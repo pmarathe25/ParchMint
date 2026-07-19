@@ -1,0 +1,2 @@
+Plain paste keeps **asterisks** literal and does not interpret them as Markdown.
+Dead-key sample: café naïve. Graphemes: 👩🏽‍💻 क्ष. Bidirectional: English שלום مرحبا.

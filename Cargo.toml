@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/parchmint-domain",
+    "crates/parchmint-markdown",
+    "crates/parchmint-storage",
+    "crates/parchmint-index",
+    "crates/parchmint-app",
+    "crates/parchmint-bridge",
+]
+default-members = [
+    "crates/parchmint-domain",
+    "crates/parchmint-markdown",
+    "crates/parchmint-storage",
+    "crates/parchmint-index",
+    "crates/parchmint-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "LicenseRef-ParchMint-Undecided"
+
+[workspace.dependencies]
+anyhow = "1.0.103"
+cxx = "1.0.194"
+cxx-qt = "0.9.1"
+cxx-qt-lib = { version = "0.9.1", features = ["qt_full"] }
+cxx-qt-build = { version = "0.9.1", features = ["link_qt_object_files"] }
+indexmap = { version = "2.14.0", features = ["serde"] }
+pulldown-cmark = { version = "0.13.1", default-features = false }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
+tempfile = "3.27.0"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

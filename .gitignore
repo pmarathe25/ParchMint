@@ -1,0 +1,9 @@
+/build/
+/target/
+/.toolchains/
+/.idea/
+/.vscode/
+*.user
+*.swp
+*.tmp
+.DS_Store
