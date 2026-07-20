@@ -1,0 +1,33 @@
+format_version = 1
+roots = ["22222222-aaaa-4aaa-8aaa-222222222222", "33333333-aaaa-4aaa-8aaa-333333333333"]
+
+[[nodes]]
+id = "22222222-aaaa-4aaa-8aaa-222222222222"
+kind = "manuscript_root"
+children = ["44444444-aaaa-4aaa-8aaa-444444444444"]
+
+[[nodes]]
+id = "33333333-aaaa-4aaa-8aaa-333333333333"
+kind = "research_root"
+children = []
+
+[[nodes]]
+id = "44444444-aaaa-4aaa-8aaa-444444444444"
+kind = "group"
+document_id = "55555555-aaaa-4aaa-8aaa-555555555555"
+parent = "22222222-aaaa-4aaa-8aaa-222222222222"
+children = ["66666666-aaaa-4aaa-8aaa-666666666666", "77777777-aaaa-4aaa-8aaa-777777777777"]
+
+[[nodes]]
+id = "66666666-aaaa-4aaa-8aaa-666666666666"
+kind = "document"
+document_id = "88888888-aaaa-4aaa-8aaa-888888888888"
+parent = "44444444-aaaa-4aaa-8aaa-444444444444"
+children = []
+
+[[nodes]]
+id = "77777777-aaaa-4aaa-8aaa-777777777777"
+kind = "document"
+document_id = "99999999-aaaa-4aaa-8aaa-999999999999"
+parent = "44444444-aaaa-4aaa-8aaa-444444444444"
+children = []

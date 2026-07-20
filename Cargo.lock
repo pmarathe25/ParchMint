@@ -539,6 +539,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parchmint-test-support"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.19",
+ "toml",
+]
+
+[[package]]
 name = "parchmint_bridge"
 version = "0.1.0"
 dependencies = [

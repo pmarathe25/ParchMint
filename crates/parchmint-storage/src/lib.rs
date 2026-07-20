@@ -1296,4 +1296,27 @@ mod tests {
         assert_eq!(opened.project.name, "Harbor Lights");
         assert_eq!(opened.project.documents.len(), 1);
     }
+
+    #[test]
+    fn example_project_catalog_is_human_readable_and_openable() {
+        let examples = [
+            ("tour", "ParchMint Tour", 1),
+            ("medium-novel", "The Lantern Route", 3),
+            ("research-heavy", "Field Notes for a Small Harbor", 3),
+            ("unicode-notes", "Unicode Notes", 1),
+            ("format-edge-case", "Format Edge Cases", 1),
+        ];
+        for (directory, name, documents) in examples {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples")
+                .join(directory);
+            let opened = ProjectStorage::open(root, OpenMode::ReadOnly).unwrap();
+            assert_eq!(opened.project.name, name, "example {directory}");
+            assert_eq!(
+                opened.project.documents.len(),
+                documents,
+                "example {directory}"
+            );
+        }
+    }
 }

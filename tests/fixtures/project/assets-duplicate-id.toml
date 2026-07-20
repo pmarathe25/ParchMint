@@ -1,0 +1,15 @@
+version = 1
+
+[[attachments]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d6"
+display_name = "first.txt"
+safe_name = "018f0be2-a8ea-7d2d-89ea-45aa663708d6.txt"
+media_type = "text/plain"
+bytes = 1
+
+[[attachments]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d6"
+display_name = "duplicate.txt"
+safe_name = "018f0be2-a8ea-7d2d-89ea-45aa663708d6.txt"
+media_type = "text/plain"
+bytes = 2

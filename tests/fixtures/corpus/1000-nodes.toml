@@ -1,0 +1,5 @@
+generator = "parchmint-test-support/xorshift-word-stream-1"
+seed = 20260720
+nodes = 1000
+words_per_document = 100
+total_words = 100000

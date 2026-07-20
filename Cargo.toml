@@ -8,6 +8,7 @@ members = [
     "crates/parchmint-compile",
     "crates/parchmint-app",
     "crates/parchmint-bridge",
+    "crates/parchmint-test-support",
 ]
 default-members = [
     "crates/parchmint-domain",
@@ -16,6 +17,7 @@ default-members = [
     "crates/parchmint-index",
     "crates/parchmint-compile",
     "crates/parchmint-app",
+    "crates/parchmint-test-support",
 ]
 
 [workspace.package]

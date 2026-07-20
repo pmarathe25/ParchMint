@@ -8,6 +8,11 @@ The product and architecture contract is in [`PLAN.md`](PLAN.md). Start with
 [`docs/development/bootstrap.md`](docs/development/bootstrap.md) to build the
 foundation application.
 
+Developer navigation, commands, the regression matrix, and platform charter
+are in [`docs/development/`](docs/development/). The user guide is in
+[`docs/user-guide/`](docs/user-guide/), and the exporter support contract is in
+[`docs/export/support-matrix.md`](docs/export/support-matrix.md).
+
 The final distribution license is intentionally not selected. Do not publish
 artifacts or statically link Qt until the licensing ADR required by the product
 contract is accepted.

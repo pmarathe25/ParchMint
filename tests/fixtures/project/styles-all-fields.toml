@@ -1,0 +1,73 @@
+format_version = 1
+
+[[styles]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d4"
+machine_key = "body"
+name = "Body"
+kind = "paragraph"
+next_style = "018f0be2-a8ea-7d2d-89ea-45aa663708d5"
+builtin = true
+
+[styles.properties]
+font-family = "serif"
+font-size = "11pt"
+
+[[styles]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d5"
+machine_key = "heading"
+name = "Heading"
+kind = "paragraph"
+based_on = "018f0be2-a8ea-7d2d-89ea-45aa663708d4"
+builtin = true
+
+[styles.properties]
+font-weight = "bold"
+
+[[styles]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d6"
+machine_key = "emphasis"
+name = "Emphasis"
+kind = "character"
+builtin = true
+
+[styles.properties]
+font-style = "italic"
+
+[[compile_presets]]
+id = "41414141-4141-4414-8414-414141414141"
+name = "Research appendix"
+selected_roots = []
+
+[compile_presets.inclusion]
+research = "all"
+
+[compile_presets.titles]
+project_title = "heading"
+document_titles = "heading"
+document_heading_level = 1
+
+separator = "page_break"
+
+[compile_presets.metadata]
+title = "Research appendix"
+author = "ParchMint fixture"
+
+[compile_presets.style_mapping.018f0be2-a8ea-7d2d-89ea-45aa663708d4]
+class_name = "body"
+
+[compile_presets.style_mapping.018f0be2-a8ea-7d2d-89ea-45aa663708d4.properties]
+font_family = "serif"
+
+[compile_presets.page]
+paper = "A4"
+width_micrometres = 210000
+height_micrometres = 297000
+margin_top_micrometres = 25400
+margin_right_micrometres = 25400
+margin_bottom_micrometres = 25400
+margin_left_micrometres = 25400
+header = "Research appendix"
+footer = "ParchMint fixture"
+
+[compile_presets.exporter_settings.html]
+asset_mode = "self_contained"

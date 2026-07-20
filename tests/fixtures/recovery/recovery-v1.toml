@@ -1,0 +1,8 @@
+format_version = 1
+project_generation = 3
+document_id = "018f0be2-a8ea-7d2d-89ea-45aa663708d4"
+revision = 7
+base_fingerprint = { bytes = 12, hash = 123456789 }
+body_fingerprint = { bytes = 32, hash = 987654321 }
+created_unix_ms = 1700000000000
+body = "\nRecovered body with Unicode: 雪.\n"

@@ -1,0 +1,19 @@
+format_version = 1
+roots = ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cccccccc-cccc-4ccc-8ccc-cccccccccccc"]
+
+[[nodes]]
+id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+kind = "manuscript_root"
+children = ["dddddddd-dddd-4ddd-8ddd-dddddddddddd"]
+
+[[nodes]]
+id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+kind = "research_root"
+children = []
+
+[[nodes]]
+id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+kind = "document"
+document_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+parent = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+children = []

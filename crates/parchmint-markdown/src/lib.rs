@@ -1534,6 +1534,12 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../../../tests/fixtures/spike/representative.md");
     const SUPPORTED_FIXTURE: &str = include_str!("../../../tests/fixtures/markdown/supported.md");
+    const FIELDS_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/markdown/front-matter-fields.md");
+    const COMBINATIONS_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/markdown/pairwise-combinations.md");
+    const MALFORMED_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/markdown/malformed-extensions.md");
 
     #[test]
     fn representative_fixture_round_trips_byte_for_byte() {
@@ -1725,5 +1731,64 @@ mod tests {
         for block in parsed.blocks() {
             assert_eq!(&FIXTURE[block.range.clone()], block.source());
         }
+    }
+
+    #[test]
+    fn focused_fixture_catalog_covers_metadata_and_pairwise_constructs() {
+        let fields = Document::parse(FIELDS_FIXTURE).unwrap();
+        assert_eq!(
+            fields.front_matter()["status"],
+            Value::String("draft".into())
+        );
+        assert!(fields.front_matter().contains_key("future-plugin"));
+
+        let combinations = Document::parse(COMBINATIONS_FIXTURE).unwrap();
+        assert!(
+            combinations
+                .blocks()
+                .iter()
+                .any(|block| block.node.is_opaque())
+        );
+        assert!(
+            combinations
+                .blocks()
+                .iter()
+                .any(|block| matches!(block.node, BlockNode::PageBreak))
+        );
+        assert!(
+            combinations
+                .blocks()
+                .iter()
+                .any(|block| matches!(block.node, BlockNode::Alignment { .. }))
+        );
+        assert_eq!(combinations.serialize(), COMBINATIONS_FIXTURE);
+    }
+
+    #[test]
+    fn malformed_fixture_preserves_opaque_source_and_hard_front_matter_errors() {
+        let malformed = Document::parse(MALFORMED_FIXTURE).unwrap();
+        assert!(
+            malformed
+                .blocks()
+                .iter()
+                .all(|block| block.node.is_opaque())
+        );
+        assert_eq!(malformed.serialize(), MALFORMED_FIXTURE);
+        let unclosed = include_str!("../../../tests/fixtures/markdown/unclosed-front-matter.md");
+        assert!(matches!(
+            Document::parse(unclosed),
+            Err(MarkdownError::UnclosedFrontMatter)
+        ));
+    }
+
+    #[test]
+    fn newline_and_unicode_fixture_is_stable_across_repeated_saves() {
+        let source = include_str!("../../../tests/fixtures/markdown/newline-stability.md");
+        let mut saved = Document::parse(source).unwrap().serialize();
+        for _ in 0..5 {
+            saved = Document::parse(&saved).unwrap().serialize();
+        }
+        assert_eq!(saved, source);
+        assert!(saved.contains("café — 雪"));
     }
 }
