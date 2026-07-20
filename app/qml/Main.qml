@@ -9,16 +9,18 @@ import org.parchmint.adapters 1.0
 
 ApplicationWindow {
     id: window
-    width: 1280
-    height: 800
+    width: 1320
+    height: 840
     minimumWidth: 900
     minimumHeight: 600
     visible: true
-    title: qsTr("ParchMint")
+    title: backend.project_open ? qsTr("%1 — ParchMint").arg(backend.project_name) : qsTr("ParchMint")
     Material.accent: DesignTokens.accent
     Material.primary: DesignTokens.accent
 
     property string transientMessage: ""
+    property bool binderVisible: true
+    property bool inspectorVisible: true
 
     ParchMintBackend {
         id: backend
@@ -49,178 +51,126 @@ ApplicationWindow {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         contentItem: ColumnLayout {
             spacing: DesignTokens.space3
-            Label {
-                text: qsTr("ParchMint could not complete the operation")
-                font.bold: true
-            }
-            Label {
-                text: window.transientMessage
-                wrapMode: Text.Wrap
-                Layout.preferredWidth: 420
-            }
-            Button {
-                text: qsTr("Close")
-                onClicked: errorPopup.close()
-                Layout.alignment: Qt.AlignRight
-            }
+            Label { text: qsTr("ParchMint could not complete the operation"); font.bold: true }
+            Label { text: window.transientMessage; wrapMode: Text.Wrap; Layout.preferredWidth: 440 }
+            Button { text: qsTr("Close"); onClicked: errorPopup.close(); Layout.alignment: Qt.AlignRight }
         }
     }
 
-    header: FormattingBar {
-        adapter: primaryAdapter
-        styleModel: [
-            { "id": "018f0be2-a8ea-7d2d-89ea-45aa663708d4", "name": qsTr("Body"), "previewSize": 14 },
-            { "id": "018f0be2-a8ea-7d2d-89ea-45aa663708d5", "name": qsTr("Heading"), "previewSize": 18 }
-        ]
-        onSourceModeRequested: window.transientMessage = qsTr("Raw source mode is available in the isolated document harness")
+    Dialog {
+        id: projectDialog
+        title: qsTr("Create project")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        property bool openExisting: false
+        onAccepted: {
+            if (openExisting)
+                backend.openProject(pathField.text)
+            else
+                backend.createProject(pathField.text, nameField.text)
+        }
+        contentItem: GridLayout {
+            columns: 2
+            rowSpacing: DesignTokens.space3
+            columnSpacing: DesignTokens.space3
+            Label { text: qsTr("Project folder") }
+            TextField { id: pathField; Layout.preferredWidth: 440; placeholderText: qsTr("/path/to/My Novel") }
+            Label { visible: !projectDialog.openExisting; text: qsTr("Project name") }
+            TextField { id: nameField; visible: !projectDialog.openExisting; text: qsTr("Untitled Novel"); Layout.fillWidth: true }
+        }
     }
 
-    Shortcut { sequence: StandardKey.Bold; onActivated: primaryAdapter.toggleBold() }
-    Shortcut { sequence: StandardKey.Italic; onActivated: primaryAdapter.toggleItalic() }
-    Shortcut { sequence: StandardKey.Undo; enabled: primaryAdapter.canUndo; onActivated: primaryAdapter.undo() }
-    Shortcut { sequence: StandardKey.Redo; enabled: primaryAdapter.canRedo; onActivated: primaryAdapter.redo() }
+    menuBar: MenuBar {
+        Menu {
+            title: qsTr("Project")
+            Action { text: qsTr("New Project…"); onTriggered: { projectDialog.openExisting = false; projectDialog.open() } }
+            Action { text: qsTr("Open Project…"); onTriggered: { projectDialog.openExisting = true; projectDialog.open() } }
+            Action { text: qsTr("Close Project"); enabled: backend.project_open; onTriggered: backend.closeProject() }
+        }
+        Menu {
+            title: qsTr("Structure")
+            Action { text: qsTr("New Group"); enabled: backend.selected_id.length > 0; onTriggered: backend.createChild(backend.selected_id, qsTr("Untitled Group"), true) }
+            Action { text: qsTr("New Scene"); enabled: backend.selected_id.length > 0; onTriggered: backend.createChild(backend.selected_id, qsTr("Untitled Scene"), false) }
+            MenuSeparator {}
+            Action { text: qsTr("Move Up"); enabled: backend.selected_id.length > 0; onTriggered: backend.moveUp(backend.selected_id) }
+            Action { text: qsTr("Move Down"); enabled: backend.selected_id.length > 0; onTriggered: backend.moveDown(backend.selected_id) }
+            Action { text: qsTr("Indent"); enabled: backend.selected_id.length > 0; onTriggered: backend.indentNode(backend.selected_id) }
+            Action { text: qsTr("Outdent"); enabled: backend.selected_id.length > 0; onTriggered: backend.outdentNode(backend.selected_id) }
+            Action { text: qsTr("Duplicate"); enabled: backend.selected_id.length > 0; onTriggered: backend.duplicateNode(backend.selected_id) }
+            Action { text: qsTr("Move to Trash"); enabled: backend.selected_id.length > 0; onTriggered: backend.trashNode(backend.selected_id) }
+        }
+        Menu {
+            title: qsTr("View")
+            Action { text: qsTr("Binder"); checkable: true; checked: window.binderVisible; onTriggered: window.binderVisible = !window.binderVisible }
+            Action { text: qsTr("Inspector"); checkable: true; checked: window.inspectorVisible; onTriggered: window.inspectorVisible = !window.inspectorVisible }
+        }
+    }
+
+    Shortcut { sequence: StandardKey.Undo; enabled: backend.project_open; onActivated: backend.undoStructural() }
+    Shortcut { sequence: StandardKey.Redo; enabled: backend.project_open; onActivated: backend.redoStructural() }
+    Shortcut { sequence: "Ctrl+Shift+Up"; enabled: backend.selected_id.length > 0; onActivated: backend.moveUp(backend.selected_id) }
+    Shortcut { sequence: "Ctrl+Shift+Down"; enabled: backend.selected_id.length > 0; onActivated: backend.moveDown(backend.selected_id) }
+    Shortcut { sequence: "Ctrl+]"; enabled: backend.selected_id.length > 0; onActivated: backend.indentNode(backend.selected_id) }
+    Shortcut { sequence: "Ctrl+["; enabled: backend.selected_id.length > 0; onActivated: backend.outdentNode(backend.selected_id) }
+    Shortcut { sequence: StandardKey.Delete; enabled: backend.selected_id.length > 0; onActivated: backend.trashNode(backend.selected_id) }
+
+    header: ToolBar {
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: DesignTokens.space2
+            ToolButton { text: "☰"; Accessible.name: qsTr("Toggle binder"); onClicked: window.binderVisible = !window.binderVisible }
+            ToolButton { text: "ⓘ"; Accessible.name: qsTr("Toggle inspector"); onClicked: window.inspectorVisible = !window.inspectorVisible }
+            TextField {
+                Layout.preferredWidth: 260
+                placeholderText: qsTr("Filter title, synopsis, status, label")
+                enabled: backend.project_open
+                onTextChanged: backend.setFilter(text)
+                Accessible.name: qsTr("Filter outline")
+            }
+            Item { Layout.fillWidth: true }
+            Label { text: backend.project_open ? backend.project_name : qsTr("No project open"); font.bold: true }
+        }
+    }
 
     RowLayout {
         anchors.fill: parent
         spacing: 0
+        BinderPane { Layout.preferredWidth: 276; Layout.fillHeight: true; visible: window.binderVisible; backend: backend; model: outlineModel }
+        Rectangle { Layout.preferredWidth: window.binderVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
 
-        Pane {
-            Layout.preferredWidth: 248
-            Layout.fillHeight: true
-            padding: 0
-            background: Rectangle {
-                color: window.palette.alternateBase
-            }
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: 0
-                Label {
-                    text: qsTr("MANUSCRIPT — %1 NODES").arg(backend.node_count)
-                    font.bold: true
-                    font.pixelSize: 11
-                    opacity: 0.72
-                    Layout.fillWidth: true
-                    leftPadding: DesignTokens.space4
-                    topPadding: DesignTokens.space4
-                    bottomPadding: DesignTokens.space2
-                }
-                ListView {
-                    id: binder
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: outlineModel
-                    reuseItems: true
-                    delegate: ItemDelegate {
-                        required property int index
-                        required property string title
-                        required property int depth
-                        width: ListView.view.width
-                        text: title
-                        leftPadding: DesignTokens.space4 + depth * DesignTokens.space3
-                        Accessible.name: text
-                        onClicked: backend.performCommand(qsTr("Open %1").arg(text))
-                    }
-                }
-            }
-        }
-
-        Rectangle {
-            Layout.preferredWidth: 1
-            Layout.fillHeight: true
-            color: window.palette.mid
-            opacity: 0.35
-        }
-
-        SplitView {
+        ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            orientation: Qt.Horizontal
-
-            Pane {
-                SplitView.fillWidth: true
-                SplitView.minimumWidth: 360
-                padding: DesignTokens.space6
-                ColumnLayout {
-                    anchors.fill: parent
-                    Label {
-                        text: qsTr("Chapter One")
-                        font.pixelSize: 24
-                        font.bold: true
-                        Accessible.role: Accessible.Heading
-                    }
-                    TextArea {
-                        id: primaryEditor
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        wrapMode: TextEdit.Wrap
-                        textFormat: TextEdit.RichText
-                        selectByMouse: true
-                        persistentSelection: true
-                        placeholderText: qsTr("Begin writing…")
-                        text: qsTr("<h2>The Glass Orchard</h2><p>Begin writing your story here.</p>")
-                        onCursorPositionChanged: primaryAdapter.cursorPosition = cursorPosition
-                        onSelectionStartChanged: primaryAdapter.selectionStart = selectionStart
-                        onSelectionEndChanged: primaryAdapter.selectionEnd = selectionEnd
-                        onActiveFocusChanged: primaryAdapter.focused = activeFocus
-                        Keys.onPressed: function(event) {
-                            if (event.key === Qt.Key_Backspace && event.modifiers === Qt.NoModifier) {
-                                primaryAdapter.deletePreviousSemanticUnit()
-                                event.accepted = true
-                            } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
-                                       && event.modifiers === Qt.NoModifier) {
-                                primaryAdapter.insertParagraphBreak()
-                                event.accepted = true
-                            }
-                        }
-                        Accessible.name: qsTr("Manuscript editor")
-                    }
-                    EditorAdapter {
-                        id: primaryAdapter
-                        textDocument: primaryEditor.textDocument
-                        onIncrementalDirty: function(revision, position, removed, added, firstBlock, lastBlockExclusive) {
-                            backend.noteEditorDelta(revision, firstBlock, lastBlockExclusive)
-                        }
-                        onAdapterError: function(message) {
-                            window.transientMessage = message
-                            errorPopup.open()
-                        }
-                    }
-                }
+            spacing: 0
+            TabBar {
+                id: views
+                Layout.fillWidth: true
+                enabled: backend.project_open
+                TabButton { text: qsTr("Outline") }
+                TabButton { text: qsTr("Cards") }
+                TabButton { text: qsTr("Editor") }
             }
-
-            Pane {
-                SplitView.preferredWidth: 390
-                SplitView.minimumWidth: 280
-                padding: DesignTokens.space4
-                ColumnLayout {
-                    anchors.fill: parent
-                    Label {
-                        text: qsTr("Research — Orchard Notes")
-                        font.pixelSize: 18
-                        font.bold: true
-                    }
-                    TextArea {
-                        id: researchEditor
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        wrapMode: TextEdit.Wrap
-                        selectByMouse: true
-                        persistentSelection: true
-                        text: qsTr("Keep research notes visible while writing.")
-                        onCursorPositionChanged: researchAdapter.cursorPosition = cursorPosition
-                        onSelectionStartChanged: researchAdapter.selectionStart = selectionStart
-                        onSelectionEndChanged: researchAdapter.selectionEnd = selectionEnd
-                        onActiveFocusChanged: researchAdapter.focused = activeFocus
-                        Accessible.name: qsTr("Research editor")
-                    }
-                    EditorAdapter {
-                        id: researchAdapter
-                        textDocument: researchEditor.textDocument
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: views.currentIndex
+                OutlineView { backend: backend; model: outlineModel }
+                CardsView { backend: backend; model: outlineModel }
+                Pane {
+                    padding: DesignTokens.space6
+                    ColumnLayout {
+                        anchors.fill: parent
+                        Label { text: backend.selected_title.length ? backend.selected_title : qsTr("Select a manuscript document"); font.pixelSize: 24; font.bold: true }
+                        Label { text: qsTr("Document bodies remain owned by the Rust document session."); opacity: .7 }
+                        TextArea { Layout.fillWidth: true; Layout.fillHeight: true; readOnly: true; text: backend.selected_id.length ? qsTr("Open the selected document from the binder to begin writing.") : ""; placeholderText: qsTr("Select a scene in the binder.") }
                     }
                 }
             }
         }
+
+        Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
+        InspectorPane { Layout.preferredWidth: 310; Layout.fillHeight: true; visible: window.inspectorVisible; backend: backend }
     }
 
     footer: ToolBar {
@@ -228,12 +178,8 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.leftMargin: DesignTokens.space3
             anchors.rightMargin: DesignTokens.space3
-            Label {
-                text: window.transientMessage.length > 0 ? window.transientMessage : qsTr("Local-first · no network requests")
-                Layout.fillWidth: true
-                elide: Text.ElideRight
-            }
-            Label { text: qsTr("Document revision %1 · %2").arg(backend.document_revision).arg(backend.save_status) }
+            Label { text: window.transientMessage.length ? window.transientMessage : qsTr("Local-first · structural changes are saved canonically"); Layout.fillWidth: true; elide: Text.ElideRight }
+            Label { text: qsTr("%1 visible · %2 selected").arg(backend.node_count).arg(backend.selected_count) }
         }
     }
 }

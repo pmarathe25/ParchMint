@@ -8,6 +8,10 @@ fn main() {
         .qml_file("qml/Main.qml")
         .qml_file(QmlFile::from("qml/components/DesignTokens.qml").singleton(true))
         .qml_file("qml/components/FormattingBar.qml")
+        .qml_file("qml/components/BinderPane.qml")
+        .qml_file("qml/components/OutlineView.qml")
+        .qml_file("qml/components/CardsView.qml")
+        .qml_file("qml/components/InspectorPane.qml")
         .qml_file("qml/components/StylePicker.qml")
         .qml_file("qml/components/StyleManager.qml")
         .qml_file("qml/components/SourceEditor.qml");

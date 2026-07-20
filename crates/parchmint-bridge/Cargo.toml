@@ -14,6 +14,7 @@ cxx.workspace = true
 cxx-qt.workspace = true
 cxx-qt-lib.workspace = true
 parchmint-app = { path = "../parchmint-app" }
+parchmint-domain = { path = "../parchmint-domain" }
 parchmint-markdown = { path = "../parchmint-markdown" }
 tracing.workspace = true
 

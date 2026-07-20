@@ -60,6 +60,10 @@ add_custom_target(
   COMMAND Qt6::qmllint -I ${CMAKE_CURRENT_BINARY_DIR}/cxxqt/qml_modules
           -I ${CMAKE_CURRENT_BINARY_DIR}/app/cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/Main.qml
+          ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/BinderPane.qml
+          ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/OutlineView.qml
+          ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/CardsView.qml
+          ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/InspectorPane.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/FormattingBar.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/SourceEditor.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/StyleManager.qml

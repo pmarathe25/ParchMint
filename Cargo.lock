@@ -534,6 +534,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "parchmint-app",
+ "parchmint-domain",
  "parchmint-markdown",
  "tracing",
 ]

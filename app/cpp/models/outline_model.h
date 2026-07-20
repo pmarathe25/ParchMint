@@ -13,8 +13,14 @@ class OutlineModel : public QAbstractListModel
 public:
   enum Role {
     TitleRole = Qt::UserRole + 1,
+    IdRole,
     DepthRole,
     ParentIdRole,
+    SynopsisRole,
+    StatusRole,
+    LabelRole,
+    GroupRole,
+    RootRole,
   };
   Q_ENUM(Role)
 
@@ -29,7 +35,11 @@ signals:
   void sourceChanged();
   void modelError(const QString& message) const;
 
+private slots:
+  void refresh();
+
 private:
   QVariant invoke(const char* method, int row) const;
   QPointer<QObject> m_source;
+  QMetaObject::Connection m_revisionConnection;
 };
