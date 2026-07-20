@@ -131,12 +131,66 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: exportDialog
+        title: qsTr("Export manuscript")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: backend.exportProject(exportFormat.currentValue, exportDestination.text)
+        contentItem: GridLayout {
+            columns: 2
+            rowSpacing: DesignTokens.space3
+            columnSpacing: DesignTokens.space3
+            Label { text: qsTr("Format") }
+            ComboBox {
+                id: exportFormat
+                Layout.preferredWidth: 300
+                textRole: "label"
+                valueRole: "value"
+                model: [
+                    { label: qsTr("Markdown"), value: "markdown" },
+                    { label: qsTr("Plain text"), value: "plain_text" },
+                    { label: qsTr("HTML"), value: "html" },
+                    { label: qsTr("PDF"), value: "pdf" },
+                    { label: qsTr("EPUB"), value: "epub" },
+                    { label: qsTr("DOCX"), value: "docx" }
+                ]
+                Accessible.name: qsTr("Export format")
+            }
+            Label { text: qsTr("Destination") }
+            TextField {
+                id: exportDestination
+                Layout.preferredWidth: 440
+                placeholderText: qsTr("/path/to/manuscript")
+                Accessible.name: qsTr("Export destination")
+            }
+            Label {
+                Layout.columnSpan: 2
+                Layout.fillWidth: true
+                text: qsTr("Existing files are left untouched unless a completed export safely replaces them.")
+                wrapMode: Text.Wrap
+                opacity: .7
+            }
+        }
+    }
+
+    Timer {
+        interval: 100
+        running: backend.export_in_progress
+        repeat: true
+        onTriggered: backend.pollExport()
+    }
+
     menuBar: MenuBar {
         Menu {
             title: qsTr("Project")
             Action { text: qsTr("New Project…"); onTriggered: { projectDialog.openExisting = false; projectDialog.open() } }
             Action { text: qsTr("Open Project…"); onTriggered: { projectDialog.openExisting = true; projectDialog.open() } }
             Action { text: qsTr("Close Project"); enabled: backend.project_open; onTriggered: backend.closeProject() }
+            MenuSeparator {}
+            Action { text: qsTr("Export manuscript…"); enabled: backend.project_open && !backend.export_in_progress; onTriggered: exportDialog.open() }
+            Action { text: qsTr("Cancel export"); enabled: backend.export_in_progress; onTriggered: backend.cancelExport() }
         }
         Menu {
             title: qsTr("Structure")
@@ -233,7 +287,7 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.leftMargin: DesignTokens.space3
             anchors.rightMargin: DesignTokens.space3
-            Label { text: window.transientMessage.length ? window.transientMessage : qsTr("Local-first · structural changes are saved canonically"); Layout.fillWidth: true; elide: Text.ElideRight }
+            Label { text: backend.export_in_progress ? backend.export_status : (window.transientMessage.length ? window.transientMessage : qsTr("Local-first · structural changes are saved canonically")); Layout.fillWidth: true; elide: Text.ElideRight }
             Label { text: qsTr("%1 visible · %2 selected").arg(backend.node_count).arg(backend.selected_count) }
         }
     }

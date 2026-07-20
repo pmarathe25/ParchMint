@@ -17,8 +17,15 @@ fn main() {
         .qml_file("qml/components/SourceEditor.qml")
         .qml_file("qml/components/PaneHost.qml");
 
-    CxxQtBuilder::new_qml_module(module)
-        .qt_module("Network")
-        .file("src/backend.rs")
-        .build();
+    // `file` accepts only Rust CXX-Qt bridge sources. Keep the small native PDF
+    // renderer in the same C++ compilation unit as the generated bridge code.
+    unsafe {
+        CxxQtBuilder::new_qml_module(module)
+            .qt_module("Network")
+            .file("src/backend.rs")
+            .cc_builder(|cc| {
+                cc.file("src/pdf_renderer.cpp");
+            })
+            .build();
+    }
 }

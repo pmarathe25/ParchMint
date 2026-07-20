@@ -1,12 +1,19 @@
 //! Application-service infrastructure: lazy snapshots and stale-safe workers.
 
 mod document;
+mod export;
 mod search;
 mod workspace;
 
 pub use document::*;
+pub use export::*;
 pub use search::*;
 pub use workspace::*;
+
+/// Qt-independent compile/export primitives used by the application bridge.
+pub use parchmint_compile::{CancellationToken, ExportFormat, ExportOptions};
+/// Stable search query and row types returned by the project service.
+pub use parchmint_index::{SearchQuery, SearchResult};
 
 use parchmint_domain::WorkStamp;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};

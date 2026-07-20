@@ -6,9 +6,13 @@
 //! the project graph.
 
 use crate::{IndexStatus, ProjectSearch, SearchServiceError};
+use parchmint_compile::{
+    self, CancellationToken, CompileError, CompileInput, CompileIr, CompilePreview, ExportError,
+    ExportOptions, ExportReport,
+};
 use parchmint_domain::{
-    DocumentId, DocumentMetadata, DocumentRecord, Node, NodeId, NodeKind, Project, ProjectCommand,
-    ProjectError, ProjectEvent, RelativeProjectPath,
+    CompilePreset, CompilePresetId, DocumentId, DocumentMetadata, DocumentRecord, Node, NodeId,
+    NodeKind, Project, ProjectCommand, ProjectError, ProjectEvent, RelativeProjectPath, WorkStamp,
 };
 use parchmint_index::{CountTotals, SearchQuery, SearchResult};
 use parchmint_storage::{
@@ -517,6 +521,60 @@ impl ProjectWorkspace {
         self.opened.attachments()
     }
 
+    /// Freezes canonical state for a worker-safe compiler. Qt editor objects
+    /// are deliberately absent; callers reject stale completions using `stamp`.
+    pub fn compile_input(&self, stamp: WorkStamp) -> Result<CompileInput, WorkspaceError> {
+        CompileInput::from_open_project(&self.opened, stamp).map_err(WorkspaceError::Compile)
+    }
+
+    /// Computes the ordered compile preview from an immutable canonical snapshot.
+    pub fn compile_preview(
+        &self,
+        preset: &CompilePreset,
+        stamp: WorkStamp,
+        cancellation: &CancellationToken,
+    ) -> Result<CompilePreview, WorkspaceError> {
+        let input = self.compile_input(stamp)?;
+        parchmint_compile::preview(&input, preset, cancellation).map_err(WorkspaceError::Compile)
+    }
+
+    /// Compiles without touching a destination. This is the API a background
+    /// app worker owns before calling [`Self::export_compiled`].
+    pub fn compile_project(
+        &self,
+        preset: &CompilePreset,
+        stamp: WorkStamp,
+        cancellation: &CancellationToken,
+    ) -> Result<(CompileIr, Vec<parchmint_compile::CompileWarning>), WorkspaceError> {
+        let input = self.compile_input(stamp)?;
+        parchmint_compile::compile(&input, preset, cancellation).map_err(WorkspaceError::Compile)
+    }
+
+    /// Validates and atomically installs a previously compiled export. A
+    /// caller must only use an IR whose stamp still matches its current state.
+    pub fn export_compiled(
+        &self,
+        ir: &CompileIr,
+        options: &ExportOptions,
+    ) -> Result<ExportReport, WorkspaceError> {
+        parchmint_compile::export(ir, options).map_err(WorkspaceError::Export)
+    }
+
+    /// Returns persisted compile presets in stable UUID order.
+    pub fn compile_presets(&self) -> Vec<&CompilePreset> {
+        self.opened.project.compile_presets.values().collect()
+    }
+
+    /// Creates or updates one human-readable persisted compile preset.
+    pub fn save_compile_preset(&mut self, preset: CompilePreset) -> Result<(), WorkspaceError> {
+        self.apply(ProjectCommand::UpsertCompilePreset { preset })
+    }
+
+    /// Deletes a compile preset through the normal structural undo layer.
+    pub fn remove_compile_preset(&mut self, id: CompilePresetId) -> Result<(), WorkspaceError> {
+        self.apply(ProjectCommand::RemoveCompilePreset { id })
+    }
+
     /// Creates a normal Markdown note below the research root or a research
     /// group. The existing stage-3 lifecycle treats it exactly like a
     /// manuscript note; only default compile inclusion differs.
@@ -927,7 +985,10 @@ impl ProjectWorkspace {
                         self.update_index_node(record.node_id);
                     }
                 }
-                ProjectEvent::StyleMutated(_) | ProjectEvent::StyleReplaced { .. } => {}
+                ProjectEvent::StyleMutated(_)
+                | ProjectEvent::StyleReplaced { .. }
+                | ProjectEvent::CompilePresetSaved(_)
+                | ProjectEvent::CompilePresetRemoved(_) => {}
             }
         }
     }
@@ -1215,6 +1276,10 @@ pub enum WorkspaceError {
     InvalidDocument(String),
     #[error(transparent)]
     Search(#[from] SearchServiceError),
+    #[error(transparent)]
+    Compile(CompileError),
+    #[error(transparent)]
+    Export(ExportError),
 }
 
 #[cfg(test)]
@@ -1457,5 +1522,35 @@ mod tests {
         assert!(reopened.workspace_diagnostic().is_some());
         assert_eq!(reopened.preferences().version, WORKSPACE_FORMAT_VERSION);
         assert_eq!(reopened.preferences().split_ratio_milli, 500);
+    }
+
+    #[test]
+    fn compile_presets_are_command_validated_and_survive_restart() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Scene", false)
+            .unwrap();
+        let mut preset = CompilePreset::manuscript("Submission");
+        preset.selected_roots = vec![scene];
+        preset.metadata.author = "A. Writer".into();
+        preset
+            .exporter_settings
+            .entry("html".into())
+            .or_default()
+            .insert("assets".into(), "self_contained".into());
+        let preset_id = preset.id;
+        workspace.save_compile_preset(preset).unwrap();
+        assert_eq!(workspace.compile_presets().len(), 1);
+        drop(workspace);
+
+        let mut reopened = ProjectWorkspace::open(&root).unwrap();
+        let persisted = reopened.compile_presets()[0];
+        assert_eq!(persisted.id, preset_id);
+        assert_eq!(persisted.selected_roots, vec![scene]);
+        assert_eq!(persisted.metadata.author, "A. Writer");
+        reopened.remove_compile_preset(preset_id).unwrap();
+        assert!(reopened.compile_presets().is_empty());
     }
 }

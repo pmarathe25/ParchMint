@@ -34,6 +34,27 @@ Collections are written in UUID order except `roots` and node `children`, whose
 order is semantic. Fields are emitted in declaration order. TOML unknown keys
 are preserved where they occur at a file's top level.
 
+## Compile presets
+
+`compile_presets` are canonical, human-readable records in `styles.toml`. Each
+has a stable `id`, display `name`, optional `selected_roots`, `inclusion`,
+`titles`, `separator`, `metadata`, `style_mapping`, `page`, and namespaced
+`exporter_settings`. An empty `selected_roots` means the manuscript root.
+Sibling traversal is always binder preorder, never the order of this list.
+
+`inclusion.research` is `selected_roots` by default: research is excluded
+unless a research root/node is explicitly selected. It may be `exclude` or
+`all`; the `include-in-compile = false` document flag is respected by default.
+`titles` controls semantic project/document title insertion, while `separator`
+is `none`, `scene_break`, or `page_break`. Page dimensions and margins are
+integer micrometres so TOML settings survive round trips without floating-point
+changes. `style_mapping` is keyed by stable style UUID and is applied after
+Rust resolves style inheritance.
+
+The legacy string `settings` map is retained when opening early format-1
+presets. New exporter-specific keys belong under `exporter_settings.<format>`;
+unknown keys are inert data, never commands or executable paths.
+
 `assets.toml` is an optional, independently versioned attachment catalog. Its
 current `version` is 1 and its ordered `attachments` entries contain an asset
 UUID, display name, UUID-derived safe filename, conservative media type, and

@@ -5,6 +5,7 @@ members = [
     "crates/parchmint-markdown",
     "crates/parchmint-storage",
     "crates/parchmint-index",
+    "crates/parchmint-compile",
     "crates/parchmint-app",
     "crates/parchmint-bridge",
 ]
@@ -13,6 +14,7 @@ default-members = [
     "crates/parchmint-markdown",
     "crates/parchmint-storage",
     "crates/parchmint-index",
+    "crates/parchmint-compile",
     "crates/parchmint-app",
 ]
 

@@ -1,5 +1,5 @@
 [package]
-name = "parchmint-app"
+name = "parchmint-compile"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,10 @@ license.workspace = true
 
 [dependencies]
 parchmint-domain = { path = "../parchmint-domain" }
-parchmint-index = { path = "../parchmint-index" }
-parchmint-compile = { path = "../parchmint-compile" }
 parchmint-markdown = { path = "../parchmint-markdown" }
 parchmint-storage = { path = "../parchmint-storage" }
-serde.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

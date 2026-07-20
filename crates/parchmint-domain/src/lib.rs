@@ -219,16 +219,239 @@ pub struct ComputedStyle {
     pub next_style: Option<StyleId>,
 }
 
-/// Future-facing compile-preset placeholder with a stable identity.
+/// Rules controlling which binder documents a compile preset can include.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchInclusion {
+    /// Research is excluded unless a research node/root is explicitly selected.
+    #[default]
+    SelectedRoots,
+    /// Research is never included, even when a broad selection would include it.
+    Exclude,
+    /// Include the complete research root after manuscript content.
+    All,
+}
+
+/// Inclusion behavior stored with a compile preset.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompileInclusionRules {
+    /// Research selection policy. The default keeps research out of normal manuscript exports.
+    #[serde(default)]
+    pub research: ResearchInclusion,
+    /// Honor an explicit `include-in-compile = false` document flag.
+    #[serde(default = "default_true")]
+    pub respect_include_flag: bool,
+    /// Whether documents with no body blocks still receive their semantic title.
+    #[serde(default = "default_true")]
+    pub include_empty_documents: bool,
+}
+
+impl Default for CompileInclusionRules {
+    fn default() -> Self {
+        Self {
+            research: ResearchInclusion::SelectedRoots,
+            respect_include_flag: true,
+            include_empty_documents: true,
+        }
+    }
+}
+
+/// Whether a generated project title is inserted before compiled content.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectTitleBehavior {
+    /// Do not synthesize a project title.
+    None,
+    /// Insert the preset metadata title (or project name) as a semantic title block.
+    #[default]
+    Heading,
+}
+
+/// Whether each compiled source document receives its metadata title.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentTitleBehavior {
+    /// Do not synthesize per-document titles.
+    None,
+    /// Insert each non-empty document title as a heading.
+    #[default]
+    Heading,
+}
+
+/// Semantic title insertion settings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompileTitleBehavior {
+    #[serde(default)]
+    pub project_title: ProjectTitleBehavior,
+    #[serde(default)]
+    pub document_titles: DocumentTitleBehavior,
+    /// Heading level used for generated document titles (1 through 6).
+    #[serde(default = "default_document_heading_level")]
+    pub document_heading_level: u8,
+}
+
+impl Default for CompileTitleBehavior {
+    fn default() -> Self {
+        Self {
+            project_title: ProjectTitleBehavior::Heading,
+            document_titles: DocumentTitleBehavior::Heading,
+            document_heading_level: default_document_heading_level(),
+        }
+    }
+}
+
+/// A semantic boundary inserted between compiled source documents.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompileSeparator {
+    /// Do not insert a boundary.
+    None,
+    /// Insert a scene/thematic break.
+    #[default]
+    SceneBreak,
+    /// Insert a semantic page break.
+    PageBreak,
+}
+
+/// Project metadata embedded in formats that support it.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompileMetadata {
+    /// Optional export title. An empty value falls back to the project name.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub language: String,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+/// Format-neutral override applied after Rust resolves a named style's inheritance.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompileStyleMapping {
+    /// Optional stable CSS/OOXML class name. Exporters sanitize it before emitting it.
+    #[serde(default)]
+    pub class_name: String,
+    /// Per-preset style properties which override the computed project style.
+    #[serde(default)]
+    pub properties: BTreeMap<String, String>,
+}
+
+/// Physical page settings consumed by PDF and DOCX export plans.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PageSettings {
+    /// Human-readable paper label, e.g. `A4` or `Letter`.
+    #[serde(default = "default_page_name")]
+    pub paper: String,
+    /// Paper width in whole micrometres; avoiding floats keeps presets deterministic.
+    #[serde(default = "default_page_width_micrometres")]
+    pub width_micrometres: u32,
+    /// Paper height in whole micrometres.
+    #[serde(default = "default_page_height_micrometres")]
+    pub height_micrometres: u32,
+    #[serde(default = "default_margin_micrometres")]
+    pub margin_top_micrometres: u32,
+    #[serde(default = "default_margin_micrometres")]
+    pub margin_right_micrometres: u32,
+    #[serde(default = "default_margin_micrometres")]
+    pub margin_bottom_micrometres: u32,
+    #[serde(default = "default_margin_micrometres")]
+    pub margin_left_micrometres: u32,
+    #[serde(default)]
+    pub header: String,
+    #[serde(default)]
+    pub footer: String,
+}
+
+impl Default for PageSettings {
+    fn default() -> Self {
+        Self {
+            paper: default_page_name(),
+            width_micrometres: default_page_width_micrometres(),
+            height_micrometres: default_page_height_micrometres(),
+            margin_top_micrometres: default_margin_micrometres(),
+            margin_right_micrometres: default_margin_micrometres(),
+            margin_bottom_micrometres: default_margin_micrometres(),
+            margin_left_micrometres: default_margin_micrometres(),
+            header: String::new(),
+            footer: String::new(),
+        }
+    }
+}
+
+/// Persisted compile/export recipe. All IDs are stable and all collections have
+/// deterministic TOML ordering through their `BTreeMap` representation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CompilePreset {
     /// Stable preset identifier.
     pub id: CompilePresetId,
     /// User-facing preset name.
     pub name: String,
-    /// Explicit placeholder settings, preserved by storage.
+    /// Roots selected for compile. An empty vector means the manuscript root.
     #[serde(default)]
+    pub selected_roots: Vec<NodeId>,
+    #[serde(default)]
+    pub inclusion: CompileInclusionRules,
+    #[serde(default)]
+    pub titles: CompileTitleBehavior,
+    #[serde(default)]
+    pub separator: CompileSeparator,
+    #[serde(default)]
+    pub metadata: CompileMetadata,
+    /// Export-only property overrides keyed by immutable style identity.
+    #[serde(default)]
+    pub style_mapping: BTreeMap<StyleId, CompileStyleMapping>,
+    #[serde(default)]
+    pub page: PageSettings,
+    /// Namespaced exporter options. Unknown keys remain readable and are never
+    /// interpreted as executable commands.
+    #[serde(default)]
+    pub exporter_settings: BTreeMap<String, BTreeMap<String, String>>,
+    /// Deprecated Stage 02 placeholder settings, retained for opening early
+    /// project-format-1 files without losing user data.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, String>,
+}
+
+impl CompilePreset {
+    /// Creates the deterministic default manuscript preset.
+    pub fn manuscript(name: impl Into<String>) -> Self {
+        Self {
+            id: CompilePresetId::new(),
+            name: name.into(),
+            selected_roots: Vec::new(),
+            inclusion: CompileInclusionRules::default(),
+            titles: CompileTitleBehavior::default(),
+            separator: CompileSeparator::SceneBreak,
+            metadata: CompileMetadata::default(),
+            style_mapping: BTreeMap::new(),
+            page: PageSettings::default(),
+            exporter_settings: BTreeMap::new(),
+            settings: BTreeMap::new(),
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
+}
+const fn default_document_heading_level() -> u8 {
+    1
+}
+fn default_page_name() -> String {
+    "A4".into()
+}
+const fn default_page_width_micrometres() -> u32 {
+    210_000
+}
+const fn default_page_height_micrometres() -> u32 {
+    297_000
+}
+const fn default_margin_micrometres() -> u32 {
+    25_400
 }
 
 /// Non-authoritative local workspace reference.
@@ -597,6 +820,31 @@ impl Project {
                 })
             }
             ProjectCommand::MutateStyle { mutation } => self.mutate_style(mutation),
+            ProjectCommand::UpsertCompilePreset { preset } => {
+                let id = preset.id;
+                let previous = self.compile_presets.insert(id, preset);
+                Ok(CommandOutcome {
+                    events: vec![ProjectEvent::CompilePresetSaved(id)],
+                    undo: StructuralUndo {
+                        inverse: previous
+                            .map_or(ProjectCommand::RemoveCompilePreset { id }, |preset| {
+                                ProjectCommand::UpsertCompilePreset { preset }
+                            }),
+                    },
+                })
+            }
+            ProjectCommand::RemoveCompilePreset { id } => {
+                let preset = self
+                    .compile_presets
+                    .remove(&id)
+                    .ok_or(ProjectError::MissingCompilePreset(id))?;
+                Ok(CommandOutcome {
+                    events: vec![ProjectEvent::CompilePresetRemoved(id)],
+                    undo: StructuralUndo {
+                        inverse: ProjectCommand::UpsertCompilePreset { preset },
+                    },
+                })
+            }
         }
     }
     #[allow(clippy::too_many_lines)]
@@ -925,7 +1173,8 @@ impl Project {
                 ));
             }
         }
-        self.validate_styles()
+        self.validate_styles()?;
+        self.validate_compile_presets()
     }
     fn walk_active(
         &self,
@@ -979,6 +1228,54 @@ impl Project {
                 .any(|style| style.builtin && style.machine_key.as_deref() == Some(*key))
         }) {
             return Err(ProjectError::InvalidInvariant("built-in styles missing"));
+        }
+        Ok(())
+    }
+    fn validate_compile_presets(&self) -> Result<(), ProjectError> {
+        for preset in self.compile_presets.values() {
+            if preset.name.trim().is_empty() || preset.name.chars().count() > 128 {
+                return Err(ProjectError::InvalidCompilePreset(
+                    "preset name must contain 1–128 characters",
+                ));
+            }
+            if !(1..=6).contains(&preset.titles.document_heading_level) {
+                return Err(ProjectError::InvalidCompilePreset(
+                    "document title heading level must be 1 through 6",
+                ));
+            }
+            if preset.page.width_micrometres == 0
+                || preset.page.height_micrometres == 0
+                || preset.page.margin_left_micrometres + preset.page.margin_right_micrometres
+                    >= preset.page.width_micrometres
+                || preset.page.margin_top_micrometres + preset.page.margin_bottom_micrometres
+                    >= preset.page.height_micrometres
+            {
+                return Err(ProjectError::InvalidCompilePreset(
+                    "page dimensions or margins are invalid",
+                ));
+            }
+            let mut roots = BTreeSet::new();
+            if preset
+                .selected_roots
+                .iter()
+                .any(|root| !roots.insert(*root))
+            {
+                return Err(ProjectError::InvalidCompilePreset(
+                    "selected roots must be unique stable node IDs",
+                ));
+            }
+            if preset.exporter_settings.iter().any(|(format, values)| {
+                format.len() > 64
+                    || values.iter().any(|(key, value)| {
+                        key.len() > 128
+                            || value.len() > 4_096
+                            || value.chars().any(char::is_control)
+                    })
+            }) {
+                return Err(ProjectError::InvalidCompilePreset(
+                    "exporter settings exceed the bounded text vocabulary",
+                ));
+            }
         }
         Ok(())
     }
@@ -1104,6 +1401,10 @@ pub enum ProjectCommand {
     },
     /// Creates, updates, or deletes a style definition.
     MutateStyle { mutation: StyleMutation },
+    /// Creates or replaces a complete compile preset atomically.
+    UpsertCompilePreset { preset: CompilePreset },
+    /// Removes one compile preset without affecting canonical manuscript data.
+    RemoveCompilePreset { id: CompilePresetId },
 }
 
 /// Style-definition mutation payload.
@@ -1151,6 +1452,8 @@ pub enum ProjectEvent {
     MetadataEdited(DocumentId),
     StyleMutated(StyleId),
     StyleReplaced { id: StyleId, replacement: StyleId },
+    CompilePresetSaved(CompilePresetId),
+    CompilePresetRemoved(CompilePresetId),
 }
 
 /// Domain invariant or command failure.
@@ -1174,6 +1477,12 @@ pub enum ProjectError {
     /// A style is already present.
     #[error("style already exists: {0}")]
     DuplicateStyle(StyleId),
+    /// Compile preset ID does not exist.
+    #[error("compile preset does not exist: {0}")]
+    MissingCompilePreset(CompilePresetId),
+    /// Compile preset violates bounded persistent settings rules.
+    #[error("invalid compile preset: {0}")]
+    InvalidCompilePreset(&'static str),
     /// Root nodes cannot be moved, renamed, or trashed.
     #[error("built-in root cannot be structurally changed: {0}")]
     RootMutation(NodeId),

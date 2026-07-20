@@ -1,14 +1,21 @@
+#![allow(clippy::struct_excessive_bools, clippy::unused_self)]
 //! QObject-facing projection of the Rust project workspace.
+//!
+//! CXX-Qt invokables deliberately retain `self` and a flat QObject property
+//! projection even when a particular getter does not need Rust state.
 
 use self::qobject::ParchMintBackend;
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use parchmint_app::{
-    DropPlacement, OutlineSort, PaneView, ProjectWorkspace, SearchQuery, SearchResult,
+    CancellationToken, CompileExportJob, CompileExportWorker, DropPlacement, ExportFormat,
+    ExportOptions, OutlineSort, PaneView, ProjectWorkspace, SearchQuery, SearchResult,
     SplitOrientation, text_statistics,
 };
-use parchmint_domain::{DocumentMetadata, NodeId};
+use parchmint_domain::{
+    CompilePreset, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
+};
 
 /// Rust state hidden behind the generated QObject.
 pub struct ParchMintBackendRust {
@@ -36,9 +43,14 @@ pub struct ParchMintBackendRust {
     split_enabled: bool,
     search_result_count: i32,
     search_status: QString,
+    export_status: QString,
+    export_in_progress: bool,
     search_results: Vec<SearchResult>,
     filter: String,
     sort: OutlineSort,
+    project_generation: u64,
+    export_worker: Option<CompileExportWorker>,
+    export_cancellation: Option<CancellationToken>,
     workspace: Option<ProjectWorkspace>,
 }
 
@@ -69,9 +81,14 @@ impl Default for ParchMintBackendRust {
             split_enabled: false,
             search_result_count: 0,
             search_status: QString::from("Index ready when you search"),
+            export_status: QString::from("No export in progress"),
+            export_in_progress: false,
             search_results: Vec::new(),
             filter: String::new(),
             sort: OutlineSort::Binder,
+            project_generation: 1,
+            export_worker: None,
+            export_cancellation: None,
             workspace: None,
         }
     }
@@ -111,6 +128,8 @@ pub mod qobject {
         #[qproperty(bool, split_enabled)]
         #[qproperty(i32, search_result_count, READ, NOTIFY)]
         #[qproperty(QString, search_status)]
+        #[qproperty(QString, export_status)]
+        #[qproperty(bool, export_in_progress)]
         type ParchMintBackend = super::ParchMintBackendRust;
 
         #[qinvokable]
@@ -162,6 +181,19 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "textStatistics"]
         fn text_statistics(self: &ParchMintBackend, text: &QString) -> QString;
+        #[qinvokable]
+        #[cxx_name = "exportProject"]
+        fn export_project(
+            self: Pin<&mut ParchMintBackend>,
+            format: &QString,
+            destination: &QString,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "pollExport"]
+        fn poll_export(self: Pin<&mut ParchMintBackend>);
+        #[qinvokable]
+        #[cxx_name = "cancelExport"]
+        fn cancel_export(self: Pin<&mut ParchMintBackend>);
 
         #[qinvokable]
         #[cxx_name = "createProject"]
@@ -433,7 +465,7 @@ impl ParchMintBackend {
             .map_or_else(QString::default, |result| {
                 // Markers originate from SQLite's `snippet`, but QML renders plain
                 // text here so source content can never become markup.
-                QString::from(result.snippet.replace('\u{1}', "").replace('\u{2}', ""))
+                QString::from(result.snippet.replace(['\u{1}', '\u{2}'], ""))
             })
     }
     pub fn open_search_result(mut self: Pin<&mut Self>, row: i32, other_pane: bool) -> bool {
@@ -451,7 +483,7 @@ impl ParchMintBackend {
                         workspace.preferences().split_orientation,
                         workspace.preferences().split_ratio_milli,
                     )
-                    .and_then(|_| workspace.open_node_in_pane(other, node))
+                    .and_then(|()| workspace.open_node_in_pane(other, node))
             } else {
                 workspace.navigate_focused_pane(node).map(|_| ())
             }
@@ -464,6 +496,139 @@ impl ParchMintBackend {
             "{} words · {} characters",
             counts.words, counts.characters
         ))
+    }
+
+    pub fn export_project(
+        mut self: Pin<&mut Self>,
+        format: &QString,
+        destination: &QString,
+    ) -> bool {
+        let format = match format.to_string().as_str() {
+            "markdown" => ExportFormat::Markdown,
+            "plain_text" => ExportFormat::PlainText,
+            "html" => ExportFormat::Html,
+            "pdf" => ExportFormat::Pdf,
+            "epub" => ExportFormat::Epub,
+            "docx" => ExportFormat::Docx,
+            _ => return self.as_mut().fail("Choose a supported export format"),
+        };
+        let destination = destination.to_string();
+        if destination.trim().is_empty() {
+            return self.as_mut().fail("Choose an export destination");
+        }
+        self.as_mut().cancel_export();
+        let stamp = self.as_ref().export_stamp();
+        let (input, preset) = match self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                let preset = workspace.compile_presets().first().map_or_else(
+                    || CompilePreset::manuscript("Manuscript"),
+                    |preset| (*preset).clone(),
+                );
+                workspace
+                    .compile_input(stamp)
+                    .map(|input| (input, preset))
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(values) => values,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let cancellation = CancellationToken::default();
+        let options = ExportOptions::file(format, destination);
+        let new_worker = if self.as_ref().rust().export_worker.is_none() {
+            match CompileExportWorker::start("parchmint-export") {
+                Ok(worker) => Some(worker),
+                Err(error) => return self.as_mut().fail(error),
+            }
+        } else {
+            None
+        };
+        let started: Result<(), String> = {
+            let mut rust = self.as_mut().rust_mut();
+            if let Some(worker) = new_worker {
+                rust.export_worker = Some(worker);
+            }
+            rust.export_worker
+                .as_ref()
+                .expect("worker was just initialized")
+                .submit(CompileExportJob {
+                    stamp,
+                    input,
+                    preset,
+                    options,
+                    cancellation: cancellation.clone(),
+                })
+                .map_err(|error| error.to_string())
+        };
+        match started {
+            Ok(()) => {
+                self.as_mut().rust_mut().export_cancellation = Some(cancellation);
+                self.as_mut().set_export_in_progress(true);
+                self.as_mut()
+                    .set_export_status(QString::from("Compiling on background worker…"));
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
+    pub fn poll_export(mut self: Pin<&mut Self>) {
+        let completion = self
+            .as_mut()
+            .rust_mut()
+            .export_worker
+            .as_ref()
+            .map(CompileExportWorker::try_result);
+        let Some(completion) = completion else {
+            return;
+        };
+        match completion {
+            Ok(Some(completion)) => {
+                self.as_mut().rust_mut().export_cancellation = None;
+                self.as_mut().set_export_in_progress(false);
+                if completion.stamp != self.as_ref().export_stamp() {
+                    self.as_mut()
+                        .set_export_status(QString::from("Discarded stale export completion"));
+                    return;
+                }
+                match completion.outcome {
+                    Ok(report) => self.as_mut().set_export_status(QString::from(format!(
+                        "Exported {} bytes to {}{}",
+                        report.bytes,
+                        report.destination.display(),
+                        if report.warnings.is_empty() {
+                            ""
+                        } else {
+                            " (with warnings)"
+                        }
+                    ))),
+                    Err(error) => {
+                        self.as_mut()
+                            .set_export_status(QString::from(error.to_string()));
+                        self.as_mut()
+                            .operation_failed(QString::from(error.to_string()));
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.as_mut().set_export_in_progress(false);
+                self.as_mut()
+                    .set_export_status(QString::from(error.to_string()));
+            }
+        }
+    }
+
+    pub fn cancel_export(mut self: Pin<&mut Self>) {
+        if let Some(token) = self.as_mut().rust_mut().export_cancellation.take() {
+            token.cancel();
+            self.as_mut()
+                .set_export_status(QString::from("Export cancellation requested"));
+        }
     }
 
     pub fn create_project(mut self: Pin<&mut Self>, path: &QString, name: &QString) -> bool {
@@ -485,6 +650,7 @@ impl ParchMintBackend {
         }
     }
     pub fn close_project(mut self: Pin<&mut Self>) {
+        self.as_mut().cancel_export();
         self.as_mut().rust_mut().workspace = None;
         self.as_mut().set_project_open(false);
         self.as_mut().set_project_name(QString::default());
@@ -601,8 +767,8 @@ impl ParchMintBackend {
         self.as_mut().edit_metadata_field(
             id,
             |metadata| {
-                metadata.status =
-                    (!status.to_string().trim().is_empty()).then(|| status.to_string())
+                let status = status.to_string();
+                metadata.status = (!status.trim().is_empty()).then_some(status);
             },
             "Edit status",
         )
@@ -611,9 +777,12 @@ impl ParchMintBackend {
         self.as_mut().edit_metadata_field(
             id,
             |metadata| {
-                metadata.labels = (!label.to_string().trim().is_empty())
-                    .then(|| vec![label.to_string()])
-                    .unwrap_or_default()
+                let label = label.to_string();
+                metadata.labels = if label.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![label]
+                };
             },
             "Edit label",
         )
@@ -717,7 +886,7 @@ impl ParchMintBackend {
                     workspace.preferences().split_orientation,
                     workspace.preferences().split_ratio_milli,
                 )
-                .and_then(|_| workspace.open_node_in_pane(other, node))
+                .and_then(|()| workspace.open_node_in_pane(other, node))
                 .map_err(|error| error.to_string())
         })
     }
@@ -879,12 +1048,20 @@ impl ParchMintBackend {
         if revision <= *self.document_revision() || first_block < 0 || last_block <= first_block {
             return;
         }
+        self.as_mut().cancel_export();
         self.as_mut().set_document_revision(revision);
         self.as_mut().set_save_status(QString::from("Unsaved"));
     }
 
     fn install_workspace(mut self: Pin<&mut Self>, workspace: ProjectWorkspace) {
         let name = QString::from(workspace.project().name.clone());
+        let generation = self
+            .as_ref()
+            .rust()
+            .project_generation
+            .saturating_add(1)
+            .max(1);
+        self.as_mut().rust_mut().project_generation = generation;
         self.as_mut().rust_mut().workspace = Some(workspace);
         self.as_mut().set_project_name(name);
         self.as_mut().set_project_open(true);
@@ -911,6 +1088,7 @@ impl ParchMintBackend {
         self.as_mut().bump(command);
     }
     fn bump(mut self: Pin<&mut Self>, command: &str) {
+        self.as_mut().cancel_export();
         let revision = self.revision().saturating_add(1);
         self.as_mut().rust_mut().revision = revision;
         self.as_mut().revision_changed();
@@ -1024,10 +1202,18 @@ impl ParchMintBackend {
                 .map_err(|error| error.to_string())
         })
     }
+    #[allow(clippy::needless_pass_by_value)]
     fn fail(mut self: Pin<&mut Self>, error: impl ToString) -> bool {
         self.as_mut()
             .operation_failed(QString::from(error.to_string()));
         false
+    }
+    fn export_stamp(&self) -> WorkStamp {
+        WorkStamp {
+            generation: ProjectGeneration::new(self.rust().project_generation.max(1))
+                .expect("non-zero backend generation"),
+            revision: Revision::new(*self.revision().max(self.document_revision())),
+        }
     }
 }
 
