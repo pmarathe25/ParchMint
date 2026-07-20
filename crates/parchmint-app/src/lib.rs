@@ -1,9 +1,11 @@
 //! Application-service infrastructure: lazy snapshots and stale-safe workers.
 
 mod document;
+mod search;
 mod workspace;
 
 pub use document::*;
+pub use search::*;
 pub use workspace::*;
 
 use parchmint_domain::WorkStamp;

@@ -5,10 +5,12 @@
 //! state such as an expanded item, but it never owns another mutable copy of
 //! the project graph.
 
+use crate::{IndexStatus, ProjectSearch, SearchServiceError};
 use parchmint_domain::{
     DocumentId, DocumentMetadata, DocumentRecord, Node, NodeId, NodeKind, Project, ProjectCommand,
-    ProjectError, RelativeProjectPath,
+    ProjectError, ProjectEvent, RelativeProjectPath,
 };
+use parchmint_index::{CountTotals, SearchQuery, SearchResult};
 use parchmint_storage::{
     AttachmentPreview, AttachmentRecord, OpenMode, OpenProject, ProjectStorage, StorageError,
     atomic_write,
@@ -139,6 +141,7 @@ impl Default for PaneWorkspaceState {
 
 /// Local, disposable UI state. Removing this file cannot affect a project.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Persisted flat QML workspace preferences.
 pub struct WorkspacePreferences {
     #[serde(default = "workspace_format_version")]
     pub version: u32,
@@ -252,6 +255,8 @@ pub struct ProjectWorkspace {
     redo: Vec<ProjectCommand>,
     preferences: WorkspacePreferences,
     workspace_diagnostic: Option<String>,
+    search: ProjectSearch,
+    index_diagnostic: Option<String>,
 }
 
 impl ProjectWorkspace {
@@ -276,6 +281,7 @@ impl ProjectWorkspace {
             .filter(|id| opened.project.nodes.contains_key(id) && !opened.project.is_trashed(*id))
             .collect();
         let snapshot = build_snapshot(&opened.project, None, "", OutlineSort::Binder);
+        let search = ProjectSearch::open(opened.root());
         Self {
             opened,
             snapshot,
@@ -284,6 +290,8 @@ impl ProjectWorkspace {
             redo: Vec::new(),
             preferences,
             workspace_diagnostic,
+            search,
+            index_diagnostic: None,
         }
     }
 
@@ -308,6 +316,49 @@ impl ProjectWorkspace {
         self.workspace_diagnostic.as_deref()
     }
 
+    /// Non-fatal search/index diagnostic. Canonical editing is always available.
+    pub fn index_diagnostic(&self) -> Option<&str> {
+        self.index_diagnostic.as_deref()
+    }
+
+    /// Current disposable-cache availability for a passive progress/status UI.
+    pub fn index_status(&self) -> &IndexStatus {
+        self.search.status()
+    }
+
+    /// Explicitly (re)builds the derived cache from current canonical project state.
+    pub fn rebuild_search_index(&mut self) -> Result<(), WorkspaceError> {
+        self.search
+            .rebuild(&self.opened)
+            .map_err(WorkspaceError::Search)?;
+        self.index_diagnostic = None;
+        Ok(())
+    }
+
+    /// Searches active documents. The first query may initialize a missing cache;
+    /// callers that require no synchronous work can invoke `rebuild_search_index`
+    /// on their Rust worker first.
+    pub fn search_project(
+        &mut self,
+        query: &SearchQuery<'_>,
+        limit: u32,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        self.search
+            .search(&self.opened, query, limit)
+            .map_err(WorkspaceError::Search)
+    }
+
+    /// Returns stored aggregate counts for manuscript/research/project/subtree.
+    pub fn search_totals(
+        &mut self,
+        scope: Option<&str>,
+        subtree: Option<NodeId>,
+    ) -> Result<CountTotals, WorkspaceError> {
+        self.search
+            .totals(&self.opened, scope, subtree)
+            .map_err(WorkspaceError::Search)
+    }
+
     pub fn pane(&self, index: usize) -> Option<&PaneWorkspaceState> {
         self.preferences.panes.get(index)
     }
@@ -326,12 +377,11 @@ impl ProjectWorkspace {
             .panes
             .get_mut(index)
             .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
-        if let Some(node) = node {
-            if !self.opened.project.nodes.contains_key(&node)
-                || self.opened.project.is_trashed(node)
-            {
-                return Err(WorkspaceError::Invariant("pane node is unavailable"));
-            }
+        if let Some(node) = node
+            && (!self.opened.project.nodes.contains_key(&node)
+                || self.opened.project.is_trashed(node))
+        {
+            return Err(WorkspaceError::Invariant("pane node is unavailable"));
         }
         pane.node = node;
         pane.view = view;
@@ -536,7 +586,10 @@ impl ProjectWorkspace {
         self.opened
             .set_body(document, body)
             .map_err(WorkspaceError::Storage)?;
-        ProjectStorage::save_document(&mut self.opened, document).map_err(WorkspaceError::Storage)
+        ProjectStorage::save_document(&mut self.opened, document)
+            .map_err(WorkspaceError::Storage)?;
+        self.update_index_node(node);
+        Ok(())
     }
 
     /// Changes selection only after removing stale, trashed, and duplicate IDs.
@@ -833,7 +886,50 @@ impl ProjectWorkspace {
             .execute(command)
             .map_err(WorkspaceError::Storage)?;
         ProjectStorage::save(&mut self.opened).map_err(WorkspaceError::Storage)?;
+        self.update_index_events(&outcome.events);
         Ok(outcome.undo.inverse)
+    }
+
+    fn update_index_node(&mut self, node: NodeId) {
+        if let Err(error) = self.search.upsert_node(&self.opened, node) {
+            self.index_diagnostic = Some(error.to_string());
+        }
+    }
+
+    fn update_index_subtree(&mut self, root: NodeId) {
+        let mut nodes = vec![root];
+        while let Some(node) = nodes.pop() {
+            if let Some(entry) = self.opened.project.nodes.get(&node) {
+                nodes.extend(entry.children.iter().copied());
+                if entry.kind.document_id().is_some() {
+                    self.update_index_node(node);
+                }
+            }
+        }
+    }
+
+    fn update_index_events(&mut self, events: &[ProjectEvent]) {
+        for event in events {
+            match *event {
+                ProjectEvent::NodeCreated(node)
+                | ProjectEvent::NodeRenamed(node)
+                | ProjectEvent::NodeReordered(node)
+                | ProjectEvent::NodeReparented { node, .. }
+                | ProjectEvent::NodeDuplicated { copy: node, .. }
+                | ProjectEvent::NodeRestored(node) => self.update_index_subtree(node),
+                ProjectEvent::NodeTrashed(node) => {
+                    if let Err(error) = self.search.delete_subtree(&self.opened.project, node) {
+                        self.index_diagnostic = Some(error.to_string());
+                    }
+                }
+                ProjectEvent::MetadataEdited(document) => {
+                    if let Some(record) = self.opened.project.documents.get(&document) {
+                        self.update_index_node(record.node_id);
+                    }
+                }
+                ProjectEvent::StyleMutated(_) | ProjectEvent::StyleReplaced { .. } => {}
+            }
+        }
     }
 }
 
@@ -1117,6 +1213,8 @@ pub enum WorkspaceError {
     Invariant(&'static str),
     #[error("document source is invalid: {0}")]
     InvalidDocument(String),
+    #[error(transparent)]
+    Search(#[from] SearchServiceError),
 }
 
 #[cfg(test)]
@@ -1237,6 +1335,62 @@ mod tests {
             "projection took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn disposable_search_rebuild_and_incremental_workspace_events_match_canonical_state() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Search").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let scene = workspace
+            .create_node(manuscript, "Winter Harbor", false)
+            .unwrap();
+        workspace
+            .save_document_body(scene, "Mara walks through the silent orchard.".into())
+            .unwrap();
+
+        // Open never scanned bodies, but a rebuild derives the cache solely
+        // from canonical-open data and makes the row searchable.
+        workspace.rebuild_search_index().unwrap();
+        let query = SearchQuery {
+            text: "orch",
+            ..SearchQuery::default()
+        };
+        assert_eq!(workspace.search_project(&query, 10).unwrap().len(), 1);
+        assert_eq!(
+            workspace
+                .search_totals(Some("manuscript"), None)
+                .unwrap()
+                .words,
+            6
+        );
+
+        let document = document_for_node(workspace.project(), scene).unwrap();
+        let mut metadata = workspace.project().documents[&document].metadata.clone();
+        metadata.tags = vec!["coast".into()];
+        workspace.edit_metadata(scene, metadata).unwrap();
+        let tagged = SearchQuery {
+            text: "winter",
+            tag: Some("coast"),
+            ..SearchQuery::default()
+        };
+        assert_eq!(
+            workspace.search_project(&tagged, 10).unwrap()[0].node_id,
+            scene.to_string()
+        );
+
+        workspace.trash(scene).unwrap();
+        assert!(workspace.search_project(&query, 10).unwrap().is_empty());
+        workspace.restore(scene).unwrap();
+        assert_eq!(workspace.search_project(&query, 10).unwrap().len(), 1);
+
+        std::fs::remove_file(directory.path().join(".parchmint/index.sqlite")).unwrap();
+        // A missing cache is disposable: reopening + rebuilding sees exactly
+        // the canonical source, not any former SQLite data.
+        drop(workspace);
+        let mut reopened = ProjectWorkspace::open(directory.path()).unwrap();
+        reopened.rebuild_search_index().unwrap();
+        assert_eq!(reopened.search_project(&query, 10).unwrap().len(), 1);
     }
 
     #[test]

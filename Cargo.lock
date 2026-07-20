@@ -472,6 +472,7 @@ name = "parchmint-app"
 version = "0.1.0"
 dependencies = [
  "parchmint-domain",
+ "parchmint-index",
  "parchmint-markdown",
  "parchmint-storage",
  "serde",

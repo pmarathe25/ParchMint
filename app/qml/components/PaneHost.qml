@@ -16,12 +16,36 @@ Pane {
     required property bool pinned
     property bool focused: backend.focused_pane === paneIndex
     property string loadedNode: ""
+    property bool findVisible: false
     padding: 0
 
     function reloadBody() {
         if (viewName === "editor" && nodeId.length > 0 && loadedNode !== nodeId) {
             editor.text = backend.paneDocumentBody(paneIndex)
             loadedNode = nodeId
+        }
+    }
+    function findNext() {
+        const query = findField.text
+        if (!query.length)
+            return
+        const source = caseCheck.checked ? editor.text : editor.text.toLocaleLowerCase()
+        const needle = caseCheck.checked ? query : query.toLocaleLowerCase()
+        let start = editor.selectionEnd
+        let found = source.indexOf(needle, start)
+        if (found < 0 && start > 0)
+            found = source.indexOf(needle)
+        if (found >= 0) {
+            editor.select(found, found + needle.length)
+            editor.forceActiveFocus()
+        }
+    }
+    function replaceSelection() {
+        if (editor.selectedText.length && editor.selectedText === findField.text) {
+            editor.insert(editor.cursorPosition, replaceField.text)
+            findNext()
+        } else {
+            findNext()
         }
     }
     onNodeIdChanged: reloadBody()
@@ -42,26 +66,52 @@ Pane {
                 anchors.fill: parent
                 ToolButton { text: root.pinned ? "●" : "○"; checkable: true; checked: root.pinned; Accessible.name: qsTr("Pin pane"); onClicked: root.backend.setPanePinned(root.paneIndex, checked) }
                 Label { text: root.viewName === "attachment" ? qsTr("Attachment") : root.viewName; Layout.fillWidth: true; elide: Text.ElideRight }
+                ToolButton { text: "⌕"; Accessible.name: qsTr("Find and replace in document"); onClicked: root.findVisible = !root.findVisible }
                 ToolButton { text: "×"; Accessible.name: qsTr("Close pane"); onClicked: root.backend.closePane(root.paneIndex) }
             }
+        }
+        RowLayout {
+            visible: root.findVisible && root.viewName === "editor"
+            Layout.fillWidth: true
+            Layout.margins: 6
+            TextField { id: findField; Layout.fillWidth: true; placeholderText: qsTr("Find"); onAccepted: root.findNext() }
+            TextField { id: replaceField; Layout.preferredWidth: 120; placeholderText: qsTr("Replace") }
+            CheckBox { id: caseCheck; text: qsTr("Case") }
+            Button { text: qsTr("Next"); onClicked: root.findNext() }
+            Button { text: qsTr("Replace"); onClicked: root.replaceSelection() }
         }
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             currentIndex: root.viewName === "outline" ? 1 : root.viewName === "cards" ? 2 : root.viewName === "attachment" ? 3 : 0
-            TextArea {
-                id: editor
-                textFormat: TextEdit.PlainText
-                wrapMode: TextEdit.Wrap
-                selectByMouse: true
-                persistentSelection: true
-                placeholderText: root.nodeId.length ? qsTr("Markdown research or manuscript note") : qsTr("Select a document")
-                Accessible.name: qsTr("Document editor")
-                onActiveFocusChanged: {
-                    if (activeFocus)
-                        root.backend.focusPane(root.paneIndex)
-                    else if (root.loadedNode === root.nodeId && root.nodeId.length > 0)
-                        root.backend.savePaneBody(root.paneIndex, text)
+            Item {
+                TextArea {
+                    id: editor
+                    anchors.fill: parent
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.Wrap
+                    selectByMouse: true
+                    persistentSelection: true
+                    placeholderText: root.nodeId.length ? qsTr("Markdown research or manuscript note") : qsTr("Select a document")
+                    Accessible.name: qsTr("Document editor")
+                    onActiveFocusChanged: {
+                        if (activeFocus)
+                            root.backend.focusPane(root.paneIndex)
+                        else if (root.loadedNode === root.nodeId && root.nodeId.length > 0)
+                            root.backend.savePaneBody(root.paneIndex, text)
+                    }
+                    onSelectedTextChanged: liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
+                    onTextChanged: liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
+                }
+                Label {
+                    id: liveCounts
+                    text: root.backend.textStatistics(editor.selectedText.length ? editor.selectedText : editor.text)
+                    Accessible.name: qsTr("Live document statistics") + ": " + text
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 8
+                    z: 1
+                    opacity: .75
                 }
             }
             OutlineView { backend: root.backend; model: root.model }

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 parchmint-domain = { path = "../parchmint-domain" }
+parchmint-index = { path = "../parchmint-index" }
 parchmint-markdown = { path = "../parchmint-markdown" }
 parchmint-storage = { path = "../parchmint-storage" }
 serde.workspace = true

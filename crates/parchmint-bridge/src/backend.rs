@@ -4,7 +4,10 @@ use self::qobject::ParchMintBackend;
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
-use parchmint_app::{DropPlacement, OutlineSort, PaneView, ProjectWorkspace, SplitOrientation};
+use parchmint_app::{
+    DropPlacement, OutlineSort, PaneView, ProjectWorkspace, SearchQuery, SearchResult,
+    SplitOrientation, text_statistics,
+};
 use parchmint_domain::{DocumentMetadata, NodeId};
 
 /// Rust state hidden behind the generated QObject.
@@ -31,6 +34,9 @@ pub struct ParchMintBackendRust {
     pane_two_pinned: bool,
     focused_pane: i32,
     split_enabled: bool,
+    search_result_count: i32,
+    search_status: QString,
+    search_results: Vec<SearchResult>,
     filter: String,
     sort: OutlineSort,
     workspace: Option<ProjectWorkspace>,
@@ -61,6 +67,9 @@ impl Default for ParchMintBackendRust {
             pane_two_pinned: false,
             focused_pane: 0,
             split_enabled: false,
+            search_result_count: 0,
+            search_status: QString::from("Index ready when you search"),
+            search_results: Vec::new(),
             filter: String::new(),
             sort: OutlineSort::Binder,
             workspace: None,
@@ -100,6 +109,8 @@ pub mod qobject {
         #[qproperty(bool, pane_two_pinned)]
         #[qproperty(i32, focused_pane)]
         #[qproperty(bool, split_enabled)]
+        #[qproperty(i32, search_result_count, READ, NOTIFY)]
+        #[qproperty(QString, search_status)]
         type ParchMintBackend = super::ParchMintBackendRust;
 
         #[qinvokable]
@@ -129,6 +140,28 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "nodeIsRoot"]
         fn node_is_root(self: &ParchMintBackend, row: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "projectSearch"]
+        fn project_search(self: Pin<&mut ParchMintBackend>, query: &QString);
+        #[qinvokable]
+        #[cxx_name = "searchResultId"]
+        fn search_result_id(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "searchResultTitle"]
+        fn search_result_title(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "searchResultContext"]
+        fn search_result_context(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "searchResultSnippet"]
+        fn search_result_snippet(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "openSearchResult"]
+        fn open_search_result(self: Pin<&mut ParchMintBackend>, row: i32, other_pane: bool)
+        -> bool;
+        #[qinvokable]
+        #[cxx_name = "textStatistics"]
+        fn text_statistics(self: &ParchMintBackend, text: &QString) -> QString;
 
         #[qinvokable]
         #[cxx_name = "createProject"]
@@ -338,6 +371,99 @@ impl ParchMintBackend {
     }
     pub fn node_is_root(&self, row: i32) -> bool {
         self.row(row).is_some_and(|value| value.is_root)
+    }
+    pub fn project_search(mut self: Pin<&mut Self>, query: &QString) {
+        let query_text = query.to_string();
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .search_project(
+                        &SearchQuery {
+                            text: &query_text,
+                            ..SearchQuery::default()
+                        },
+                        100,
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(results) => {
+                let count = i32::try_from(results.len()).unwrap_or(i32::MAX);
+                self.as_mut().rust_mut().search_results = results;
+                self.as_mut().rust_mut().search_result_count = count;
+                self.as_mut().search_result_count_changed();
+                self.as_mut().set_search_status(QString::from(format!(
+                    "{count} results — unquoted words match prefixes; quoted text matches a phrase"
+                )));
+            }
+            Err(error) => {
+                self.as_mut().rust_mut().search_results.clear();
+                self.as_mut().rust_mut().search_result_count = 0;
+                self.as_mut().search_result_count_changed();
+                self.as_mut().set_search_status(QString::from(error));
+            }
+        }
+    }
+    fn search_row(&self, row: i32) -> Option<&SearchResult> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|index| self.rust().search_results.get(index))
+    }
+    pub fn search_result_id(&self, row: i32) -> QString {
+        self.search_row(row)
+            .map_or_else(QString::default, |result| QString::from(&result.node_id))
+    }
+    pub fn search_result_title(&self, row: i32) -> QString {
+        self.search_row(row)
+            .map_or_else(QString::default, |result| QString::from(&result.title))
+    }
+    pub fn search_result_context(&self, row: i32) -> QString {
+        self.search_row(row)
+            .map_or_else(QString::default, |result| {
+                QString::from(format!("{} · {}", result.scope, result.path))
+            })
+    }
+    pub fn search_result_snippet(&self, row: i32) -> QString {
+        self.search_row(row)
+            .map_or_else(QString::default, |result| {
+                // Markers originate from SQLite's `snippet`, but QML renders plain
+                // text here so source content can never become markup.
+                QString::from(result.snippet.replace('\u{1}', "").replace('\u{2}', ""))
+            })
+    }
+    pub fn open_search_result(mut self: Pin<&mut Self>, row: i32, other_pane: bool) -> bool {
+        let node = self
+            .search_row(row)
+            .and_then(|result| NodeId::parse(&result.node_id).ok());
+        self.as_mut().perform("Open search result", |workspace| {
+            let node = node.ok_or("Choose a valid search result")?;
+            workspace.select([node]);
+            if other_pane {
+                let other = 1 - usize::from(workspace.preferences().focused_pane.min(1));
+                workspace
+                    .set_split(
+                        true,
+                        workspace.preferences().split_orientation,
+                        workspace.preferences().split_ratio_milli,
+                    )
+                    .and_then(|_| workspace.open_node_in_pane(other, node))
+            } else {
+                workspace.navigate_focused_pane(node).map(|_| ())
+            }
+            .map_err(|error| error.to_string())
+        })
+    }
+    pub fn text_statistics(&self, text: &QString) -> QString {
+        let counts = text_statistics(&text.to_string());
+        QString::from(format!(
+            "{} words · {} characters",
+            counts.words, counts.characters
+        ))
     }
 
     pub fn create_project(mut self: Pin<&mut Self>, path: &QString, name: &QString) -> bool {

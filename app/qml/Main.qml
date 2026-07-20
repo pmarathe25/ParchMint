@@ -22,6 +22,43 @@ ApplicationWindow {
     property bool binderVisible: true
     property bool inspectorVisible: true
 
+    Popup {
+        id: searchPopup
+        x: Math.max(DesignTokens.space3, projectSearchField.x)
+        y: window.header.height + DesignTokens.space1
+        width: 620
+        height: 410
+        padding: DesignTokens.space3
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        contentItem: ColumnLayout {
+            spacing: DesignTokens.space2
+            Label { text: backend.search_status; wrapMode: Text.Wrap; Layout.fillWidth: true; opacity: .75 }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                model: backend.search_result_count
+                delegate: ItemDelegate {
+                    required property int index
+                    width: ListView.view.width
+                    onClicked: { backend.openSearchResult(index, false); searchPopup.close() }
+                    contentItem: ColumnLayout {
+                        Label { text: backend.searchResultTitle(index); font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
+                        Label { text: backend.searchResultContext(index); opacity: .65; Layout.fillWidth: true; elide: Text.ElideRight }
+                        Label { text: backend.searchResultSnippet(index); Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
+                    }
+                    ToolButton {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "↗"
+                        Accessible.name: qsTr("Open search result in other pane")
+                        onClicked: { backend.openSearchResult(index, true); searchPopup.close() }
+                    }
+                }
+            }
+        }
+    }
+
     ParchMintBackend {
         id: backend
         onCommandCompleted: function(command, revision) {
@@ -138,6 +175,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+["; enabled: backend.selected_id.length > 0; onActivated: backend.outdentNode(backend.selected_id) }
     Shortcut { sequence: StandardKey.Delete; enabled: backend.selected_id.length > 0; onActivated: backend.trashNode(backend.selected_id) }
     Shortcut { sequence: "Ctrl+Tab"; enabled: backend.split_enabled; onActivated: backend.focusNextPane() }
+    Shortcut { sequence: "Ctrl+Shift+F"; enabled: backend.project_open; onActivated: projectSearchField.forceActiveFocus() }
 
     header: ToolBar {
         RowLayout {
@@ -146,11 +184,25 @@ ApplicationWindow {
             ToolButton { text: "☰"; Accessible.name: qsTr("Toggle binder"); onClicked: window.binderVisible = !window.binderVisible }
             ToolButton { text: "ⓘ"; Accessible.name: qsTr("Toggle inspector"); onClicked: window.inspectorVisible = !window.inspectorVisible }
             TextField {
-                Layout.preferredWidth: 260
-                placeholderText: qsTr("Filter title, synopsis, status, label")
+                Layout.preferredWidth: 220
+                placeholderText: qsTr("Filter outline")
                 enabled: backend.project_open
                 onTextChanged: backend.setFilter(text)
                 Accessible.name: qsTr("Filter outline")
+            }
+            TextField {
+                id: projectSearchField
+                Layout.preferredWidth: 300
+                placeholderText: qsTr("Search project…")
+                enabled: backend.project_open
+                onTextChanged: {
+                    if (text.trim().length) {
+                        backend.projectSearch(text)
+                        searchPopup.open()
+                    }
+                }
+                onAccepted: { if (text.trim().length) { backend.projectSearch(text); searchPopup.open() } }
+                Accessible.name: qsTr("Search project; quote an exact phrase")
             }
             Item { Layout.fillWidth: true }
             Label { text: backend.project_open ? backend.project_name : qsTr("No project open"); font.bold: true }
