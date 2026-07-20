@@ -1,7 +1,6 @@
-# ParchMint Markdown 1.0 draft grammar
+# ParchMint Markdown 1.0 grammar
 
-Status: syntax accepted by ADR-0005; complete codec implementation and schema
-freeze belong to Stages 02–03.
+Status: codec implemented by Stage 03; persisted spelling remains version 1.
 
 Documents are UTF-8 CommonMark with selected GFM tables, task lists,
 strikethrough, and footnotes. A YAML mapping delimited by `---` at byte zero
@@ -45,5 +44,45 @@ source retained exactly
 The codec may also classify unrecognized extension blocks as opaque without
 rewriting them into that spelling. Opaque nodes are protected and visibly
 identified in WYSIWYG mode. Attribute output order is `id`, class names,
-`style-id`, then remaining keys in lexical order. Stage 03 owns comprehensive
-normalization rules and diagnostics.
+`style-id`, then remaining keys in lexical order.
+
+## Supported semantic matrix
+
+| Construct | Canonical spelling | Editing behavior |
+|---|---|---|
+| Paragraph | CommonMark paragraph | Semantic inline runs and paragraph attributes |
+| Title/headings | ATX `#` through `######` | Level is explicit, never inferred from font size |
+| Emphasis | `*italic*`, `**bold**`, `~~strike~~` | Character format |
+| Super/subscript | `<sup>…</sup>`, `<sub>…</sub>` | Character vertical alignment |
+| Links | `[label](destination "title")` | `http`, `https`, `mailto`, relative, and `asset` destinations |
+| Images | `![alt](asset:<uuid> "title")` | Project asset identity is the destination |
+| Lists/tasks | CommonMark markers and GFM tasks | List and checked state are semantic |
+| Block quotes | CommonMark `>` | Source-aware supported block |
+| Code | Indented or fenced code | Info string and text are retained |
+| Tables | GFM pipe table | Source-aware supported block |
+| Footnotes | GFM definition/reference | Source-aware supported construct |
+| Thematic/scene break | CommonMark thematic break | Semantic thematic break |
+| Alignment | `::: {.parchmint-align align="…"}` | `left`, `center`, `right`, or `justify` |
+| Named styles | `.parchmint-style style-id="…"` | Stable paragraph or character identity |
+| Page break | `<!-- parchmint:page-break -->` | Protected visible compile marker |
+
+Untouched supported blocks retain their exact UTF-8 source slice. A block that
+is semantically edited is reconstructed deterministically with two trailing
+newlines, ATX headings, `-` unordered markers, sequential `.` ordered markers,
+backtick fences, and the attribute ordering above. Repeated parse/serialize
+cycles are stable.
+
+## Diagnostics and unsupported input
+
+- Source spans are absolute UTF-8 byte ranges, including the front-matter
+  offset. Diagnostics have a stable machine code, severity, range, and message.
+- Duplicate anchor IDs are warnings; their source is retained. Duplicate
+  top-level YAML keys are warnings and the last YAML value is semantic.
+- `.parchmint-style` without `style-id`, and IDs absent from the project style
+  catalog, are visible warnings. Source and direct appearance survive.
+- An unknown fenced div, explicit opaque fence, unsupported HTML block, or
+  paragraph containing unsupported inline HTML is a source-backed opaque block.
+- Unclosed front matter is a hard parse error. Unclosed fences/divs are opaque
+  nodes with diagnostics so raw mode retains the complete buffer.
+- Returning from raw mode is forbidden after a hard parse error until the user
+  fixes the buffer or explicitly discards it.

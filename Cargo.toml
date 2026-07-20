@@ -32,7 +32,7 @@ indexmap = { version = "2.14.0", features = ["serde"] }
 pulldown-cmark = { version = "0.13.1", default-features = false }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_yaml = "0.9.34"
+noyalib = { version = "0.0.15", features = ["compat-serde-yaml"] }
 toml = "0.8.23"
 tempfile = "3.27.0"
 thiserror = "2.0.18"

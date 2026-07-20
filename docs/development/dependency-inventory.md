@@ -1,4 +1,4 @@
-# Stage 01 dependency inventory
+# Development dependency inventory
 
 The final distribution license is unresolved. This inventory is engineering
 input, not permission to publish binaries. CI checks registry sources and known
@@ -11,7 +11,7 @@ advisories; Stage 09 must generate the complete transitive notices artifact.
 | Rust | 1.97.1 | Domain/application implementation | Rust project license terms |
 | pulldown-cmark | Cargo.lock | CommonMark/GFM parser events and ranges | MIT |
 | rusqlite + bundled SQLite | Cargo.lock | Disposable FTS5 cache spike | MIT; SQLite public domain |
-| serde / serde_yaml | Cargo.lock | Boundary DTO and front-matter spike | MIT OR Apache-2.0; deprecated YAML crate must be replaced/reviewed before format freeze |
+| serde / noyalib | Cargo.lock / 0.0.15 | Boundary DTOs and bounded pure-Rust YAML 1.2 front matter | MIT OR Apache-2.0 |
 | tempfile | Cargo.lock | Same-directory atomic replacement | MIT OR Apache-2.0 |
 | tracing | Cargo.lock | Structured Rust diagnostics hooks | MIT |
 

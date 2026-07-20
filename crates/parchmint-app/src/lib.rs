@@ -1,5 +1,9 @@
 //! Application-service infrastructure: lazy snapshots and stale-safe workers.
 
+mod document;
+
+pub use document::*;
+
 use parchmint_domain::WorkStamp;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};

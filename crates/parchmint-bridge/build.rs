@@ -6,7 +6,11 @@ fn main() {
     let module = QmlModule::new("org.parchmint.app")
         .version(1, 0)
         .qml_file("qml/Main.qml")
-        .qml_file(QmlFile::from("qml/components/DesignTokens.qml").singleton(true));
+        .qml_file(QmlFile::from("qml/components/DesignTokens.qml").singleton(true))
+        .qml_file("qml/components/FormattingBar.qml")
+        .qml_file("qml/components/StylePicker.qml")
+        .qml_file("qml/components/StyleManager.qml")
+        .qml_file("qml/components/SourceEditor.qml");
 
     CxxQtBuilder::new_qml_module(module)
         .qt_module("Network")

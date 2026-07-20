@@ -5,13 +5,13 @@
 //! contain an advisory lock and local workspace/index state, but deleting it
 //! leaves every project document, manifest, style, asset, and tombstone intact.
 
+use noyalib::compat::serde_yaml::{self as yaml, Mapping, Value};
 use parchmint_domain::{
     CommandOutcome, DocumentId, DocumentMetadata, DocumentRecord, Node, NodeId, NodeKind, Project,
     ProjectCommand, ProjectError, ProjectEvent, ProjectId, RelativeProjectPath, StyleDefinition,
     TrashTombstone,
 };
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -81,6 +81,19 @@ impl OpenProject {
             .get(&id)
             .map(String::as_str)
             .ok_or(StorageError::MissingBody(id))
+    }
+    /// Reads the current canonical body from disk, bypassing the in-memory copy.
+    /// This is used by external-change detection and never mutates open state.
+    pub fn canonical_body_on_disk(&self, id: DocumentId) -> Result<String, StorageError> {
+        let record = self
+            .project
+            .documents
+            .get(&id)
+            .ok_or(StorageError::MissingBody(id))?;
+        let path = resolve_project_path(&self.root, &record.path)?;
+        let source = read_bounded(&path, MAX_DOCUMENT_BYTES, "document")?;
+        let (_, body, _) = parse_document(&source, id)?;
+        Ok(body)
     }
     /// Replaces a document body; callers should use the Markdown crate for semantic changes.
     pub fn set_body(&mut self, id: DocumentId, body: String) -> Result<(), StorageError> {
@@ -259,6 +272,7 @@ impl ProjectStorage {
                 .map(|entry| (entry.node_id, entry))
                 .collect(),
         };
+        project.ensure_required_builtin_styles();
         let mut bodies = BTreeMap::new();
         let mut extras = BTreeMap::new();
         let mut locations = BTreeMap::new();
@@ -337,34 +351,9 @@ impl ProjectStorage {
         write_toml(&opened.root.join("parchmint.toml"), &manifest)?;
         write_toml(&opened.root.join("outline.toml"), &outline)?;
         write_toml(&opened.root.join("styles.toml"), &styles)?;
-        let records = opened
-            .project
-            .documents
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for record in records {
-            let desired = canonical_document_path(&opened.project, record.node_id)?;
-            let body = opened
-                .bodies
-                .get(&record.id)
-                .ok_or(StorageError::MissingBody(record.id))?;
-            let unknown = opened
-                .unknown_front_matter
-                .get(&record.id)
-                .cloned()
-                .unwrap_or_default();
-            let bytes = serialize_document(record.id, &record.metadata, &unknown, body)?;
-            let target = resolve_project_path(&opened.root, &desired)?;
-            atomic_write(&target, bytes.as_bytes())?;
-            if let Some(previous) = opened.locations.insert(record.id, desired.clone())
-                && previous != desired
-            {
-                let old = resolve_project_path(&opened.root, &previous)?;
-                if old.is_file() {
-                    fs::remove_file(old).map_err(StorageError::RemoveOldDocument)?;
-                }
-            }
+        let records = opened.project.documents.keys().copied().collect::<Vec<_>>();
+        for id in records {
+            Self::save_document(opened, id)?;
         }
         for tombstone in opened.project.trash.values() {
             write_toml(
@@ -375,6 +364,43 @@ impl ProjectStorage {
                 )?,
                 tombstone,
             )?;
+        }
+        Ok(())
+    }
+    /// Atomically persists one canonical Markdown document without rewriting
+    /// unrelated documents or project manifests. Editor autosave uses this to
+    /// avoid overwriting an external change in another document.
+    pub fn save_document(opened: &mut OpenProject, id: DocumentId) -> Result<(), StorageError> {
+        if opened.mode == OpenMode::ReadOnly {
+            return Err(StorageError::ReadOnly);
+        }
+        opened.project.validate().map_err(StorageError::Domain)?;
+        let record = opened
+            .project
+            .documents
+            .get(&id)
+            .cloned()
+            .ok_or(StorageError::MissingBody(id))?;
+        let desired = canonical_document_path(&opened.project, record.node_id)?;
+        let body = opened
+            .bodies
+            .get(&record.id)
+            .ok_or(StorageError::MissingBody(record.id))?;
+        let unknown = opened
+            .unknown_front_matter
+            .get(&record.id)
+            .cloned()
+            .unwrap_or_default();
+        let bytes = serialize_document(record.id, &record.metadata, &unknown, body)?;
+        let target = resolve_project_path(&opened.root, &desired)?;
+        atomic_write(&target, bytes.as_bytes())?;
+        if let Some(previous) = opened.locations.insert(record.id, desired.clone())
+            && previous != desired
+        {
+            let old = resolve_project_path(&opened.root, &previous)?;
+            if old.is_file() {
+                fs::remove_file(old).map_err(StorageError::RemoveOldDocument)?;
+            }
         }
         Ok(())
     }
@@ -475,7 +501,7 @@ fn parse_document(
         ));
     }
     let raw = &source[4..end];
-    let mut mapping = serde_yaml::from_str::<Value>(raw)
+    let mut mapping = yaml::from_str::<Value>(raw)
         .map_err(|error| StorageError::Yaml(error.to_string()))?
         .as_mapping()
         .cloned()
@@ -483,12 +509,11 @@ fn parse_document(
             "front matter root must be a mapping",
         ))?;
     check_yaml_depth(&Value::Mapping(mapping.clone()), 0)?;
-    let stored_id =
-        mapping
-            .remove(Value::from("document_id"))
-            .ok_or(StorageError::InvalidSchema(
-                "document_id is missing from front matter",
-            ))?;
+    let stored_id = mapping
+        .remove("document_id")
+        .ok_or(StorageError::InvalidSchema(
+            "document_id is missing from front matter",
+        ))?;
     if stored_id
         .as_str()
         .map(DocumentId::parse)
@@ -503,11 +528,11 @@ fn parse_document(
     let known = ["title", "summary", "status", "labels", "tags", "flags"];
     let mut metadata_map = Mapping::new();
     for key in known {
-        if let Some(value) = mapping.remove(Value::from(key)) {
-            metadata_map.insert(Value::from(key), value);
+        if let Some(value) = mapping.remove(key) {
+            metadata_map.insert(key, value);
         }
     }
-    let metadata = serde_yaml::from_value::<DocumentMetadata>(Value::Mapping(metadata_map))
+    let metadata = yaml::from_value::<DocumentMetadata>(Value::Mapping(metadata_map))
         .map_err(|error| StorageError::Yaml(error.to_string()))?;
     Ok((metadata, source[end + 5..].to_owned(), mapping))
 }
@@ -529,34 +554,29 @@ fn serialize_document(
     if !metadata.labels.is_empty() {
         entries.insert(
             "labels".into(),
-            serde_yaml::to_value(&metadata.labels)
-                .map_err(|e| StorageError::Yaml(e.to_string()))?,
+            yaml::to_value(&metadata.labels).map_err(|e| StorageError::Yaml(e.to_string()))?,
         );
     }
     if !metadata.tags.is_empty() {
         entries.insert(
             "tags".into(),
-            serde_yaml::to_value(&metadata.tags).map_err(|e| StorageError::Yaml(e.to_string()))?,
+            yaml::to_value(&metadata.tags).map_err(|e| StorageError::Yaml(e.to_string()))?,
         );
     }
     if !metadata.flags.is_empty() {
         entries.insert(
             "flags".into(),
-            serde_yaml::to_value(&metadata.flags).map_err(|e| StorageError::Yaml(e.to_string()))?,
+            yaml::to_value(&metadata.flags).map_err(|e| StorageError::Yaml(e.to_string()))?,
         );
     }
     for (key, value) in unknown {
-        let key = key.as_str().ok_or(StorageError::InvalidSchema(
-            "front matter keys must be strings",
-        ))?;
         if entries.contains_key(key) || key == "document_id" {
             continue;
         }
         entries.insert(key.to_owned(), value.clone());
     }
-    let yaml =
-        serde_yaml::to_string(&entries).map_err(|error| StorageError::Yaml(error.to_string()))?;
-    Ok(format!("---\n{yaml}---\n{body}"))
+    let yaml = yaml::to_string(&entries).map_err(|error| StorageError::Yaml(error.to_string()))?;
+    Ok(format!("---\n{}\n---\n{body}", yaml.trim_end()))
 }
 fn check_yaml_depth(value: &Value, depth: usize) -> Result<(), StorageError> {
     if depth > MAX_YAML_NESTING {
@@ -571,8 +591,7 @@ fn check_yaml_depth(value: &Value, depth: usize) -> Result<(), StorageError> {
             }
         }
         Value::Mapping(values) => {
-            for (key, value) in values {
-                check_yaml_depth(key, depth + 1)?;
+            for value in values.values() {
                 check_yaml_depth(value, depth + 1)?;
             }
         }

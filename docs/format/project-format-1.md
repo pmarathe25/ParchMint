@@ -18,7 +18,17 @@ sibling `index`.
 
 `styles.toml` has `format_version = 1`, ordered `styles`, and optional
 `compile_presets`. Style IDs are UUIDs. Built-ins carry immutable machine keys;
-display names are not references. `based_on` must form no cycle.
+display names are not references. `kind` is `paragraph` (the backward-compatible
+default) or `character`; inheritance and replacement stay within one kind.
+`based_on` must form no cycle. Paragraph-only `next_style` selects the style for
+a newly created following paragraph. `properties` is a bounded string map that
+exporters resolve through inheritance without Qt.
+
+Required built-ins have stable machine keys/IDs: Body
+`018f0be2-a8ea-7d2d-89ea-45aa663708d4`, Heading
+`018f0be2-a8ea-7d2d-89ea-45aa663708d5`, and character Emphasis
+`018f0be2-a8ea-7d2d-89ea-45aa663708d6`. A loader supplies a missing required
+built-in in memory so early format-1 projects remain openable.
 
 Collections are written in UUID order except `roots` and node `children`, whose
 order is semantic. Fields are emitted in declaration order. TOML unknown keys

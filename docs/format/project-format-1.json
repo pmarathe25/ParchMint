@@ -6,7 +6,7 @@
   "properties": {
     "parchmint.toml": {"type": "object", "required": ["format_version", "project_id", "name"], "properties": {"format_version": {"const": 1}, "project_id": {"format": "uuid"}, "name": {"type": "string"}}},
     "outline.toml": {"type": "object", "required": ["format_version", "roots", "nodes"], "properties": {"format_version": {"const": 1}, "roots": {"type": "array", "minItems": 2, "maxItems": 2}, "nodes": {"type": "array"}, "trash": {"type": "array"}}},
-    "styles.toml": {"type": "object", "required": ["format_version", "styles"], "properties": {"format_version": {"const": 1}, "styles": {"type": "array"}, "compile_presets": {"type": "array"}}},
+    "styles.toml": {"type": "object", "required": ["format_version", "styles"], "properties": {"format_version": {"const": 1}, "styles": {"type": "array", "items": {"type": "object", "required": ["id", "name"], "properties": {"id": {"format": "uuid"}, "machine_key": {"type": "string"}, "name": {"type": "string"}, "based_on": {"format": "uuid"}, "kind": {"enum": ["paragraph", "character"], "default": "paragraph"}, "next_style": {"format": "uuid"}, "properties": {"type": "object"}, "builtin": {"type": "boolean"}}}}, "compile_presets": {"type": "array"}}},
     "document-front-matter": {"type": "object", "required": ["document_id", "title"], "properties": {"document_id": {"format": "uuid"}, "title": {"type": "string"}, "summary": {"type": "string"}, "status": {"type": "string"}, "labels": {"type": "array"}, "tags": {"type": "array"}, "flags": {"type": "object"}}}
   }
 }

@@ -180,12 +180,38 @@ pub struct StyleDefinition {
     /// Optional parent style.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub based_on: Option<StyleId>,
+    /// Whether the style applies to whole paragraphs or character runs.
+    #[serde(default)]
+    pub kind: StyleKind,
+    /// Style automatically selected for the paragraph created after this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_style: Option<StyleId>,
     /// Deterministic appearance/settings map.
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
     /// Built-ins cannot be deleted.
     #[serde(default)]
     pub builtin: bool,
+}
+
+/// Semantic scope of a named style.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StyleKind {
+    /// Applies to a whole paragraph/block.
+    #[default]
+    Paragraph,
+    /// Applies to an inline character run.
+    Character,
+}
+
+/// Fully inherited, Qt-independent style consumed by exporters and editor projections.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComputedStyle {
+    pub id: StyleId,
+    pub kind: StyleKind,
+    pub properties: BTreeMap<String, String>,
+    pub next_style: Option<StyleId>,
 }
 
 /// Future-facing compile-preset placeholder with a stable identity.
@@ -288,6 +314,13 @@ impl Project {
     pub const fn research_root(&self) -> NodeId {
         self.roots[1]
     }
+    /// Adds built-in styles introduced by this format version without replacing
+    /// overrides of an existing built-in stable identity.
+    pub fn ensure_required_builtin_styles(&mut self) {
+        for (id, style) in builtin_styles() {
+            self.styles.entry(id).or_insert(style);
+        }
+    }
     /// Returns the localizable built-in root machine key.
     pub fn builtin_root_key(&self, id: NodeId) -> Option<&'static str> {
         (id == self.manuscript_root())
@@ -313,6 +346,38 @@ impl Project {
         candidate.validate()?;
         *self = candidate;
         Ok(outcome)
+    }
+
+    /// Resolves inherited properties without Qt or mutable display names.
+    pub fn computed_style(&self, id: StyleId) -> Result<ComputedStyle, ProjectError> {
+        let leaf = self.styles.get(&id).ok_or(ProjectError::MissingStyle(id))?;
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        let mut seen = BTreeSet::new();
+        while let Some(style_id) = current {
+            if !seen.insert(style_id) {
+                return Err(ProjectError::StyleCycle);
+            }
+            let style = self
+                .styles
+                .get(&style_id)
+                .ok_or(ProjectError::MissingStyle(style_id))?;
+            if style.kind != leaf.kind {
+                return Err(ProjectError::StyleKindMismatch);
+            }
+            chain.push(style);
+            current = style.based_on;
+        }
+        let mut properties = BTreeMap::new();
+        for style in chain.into_iter().rev() {
+            properties.extend(style.properties.clone());
+        }
+        Ok(ComputedStyle {
+            id,
+            kind: leaf.kind,
+            properties,
+            next_style: leaf.next_style,
+        })
     }
     #[allow(clippy::too_many_lines)]
     fn apply(&mut self, command: ProjectCommand) -> Result<CommandOutcome, ProjectError> {
@@ -529,6 +594,7 @@ impl Project {
             ProjectCommand::MutateStyle { mutation } => self.mutate_style(mutation),
         }
     }
+    #[allow(clippy::too_many_lines)]
     fn mutate_style(&mut self, mutation: StyleMutation) -> Result<CommandOutcome, ProjectError> {
         match mutation {
             StyleMutation::Create(style) => {
@@ -569,12 +635,88 @@ impl Project {
                 if old.builtin {
                     return Err(ProjectError::BuiltinStyle(id));
                 }
+                if self.styles.values().any(|style| {
+                    style.id != id && (style.based_on == Some(id) || style.next_style == Some(id))
+                }) {
+                    return Err(ProjectError::StyleInUse(id));
+                }
                 self.styles.remove(&id);
                 Ok(CommandOutcome {
                     events: vec![ProjectEvent::StyleMutated(id)],
                     undo: StructuralUndo {
                         inverse: ProjectCommand::MutateStyle {
                             mutation: StyleMutation::Create(old),
+                        },
+                    },
+                })
+            }
+            StyleMutation::DeleteAndReplace { id, replacement } => {
+                let old = self
+                    .styles
+                    .get(&id)
+                    .cloned()
+                    .ok_or(ProjectError::MissingStyle(id))?;
+                if old.builtin {
+                    return Err(ProjectError::BuiltinStyle(id));
+                }
+                let replacement_style = self
+                    .styles
+                    .get(&replacement)
+                    .ok_or(ProjectError::MissingStyle(replacement))?;
+                if old.kind != replacement_style.kind || id == replacement {
+                    return Err(ProjectError::StyleKindMismatch);
+                }
+                let affected = self
+                    .styles
+                    .values()
+                    .filter(|style| {
+                        style.id != id
+                            && (style.based_on == Some(id) || style.next_style == Some(id))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for style in self.styles.values_mut() {
+                    if style.based_on == Some(id) {
+                        style.based_on = Some(replacement);
+                    }
+                    if style.next_style == Some(id) {
+                        style.next_style = Some(replacement);
+                    }
+                }
+                self.styles.remove(&id);
+                Ok(CommandOutcome {
+                    events: vec![ProjectEvent::StyleReplaced { id, replacement }],
+                    undo: StructuralUndo {
+                        inverse: ProjectCommand::MutateStyle {
+                            mutation: StyleMutation::RestoreDeleted {
+                                style: old,
+                                affected,
+                                replacement,
+                            },
+                        },
+                    },
+                })
+            }
+            StyleMutation::RestoreDeleted {
+                style,
+                affected,
+                replacement,
+            } => {
+                let id = style.id;
+                if self.styles.contains_key(&id) {
+                    return Err(ProjectError::DuplicateStyle(id));
+                }
+                self.styles.insert(id, style);
+                for prior in affected {
+                    if self.styles.contains_key(&prior.id) {
+                        self.styles.insert(prior.id, prior);
+                    }
+                }
+                Ok(CommandOutcome {
+                    events: vec![ProjectEvent::StyleMutated(id)],
+                    undo: StructuralUndo {
+                        inverse: ProjectCommand::MutateStyle {
+                            mutation: StyleMutation::DeleteAndReplace { id, replacement },
                         },
                     },
                 })
@@ -796,20 +938,41 @@ impl Project {
     }
     fn validate_styles(&self) -> Result<(), ProjectError> {
         for style in self.styles.values() {
+            if style.name.trim().is_empty() || style.name.chars().count() > 128 {
+                return Err(ProjectError::InvalidStyle(
+                    "style name must contain 1–128 characters",
+                ));
+            }
+            validate_style_properties(&style.properties)?;
             let mut seen = BTreeSet::new();
             let mut current = Some(style.id);
             while let Some(id) = current {
                 if !seen.insert(id) {
                     return Err(ProjectError::StyleCycle);
                 }
-                current = self
+                let parent = self.styles.get(&id).ok_or(ProjectError::MissingStyle(id))?;
+                if parent.kind != style.kind {
+                    return Err(ProjectError::StyleKindMismatch);
+                }
+                current = parent.based_on;
+            }
+            if let Some(next) = style.next_style {
+                let next = self
                     .styles
-                    .get(&id)
-                    .ok_or(ProjectError::MissingStyle(id))?
-                    .based_on;
+                    .get(&next)
+                    .ok_or(ProjectError::MissingStyle(next))?;
+                if style.kind != StyleKind::Paragraph || next.kind != StyleKind::Paragraph {
+                    return Err(ProjectError::StyleKindMismatch);
+                }
             }
         }
-        if self.styles.values().filter(|style| style.builtin).count() < 2 {
+        let required = ["body", "heading", "emphasis"];
+        if required.iter().any(|key| {
+            !self
+                .styles
+                .values()
+                .any(|style| style.builtin && style.machine_key.as_deref() == Some(*key))
+        }) {
             return Err(ProjectError::InvalidInvariant("built-in styles missing"));
         }
         Ok(())
@@ -822,15 +985,23 @@ fn builtin_styles() -> BTreeMap<StyleId, StyleDefinition> {
             StyleId(Uuid::from_u128(0x018f_0be2_a8ea_7d2d_89ea_45aa_6637_08d4)),
             "body",
             "Body",
+            StyleKind::Paragraph,
         ),
         (
             StyleId(Uuid::from_u128(0x018f_0be2_a8ea_7d2d_89ea_45aa_6637_08d5)),
             "heading",
             "Heading",
+            StyleKind::Paragraph,
+        ),
+        (
+            StyleId(Uuid::from_u128(0x018f_0be2_a8ea_7d2d_89ea_45aa_6637_08d6)),
+            "emphasis",
+            "Emphasis",
+            StyleKind::Character,
         ),
     ]
     .into_iter()
-    .map(|(id, key, name)| {
+    .map(|(id, key, name, kind)| {
         (
             id,
             StyleDefinition {
@@ -838,12 +1009,47 @@ fn builtin_styles() -> BTreeMap<StyleId, StyleDefinition> {
                 machine_key: Some(key.into()),
                 name: name.into(),
                 based_on: None,
+                kind,
+                next_style: None,
                 properties: BTreeMap::new(),
                 builtin: true,
             },
         )
     })
     .collect()
+}
+
+fn validate_style_properties(properties: &BTreeMap<String, String>) -> Result<(), ProjectError> {
+    const KEYS: &[&str] = &[
+        "alignment",
+        "background",
+        "first-line-indent",
+        "font-family",
+        "font-size",
+        "font-style",
+        "font-weight",
+        "foreground",
+        "keep-with-next",
+        "left-indent",
+        "line-height",
+        "page-break-before",
+        "right-indent",
+        "space-after",
+        "space-before",
+        "text-decoration",
+    ];
+    for (key, value) in properties {
+        if (!KEYS.contains(&key.as_str()) && !key.starts_with("x-"))
+            || key.len() > 64
+            || value.len() > 512
+            || value.chars().any(char::is_control)
+        {
+            return Err(ProjectError::InvalidStyle(
+                "property key or value is outside the supported bounded vocabulary",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A validated mutation accepted by the Rust command layer.
@@ -901,6 +1107,17 @@ pub enum StyleMutation {
     Create(StyleDefinition),
     Update(StyleDefinition),
     Delete(StyleId),
+    /// Deletes a user style and rewires definition references to a same-kind replacement.
+    DeleteAndReplace {
+        id: StyleId,
+        replacement: StyleId,
+    },
+    /// Internal lossless inverse for [`StyleMutation::DeleteAndReplace`].
+    RestoreDeleted {
+        style: StyleDefinition,
+        affected: Vec<StyleDefinition>,
+        replacement: StyleId,
+    },
 }
 /// An undo record deliberately independent of Qt's text undo stack.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -928,6 +1145,7 @@ pub enum ProjectEvent {
     NodeRestored(NodeId),
     MetadataEdited(DocumentId),
     StyleMutated(StyleId),
+    StyleReplaced { id: StyleId, replacement: StyleId },
 }
 
 /// Domain invariant or command failure.
@@ -969,6 +1187,15 @@ pub enum ProjectError {
     /// Style inheritance has a cycle.
     #[error("style inheritance contains a cycle")]
     StyleCycle,
+    /// A character style cannot inherit from or replace a paragraph style, and vice versa.
+    #[error("style kinds are incompatible")]
+    StyleKindMismatch,
+    /// Style is referenced and requires an explicit replacement.
+    #[error("style is still referenced and requires a replacement: {0}")]
+    StyleInUse(StyleId),
+    /// Style definition contains an invalid value.
+    #[error("invalid style: {0}")]
+    InvalidStyle(&'static str),
     /// A built-in style cannot be deleted.
     #[error("built-in style cannot be deleted: {0}")]
     BuiltinStyle(StyleId),
@@ -1160,6 +1387,8 @@ mod tests {
             machine_key: None,
             name: "A".into(),
             based_on: None,
+            kind: StyleKind::Paragraph,
+            next_style: None,
             properties: BTreeMap::new(),
             builtin: false,
         };
@@ -1168,6 +1397,8 @@ mod tests {
             machine_key: None,
             name: "B".into(),
             based_on: Some(a.id),
+            kind: StyleKind::Paragraph,
+            next_style: None,
             properties: BTreeMap::new(),
             builtin: false,
         };
@@ -1190,6 +1421,76 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+    #[test]
+    fn randomized_style_rename_inheritance_and_replacement_remain_resolvable() {
+        let mut project = Project::new("Styles");
+        let body = project
+            .styles
+            .values()
+            .find(|style| style.machine_key.as_deref() == Some("body"))
+            .unwrap()
+            .id;
+        let mut ids = Vec::new();
+        for index in 0..24 {
+            let id = StyleId::new();
+            project
+                .execute(ProjectCommand::MutateStyle {
+                    mutation: StyleMutation::Create(StyleDefinition {
+                        id,
+                        machine_key: None,
+                        name: format!("User {index}"),
+                        based_on: ids.last().copied().or(Some(body)),
+                        kind: StyleKind::Paragraph,
+                        next_style: Some(body),
+                        properties: BTreeMap::from([(
+                            "space-after".into(),
+                            format!("{}pt", index % 9),
+                        )]),
+                        builtin: false,
+                    }),
+                })
+                .unwrap();
+            ids.push(id);
+        }
+        let mut state = 0x5eed_u64;
+        for step in 0..500 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let index = usize::try_from(state % ids.len() as u64).unwrap();
+            let mut style = project.styles[&ids[index]].clone();
+            style.name = format!("Renamed {step}-{index}");
+            style.based_on = if index == 0 {
+                Some(body)
+            } else {
+                Some(ids[usize::try_from(state % index as u64).unwrap()])
+            };
+            style.properties.insert(
+                "line-height".into(),
+                format!("{}.{}", 1 + step % 2, step % 10),
+            );
+            project
+                .execute(ProjectCommand::MutateStyle {
+                    mutation: StyleMutation::Update(style),
+                })
+                .unwrap();
+            project.computed_style(ids[index]).unwrap();
+        }
+        let deleted = ids[12];
+        let replacement = ids[3];
+        let outcome = project
+            .execute(ProjectCommand::MutateStyle {
+                mutation: StyleMutation::DeleteAndReplace {
+                    id: deleted,
+                    replacement,
+                },
+            })
+            .unwrap();
+        assert!(!project.styles.contains_key(&deleted));
+        project.execute(outcome.undo.inverse).unwrap();
+        assert!(project.styles.contains_key(&deleted));
+        project.validate().unwrap();
     }
     #[test]
     fn generated_structural_sequences_remain_valid() {

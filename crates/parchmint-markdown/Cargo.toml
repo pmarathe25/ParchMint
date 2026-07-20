@@ -9,7 +9,7 @@ license.workspace = true
 indexmap.workspace = true
 pulldown-cmark.workspace = true
 serde.workspace = true
-serde_yaml.workspace = true
+noyalib.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

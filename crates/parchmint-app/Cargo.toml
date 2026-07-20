@@ -7,8 +7,15 @@ license.workspace = true
 
 [dependencies]
 parchmint-domain = { path = "../parchmint-domain" }
+parchmint-markdown = { path = "../parchmint-markdown" }
+parchmint-storage = { path = "../parchmint-storage" }
+serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

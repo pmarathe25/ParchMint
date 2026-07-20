@@ -5,6 +5,7 @@
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QScopedPointer>
+#include <QSignalSpy>
 #include <QTest>
 #include <QTextBoundaryFinder>
 #include <QTextDocumentFragment>
@@ -17,6 +18,113 @@ class EditorAdapterTest final : public QObject
   Q_OBJECT
 
 private slots:
+  void semanticLoadAndSnapshotKeepExplicitObjectsAndStyles()
+  {
+    QTextDocument document;
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    QVariantMap heading;
+    heading.insert(QStringLiteral("type"), QStringLiteral("heading"));
+    heading.insert(QStringLiteral("level"), 2);
+    heading.insert(QStringLiteral("text"), QStringLiteral("Chapter"));
+    heading.insert(QStringLiteral("styleId"), QStringLiteral("stable-paragraph-style"));
+    QVariantMap pageBreak;
+    pageBreak.insert(QStringLiteral("type"), QStringLiteral("page_break"));
+    QVariantMap opaque;
+    opaque.insert(QStringLiteral("type"), QStringLiteral("opaque"));
+    opaque.insert(QStringLiteral("source"), QStringLiteral("@future[exact]"));
+    opaque.insert(QStringLiteral("reason"), QStringLiteral("Unsupported extension"));
+
+    adapter.loadSemanticBlocks({ heading, pageBreak, opaque });
+    QCOMPARE(adapter.revision(), 0);
+    const auto snapshot = adapter.semanticBlocks();
+    QCOMPARE(snapshot.size(), 3);
+    QCOMPARE(snapshot[0].toMap().value(QStringLiteral("level")).toInt(), 2);
+    QCOMPARE(snapshot[0].toMap().value(QStringLiteral("styleId")).toString(),
+             QStringLiteral("stable-paragraph-style"));
+    QCOMPARE(snapshot[1].toMap().value(QStringLiteral("type")).toString(),
+             QStringLiteral("page_break"));
+    QCOMPARE(snapshot[2].toMap().value(QStringLiteral("source")).toString(),
+             QStringLiteral("@future[exact]"));
+    QVERIFY(!document.isUndoAvailable());
+  }
+
+  void incrementalDirtyIsRevisionedAndFocusLossRequestsFlush()
+  {
+    QTextDocument document;
+    document.setPlainText(QStringLiteral("one\ntwo"));
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    QSignalSpy dirty(&adapter, &EditorAdapter::incrementalDirty);
+    QSignalSpy flush(&adapter, &EditorAdapter::focusLostFlushRequested);
+    adapter.setFocused(true);
+    adapter.setCursorPosition(3);
+    adapter.insertSceneBreak();
+    QVERIFY(adapter.revision() > 0);
+    QVERIFY(!dirty.isEmpty());
+    const auto arguments = dirty.last();
+    QCOMPARE(arguments[0].toULongLong(), adapter.revision());
+    QVERIFY(arguments[5].toInt() > arguments[4].toInt());
+    adapter.setFocused(false);
+    QCOMPARE(flush.size(), 1);
+    QCOMPARE(flush[0][0].toULongLong(), adapter.revision());
+  }
+
+  void mixedFormattingAndDirectFormattingAreDistinctFromStyle()
+  {
+    QTextDocument document;
+    QTextCursor writer(&document);
+    QTextCharFormat bold;
+    bold.setFontWeight(QFont::Bold);
+    writer.insertText(QStringLiteral("bold"), bold);
+    QTextCharFormat plain;
+    plain.setFontWeight(QFont::Normal);
+    writer.insertText(QStringLiteral("plain"), plain);
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.setSelectionStart(0);
+    adapter.setSelectionEnd(9);
+    QCOMPARE(adapter.boldState(), -1);
+    adapter.setCharacterStyle(QStringLiteral("stable-character-style"));
+    adapter.clearDirectFormatting();
+    QTextCursor probe(&document);
+    probe.setPosition(0);
+    probe.setPosition(9, QTextCursor::KeepAnchor);
+    QCOMPARE(probe.charFormat().property(QTextFormat::UserProperty + 10).toString(),
+             QStringLiteral("stable-character-style"));
+    QVERIFY(probe.charFormat().fontWeight() < QFont::Bold);
+  }
+
+  void computedStylePreviewAndNextStyleRemainSemantic()
+  {
+    QTextDocument document;
+    document.setPlainText(QStringLiteral("Heading"));
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.setCursorPosition(7);
+    adapter.setSelectionStart(7);
+    adapter.setSelectionEnd(7);
+    adapter.defineStyle(QStringLiteral("body"),
+                        { { QStringLiteral("font-size"), 12.0 } },
+                        true,
+                        QStringLiteral("body"));
+    adapter.defineStyle(QStringLiteral("heading"),
+                        { { QStringLiteral("font-weight"), static_cast<int>(QFont::Bold) },
+                          { QStringLiteral("alignment"), QStringLiteral("center") } },
+                        true,
+                        QStringLiteral("body"));
+    adapter.setParagraphStyle(QStringLiteral("heading"));
+    QCOMPARE(document.begin().blockFormat().property(QTextFormat::UserProperty + 10).toString(),
+             QStringLiteral("heading"));
+    QCOMPARE(document.begin().blockFormat().alignment(), Qt::AlignHCenter);
+    adapter.insertParagraphBreak();
+    QCOMPARE(document.lastBlock()
+               .blockFormat()
+               .property(QTextFormat::UserProperty + 10)
+               .toString(),
+             QStringLiteral("body"));
+  }
+
   void documentsKeepIndependentUndoState()
   {
     QTextDocument firstDocument;

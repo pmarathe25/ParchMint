@@ -11,7 +11,7 @@ thiserror.workspace = true
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-markdown = { path = "../parchmint-markdown" }
 serde.workspace = true
-serde_yaml.workspace = true
+noyalib.workspace = true
 toml.workspace = true
 uuid.workspace = true
 

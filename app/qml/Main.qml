@@ -66,38 +66,19 @@ ApplicationWindow {
         }
     }
 
-    header: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: DesignTokens.space3
-            anchors.rightMargin: DesignTokens.space3
-            ToolButton {
-                text: qsTr("Bold")
-                checkable: true
-                checked: primaryAdapter.bold
-                Accessible.name: qsTr("Toggle bold")
-                onClicked: primaryAdapter.toggleBold()
-            }
-            ToolButton {
-                text: qsTr("Italic")
-                checkable: true
-                checked: primaryAdapter.italic
-                Accessible.name: qsTr("Toggle italic")
-                onClicked: primaryAdapter.toggleItalic()
-            }
-            ToolSeparator {}
-            ToolButton {
-                text: qsTr("Scene break")
-                onClicked: primaryAdapter.insertSceneBreak()
-            }
-            ToolButton {
-                text: qsTr("Page break")
-                onClicked: primaryAdapter.insertPageBreak()
-            }
-            Item { Layout.fillWidth: true }
-            Label { text: backend.status }
-        }
+    header: FormattingBar {
+        adapter: primaryAdapter
+        styleModel: [
+            { "id": "018f0be2-a8ea-7d2d-89ea-45aa663708d4", "name": qsTr("Body"), "previewSize": 14 },
+            { "id": "018f0be2-a8ea-7d2d-89ea-45aa663708d5", "name": qsTr("Heading"), "previewSize": 18 }
+        ]
+        onSourceModeRequested: window.transientMessage = qsTr("Raw source mode is available in the isolated document harness")
     }
+
+    Shortcut { sequence: StandardKey.Bold; onActivated: primaryAdapter.toggleBold() }
+    Shortcut { sequence: StandardKey.Italic; onActivated: primaryAdapter.toggleItalic() }
+    Shortcut { sequence: StandardKey.Undo; enabled: primaryAdapter.canUndo; onActivated: primaryAdapter.undo() }
+    Shortcut { sequence: StandardKey.Redo; enabled: primaryAdapter.canRedo; onActivated: primaryAdapter.redo() }
 
     RowLayout {
         anchors.fill: parent
@@ -181,11 +162,25 @@ ApplicationWindow {
                         onCursorPositionChanged: primaryAdapter.cursorPosition = cursorPosition
                         onSelectionStartChanged: primaryAdapter.selectionStart = selectionStart
                         onSelectionEndChanged: primaryAdapter.selectionEnd = selectionEnd
+                        onActiveFocusChanged: primaryAdapter.focused = activeFocus
+                        Keys.onPressed: function(event) {
+                            if (event.key === Qt.Key_Backspace && event.modifiers === Qt.NoModifier) {
+                                primaryAdapter.deletePreviousSemanticUnit()
+                                event.accepted = true
+                            } else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                                       && event.modifiers === Qt.NoModifier) {
+                                primaryAdapter.insertParagraphBreak()
+                                event.accepted = true
+                            }
+                        }
                         Accessible.name: qsTr("Manuscript editor")
                     }
                     EditorAdapter {
                         id: primaryAdapter
                         textDocument: primaryEditor.textDocument
+                        onIncrementalDirty: function(revision, position, removed, added, firstBlock, lastBlockExclusive) {
+                            backend.noteEditorDelta(revision, firstBlock, lastBlockExclusive)
+                        }
                         onAdapterError: function(message) {
                             window.transientMessage = message
                             errorPopup.open()
@@ -216,6 +211,7 @@ ApplicationWindow {
                         onCursorPositionChanged: researchAdapter.cursorPosition = cursorPosition
                         onSelectionStartChanged: researchAdapter.selectionStart = selectionStart
                         onSelectionEndChanged: researchAdapter.selectionEnd = selectionEnd
+                        onActiveFocusChanged: researchAdapter.focused = activeFocus
                         Accessible.name: qsTr("Research editor")
                     }
                     EditorAdapter {
@@ -237,7 +233,7 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 elide: Text.ElideRight
             }
-            Label { text: qsTr("Revision %1").arg(backend.revision) }
+            Label { text: qsTr("Document revision %1 · %2").arg(backend.document_revision).arg(backend.save_status) }
         }
     }
 }
