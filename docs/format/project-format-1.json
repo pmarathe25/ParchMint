@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ParchMint Project Format 1",
+  "type": "object",
+  "required": ["parchmint.toml", "outline.toml", "styles.toml"],
+  "properties": {
+    "parchmint.toml": {"type": "object", "required": ["format_version", "project_id", "name"], "properties": {"format_version": {"const": 1}, "project_id": {"format": "uuid"}, "name": {"type": "string"}}},
+    "outline.toml": {"type": "object", "required": ["format_version", "roots", "nodes"], "properties": {"format_version": {"const": 1}, "roots": {"type": "array", "minItems": 2, "maxItems": 2}, "nodes": {"type": "array"}, "trash": {"type": "array"}}},
+    "styles.toml": {"type": "object", "required": ["format_version", "styles"], "properties": {"format_version": {"const": 1}, "styles": {"type": "array"}, "compile_presets": {"type": "array"}}},
+    "document-front-matter": {"type": "object", "required": ["document_id", "title"], "properties": {"document_id": {"format": "uuid"}, "title": {"type": "string"}, "summary": {"type": "string"}, "status": {"type": "string"}, "labels": {"type": "array"}, "tags": {"type": "array"}, "flags": {"type": "object"}}}
+  }
+}

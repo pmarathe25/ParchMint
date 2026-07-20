@@ -33,10 +33,12 @@ pulldown-cmark = { version = "0.13.1", default-features = false }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
+toml = "0.8.23"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

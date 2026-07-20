@@ -1,0 +1,13 @@
+format_version = 1
+
+[[styles]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d4"
+machine_key = "body"
+name = "Body"
+builtin = true
+
+[[styles]]
+id = "018f0be2-a8ea-7d2d-89ea-45aa663708d5"
+machine_key = "heading"
+name = "Heading"
+builtin = true
