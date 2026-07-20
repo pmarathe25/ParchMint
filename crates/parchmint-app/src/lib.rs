@@ -1,10 +1,14 @@
 //! Application-service infrastructure: lazy snapshots and stale-safe workers.
 
+mod commands;
+mod diagnostics;
 mod document;
 mod export;
 mod search;
 mod workspace;
 
+pub use commands::*;
+pub use diagnostics::*;
 pub use document::*;
 pub use export::*;
 pub use search::*;

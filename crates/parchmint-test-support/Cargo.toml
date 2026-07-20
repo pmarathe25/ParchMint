@@ -7,7 +7,10 @@ license.workspace = true
 description = "Deterministic fixture and stress-corpus helpers for ParchMint tests"
 
 [dependencies]
+parchmint-compile = { path = "../parchmint-compile" }
+parchmint-markdown = { path = "../parchmint-markdown" }
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 

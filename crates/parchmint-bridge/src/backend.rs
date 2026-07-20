@@ -9,13 +9,15 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use parchmint_app::{
-    CancellationToken, CompileExportJob, CompileExportWorker, DropPlacement, ExportFormat,
-    ExportOptions, OutlineSort, PaneView, ProjectWorkspace, SearchQuery, SearchResult,
-    SplitOrientation, text_statistics,
+    CancellationToken, CommandSpec, CompileExportJob, CompileExportWorker, DiagnosticsSnapshot,
+    DropPlacement, ExportFormat, ExportOptions, OutlineSort, PaneView, ProjectReplacePreview,
+    ProjectWorkspace, SearchQuery, SearchResult, SplitOrientation, export_diagnostics,
+    matching_commands, text_statistics,
 };
 use parchmint_domain::{
     CompilePreset, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
 };
+use std::path::Path;
 
 /// Rust state hidden behind the generated QObject.
 pub struct ParchMintBackendRust {
@@ -45,7 +47,12 @@ pub struct ParchMintBackendRust {
     search_status: QString,
     export_status: QString,
     export_in_progress: bool,
+    command_count: i32,
+    replace_count: i32,
     search_results: Vec<SearchResult>,
+    command_results: Vec<CommandSpec>,
+    command_query: String,
+    replace_preview: Option<ProjectReplacePreview>,
     filter: String,
     sort: OutlineSort,
     project_generation: u64,
@@ -56,6 +63,7 @@ pub struct ParchMintBackendRust {
 
 impl Default for ParchMintBackendRust {
     fn default() -> Self {
+        let command_results = matching_commands("", false, false);
         Self {
             status: QString::from("Create or open a project"),
             node_count: 0,
@@ -83,7 +91,12 @@ impl Default for ParchMintBackendRust {
             search_status: QString::from("Index ready when you search"),
             export_status: QString::from("No export in progress"),
             export_in_progress: false,
+            command_count: i32::try_from(command_results.len()).unwrap_or(i32::MAX),
+            replace_count: 0,
             search_results: Vec::new(),
+            command_results,
+            command_query: String::new(),
+            replace_preview: None,
             filter: String::new(),
             sort: OutlineSort::Binder,
             project_generation: 1,
@@ -130,7 +143,55 @@ pub mod qobject {
         #[qproperty(QString, search_status)]
         #[qproperty(QString, export_status)]
         #[qproperty(bool, export_in_progress)]
+        #[qproperty(i32, command_count, READ, NOTIFY)]
+        #[qproperty(i32, replace_count, READ, NOTIFY)]
         type ParchMintBackend = super::ParchMintBackendRust;
+
+        #[qinvokable]
+        #[cxx_name = "filterCommands"]
+        fn filter_commands(self: Pin<&mut ParchMintBackend>, query: &QString);
+        #[qinvokable]
+        #[cxx_name = "commandId"]
+        fn command_id(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "commandLabel"]
+        fn command_label(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "commandShortcut"]
+        fn command_shortcut(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "requestCommand"]
+        fn request_command(self: Pin<&mut ParchMintBackend>, id: &QString) -> bool;
+        #[qinvokable]
+        #[cxx_name = "previewProjectReplace"]
+        fn preview_project_replace(
+            self: Pin<&mut ParchMintBackend>,
+            query: &QString,
+            replacement: &QString,
+            case_sensitive: bool,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "replaceTitle"]
+        fn replace_title(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "replaceContext"]
+        fn replace_context(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "replaceSelected"]
+        fn replace_selected(self: &ParchMintBackend, row: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "setReplaceSelected"]
+        fn set_replace_selected(self: Pin<&mut ParchMintBackend>, row: i32, selected: bool)
+        -> bool;
+        #[qinvokable]
+        #[cxx_name = "applyProjectReplace"]
+        fn apply_project_replace(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "undoProjectReplace"]
+        fn undo_project_replace(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "exportDiagnostics"]
+        fn export_diagnostics(self: Pin<&mut ParchMintBackend>, destination: &QString) -> bool;
 
         #[qinvokable]
         #[cxx_name = "nodeTitle"]
@@ -199,6 +260,9 @@ pub mod qobject {
         #[cxx_name = "createProject"]
         fn create_project(self: Pin<&mut ParchMintBackend>, path: &QString, name: &QString)
         -> bool;
+        #[qinvokable]
+        #[cxx_name = "createSampleProject"]
+        fn create_sample_project(self: Pin<&mut ParchMintBackend>, path: &QString) -> bool;
         #[qinvokable]
         #[cxx_name = "openProject"]
         fn open_project(self: Pin<&mut ParchMintBackend>, path: &QString) -> bool;
@@ -347,10 +411,183 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "operationFailed"]
         fn operation_failed(self: Pin<&mut ParchMintBackend>, message: QString);
+        #[qsignal]
+        #[cxx_name = "commandRequested"]
+        fn command_requested(self: Pin<&mut ParchMintBackend>, id: QString);
     }
 }
 
 impl ParchMintBackend {
+    pub fn filter_commands(mut self: Pin<&mut Self>, query: &QString) {
+        self.as_mut().rust_mut().command_query = query.to_string();
+        self.as_mut().refresh_commands();
+    }
+
+    fn command_row(&self, row: i32) -> Option<CommandSpec> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|index| self.rust().command_results.get(index).copied())
+    }
+
+    pub fn command_id(&self, row: i32) -> QString {
+        self.command_row(row)
+            .map_or_else(QString::default, |item| QString::from(item.id))
+    }
+
+    pub fn command_label(&self, row: i32) -> QString {
+        self.command_row(row)
+            .map_or_else(QString::default, |item| QString::from(item.label))
+    }
+
+    pub fn command_shortcut(&self, row: i32) -> QString {
+        self.command_row(row)
+            .map_or_else(QString::default, |item| QString::from(item.shortcut))
+    }
+
+    pub fn request_command(mut self: Pin<&mut Self>, id: &QString) -> bool {
+        let id = id.to_string();
+        let valid = matching_commands("", *self.project_open(), !self.selected_id().is_empty())
+            .iter()
+            .any(|item| item.id == id);
+        if !valid {
+            return self
+                .as_mut()
+                .fail("That command is unavailable in the current context");
+        }
+        self.as_mut().command_requested(QString::from(id));
+        true
+    }
+
+    pub fn preview_project_replace(
+        mut self: Pin<&mut Self>,
+        query: &QString,
+        replacement: &QString,
+        case_sensitive: bool,
+    ) -> bool {
+        let result = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .preview_project_replace(
+                        &query.to_string(),
+                        &replacement.to_string(),
+                        case_sensitive,
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(preview) => {
+                let count = i32::try_from(preview.matches().len()).unwrap_or(i32::MAX);
+                self.as_mut().rust_mut().replace_preview = Some(preview);
+                self.as_mut().rust_mut().replace_count = count;
+                self.as_mut().replace_count_changed();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
+    fn replace_row(&self, row: i32) -> Option<&parchmint_app::ProjectReplaceMatch> {
+        usize::try_from(row)
+            .ok()
+            .and_then(|index| self.rust().replace_preview.as_ref()?.matches().get(index))
+    }
+
+    pub fn replace_title(&self, row: i32) -> QString {
+        self.replace_row(row)
+            .map_or_else(QString::default, |item| QString::from(&item.title))
+    }
+
+    pub fn replace_context(&self, row: i32) -> QString {
+        self.replace_row(row)
+            .map_or_else(QString::default, |item| QString::from(&item.context))
+    }
+
+    pub fn replace_selected(&self, row: i32) -> bool {
+        self.replace_row(row).is_some_and(|item| item.selected)
+    }
+
+    pub fn set_replace_selected(mut self: Pin<&mut Self>, row: i32, selected: bool) -> bool {
+        let Some(index) = usize::try_from(row).ok() else {
+            return false;
+        };
+        self.as_mut()
+            .rust_mut()
+            .replace_preview
+            .as_mut()
+            .is_some_and(|preview| preview.set_selected(index, selected))
+    }
+
+    pub fn apply_project_replace(mut self: Pin<&mut Self>) -> bool {
+        let Some(preview) = self.as_mut().rust_mut().replace_preview.take() else {
+            return self
+                .as_mut()
+                .fail("Preview project changes before applying them");
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .apply_project_replace(&preview)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(count) => {
+                self.as_mut().rust_mut().replace_count = 0;
+                self.as_mut().replace_count_changed();
+                self.as_mut()
+                    .refresh_projection(&format!("Replace {count} project matches"));
+                true
+            }
+            Err(error) => {
+                self.as_mut().rust_mut().replace_preview = Some(preview);
+                self.as_mut().fail(error)
+            }
+        }
+    }
+
+    pub fn undo_project_replace(mut self: Pin<&mut Self>) -> bool {
+        self.as_mut()
+            .perform("Undo project replacement", |workspace| {
+                workspace
+                    .undo_project_replace()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })
+    }
+
+    pub fn export_diagnostics(mut self: Pin<&mut Self>, destination: &QString) -> bool {
+        let snapshot = self.as_ref().rust().workspace.as_ref().map_or(
+            DiagnosticsSnapshot {
+                project_open: false,
+                node_count: 0,
+                workspace_warning: None,
+                index_warning: None,
+            },
+            |workspace| DiagnosticsSnapshot {
+                project_open: true,
+                node_count: workspace.project().nodes.len(),
+                workspace_warning: workspace.workspace_diagnostic().map(str::to_owned),
+                index_warning: workspace.index_diagnostic().map(str::to_owned),
+            },
+        );
+        match export_diagnostics(Path::new(&destination.to_string()), &snapshot) {
+            Ok(()) => {
+                self.as_mut().bump("Export diagnostics");
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
     fn row(&self, row: i32) -> Option<&parchmint_app::BinderRow> {
         usize::try_from(row)
             .ok()
@@ -640,6 +877,36 @@ impl ParchMintBackend {
             Err(error) => self.as_mut().fail(error),
         }
     }
+    pub fn create_sample_project(mut self: Pin<&mut Self>, path: &QString) -> bool {
+        let result = ProjectWorkspace::create(path.to_string(), "ParchMint Tour").and_then(
+            |mut workspace| {
+                let manuscript = workspace.project().manuscript_root();
+                let research = workspace.project().research_root();
+                let chapter = workspace.create_node(manuscript, "Chapter One", true)?;
+                let scene = workspace.create_node(chapter, "A Place to Begin", false)?;
+                workspace.save_document_body(
+                    scene,
+                    "Welcome to **ParchMint**. Use the binder to plan, then write here.\n\n<!-- parchmint:page-break -->\n".into(),
+                )?;
+                let note = workspace.create_research_node(research, "Tour Notes", false)?;
+                workspace.save_document_body(
+                    note,
+                    "Keep research visible in the second pane while you write.\n".into(),
+                )?;
+                workspace.open_in_pane(0, Some(scene), PaneView::Editor)?;
+                workspace.open_in_pane(1, Some(note), PaneView::Editor)?;
+                workspace.set_split(true, SplitOrientation::Horizontal, 600)?;
+                Ok(workspace)
+            },
+        );
+        match result {
+            Ok(workspace) => {
+                self.as_mut().install_workspace(workspace);
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
     pub fn open_project(mut self: Pin<&mut Self>, path: &QString) -> bool {
         match ProjectWorkspace::open(path.to_string()) {
             Ok(workspace) => {
@@ -668,6 +935,10 @@ impl ParchMintBackend {
         self.as_mut().set_split_enabled(false);
         self.as_mut().set_save_status(QString::from("No project"));
         self.as_mut().set_status(QString::from("Project closed"));
+        self.as_mut().rust_mut().replace_preview = None;
+        self.as_mut().rust_mut().replace_count = 0;
+        self.as_mut().replace_count_changed();
+        self.as_mut().refresh_commands();
         self.as_mut().bump("Close project");
     }
     pub fn select_node(mut self: Pin<&mut Self>, id: &QString, additive: bool) {
@@ -1085,7 +1356,18 @@ impl ParchMintBackend {
         self.as_mut().selected_count_changed();
         self.as_mut().sync_selected();
         self.as_mut().sync_panes();
+        self.as_mut().refresh_commands();
         self.as_mut().bump(command);
+    }
+    fn refresh_commands(mut self: Pin<&mut Self>) {
+        let project_open = *self.project_open();
+        let has_selection = !self.selected_id().is_empty();
+        let query = self.as_ref().rust().command_query.clone();
+        let results = matching_commands(&query, project_open, has_selection);
+        let count = i32::try_from(results.len()).unwrap_or(i32::MAX);
+        self.as_mut().rust_mut().command_results = results;
+        self.as_mut().rust_mut().command_count = count;
+        self.as_mut().command_count_changed();
     }
     fn bump(mut self: Pin<&mut Self>, command: &str) {
         self.as_mut().cancel_export();

@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLibraryInfo>
@@ -38,7 +39,7 @@ int main(int argc, char* argv[])
 {
   QGuiApplication::setOrganizationName(QStringLiteral("ParchMint"));
   QGuiApplication::setApplicationName(QStringLiteral("ParchMint"));
-  QGuiApplication::setApplicationVersion(QStringLiteral("0.1.0"));
+  QGuiApplication::setApplicationVersion(QStringLiteral(PARCHMINT_VERSION));
   QQuickStyle::setStyle(QStringLiteral("Material"));
   qInstallMessageHandler(writeDiagnostic);
   std::set_terminate([] {
@@ -46,6 +47,8 @@ int main(int argc, char* argv[])
   });
 
   QGuiApplication application(argc, argv);
+  QGuiApplication::setWindowIcon(
+    QIcon(QStringLiteral(":/org.parchmint.ParchMint.svg")));
   QCommandLineParser parser;
   parser.addHelpOption();
   parser.addVersionOption();

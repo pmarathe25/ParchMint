@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(ParchMint VERSION 0.1.0 LANGUAGES CXX)
+project(ParchMint VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,12 +13,12 @@ endif()
 
 # Stage 01 pins one tested patch release. Later security patch updates require CI
 # evidence but do not change the Qt 6.8 architecture decision.
-find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Core Gui Network Qml Quick QuickControls2 Sql Test QuickTest)
+find_package(Qt6 6.8.3 EXACT REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Sql Test QuickTest)
 qt_policy(SET QTP0001 NEW)
 
 if(MSVC)
   set_property(TARGET
-    Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick
+    Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick
     Qt6::QuickControls2 Qt6::Sql Qt6::Test Qt6::QuickTest
     PROPERTY MAP_IMPORTED_CONFIG_DEBUG "RELEASE")
 endif()
@@ -43,7 +43,7 @@ cxx_qt_import_crate(
   MANIFEST_PATH crates/parchmint-bridge/Cargo.toml
   CRATES parchmint_bridge
   LOCKED
-  QT_MODULES Qt6::Core Qt6::Gui Qt6::Network Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+  QT_MODULES Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
 cxx_qt_import_qml_module(parchmint_qml
   URI "org.parchmint.app"
@@ -75,3 +75,4 @@ add_custom_target(
 add_custom_target(run COMMAND parchmint DEPENDS parchmint USES_TERMINAL)
 
 install(TARGETS parchmint RUNTIME DESTINATION bin BUNDLE DESTINATION .)
+include(cmake/Packaging.cmake)

@@ -21,7 +21,6 @@ fn main() {
     // renderer in the same C++ compilation unit as the generated bridge code.
     unsafe {
         CxxQtBuilder::new_qml_module(module)
-            .qt_module("Network")
             .file("src/backend.rs")
             .cc_builder(|cc| {
                 cc.file("src/pdf_renderer.cpp");

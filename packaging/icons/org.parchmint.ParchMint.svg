@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="ParchMint">
+  <rect width="256" height="256" rx="48" fill="#1f665a"/>
+  <path d="M62 42h96l36 36v136H62z" fill="#fafdfb"/>
+  <path d="M158 42v38h36" fill="#bde4da"/>
+  <path d="M88 106h80M88 132h80M88 158h58M88 184h70" stroke="#2e7d6e" stroke-width="11" stroke-linecap="round"/>
+</svg>

@@ -21,7 +21,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "LicenseRef-ParchMint-Undecided"
@@ -36,6 +36,7 @@ indexmap = { version = "2.14.0", features = ["serde"] }
 pulldown-cmark = { version = "0.13.1", default-features = false }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 noyalib = { version = "0.0.15", features = ["compat-serde-yaml"] }
 toml = "0.8.23"
 tempfile = "3.27.0"

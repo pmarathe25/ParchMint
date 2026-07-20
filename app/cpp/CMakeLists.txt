@@ -13,13 +13,67 @@ target_include_directories(parchmint_adapters PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(parchmint_adapters PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 
 qt_add_executable(parchmint main.cpp)
+set(parchmint_qml_sources
+  "${CMAKE_SOURCE_DIR}/app/qml/Main.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/DesignTokens.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/FormattingBar.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/BinderPane.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/OutlineView.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/CardsView.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/InspectorPane.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/StylePicker.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/StyleManager.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/SourceEditor.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/PaneHost.qml")
+set_source_files_properties(${parchmint_qml_sources} PROPERTIES HEADER_FILE_ONLY TRUE)
+target_sources(parchmint PRIVATE ${parchmint_qml_sources})
+foreach(qml_file IN LISTS parchmint_qml_sources)
+  file(RELATIVE_PATH qml_alias "${CMAKE_SOURCE_DIR}/app/qml" "${qml_file}")
+  set_source_files_properties("${qml_file}" PROPERTIES QT_RESOURCE_ALIAS "${qml_alias}")
+endforeach()
+# CXX-Qt embeds the production module. This second resource is scanner input so
+# Qt's deployment API can discover and package all transitive Qt QML imports.
+qt_add_resources(parchmint "parchmint_qml_deploy_scan"
+  PREFIX "/parchmint-qml-deploy-scan"
+  FILES ${parchmint_qml_sources})
+set_target_properties(parchmint PROPERTIES
+  MACOSX_BUNDLE TRUE
+  MACOSX_BUNDLE_BUNDLE_NAME "ParchMint"
+  MACOSX_BUNDLE_GUI_IDENTIFIER "org.parchmint.ParchMint"
+  MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/packaging/macos/Info.plist.in"
+  WIN32_EXECUTABLE TRUE)
+if(APPLE)
+  set_property(TARGET parchmint PROPERTY INSTALL_RPATH "@executable_path/../Frameworks")
+elseif(UNIX)
+  set_property(TARGET parchmint PROPERTY INSTALL_RPATH "$ORIGIN/../lib")
+endif()
+target_compile_definitions(parchmint PRIVATE PARCHMINT_VERSION="${PROJECT_VERSION}")
+set(parchmint_icon "${CMAKE_SOURCE_DIR}/packaging/icons/org.parchmint.ParchMint.svg")
+set_source_files_properties(${parchmint_icon} PROPERTIES QT_RESOURCE_ALIAS "org.parchmint.ParchMint.svg")
+qt_add_resources(parchmint "parchmint_icons"
+  PREFIX "/"
+  FILES ${parchmint_icon})
 
 target_link_libraries(parchmint PRIVATE
   parchmint_qml
   parchmint_adaptersplugin
   Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 
+qt_import_plugins(parchmint
+  INCLUDE_BY_TYPE platforms
+    Qt6::QXcbIntegrationPlugin
+    Qt6::QOffscreenIntegrationPlugin
+    Qt6::QWaylandIntegrationPlugin
+    Qt6::QWaylandEglPlatformIntegrationPlugin
+  EXCLUDE_BY_TYPE networkinformation tls qmltooling)
 qt_import_qml_plugins(parchmint)
+
+qt_generate_deploy_qml_app_script(
+  TARGET parchmint
+  OUTPUT_SCRIPT parchmint_deploy_script
+  NO_TRANSLATIONS
+  NO_UNSUPPORTED_PLATFORM_ERROR)
+install(SCRIPT ${parchmint_deploy_script})
 
 qt_add_executable(parchmint-editor-tests
   ${CMAKE_SOURCE_DIR}/tests/qt/tst_editor_adapter.cpp)

@@ -1,0 +1,35 @@
+name: nightly-hardening
+
+on:
+  schedule:
+    - cron: '17 5 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Parser fuzz smoke
+        run: cargo run --locked -p parchmint-test-support --release --bin fuzz-smoke -- 25000
+      - name: Release-mode ignored measurements
+        run: cargo test --locked -p parchmint-app -p parchmint-markdown -p parchmint-index --release -- --ignored --nocapture
+
+  native-benchmark:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Install runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 ninja-build
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          modules: 'qtshadertools'
+          cache: true
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --target editor-benchmark --parallel

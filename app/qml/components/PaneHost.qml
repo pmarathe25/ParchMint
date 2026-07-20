@@ -17,7 +17,13 @@ Pane {
     property bool focused: backend.focused_pane === paneIndex
     property string loadedNode: ""
     property bool findVisible: false
+    property string pendingExternalUrl: ""
     padding: 0
+
+    function showFind() {
+        findVisible = true
+        findField.forceActiveFocus()
+    }
 
     function reloadBody() {
         if (viewName === "editor" && nodeId.length > 0 && loadedNode !== nodeId) {
@@ -41,12 +47,38 @@ Pane {
         }
     }
     function replaceSelection() {
-        if (editor.selectedText.length && editor.selectedText === findField.text) {
-            editor.insert(editor.cursorPosition, replaceField.text)
+        const selected = caseCheck.checked ? editor.selectedText : editor.selectedText.toLocaleLowerCase()
+        const query = caseCheck.checked ? findField.text : findField.text.toLocaleLowerCase()
+        if (selected.length && selected === query) {
+            const start = editor.selectionStart
+            editor.remove(editor.selectionStart, editor.selectionEnd)
+            editor.insert(start, replaceField.text)
+            editor.cursorPosition = start + replaceField.text.length
             findNext()
         } else {
             findNext()
         }
+    }
+    function replaceAll() {
+        const query = findField.text
+        if (!query.length)
+            return
+        let source = caseCheck.checked ? editor.text : editor.text.toLocaleLowerCase()
+        const needle = caseCheck.checked ? query : query.toLocaleLowerCase()
+        const positions = []
+        let start = 0
+        while (positions.length < 10000) {
+            const found = source.indexOf(needle, start)
+            if (found < 0)
+                break
+            positions.push(found)
+            start = found + needle.length
+        }
+        for (let index = positions.length - 1; index >= 0; --index) {
+            editor.remove(positions[index], positions[index] + query.length)
+            editor.insert(positions[index], replaceField.text)
+        }
+        editor.cursorPosition = positions.length ? positions[0] + replaceField.text.length : editor.cursorPosition
     }
     onNodeIdChanged: reloadBody()
     onViewNameChanged: reloadBody()
@@ -79,6 +111,7 @@ Pane {
             CheckBox { id: caseCheck; text: qsTr("Case") }
             Button { text: qsTr("Next"); onClicked: root.findNext() }
             Button { text: qsTr("Replace"); onClicked: root.replaceSelection() }
+            Button { text: qsTr("Replace all"); onClicked: root.replaceAll() }
         }
         StackLayout {
             Layout.fillWidth: true
@@ -121,8 +154,29 @@ Pane {
                 Label { text: qsTr("Safe attachment preview"); font.bold: true; font.pixelSize: 20 }
                 Label { text: root.backend.paneAttachmentDescription(root.paneIndex); wrapMode: Text.Wrap; Layout.fillWidth: true }
                 Label { text: qsTr("Images, PDFs where the platform supports them, and plain text are previewed passively. Other files require an explicit system-open action."); wrapMode: Text.Wrap; Layout.fillWidth: true; opacity: .7 }
-                Button { text: qsTr("Open in system application…"); enabled: root.backend.paneAttachmentUrl(root.paneIndex).length > 0; onClicked: Qt.openUrlExternally(root.backend.paneAttachmentUrl(root.paneIndex)) }
+                Button {
+                    text: qsTr("Open in system application…")
+                    enabled: root.backend.paneAttachmentUrl(root.paneIndex).length > 0
+                    onClicked: {
+                        root.pendingExternalUrl = root.backend.paneAttachmentUrl(root.paneIndex)
+                        externalOpenConfirm.open()
+                    }
+                }
             }
+        }
+    }
+
+    Dialog {
+        id: externalOpenConfirm
+        anchors.centerIn: Overlay.overlay
+        title: qsTr("Open attachment outside ParchMint?")
+        modal: true
+        standardButtons: Dialog.Open | Dialog.Cancel
+        onAccepted: Qt.openUrlExternally(root.pendingExternalUrl)
+        Label {
+            width: 420
+            wrapMode: Text.Wrap
+            text: qsTr("The system application may execute or transmit content according to its own settings. Only continue if you trust this attachment.")
         }
     }
 }

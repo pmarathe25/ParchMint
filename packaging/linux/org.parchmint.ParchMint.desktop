@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ParchMint
+Comment=Plan and write long-form projects locally
+Exec=parchmint %F
+Icon=org.parchmint.ParchMint
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=application/x-parchmint-project;
+StartupWMClass=ParchMint

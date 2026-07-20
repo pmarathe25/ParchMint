@@ -5,7 +5,7 @@
 //! state such as an expanded item, but it never owns another mutable copy of
 //! the project graph.
 
-use crate::{IndexStatus, ProjectSearch, SearchServiceError};
+use crate::{ContentFingerprint, IndexStatus, ProjectSearch, SearchServiceError};
 use parchmint_compile::{
     self, CancellationToken, CompileError, CompileInput, CompileIr, CompilePreview, ExportError,
     ExportOptions, ExportReport,
@@ -211,6 +211,39 @@ fn default_split_ratio() -> u16 {
     500
 }
 
+fn literal_match_ranges(source: &str, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    if case_sensitive {
+        return source
+            .match_indices(query)
+            .map(|(start, value)| (start, start + value.len()))
+            .collect();
+    }
+    source
+        .char_indices()
+        .filter_map(|(start, _)| {
+            let end = start.checked_add(query.len())?;
+            source
+                .get(start..end)
+                .is_some_and(|value| value.eq_ignore_ascii_case(query))
+                .then_some((start, end))
+        })
+        .collect()
+}
+
+fn replacement_context(source: &str, start: usize, end: usize) -> String {
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[end..]
+        .find('\n')
+        .map_or(source.len(), |index| end + index);
+    let line = &source[line_start..line_end];
+    let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() <= 160 {
+        compact
+    } else {
+        compact.chars().take(157).collect::<String>() + "…"
+    }
+}
+
 /// A recent project entry stored outside canonical project data.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecentProject {
@@ -250,6 +283,51 @@ impl RecentProjects {
     }
 }
 
+/// One independently selectable literal match in a project replacement preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectReplaceMatch {
+    pub node: NodeId,
+    pub title: String,
+    pub start: usize,
+    pub end: usize,
+    pub context: String,
+    pub selected: bool,
+}
+
+/// Conflict-protected replacement proposal. Callers may only change `selected`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectReplacePreview {
+    query: String,
+    replacement: String,
+    matches: Vec<ProjectReplaceMatch>,
+    fingerprints: std::collections::BTreeMap<NodeId, ContentFingerprint>,
+}
+
+impl ProjectReplacePreview {
+    pub fn matches(&self) -> &[ProjectReplaceMatch] {
+        &self.matches
+    }
+
+    pub fn selected_count(&self) -> usize {
+        self.matches.iter().filter(|item| item.selected).count()
+    }
+
+    pub fn set_selected(&mut self, index: usize, selected: bool) -> bool {
+        let Some(item) = self.matches.get_mut(index) else {
+            return false;
+        };
+        item.selected = selected;
+        true
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProjectReplaceUndo {
+    originals: Vec<(NodeId, String)>,
+    replacements: Vec<(NodeId, String)>,
+    expected: Vec<(NodeId, ContentFingerprint)>,
+}
+
 /// One project incarnation and all Stage 04 structural/metadata use cases.
 pub struct ProjectWorkspace {
     opened: OpenProject,
@@ -261,6 +339,7 @@ pub struct ProjectWorkspace {
     workspace_diagnostic: Option<String>,
     search: ProjectSearch,
     index_diagnostic: Option<String>,
+    replace_undo: Option<ProjectReplaceUndo>,
 }
 
 impl ProjectWorkspace {
@@ -296,6 +375,7 @@ impl ProjectWorkspace {
             workspace_diagnostic,
             search,
             index_diagnostic: None,
+            replace_undo: None,
         }
     }
 
@@ -648,6 +728,213 @@ impl ProjectWorkspace {
             .map_err(WorkspaceError::Storage)?;
         self.update_index_node(node);
         Ok(())
+    }
+
+    /// Builds a bounded, literal project-wide replacement preview without writing.
+    /// Every match is selected initially and can be independently deselected.
+    pub fn preview_project_replace(
+        &self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> Result<ProjectReplacePreview, WorkspaceError> {
+        if query.is_empty() {
+            return Err(WorkspaceError::InvalidReplace(
+                "replacement query cannot be empty".into(),
+            ));
+        }
+        if query.len() > 4_096 || replacement.len() > 1024 * 1024 {
+            return Err(WorkspaceError::InvalidReplace(
+                "replacement query or value exceeds its safety limit".into(),
+            ));
+        }
+        if !case_sensitive && !query.is_ascii() {
+            return Err(WorkspaceError::InvalidReplace(
+                "case-insensitive project replacement currently requires an ASCII query; use case-sensitive matching for Unicode text".into(),
+            ));
+        }
+
+        let mut matches = Vec::new();
+        let mut fingerprints = std::collections::BTreeMap::new();
+        for (node_id, node) in &self.opened.project.nodes {
+            if self.opened.project.is_trashed(*node_id) {
+                continue;
+            }
+            let Some(document_id) = node.kind.document_id() else {
+                continue;
+            };
+            let body = self.opened.body(document_id)?;
+            let ranges = literal_match_ranges(body, query, case_sensitive);
+            if ranges.is_empty() {
+                continue;
+            }
+            fingerprints.insert(*node_id, ContentFingerprint::of(body));
+            let title = self
+                .opened
+                .project
+                .documents
+                .get(&document_id)
+                .map_or_else(String::new, |record| record.metadata.title.clone());
+            for (start, end) in ranges {
+                if matches.len() >= 10_000 {
+                    return Err(WorkspaceError::InvalidReplace(
+                        "replacement preview exceeds 10,000 changes; narrow the query".into(),
+                    ));
+                }
+                matches.push(ProjectReplaceMatch {
+                    node: *node_id,
+                    title: title.clone(),
+                    start,
+                    end,
+                    context: replacement_context(body, start, end),
+                    selected: true,
+                });
+            }
+        }
+        Ok(ProjectReplacePreview {
+            query: query.to_owned(),
+            replacement: replacement.to_owned(),
+            matches,
+            fingerprints,
+        })
+    }
+
+    /// Applies selected preview rows only after every source still matches the
+    /// preview fingerprint. Original bodies are backed up before the first write.
+    pub fn apply_project_replace(
+        &mut self,
+        preview: &ProjectReplacePreview,
+    ) -> Result<usize, WorkspaceError> {
+        let mut by_node = std::collections::BTreeMap::<NodeId, Vec<&ProjectReplaceMatch>>::new();
+        for item in preview.matches.iter().filter(|item| item.selected) {
+            by_node.entry(item.node).or_default().push(item);
+        }
+        if by_node.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updates = Vec::with_capacity(by_node.len());
+        for (node, mut selected) in by_node {
+            let document = document_for_node(&self.opened.project, node)?;
+            let cached = self.opened.body(document)?.to_owned();
+            let disk = self.opened.canonical_body_on_disk(document)?;
+            let expected = preview
+                .fingerprints
+                .get(&node)
+                .ok_or(WorkspaceError::ReplaceConflict(node))?;
+            if ContentFingerprint::of(&cached) != *expected
+                || ContentFingerprint::of(&disk) != *expected
+            {
+                return Err(WorkspaceError::ReplaceConflict(node));
+            }
+            selected.sort_by_key(|item| std::cmp::Reverse(item.start));
+            let mut output = cached.clone();
+            for item in selected {
+                if output.get(item.start..item.end) != Some(preview.query.as_str())
+                    && !output
+                        .get(item.start..item.end)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(&preview.query))
+                {
+                    return Err(WorkspaceError::ReplaceConflict(node));
+                }
+                output.replace_range(item.start..item.end, &preview.replacement);
+            }
+            parchmint_markdown::Document::parse_body(
+                &output,
+                &parchmint_markdown::ParseOptions::default(),
+            )
+            .map_err(|error| WorkspaceError::InvalidDocument(error.to_string()))?;
+            updates.push((node, cached, output));
+        }
+
+        self.back_up_replacement(&updates)?;
+        let originals = updates
+            .iter()
+            .map(|(node, original, _)| (*node, original.clone()))
+            .collect::<Vec<_>>();
+        let expected = updates
+            .iter()
+            .map(|(node, _, output)| (*node, ContentFingerprint::of(output)))
+            .collect::<Vec<_>>();
+        let replacements = updates
+            .iter()
+            .map(|(node, _, output)| (*node, output.clone()))
+            .collect::<Vec<_>>();
+        let mut written = Vec::new();
+        for (node, original, output) in &updates {
+            if let Err(error) = self.save_document_body(*node, output.clone()) {
+                if let Ok(document) = document_for_node(&self.opened.project, *node) {
+                    let _ = self.opened.set_body(document, original.clone());
+                }
+                for (written_node, written_body) in written.into_iter().rev() {
+                    let _ = self.save_document_body(written_node, written_body);
+                }
+                return Err(error);
+            }
+            written.push((*node, original.clone()));
+        }
+        self.replace_undo = Some(ProjectReplaceUndo {
+            originals,
+            replacements,
+            expected,
+        });
+        Ok(preview.selected_count())
+    }
+
+    /// Restores the last project replacement if none of its documents changed.
+    pub fn undo_project_replace(&mut self) -> Result<usize, WorkspaceError> {
+        let undo = self.replace_undo.take().ok_or_else(|| {
+            WorkspaceError::InvalidReplace("there is no project replacement to undo".into())
+        })?;
+        let conflict = undo.expected.iter().find_map(|(node, expected)| {
+            let document = document_for_node(&self.opened.project, *node).ok()?;
+            let disk = self.opened.canonical_body_on_disk(document).ok()?;
+            (ContentFingerprint::of(&disk) != *expected).then_some(*node)
+        });
+        if let Some(node) = conflict {
+            self.replace_undo = Some(undo);
+            return Err(WorkspaceError::ReplaceConflict(node));
+        }
+        let count = undo.originals.len();
+        let mut restored = Vec::new();
+        for (node, body) in &undo.originals {
+            if let Err(error) = self.save_document_body(*node, body.clone()) {
+                for restored_node in restored.into_iter().rev() {
+                    if let Some((_, replacement)) = undo
+                        .replacements
+                        .iter()
+                        .find(|(candidate, _)| *candidate == restored_node)
+                    {
+                        let _ = self.save_document_body(restored_node, replacement.clone());
+                    }
+                }
+                self.replace_undo = Some(undo);
+                return Err(error);
+            }
+            restored.push(*node);
+        }
+        Ok(count)
+    }
+
+    fn back_up_replacement(
+        &self,
+        updates: &[(NodeId, String, String)],
+    ) -> Result<(), WorkspaceError> {
+        let transaction = self
+            .opened
+            .root()
+            .join(".parchmint/backups/project-replace")
+            .join(NodeId::new().to_string());
+        fs::create_dir_all(&transaction).map_err(WorkspaceError::CreateReplaceBackup)?;
+        for (node, original, _) in updates {
+            atomic_write(&transaction.join(format!("{node}.md")), original.as_bytes())
+                .map_err(WorkspaceError::WriteReplaceBackup)?;
+        }
+        atomic_write(
+            &transaction.join("README.txt"),
+            b"ParchMint project replacement backup. Each file contains the original Markdown body.\n",
+        )
+        .map_err(WorkspaceError::WriteReplaceBackup)
     }
 
     /// Changes selection only after removing stale, trashed, and duplicate IDs.
@@ -1274,6 +1561,14 @@ pub enum WorkspaceError {
     Invariant(&'static str),
     #[error("document source is invalid: {0}")]
     InvalidDocument(String),
+    #[error("project replacement is invalid: {0}")]
+    InvalidReplace(String),
+    #[error("project replacement stopped because document {0} changed after preview")]
+    ReplaceConflict(NodeId),
+    #[error("project replacement backup directory could not be created: {0}")]
+    CreateReplaceBackup(std::io::Error),
+    #[error("project replacement backup could not be written: {0}")]
+    WriteReplaceBackup(parchmint_storage::AtomicWriteError),
     #[error(transparent)]
     Search(#[from] SearchServiceError),
     #[error(transparent)]
@@ -1552,5 +1847,55 @@ mod tests {
         assert_eq!(persisted.metadata.author, "A. Writer");
         reopened.remove_compile_preset(preset_id).unwrap();
         assert!(reopened.compile_presets().is_empty());
+    }
+
+    #[test]
+    fn project_replace_previews_selection_conflicts_backups_and_undo() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let first = workspace.create_node(manuscript, "First", false).unwrap();
+        let second = workspace.create_node(manuscript, "Second", false).unwrap();
+        workspace
+            .save_document_body(first, "mist on the misty hill\n".into())
+            .unwrap();
+        workspace
+            .save_document_body(second, "MIST and mist\n".into())
+            .unwrap();
+
+        let mut preview = workspace
+            .preview_project_replace("mist", "fog", true)
+            .unwrap();
+        assert_eq!(preview.matches().len(), 3);
+        let first_exact = preview
+            .matches()
+            .iter()
+            .position(|item| item.node == first && item.start == 0)
+            .unwrap();
+        assert!(preview.set_selected(first_exact, false));
+        assert_eq!(workspace.apply_project_replace(&preview).unwrap(), 2);
+        assert_eq!(
+            workspace.document_body(first).unwrap(),
+            "mist on the fogy hill\n"
+        );
+        assert_eq!(workspace.document_body(second).unwrap(), "MIST and fog\n");
+        assert!(root.join(".parchmint/backups/project-replace").is_dir());
+        assert_eq!(workspace.undo_project_replace().unwrap(), 2);
+        assert_eq!(
+            workspace.document_body(first).unwrap(),
+            "mist on the misty hill\n"
+        );
+
+        let stale = workspace
+            .preview_project_replace("mist", "rain", true)
+            .unwrap();
+        workspace
+            .save_document_body(first, "an external-equivalent local change\n".into())
+            .unwrap();
+        assert!(matches!(
+            workspace.apply_project_replace(&stale),
+            Err(WorkspaceError::ReplaceConflict(id)) if id == first
+        ));
     }
 }

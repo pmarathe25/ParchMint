@@ -469,7 +469,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "parchmint-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "parchmint-compile",
  "parchmint-domain",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-compile"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "parchmint-domain",
  "parchmint-markdown",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-domain"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror 2.0.19",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-index"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "rusqlite",
  "tempfile",
@@ -514,7 +514,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-markdown"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "indexmap",
  "noyalib",
@@ -526,7 +526,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-storage"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "noyalib",
  "parchmint-domain",
@@ -540,16 +540,19 @@ dependencies = [
 
 [[package]]
 name = "parchmint-test-support"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
+ "parchmint-compile",
+ "parchmint-markdown",
  "serde",
+ "serde_json",
  "thiserror 2.0.19",
  "toml",
 ]
 
 [[package]]
 name = "parchmint_bridge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "cxx",
  "cxx-qt",

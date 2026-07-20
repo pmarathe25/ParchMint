@@ -52,5 +52,11 @@ package-smoke: build
     cmake --install {{build-dir}} --prefix {{build-dir}}/install
     cmake -E tar cf {{build-dir}}/parchmint-smoke.tar --format=gnutar {{build-dir}}/install
 
+release-evidence:
+    cargo run -p parchmint-test-support --bin release-evidence -- release-evidence
+
+fuzz-smoke:
+    cargo run -p parchmint-test-support --release --bin fuzz-smoke -- 10000
+
 bench-spikes:
     cargo test -p parchmint-app -p parchmint-markdown -p parchmint-index --release -- --ignored --nocapture
