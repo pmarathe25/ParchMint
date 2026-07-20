@@ -9,15 +9,16 @@ use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use parchmint_app::{
-    CancellationToken, CommandSpec, CompileExportJob, CompileExportWorker, DiagnosticsSnapshot,
-    DropPlacement, ExportFormat, ExportOptions, OutlineSort, PaneView, ProjectReplacePreview,
-    ProjectWorkspace, SearchQuery, SearchResult, SplitOrientation, export_diagnostics,
-    matching_commands, text_statistics,
+    CancellationToken, CollisionPolicy, CommandSpec, CompileExportJob, CompileExportOutput,
+    CompileExportWorker, CompileIr, DiagnosticsSnapshot, DropPlacement, ExportFormat,
+    ExportOptions, HtmlAssetMode, OutlineSort, PaneView, PreparedExport, ProjectReplacePreview,
+    ProjectWorkspace, SearchQuery, SearchResult, SplitOrientation, commit_prepared_export,
+    export_diagnostics, matching_commands, prepare_export_bytes, render_html, text_statistics,
 };
 use parchmint_domain::{
     CompilePreset, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
 };
-use std::path::Path;
+use std::{fs, path::Path};
 
 /// Rust state hidden behind the generated QObject.
 pub struct ParchMintBackendRust {
@@ -111,7 +112,19 @@ impl Default for ParchMintBackendRust {
 pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
+        include!("pdf_renderer.h");
         type QString = cxx_qt_lib::QString;
+
+        fn parchmint_render_pdf_qt(
+            destination: &QString,
+            html: &QString,
+            width_micrometres: i32,
+            height_micrometres: i32,
+            margin_left_micrometres: i32,
+            margin_top_micrometres: i32,
+            margin_right_micrometres: i32,
+            margin_bottom_micrometres: i32,
+        ) -> bool;
     }
 
     extern "RustQt" {
@@ -249,6 +262,17 @@ pub mod qobject {
             format: &QString,
             destination: &QString,
         ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "exportProjectWithOverwrite"]
+        fn export_project_with_overwrite(
+            self: Pin<&mut ParchMintBackend>,
+            format: &QString,
+            destination: &QString,
+            overwrite_confirmed: bool,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "exportDestinationExists"]
+        fn export_destination_exists(self: &ParchMintBackend, destination: &QString) -> bool;
         #[qinvokable]
         #[cxx_name = "pollExport"]
         fn poll_export(self: Pin<&mut ParchMintBackend>);
@@ -740,6 +764,21 @@ impl ParchMintBackend {
         format: &QString,
         destination: &QString,
     ) -> bool {
+        self.as_mut()
+            .export_project_with_overwrite(format, destination, false)
+    }
+
+    pub fn export_destination_exists(&self, destination: &QString) -> bool {
+        let destination = destination.to_string();
+        !destination.trim().is_empty() && Path::new(destination.trim()).is_file()
+    }
+
+    pub fn export_project_with_overwrite(
+        mut self: Pin<&mut Self>,
+        format: &QString,
+        destination: &QString,
+        overwrite_confirmed: bool,
+    ) -> bool {
         let format = match format.to_string().as_str() {
             "markdown" => ExportFormat::Markdown,
             "plain_text" => ExportFormat::PlainText,
@@ -775,7 +814,13 @@ impl ParchMintBackend {
             Err(error) => return self.as_mut().fail(error),
         };
         let cancellation = CancellationToken::default();
-        let options = ExportOptions::file(format, destination);
+        let mut options = ExportOptions::file(format, &destination);
+        if Path::new(&destination).exists() {
+            if !overwrite_confirmed {
+                return self.as_mut().fail("The export destination already exists; explicit overwrite confirmation is required");
+            }
+            options.collision = CollisionPolicy::ReplaceFile;
+        }
         let new_worker = if self.as_ref().rust().export_worker.is_none() {
             match CompileExportWorker::start("parchmint-export") {
                 Ok(worker) => Some(worker),
@@ -798,6 +843,7 @@ impl ParchMintBackend {
                     preset,
                     options,
                     cancellation: cancellation.clone(),
+                    defer_pdf_render_to_ui: format == ExportFormat::Pdf,
                 })
                 .map_err(|error| error.to_string())
         };
@@ -825,29 +871,48 @@ impl ParchMintBackend {
         };
         match completion {
             Ok(Some(completion)) => {
-                self.as_mut().rust_mut().export_cancellation = None;
+                let cancellation = self
+                    .as_mut()
+                    .rust_mut()
+                    .export_cancellation
+                    .take()
+                    .unwrap_or_default();
                 self.as_mut().set_export_in_progress(false);
-                if completion.stamp != self.as_ref().export_stamp() {
+                if cancellation.is_cancelled() || completion.stamp != self.as_ref().export_stamp() {
                     self.as_mut()
                         .set_export_status(QString::from("Discarded stale export completion"));
                     return;
                 }
-                match completion.outcome {
-                    Ok(report) => self.as_mut().set_export_status(QString::from(format!(
-                        "Exported {} bytes to {}{}",
-                        report.bytes,
-                        report.destination.display(),
-                        if report.warnings.is_empty() {
-                            ""
-                        } else {
-                            " (with warnings)"
+                let prepared = match completion.outcome {
+                    Ok(CompileExportOutput::Prepared(prepared)) => Ok(prepared),
+                    Ok(CompileExportOutput::Compiled { ir, options }) => {
+                        self.as_ref().render_qt_pdf(&ir, &options, &cancellation)
+                    }
+                    Err(error) => Err(error.to_string()),
+                };
+                match prepared {
+                    Ok(prepared) => match commit_prepared_export(prepared, &cancellation) {
+                        Ok(report) => self.as_mut().set_export_status(QString::from(format!(
+                            "Exported {} bytes to {}{}",
+                            report.bytes,
+                            report.destination.display(),
+                            if report.warnings.is_empty() {
+                                ""
+                            } else {
+                                " (with warnings)"
+                            }
+                        ))),
+                        Err(error) => {
+                            self.as_mut()
+                                .set_export_status(QString::from(error.to_string()));
+                            self.as_mut()
+                                .operation_failed(QString::from(error.to_string()));
                         }
-                    ))),
+                    },
                     Err(error) => {
                         self.as_mut()
-                            .set_export_status(QString::from(error.to_string()));
-                        self.as_mut()
-                            .operation_failed(QString::from(error.to_string()));
+                            .set_export_status(QString::from(error.clone()));
+                        self.as_mut().operation_failed(QString::from(error));
                     }
                 }
             }
@@ -1370,7 +1435,6 @@ impl ParchMintBackend {
         self.as_mut().command_count_changed();
     }
     fn bump(mut self: Pin<&mut Self>, command: &str) {
-        self.as_mut().cancel_export();
         let revision = self.revision().saturating_add(1);
         self.as_mut().rust_mut().revision = revision;
         self.as_mut().revision_changed();
@@ -1496,6 +1560,56 @@ impl ParchMintBackend {
                 .expect("non-zero backend generation"),
             revision: Revision::new(*self.revision().max(self.document_revision())),
         }
+    }
+
+    /// Qt owns the PDF painter/document boundary. Rust has already produced a
+    /// frozen semantic IR on the worker; this method renders it into a
+    /// destination-adjacent temporary PDF and returns to the common commit
+    /// transaction without touching the requested path.
+    fn render_qt_pdf(
+        &self,
+        ir: &CompileIr,
+        options: &ExportOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<PreparedExport, String> {
+        if cancellation.is_cancelled() {
+            return Err("export cancelled before Qt PDF render".into());
+        }
+        let parent = options
+            .destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .ok_or_else(|| "PDF destination has no parent directory".to_owned())?;
+        let artifact = tempfile::Builder::new()
+            .prefix(".parchmint-qt-pdf-")
+            .suffix(".pdf")
+            .tempfile_in(parent)
+            .map_err(|error| error.to_string())?;
+        let (html, warnings) = render_html(ir, HtmlAssetMode::SelfContained);
+        let destination = QString::from(artifact.path().to_string_lossy().into_owned());
+        let html = QString::from(html);
+        let page = &ir.page;
+        let measure = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        // The QPdfWriter/QTextDocument pair must be created by the Qt owner.
+        let rendered = qobject::parchmint_render_pdf_qt(
+            &destination,
+            &html,
+            measure(page.width_micrometres),
+            measure(page.height_micrometres),
+            measure(page.margin_left_micrometres),
+            measure(page.margin_top_micrometres),
+            measure(page.margin_right_micrometres),
+            measure(page.margin_bottom_micrometres),
+        );
+        if !rendered {
+            return Err("Qt PDF renderer could not create the temporary artifact".into());
+        }
+        if cancellation.is_cancelled() {
+            return Err("export cancelled before Qt PDF validation".into());
+        }
+        let bytes = fs::read(artifact.path()).map_err(|error| error.to_string())?;
+        prepare_export_bytes(options, &bytes, warnings, cancellation)
+            .map_err(|error| error.to_string())
     }
 }
 

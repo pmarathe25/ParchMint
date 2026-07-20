@@ -15,7 +15,10 @@ pub use search::*;
 pub use workspace::*;
 
 /// Qt-independent compile/export primitives used by the application bridge.
-pub use parchmint_compile::{CancellationToken, ExportFormat, ExportOptions};
+pub use parchmint_compile::{
+    CancellationToken, CollisionPolicy, CompileIr, ExportFormat, ExportOptions, HtmlAssetMode,
+    PreparedExport, commit_prepared_export, prepare_export_bytes, render_html,
+};
 /// Stable search query and row types returned by the project service.
 pub use parchmint_index::{SearchQuery, SearchResult};
 

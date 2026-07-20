@@ -6,7 +6,6 @@
 //! ParchMint spelling. Unsupported constructs remain protected opaque nodes.
 
 use noyalib::compat::serde_yaml::{self as yaml, Mapping, Value};
-use pulldown_cmark::{Event, Options as CmarkOptions, Parser};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -14,10 +13,36 @@ use thiserror::Error;
 
 pub const PAGE_BREAK_MARKER: &str = "<!-- parchmint:page-break -->";
 
-#[derive(Clone, Debug, Default)]
+/// Resource bounds for parsing untrusted canonical Markdown.  These values are
+/// deliberately expressed in bytes/items rather than wall-clock time so the
+/// same document has the same outcome on every supported platform.
+#[derive(Clone, Debug)]
 pub struct ParseOptions {
     /// Style IDs known to the currently open project. Empty means unchecked.
     pub known_style_ids: BTreeSet<String>,
+    /// Largest accepted source document, including front matter.
+    pub max_document_bytes: usize,
+    /// Largest number of semantic blocks, including blocks in fenced divs.
+    pub max_blocks: usize,
+    /// Maximum nested inline or fenced-div depth.
+    pub max_inline_depth: usize,
+    /// Maximum delimiter/escape inspections performed by the inline scanner.
+    pub max_delimiter_scans: usize,
+    /// Maximum diagnostics retained for one document.
+    pub max_diagnostics: usize,
+}
+
+impl Default for ParseOptions {
+    fn default() -> Self {
+        Self {
+            known_style_ids: BTreeSet::new(),
+            max_document_bytes: 16 * 1024 * 1024,
+            max_blocks: 100_000,
+            max_inline_depth: 64,
+            max_delimiter_scans: 1_000_000,
+            max_diagnostics: 1_024,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -82,6 +107,10 @@ pub enum Inline {
 pub struct ListItem {
     pub checked: Option<bool>,
     pub content: Vec<Inline>,
+    /// Nested list boundaries and continuation paragraphs.  A list item is a
+    /// container, not merely a line: retaining this distinction keeps a
+    /// changed parent list from flattening its children on save.
+    pub children: Vec<BlockNode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -188,6 +217,7 @@ impl Document {
     }
 
     pub fn parse_with_options(source: &str, options: &ParseOptions) -> Result<Self, MarkdownError> {
+        let mut budget = ParseBudget::new(options, source.len())?;
         let ParsedFrontMatter {
             has_front_matter,
             raw_front_matter,
@@ -195,10 +225,9 @@ impl Document {
             body,
             body_offset,
             mut diagnostics,
-        } = parse_front_matter(source)?;
-        validate_commonmark(body, body_offset)?;
-        let mut blocks = scan_blocks(body, body_offset, &mut diagnostics);
-        validate_extensions(&mut blocks, options, &mut diagnostics);
+        } = parse_front_matter(source, &budget)?;
+        let mut blocks = scan_blocks(body, body_offset, &mut diagnostics, &mut budget, 0)?;
+        validate_extensions(&mut blocks, options, &mut diagnostics, &mut budget)?;
         Ok(Self {
             has_front_matter,
             raw_front_matter,
@@ -210,10 +239,10 @@ impl Document {
 
     /// Parses a storage-owned body which has no YAML front matter.
     pub fn parse_body(body: &str, options: &ParseOptions) -> Result<Self, MarkdownError> {
-        validate_commonmark(body, 0)?;
+        let mut budget = ParseBudget::new(options, body.len())?;
         let mut diagnostics = Vec::new();
-        let mut blocks = scan_blocks(body, 0, &mut diagnostics);
-        validate_extensions(&mut blocks, options, &mut diagnostics);
+        let mut blocks = scan_blocks(body, 0, &mut diagnostics, &mut budget, 0)?;
+        validate_extensions(&mut blocks, options, &mut diagnostics, &mut budget)?;
         Ok(Self {
             has_front_matter: false,
             raw_front_matter: String::new(),
@@ -312,10 +341,77 @@ pub enum MarkdownError {
     UnclosedFrontMatter,
     #[error("invalid YAML front matter: {0}")]
     InvalidFrontMatter(String),
-    #[error("Markdown parser emitted invalid source range {start}..{end}")]
-    InvalidSourceRange { start: usize, end: usize },
+    #[error("Markdown exceeds the configured {kind} limit ({limit})")]
+    ResourceLimit { kind: &'static str, limit: usize },
     #[error("block index {index} is outside document with {count} blocks")]
     BlockIndex { index: usize, count: usize },
+}
+
+/// Mutable accounting is intentionally shared by all recursive scanners.  The
+/// configured depth makes recursion bounded; counters ensure long unmatched
+/// delimiter runs cannot turn parsing into quadratic work.
+struct ParseBudget<'a> {
+    options: &'a ParseOptions,
+    blocks: usize,
+    delimiter_scans: usize,
+}
+
+impl<'a> ParseBudget<'a> {
+    fn new(options: &'a ParseOptions, bytes: usize) -> Result<Self, MarkdownError> {
+        if bytes > options.max_document_bytes {
+            return Err(MarkdownError::ResourceLimit {
+                kind: "document-byte",
+                limit: options.max_document_bytes,
+            });
+        }
+        Ok(Self {
+            options,
+            blocks: 0,
+            delimiter_scans: 0,
+        })
+    }
+
+    fn block(&mut self) -> Result<(), MarkdownError> {
+        self.blocks += 1;
+        if self.blocks > self.options.max_blocks {
+            return Err(MarkdownError::ResourceLimit {
+                kind: "block-count",
+                limit: self.options.max_blocks,
+            });
+        }
+        Ok(())
+    }
+
+    fn depth(&self, depth: usize) -> Result<(), MarkdownError> {
+        if depth > self.options.max_inline_depth {
+            return Err(MarkdownError::ResourceLimit {
+                kind: "inline-depth",
+                limit: self.options.max_inline_depth,
+            });
+        }
+        Ok(())
+    }
+
+    fn delimiter_scan(&mut self) -> Result<(), MarkdownError> {
+        self.delimiter_scans += 1;
+        if self.delimiter_scans > self.options.max_delimiter_scans {
+            return Err(MarkdownError::ResourceLimit {
+                kind: "delimiter-scan",
+                limit: self.options.max_delimiter_scans,
+            });
+        }
+        Ok(())
+    }
+
+    fn diagnostic(&self, count: usize) -> Result<(), MarkdownError> {
+        if count >= self.options.max_diagnostics {
+            return Err(MarkdownError::ResourceLimit {
+                kind: "diagnostic-count",
+                limit: self.options.max_diagnostics,
+            });
+        }
+        Ok(())
+    }
 }
 
 struct ParsedFrontMatter<'a> {
@@ -327,7 +423,10 @@ struct ParsedFrontMatter<'a> {
     diagnostics: Vec<Diagnostic>,
 }
 
-fn parse_front_matter(source: &str) -> Result<ParsedFrontMatter<'_>, MarkdownError> {
+fn parse_front_matter<'a>(
+    source: &'a str,
+    budget: &ParseBudget<'_>,
+) -> Result<ParsedFrontMatter<'a>, MarkdownError> {
     let opening_len = if source.starts_with("---\r\n") {
         5
     } else if source.starts_with("---\n") {
@@ -375,6 +474,7 @@ fn parse_front_matter(source: &str) -> Result<ParsedFrontMatter<'_>, MarkdownErr
             && !key.trim().is_empty()
             && !keys.insert(key.trim())
         {
+            budget.diagnostic(diagnostics.len())?;
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 code: "duplicate-front-matter-key",
@@ -398,26 +498,15 @@ fn parse_front_matter(source: &str) -> Result<ParsedFrontMatter<'_>, MarkdownErr
     })
 }
 
-fn validate_commonmark(body: &str, offset: usize) -> Result<(), MarkdownError> {
-    let options = CmarkOptions::ENABLE_GFM
-        | CmarkOptions::ENABLE_TABLES
-        | CmarkOptions::ENABLE_TASKLISTS
-        | CmarkOptions::ENABLE_FOOTNOTES
-        | CmarkOptions::ENABLE_HEADING_ATTRIBUTES;
-    for (event, range) in Parser::new_ext(body, options).into_offset_iter() {
-        if range.end > body.len() || range.start > range.end {
-            return Err(MarkdownError::InvalidSourceRange {
-                start: offset + range.start,
-                end: offset + range.end,
-            });
-        }
-        let _ = matches!(event, Event::Text(_));
-    }
-    Ok(())
-}
-
 #[allow(clippy::too_many_lines)]
-fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> Vec<Block> {
+fn scan_blocks(
+    body: &str,
+    offset: usize,
+    diagnostics: &mut Vec<Diagnostic>,
+    budget: &mut ParseBudget<'_>,
+    depth: usize,
+) -> Result<Vec<Block>, MarkdownError> {
+    budget.depth(depth)?;
     let lines = line_ranges(body);
     let mut result = Vec::new();
     let mut line = 0;
@@ -432,16 +521,16 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
         let (last_line, node) = if trimmed == PAGE_BREAK_MARKER {
             (line, BlockNode::PageBreak)
         } else if trimmed.starts_with("::: ") || trimmed == ":::" {
-            scan_div(body, &lines, line, offset, diagnostics)
+            scan_div(body, &lines, line, offset, diagnostics, budget, depth + 1)?
         } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            scan_fence(body, &lines, line, offset, diagnostics)
+            scan_fence(body, &lines, line, offset, diagnostics, budget)?
         } else if let Some((level, heading)) = heading_line(trimmed) {
             let (content, attributes) = split_trailing_attributes(heading);
             (
                 line,
                 BlockNode::Heading {
                     level,
-                    content: parse_inlines(content),
+                    content: parse_inlines(content, budget)?,
                     attributes,
                 },
             )
@@ -453,14 +542,14 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
                 line + 1,
                 BlockNode::Heading {
                     level,
-                    content: parse_inlines(content),
+                    content: parse_inlines(content, budget)?,
                     attributes,
                 },
             )
         } else if is_thematic_break(trimmed) {
             (line, BlockNode::ThematicBreak)
         } else if is_list_line(trimmed) {
-            scan_list(body, &lines, line)
+            scan_list(body, &lines, line, budget, depth + 1)?
         } else if trimmed.starts_with('>') {
             let last = consume_while(body, &lines, line, |value| {
                 value.trim().is_empty() || value.trim_start().starts_with('>')
@@ -519,12 +608,16 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
             let last = consume_paragraph(body, &lines, line);
             let raw = slice_lines(body, &lines, line, last);
             let content = raw.trim_end_matches(['\r', '\n']);
-            if has_unsupported_inline_html(content) {
+            if has_unsupported_inline_html(content) || has_reference_link(content, budget)? {
                 let source = raw.to_owned();
                 (
                     last,
                     BlockNode::Opaque {
-                        reason: "unsupported inline HTML".into(),
+                        reason: if has_unsupported_inline_html(content) {
+                            "unsupported inline HTML".into()
+                        } else {
+                            "reference links are preserved as opaque source".into()
+                        },
                         source,
                     },
                 )
@@ -533,7 +626,7 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
                 (
                     last,
                     BlockNode::Paragraph {
-                        content: parse_inlines(content),
+                        content: parse_inlines(content, budget)?,
                         attributes,
                     },
                 )
@@ -547,6 +640,7 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
         }
         let block_end = lines[trailing_line].end;
         let source = body[start..block_end].to_owned();
+        budget.block()?;
         result.push(Block {
             kind: block_kind(&node),
             range: offset + start..offset + block_end,
@@ -556,7 +650,7 @@ fn scan_blocks(body: &str, offset: usize, diagnostics: &mut Vec<Diagnostic>) -> 
         });
         line = trailing_line + 1;
     }
-    result
+    Ok(result)
 }
 
 fn line_ranges(source: &str) -> Vec<Range<usize>> {
@@ -582,30 +676,33 @@ fn scan_div(
     first: usize,
     offset: usize,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (usize, BlockNode) {
+    budget: &mut ParseBudget<'_>,
+    depth: usize,
+) -> Result<(usize, BlockNode), MarkdownError> {
     let opening = body[lines[first].clone()].trim();
     let Some(relative_close) = lines[first + 1..]
         .iter()
         .position(|range| body[range.clone()].trim() == ":::")
     else {
         let source = slice_lines(body, lines, first, lines.len() - 1).to_owned();
+        budget.diagnostic(diagnostics.len())?;
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             code: "unclosed-fenced-div",
             message: "fenced div has no closing `:::`".into(),
             range: offset + lines[first].start..offset + lines[first].end,
         });
-        return (
+        return Ok((
             lines.len() - 1,
             BlockNode::Opaque {
                 reason: "malformed fenced div".into(),
                 source,
             },
-        );
+        ));
     };
     let close = first + 1 + relative_close;
     let source = slice_lines(body, lines, first, close).to_owned();
-    let attributes = parse_attributes(opening.trim_start_matches(':').trim());
+    let attributes = parse_attributes(opening.trim_start_matches(':').trim()).unwrap_or_default();
     let alignment = attributes
         .extra
         .get("align")
@@ -621,28 +718,29 @@ fn scan_div(
         .iter()
         .any(|class| class == "parchmint-opaque")
     {
-        return (
+        return Ok((
             close,
             BlockNode::Opaque {
                 reason: "explicit opaque extension".into(),
                 source,
             },
-        );
+        ));
     }
     let Some(alignment) = alignment else {
+        budget.diagnostic(diagnostics.len())?;
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Warning,
             code: "unsupported-fenced-div",
             message: "unknown or malformed fenced div is protected as opaque source".into(),
             range: offset + lines[first].start..offset + lines[close].end,
         });
-        return (
+        return Ok((
             close,
             BlockNode::Opaque {
                 reason: "unsupported fenced div".into(),
                 source,
             },
-        );
+        ));
     };
     let inner_start = lines[first].end;
     let inner_end = lines[close].start;
@@ -650,15 +748,17 @@ fn scan_div(
         &body[inner_start..inner_end],
         offset + inner_start,
         diagnostics,
-    );
-    (
+        budget,
+        depth,
+    )?;
+    Ok((
         close,
         BlockNode::Alignment {
             alignment,
             attributes,
             children,
         },
-    )
+    ))
 }
 
 fn scan_fence(
@@ -667,66 +767,96 @@ fn scan_fence(
     first: usize,
     offset: usize,
     diagnostics: &mut Vec<Diagnostic>,
-) -> (usize, BlockNode) {
+    budget: &ParseBudget<'_>,
+) -> Result<(usize, BlockNode), MarkdownError> {
     let opening = body[lines[first].clone()].trim_end();
-    let marker = if opening.starts_with("~~~") {
-        "~~~"
-    } else {
-        "```"
-    };
+    let marker_char = opening.as_bytes().first().copied().unwrap_or(b'`');
+    let marker_len = opening
+        .bytes()
+        .take_while(|byte| *byte == marker_char)
+        .count();
     let close = lines[first + 1..]
         .iter()
-        .position(|range| body[range.clone()].trim_start().starts_with(marker))
+        .position(|range| {
+            let candidate = body[range.clone()].trim_start();
+            candidate
+                .bytes()
+                .take_while(|byte| *byte == marker_char)
+                .count()
+                >= marker_len
+                && candidate[marker_len..].trim().is_empty()
+        })
         .map(|relative| first + 1 + relative);
     let last = close.unwrap_or(lines.len() - 1);
     let source = slice_lines(body, lines, first, last).to_owned();
     if close.is_none() {
+        budget.diagnostic(diagnostics.len())?;
         diagnostics.push(Diagnostic {
             severity: DiagnosticSeverity::Error,
             code: "unclosed-code-fence",
             message: "code fence is not closed".into(),
             range: offset + lines[first].start..offset + lines[first].end,
         });
-        return (
+        return Ok((
             last,
             BlockNode::Opaque {
                 reason: "malformed code fence".into(),
                 source,
             },
-        );
+        ));
     }
-    let info = opening.trim_start_matches(marker).trim().to_owned();
+    let info = opening[marker_len..].trim().to_owned();
     if info.starts_with("{=parchmint-opaque") {
-        return (
+        return Ok((
             last,
             BlockNode::Opaque {
                 reason: "explicit opaque extension".into(),
                 source,
             },
-        );
+        ));
     }
     let text = body[lines[first].end..lines[last].start].to_owned();
-    (last, BlockNode::CodeBlock { info, text })
+    Ok((last, BlockNode::CodeBlock { info, text }))
 }
 
-fn scan_list(body: &str, lines: &[Range<usize>], first: usize) -> (usize, BlockNode) {
+fn scan_list(
+    body: &str,
+    lines: &[Range<usize>],
+    first: usize,
+    budget: &mut ParseBudget<'_>,
+    depth: usize,
+) -> Result<(usize, BlockNode), MarkdownError> {
     let mut items = Vec::new();
+    let first_line = body[lines[first].clone()].trim_end_matches(['\r', '\n']);
+    let base_indent = indentation(first_line);
+    let Some((first_prefix, _)) = split_list_marker(first_line) else {
+        unreachable!()
+    };
+    let ordered = first_prefix
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_digit);
+    let start_number = if ordered {
+        first_prefix
+            .trim_end_matches(['.', ')'])
+            .parse()
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    let mut index = first;
     let mut last = first;
-    let mut ordered = false;
-    let mut start_number = 1;
-    for (index, range) in lines.iter().enumerate().skip(first) {
-        let line = body[range.clone()].trim_end_matches(['\r', '\n']);
+    while index < lines.len() {
+        let line = body[lines[index].clone()].trim_end_matches(['\r', '\n']);
+        if indentation(line) != base_indent {
+            break;
+        }
         let Some((prefix, content)) = split_list_marker(line) else {
             break;
         };
-        if items.is_empty() {
-            ordered = prefix
-                .chars()
-                .next()
-                .is_some_and(|value| value.is_ascii_digit());
-            if ordered {
-                start_number = prefix.trim_end_matches(['.', ')']).parse().unwrap_or(1);
-            }
+        let is_ordered = prefix.as_bytes().first().is_some_and(u8::is_ascii_digit);
+        if is_ordered != ordered {
+            break;
         }
         let (checked, content) = if let Some(rest) = content.strip_prefix("[ ] ") {
             (Some(false), rest)
@@ -738,20 +868,76 @@ fn scan_list(body: &str, lines: &[Range<usize>], first: usize) -> (usize, BlockN
         } else {
             (None, content)
         };
+        index += 1;
+        let nested_start = index;
+        while index < lines.len() {
+            let candidate = body[lines[index].clone()].trim_end_matches(['\r', '\n']);
+            if candidate.trim().is_empty() {
+                let next = lines
+                    .get(index + 1)
+                    .map(|range| body[range.clone()].trim_end_matches(['\r', '\n']));
+                if next.is_some_and(|next| indentation(next) > base_indent) {
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            if indentation(candidate) <= base_indent {
+                break;
+            }
+            index += 1;
+        }
+        let children = if nested_start == index {
+            Vec::new()
+        } else {
+            let fragment =
+                deindent_list_fragment(body, lines, nested_start, index, base_indent + 2);
+            scan_blocks(&fragment, 0, &mut Vec::new(), budget, depth + 1)?
+                .into_iter()
+                .map(|block| block.node)
+                .collect()
+        };
         items.push(ListItem {
             checked,
-            content: parse_inlines(content),
+            content: parse_inlines(content, budget)?,
+            children,
         });
-        last = index;
+        last = index.saturating_sub(1).max(first);
     }
-    (
+    Ok((
         last,
         BlockNode::List {
             ordered,
             start: start_number,
             items,
         },
-    )
+    ))
+}
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start_matches([' ', '\t']).len()
+}
+
+fn deindent_list_fragment(
+    body: &str,
+    lines: &[Range<usize>],
+    first: usize,
+    end: usize,
+    amount: usize,
+) -> String {
+    let mut result = String::new();
+    for range in &lines[first..end] {
+        let line = &body[range.clone()];
+        let mut index = 0;
+        for (removed, character) in line.chars().enumerate() {
+            if removed == amount || !matches!(character, ' ' | '\t') {
+                break;
+            }
+            index += character.len_utf8();
+        }
+        result.push_str(&line[index..]);
+    }
+    result
 }
 
 fn split_list_marker(line: &str) -> Option<(&str, &str)> {
@@ -909,41 +1095,84 @@ fn split_trailing_attributes(text: &str) -> (&str, Attributes) {
     let trimmed = text.trim_end();
     if let Some(start) = trimmed.rfind(" {")
         && trimmed.ends_with('}')
+        && let Some(attributes) = parse_attributes(&trimmed[start + 1..])
+        && attributes != Attributes::default()
     {
-        let attributes = parse_attributes(&trimmed[start + 1..]);
-        if attributes != Attributes::default() {
-            return (&trimmed[..start], attributes);
-        }
+        return (&trimmed[..start], attributes);
     }
     (text, Attributes::default())
 }
 
-fn parse_attributes(source: &str) -> Attributes {
-    let source = source.trim().trim_start_matches('{').trim_end_matches('}');
+/// Parses only the documented Pandoc-compatible subset.  In particular,
+/// malformed quotes are rejected as a whole: consuming a plausible prefix
+/// would otherwise silently delete user text from a changed paragraph.
+fn parse_attributes(source: &str) -> Option<Attributes> {
+    let source = source.trim();
+    let source = source.strip_prefix('{')?.strip_suffix('}')?;
     let mut result = Attributes::default();
-    for token in split_attribute_tokens(source) {
+    for token in split_attribute_tokens(source)? {
         if let Some(id) = token.strip_prefix('#') {
+            if !valid_attribute_name(id) || result.id.is_some() {
+                return None;
+            }
             result.id = Some(id.to_owned());
         } else if let Some(class) = token.strip_prefix('.') {
+            if !valid_attribute_name(class) {
+                return None;
+            }
             result.classes.push(class.to_owned());
         } else if let Some((key, value)) = token.split_once('=') {
-            let value = value.trim_matches('"').to_owned();
-            if key == "style-id" {
-                result.style_id = Some(value);
-            } else {
-                result.extra.insert(key.to_owned(), value);
+            if !valid_attribute_name(key)
+                || !value.starts_with('"')
+                || !value.ends_with('"')
+                || value.len() < 2
+            {
+                return None;
             }
+            let value = decode_escapes(&value[1..value.len() - 1], &['\\', '"'])?;
+            if key == "style-id" {
+                if result.style_id.is_some() {
+                    return None;
+                }
+                result.style_id = Some(value);
+            } else if result.extra.insert(key.to_owned(), value).is_some() {
+                return None;
+            }
+        } else {
+            return None;
         }
     }
-    result
+    Some(result)
 }
 
-fn split_attribute_tokens(source: &str) -> Vec<String> {
+fn valid_attribute_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b':' | b'.')
+                || (index > 0 && byte == b'+')
+        })
+}
+
+fn split_attribute_tokens(source: &str) -> Option<Vec<String>> {
     let mut result = Vec::new();
     let mut current = String::new();
     let mut quoted = false;
+    let mut escaped = false;
     for character in source.chars() {
+        if escaped {
+            if !quoted || !matches!(character, '\\' | '"') {
+                return None;
+            }
+            current.push(character);
+            escaped = false;
+            continue;
+        }
         match character {
+            '\\' if quoted => {
+                current.push(character);
+                escaped = true;
+            }
             '"' => {
                 quoted = !quoted;
                 current.push(character);
@@ -956,196 +1185,456 @@ fn split_attribute_tokens(source: &str) -> Vec<String> {
             value => current.push(value),
         }
     }
+    if quoted || escaped {
+        return None;
+    }
     if !current.is_empty() {
         result.push(current);
     }
-    result
+    Some(result)
 }
 
-fn parse_inlines(source: &str) -> Vec<Inline> {
-    parse_inline_segment(source)
-}
-
-fn parse_inline_segment(mut source: &str) -> Vec<Inline> {
-    let mut result = Vec::new();
-    while !source.is_empty() {
-        if let Some((node, consumed)) = parse_delimited(source, "**", "**", Inline::Strong)
-            .or_else(|| parse_delimited(source, "__", "__", Inline::Strong))
-            .or_else(|| parse_delimited(source, "~~", "~~", Inline::Strikethrough))
-            .or_else(|| parse_delimited(source, "*", "*", Inline::Emphasis))
-            .or_else(|| parse_delimited(source, "_", "_", Inline::Emphasis))
-            .or_else(|| parse_delimited(source, "<sup>", "</sup>", Inline::Superscript))
-            .or_else(|| parse_delimited(source, "<sub>", "</sub>", Inline::Subscript))
-        {
-            result.push(node);
-            source = &source[consumed..];
+fn decode_escapes(value: &str, accepted: &[char]) -> Option<String> {
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            output.push(character);
             continue;
         }
-        if source.starts_with('`')
-            && let Some(end) = source[1..].find('`')
-        {
-            result.push(Inline::Code(source[1..=end].to_owned()));
-            source = &source[end + 2..];
-            continue;
+        let next = chars.next()?;
+        if !accepted.contains(&next) {
+            return None;
         }
-        if let Some((node, consumed)) = parse_autolink(source) {
-            result.push(node);
-            source = &source[consumed..];
-            continue;
-        }
-        if let Some((node, consumed)) =
-            parse_styled_span(source).or_else(|| parse_link_or_image(source))
-        {
-            result.push(node);
-            source = &source[consumed..];
-            continue;
-        }
-        if source.starts_with("  \n") || source.starts_with("\\\n") {
-            result.push(Inline::HardBreak);
-            source = source
-                .strip_prefix("  \n")
-                .or_else(|| source.strip_prefix("\\\n"))
-                .unwrap_or(source);
-            continue;
-        }
-        if source.starts_with('\n') {
-            result.push(Inline::SoftBreak);
-            source = &source[1..];
-            continue;
-        }
-        let next = next_inline_marker(source).unwrap_or(source.len()).max(1);
-        push_text(&mut result, &source[..next]);
-        source = &source[next..];
+        output.push(next);
     }
-    result
+    Some(output)
 }
 
-fn parse_autolink(source: &str) -> Option<(Inline, usize)> {
-    let tail = source.strip_prefix('<')?;
-    let end = tail.find('>')?;
-    let destination = &tail[..end];
-    if !(destination.starts_with("http://")
-        || destination.starts_with("https://")
-        || destination.starts_with("mailto:"))
-    {
-        return None;
-    }
-    let label = destination.strip_prefix("mailto:").unwrap_or(destination);
-    Some((
-        Inline::Link {
-            label: vec![Inline::Text(label.to_owned())],
-            destination: destination.to_owned(),
-            title: None,
-        },
-        end + 2,
-    ))
+fn parse_inlines(source: &str, budget: &mut ParseBudget<'_>) -> Result<Vec<Inline>, MarkdownError> {
+    parse_inlines_at_depth(source, budget, 0)
 }
 
-fn parse_styled_span(source: &str) -> Option<(Inline, usize)> {
-    let tail = source.strip_prefix('[')?;
-    let label_end = tail.find(']')?;
-    let attributes_source = tail[label_end + 1..].strip_prefix('{')?;
-    let attributes_end = attributes_source.find('}')?;
-    let attributes = parse_attributes(&attributes_source[..attributes_end]);
-    if !attributes
-        .classes
-        .iter()
-        .any(|class| class == "parchmint-style")
-    {
-        return None;
-    }
-    let consumed = 1 + label_end + 1 + 1 + attributes_end + 1;
-    Some((
-        Inline::Styled {
-            children: parse_inline_segment(&tail[..label_end]),
-            attributes,
-        },
-        consumed,
-    ))
-}
-
-fn parse_delimited(
+fn parse_inlines_at_depth(
     source: &str,
-    open: &str,
-    close: &str,
-    constructor: impl Fn(Vec<Inline>) -> Inline,
-) -> Option<(Inline, usize)> {
-    let tail = source.strip_prefix(open)?;
-    let end = tail.find(close)?;
-    if end == 0 {
-        return None;
-    }
-    Some((
-        constructor(parse_inline_segment(&tail[..end])),
-        open.len() + end + close.len(),
-    ))
+    budget: &mut ParseBudget<'_>,
+    depth: usize,
+) -> Result<Vec<Inline>, MarkdownError> {
+    let mut parser = InlineParser {
+        source,
+        position: 0,
+        budget,
+    };
+    let (values, _) = parser.segment(None, depth)?;
+    Ok(values)
 }
 
-fn parse_link_or_image(source: &str) -> Option<(Inline, usize)> {
-    let (image, tail, prefix) = if let Some(tail) = source.strip_prefix("![") {
-        (true, tail, 2)
-    } else {
-        (false, source.strip_prefix('[')?, 1)
-    };
-    let label_end = tail.find(']')?;
-    let label = &tail[..label_end];
-    let after_label = &tail[label_end + 1..];
-    let destination = after_label.strip_prefix('(')?;
-    let destination_end = destination.find(')')?;
-    let raw_destination = &destination[..destination_end];
-    let (destination, title) = if let Some((destination, title)) = raw_destination.split_once(" \"")
-    {
-        (destination, Some(title.trim_end_matches('"').to_owned()))
-    } else {
-        (raw_destination, None)
-    };
-    let consumed = prefix + label_end + 1 + 1 + destination_end + 1;
-    let mut node = if image {
-        Inline::Image {
-            alt: label.to_owned(),
-            destination: destination.to_owned(),
-            title,
-        }
-    } else {
-        Inline::Link {
-            label: parse_inline_segment(label),
-            destination: destination.to_owned(),
-            title,
-        }
-    };
-    if !image {
-        let rest = &source[consumed..];
-        if rest.starts_with('{')
-            && let Some(end) = rest.find('}')
-        {
-            let attributes = parse_attributes(&rest[..=end]);
-            if attributes
-                .classes
-                .iter()
-                .any(|class| class == "parchmint-style")
+struct InlineParser<'source, 'budget, 'options> {
+    source: &'source str,
+    position: usize,
+    budget: &'budget mut ParseBudget<'options>,
+}
+
+impl InlineParser<'_, '_, '_> {
+    fn segment(
+        &mut self,
+        terminator: Option<&str>,
+        depth: usize,
+    ) -> Result<(Vec<Inline>, bool), MarkdownError> {
+        self.budget.depth(depth)?;
+        let mut values = Vec::new();
+        while self.position < self.source.len() {
+            self.budget.delimiter_scan()?;
+            if let Some(terminator) = terminator
+                && self.is_closing(terminator)
             {
-                let Inline::Link {
-                    label: children, ..
-                } = node
-                else {
-                    unreachable!()
-                };
-                node = Inline::Styled {
+                self.position += terminator.len();
+                return Ok((values, true));
+            }
+            if self.remaining().starts_with("  \n") || self.remaining().starts_with("\\\n") {
+                self.position += 2;
+                values.push(Inline::HardBreak);
+                continue;
+            }
+            if self.remaining().starts_with('\n') {
+                self.position += 1;
+                values.push(Inline::SoftBreak);
+                continue;
+            }
+            if self.remaining().starts_with('\\') {
+                self.consume_escape(&mut values);
+                continue;
+            }
+            if self.remaining().starts_with('`')
+                && let Some(code) = self.code_span()?
+            {
+                values.push(Inline::Code(code));
+                continue;
+            }
+            if let Some(link) = self.autolink() {
+                values.push(link);
+                continue;
+            }
+            if let Some(link) = self.styled_or_link(depth)? {
+                values.push(link);
+                continue;
+            }
+            let mut node = self.delimited("**", depth, Inline::Strong)?;
+            if node.is_none() {
+                node = self.delimited("__", depth, Inline::Strong)?;
+            }
+            if node.is_none() {
+                node = self.delimited("~~", depth, Inline::Strikethrough)?;
+            }
+            if node.is_none() {
+                node = self.delimited("*", depth, Inline::Emphasis)?;
+            }
+            if node.is_none() {
+                node = self.delimited("_", depth, Inline::Emphasis)?;
+            }
+            if node.is_none() {
+                node = self.delimited("<sup>", depth, Inline::Superscript)?;
+            }
+            if node.is_none() {
+                node = self.delimited("<sub>", depth, Inline::Subscript)?;
+            }
+            if let Some(node) = node {
+                values.push(node);
+                continue;
+            }
+            self.push_current(&mut values);
+        }
+        Ok((values, false))
+    }
+
+    fn remaining(&self) -> &str {
+        &self.source[self.position..]
+    }
+
+    fn is_closing(&self, marker: &str) -> bool {
+        if !self.remaining().starts_with(marker) {
+            return false;
+        }
+        // A single `*` must not close an outer emphasis span at the start of
+        // a nested strong delimiter (`*a **b** c*`).
+        !(marker.len() == 1
+            && matches!(marker, "*" | "_")
+            && self.remaining().starts_with(&format!("{marker}{marker}")))
+    }
+
+    fn push_current(&mut self, values: &mut Vec<Inline>) {
+        let character = self.remaining().chars().next().expect("position is valid");
+        self.position += character.len_utf8();
+        push_text(values, &character.to_string());
+    }
+
+    fn consume_escape(&mut self, values: &mut Vec<Inline>) {
+        self.position += 1;
+        let Some(character) = self.remaining().chars().next() else {
+            push_text(values, "\\");
+            return;
+        };
+        if matches!(
+            character,
+            '\\' | '*' | '_' | '~' | '`' | '[' | ']' | '!' | '(' | ')' | '"'
+        ) {
+            self.position += character.len_utf8();
+            push_text(values, &character.to_string());
+        } else {
+            push_text(values, "\\");
+        }
+    }
+
+    fn delimited(
+        &mut self,
+        marker: &str,
+        depth: usize,
+        constructor: impl Fn(Vec<Inline>) -> Inline,
+    ) -> Result<Option<Inline>, MarkdownError> {
+        if !self.remaining().starts_with(marker) {
+            return Ok(None);
+        }
+        let checkpoint = self.position;
+        self.position += marker.len();
+        let (children, closed) = self.segment(Some(marker), depth + 1)?;
+        if closed && !children.is_empty() {
+            Ok(Some(constructor(children)))
+        } else {
+            self.position = checkpoint;
+            Ok(None)
+        }
+    }
+
+    fn code_span(&mut self) -> Result<Option<String>, MarkdownError> {
+        let checkpoint = self.position;
+        let count = self
+            .remaining()
+            .bytes()
+            .take_while(|byte| *byte == b'`')
+            .count();
+        self.position += count;
+        while self.position < self.source.len() {
+            self.budget.delimiter_scan()?;
+            if self.remaining().starts_with('`') {
+                let closing = self
+                    .remaining()
+                    .bytes()
+                    .take_while(|byte| *byte == b'`')
+                    .count();
+                if closing == count {
+                    let raw = &self.source[checkpoint + count..self.position];
+                    self.position += count;
+                    let normalized = raw.replace(['\r', '\n'], " ");
+                    return Ok(Some(normalize_code_span(&normalized)));
+                }
+                self.position += closing;
+                continue;
+            }
+            self.push_current(&mut Vec::new());
+        }
+        self.position = checkpoint;
+        Ok(None)
+    }
+
+    fn autolink(&mut self) -> Option<Inline> {
+        if !self.remaining().starts_with('<') {
+            return None;
+        }
+        let end = self.remaining().find('>')?;
+        let destination = self.remaining()[1..end].to_owned();
+        if !(destination.starts_with("http://")
+            || destination.starts_with("https://")
+            || destination.starts_with("mailto:"))
+        {
+            return None;
+        }
+        self.position += end + 1;
+        let label = destination.strip_prefix("mailto:").unwrap_or(&destination);
+        Some(Inline::Link {
+            label: vec![Inline::Text(label.to_owned())],
+            destination,
+            title: None,
+        })
+    }
+
+    fn styled_or_link(&mut self, depth: usize) -> Result<Option<Inline>, MarkdownError> {
+        let checkpoint = self.position;
+        let image = self.remaining().starts_with("![");
+        let open = if image {
+            2
+        } else if self.remaining().starts_with('[') {
+            1
+        } else {
+            return Ok(None);
+        };
+        self.position += open;
+        let Some(label_end) = self.find_unescaped(']')? else {
+            self.position = checkpoint;
+            return Ok(None);
+        };
+        let label = &self.source[checkpoint + open..label_end];
+        self.position = label_end + 1;
+        if !image
+            && self.remaining().starts_with('{')
+            && let Some(end) = self.remaining().find('}')
+        {
+            let attributes = parse_attributes(&self.remaining()[..=end]);
+            if let Some(attributes) = attributes.filter(|attributes| {
+                attributes
+                    .classes
+                    .iter()
+                    .any(|class| class == "parchmint-style")
+            }) {
+                let children = parse_inlines_at_depth(label, self.budget, depth + 1)?;
+                self.position += end + 1;
+                return Ok(Some(Inline::Styled {
                     children,
                     attributes,
-                };
-                return Some((node, consumed + end + 1));
+                }));
             }
         }
+        if !self.remaining().starts_with('(') {
+            self.position = checkpoint;
+            return Ok(None);
+        }
+        self.position += 1;
+        let content_start = self.position;
+        let Some(content_end) = self.find_link_close()? else {
+            self.position = checkpoint;
+            return Ok(None);
+        };
+        let raw = &self.source[content_start..content_end];
+        let Some((destination, title)) = parse_link_target(raw) else {
+            self.position = checkpoint;
+            return Ok(None);
+        };
+        self.position = content_end + 1;
+        if image {
+            let Some(alt) = decode_escapes(label, &['\\', '[', ']']) else {
+                self.position = checkpoint;
+                return Ok(None);
+            };
+            return Ok(Some(Inline::Image {
+                alt,
+                destination,
+                title,
+            }));
+        }
+        let children = parse_inlines_at_depth(label, self.budget, depth + 1)?;
+        let mut node = Inline::Link {
+            label: children,
+            destination,
+            title,
+        };
+        if self.remaining().starts_with('{')
+            && let Some(end) = self.remaining().find('}')
+            && let Some(attributes) =
+                parse_attributes(&self.remaining()[..=end]).filter(|attributes| {
+                    attributes
+                        .classes
+                        .iter()
+                        .any(|class| class == "parchmint-style")
+                })
+        {
+            let Inline::Link { label, .. } = node else {
+                unreachable!()
+            };
+            node = Inline::Styled {
+                children: label,
+                attributes,
+            };
+            self.position += end + 1;
+        }
+        let _ = depth;
+        Ok(Some(node))
     }
-    Some((node, consumed))
+
+    fn find_unescaped(&mut self, needle: char) -> Result<Option<usize>, MarkdownError> {
+        let mut escaped = false;
+        let mut cursor = self.position;
+        while cursor < self.source.len() {
+            self.budget.delimiter_scan()?;
+            let character = self.source[cursor..]
+                .chars()
+                .next()
+                .expect("cursor is valid");
+            if !escaped && character == needle {
+                return Ok(Some(cursor));
+            }
+            escaped = !escaped && character == '\\';
+            if character != '\\' {
+                escaped = false;
+            }
+            cursor += character.len_utf8();
+        }
+        Ok(None)
+    }
+
+    fn find_link_close(&mut self) -> Result<Option<usize>, MarkdownError> {
+        let mut depth = 0usize;
+        let mut escaped = false;
+        let mut quoted = false;
+        let mut cursor = self.position;
+        while cursor < self.source.len() {
+            self.budget.delimiter_scan()?;
+            let character = self.source[cursor..]
+                .chars()
+                .next()
+                .expect("cursor is valid");
+            if escaped {
+                escaped = false;
+                cursor += character.len_utf8();
+                continue;
+            }
+            if character == '\\' {
+                escaped = true;
+                cursor += 1;
+                continue;
+            }
+            if character == '"' {
+                quoted = !quoted;
+                cursor += 1;
+                continue;
+            }
+            if !quoted {
+                if character == '(' {
+                    depth += 1;
+                }
+                if character == ')' {
+                    if depth == 0 {
+                        return Ok(Some(cursor));
+                    }
+                    depth -= 1;
+                }
+            }
+            cursor += character.len_utf8();
+        }
+        Ok(None)
+    }
 }
 
-fn next_inline_marker(source: &str) -> Option<usize> {
-    ['*', '_', '~', '`', '[', '!', '<', '\n', '\\']
-        .iter()
-        .filter_map(|marker| source.find(*marker))
-        .min()
+fn normalize_code_span(value: &str) -> String {
+    if value.len() >= 2 && value.starts_with(' ') && value.ends_with(' ') && value.trim() != "" {
+        value[1..value.len() - 1].to_owned()
+    } else {
+        value.to_owned()
+    }
+}
+
+fn parse_link_target(raw: &str) -> Option<(String, Option<String>)> {
+    let mut escaped = false;
+    let mut split = None;
+    for (index, character) in raw.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character.is_ascii_whitespace() {
+            split = Some(index);
+            break;
+        }
+    }
+    let (destination, title) = match split {
+        None => (raw, None),
+        Some(index) => {
+            let destination = &raw[..index];
+            let rest = raw[index..].trim();
+            if !rest.starts_with('"') || !rest.ends_with('"') || rest.len() < 2 {
+                return None;
+            }
+            (
+                destination,
+                Some(decode_escapes(&rest[1..rest.len() - 1], &['\\', '"'])?),
+            )
+        }
+    };
+    Some((decode_escapes(destination, &['\\', '(', ')', ' '])?, title))
+}
+
+fn has_reference_link(source: &str, budget: &mut ParseBudget<'_>) -> Result<bool, MarkdownError> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        budget.delimiter_scan()?;
+        if bytes[cursor] == b'\\' {
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+        if bytes[cursor] == b'['
+            && let Some(close) = source[cursor + 1..].find(']')
+        {
+            let after = cursor + close + 2;
+            if bytes.get(after) == Some(&b'[') {
+                return Ok(true);
+            }
+        }
+        cursor += 1;
+    }
+    Ok(false)
 }
 
 fn push_text(result: &mut Vec<Inline>, text: &str) {
@@ -1160,7 +1649,8 @@ fn validate_extensions(
     blocks: &mut [Block],
     options: &ParseOptions,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), MarkdownError> {
     let mut ids = BTreeMap::<String, Range<usize>>::new();
     for block in blocks {
         let attributes = match &block.node {
@@ -1173,6 +1663,7 @@ fn validate_extensions(
             if let Some(id) = &attributes.id
                 && let Some(previous) = ids.insert(id.clone(), block.range.clone())
             {
+                budget.diagnostic(diagnostics.len())?;
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     code: "duplicate-id",
@@ -1183,14 +1674,15 @@ fn validate_extensions(
                     range: block.range.clone(),
                 });
             }
-            check_style(attributes, &block.range, options, diagnostics);
+            check_style(attributes, &block.range, options, diagnostics, budget)?;
         }
-        validate_inline_styles(&block.node, &block.range, options, diagnostics);
+        validate_inline_styles(&block.node, &block.range, options, diagnostics, budget)?;
         if block.node.is_opaque() {
             let message = match &block.node {
                 BlockNode::Opaque { reason, .. } => reason.clone(),
                 _ => unreachable!(),
             };
+            budget.diagnostic(diagnostics.len())?;
             diagnostics.push(Diagnostic {
                 severity: DiagnosticSeverity::Warning,
                 code: "opaque-block",
@@ -1199,6 +1691,7 @@ fn validate_extensions(
             });
         }
     }
+    Ok(())
 }
 
 fn validate_inline_styles(
@@ -1206,18 +1699,19 @@ fn validate_inline_styles(
     range: &Range<usize>,
     options: &ParseOptions,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), MarkdownError> {
     let inlines = match node {
         BlockNode::Paragraph { content, .. } | BlockNode::Heading { content, .. } => content,
         BlockNode::List { items, .. } => {
             for item in items {
-                walk_inline_styles(&item.content, range, options, diagnostics);
+                walk_inline_styles(&item.content, range, options, diagnostics, budget)?;
             }
-            return;
+            return Ok(());
         }
-        _ => return,
+        _ => return Ok(()),
     };
-    walk_inline_styles(inlines, range, options, diagnostics);
+    walk_inline_styles(inlines, range, options, diagnostics, budget)
 }
 
 fn walk_inline_styles(
@@ -1225,27 +1719,31 @@ fn walk_inline_styles(
     range: &Range<usize>,
     options: &ParseOptions,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), MarkdownError> {
     for value in values {
         match value {
             Inline::Styled {
                 children,
                 attributes,
             } => {
-                check_style(attributes, range, options, diagnostics);
-                walk_inline_styles(children, range, options, diagnostics);
+                check_style(attributes, range, options, diagnostics, budget)?;
+                walk_inline_styles(children, range, options, diagnostics, budget)?;
             }
             Inline::Emphasis(children)
             | Inline::Strong(children)
             | Inline::Strikethrough(children)
             | Inline::Superscript(children)
             | Inline::Subscript(children) => {
-                walk_inline_styles(children, range, options, diagnostics);
+                walk_inline_styles(children, range, options, diagnostics, budget)?;
             }
-            Inline::Link { label, .. } => walk_inline_styles(label, range, options, diagnostics),
+            Inline::Link { label, .. } => {
+                walk_inline_styles(label, range, options, diagnostics, budget)?;
+            }
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn check_style(
@@ -1253,22 +1751,27 @@ fn check_style(
     range: &Range<usize>,
     options: &ParseOptions,
     diagnostics: &mut Vec<Diagnostic>,
-) {
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), MarkdownError> {
     if attributes
         .classes
         .iter()
         .any(|class| class == "parchmint-style")
     {
         match &attributes.style_id {
-            None => diagnostics.push(Diagnostic {
-                severity: DiagnosticSeverity::Warning,
-                code: "missing-style-id",
-                message: "ParchMint style attribute has no stable style-id".into(),
-                range: range.clone(),
-            }),
+            None => {
+                budget.diagnostic(diagnostics.len())?;
+                diagnostics.push(Diagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    code: "missing-style-id",
+                    message: "ParchMint style attribute has no stable style-id".into(),
+                    range: range.clone(),
+                });
+            }
             Some(id)
                 if !options.known_style_ids.is_empty() && !options.known_style_ids.contains(id) =>
             {
+                budget.diagnostic(diagnostics.len())?;
                 diagnostics.push(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     code: "unknown-style-id",
@@ -1279,6 +1782,7 @@ fn check_style(
             _ => {}
         }
     }
+    Ok(())
 }
 
 fn block_kind(node: &BlockNode) -> BlockKind {
@@ -1390,38 +1894,18 @@ fn serialize_node(node: &BlockNode) -> String {
         | BlockNode::Footnote { source }
         | BlockNode::Opaque { source, .. } => ensure_block_spacing(source),
         BlockNode::CodeBlock { info, text } => {
+            let fence = markdown_fence(text);
             format!(
-                "```{info}\n{}{}```\n\n",
+                "{fence}{info}\n{}{}{fence}\n\n",
                 text,
-                if text.ends_with('\n') { "" } else { "\n" }
+                if text.ends_with('\n') { "" } else { "\n" },
             )
         }
         BlockNode::List {
             ordered,
             start,
             items,
-        } => {
-            let mut output = String::new();
-            for (index, item) in items.iter().enumerate() {
-                let marker = if *ordered {
-                    format!("{}.", start + u64::try_from(index).unwrap_or(0))
-                } else {
-                    "-".into()
-                };
-                let task = match item.checked {
-                    Some(true) => "[x] ",
-                    Some(false) => "[ ] ",
-                    None => "",
-                };
-                let _ = writeln!(
-                    output,
-                    "{marker} {task}{}",
-                    serialize_inlines(&item.content)
-                );
-            }
-            output.push('\n');
-            output
-        }
+        } => format!("{}\n", serialize_list(*ordered, *start, items, 0)),
         BlockNode::ThematicBreak => "---\n\n".into(),
         BlockNode::Alignment {
             alignment,
@@ -1452,6 +1936,46 @@ fn serialize_node(node: &BlockNode) -> String {
     }
 }
 
+fn serialize_list(ordered: bool, start: u64, items: &[ListItem], indent: usize) -> String {
+    let mut output = String::new();
+    let prefix = " ".repeat(indent);
+    for (index, item) in items.iter().enumerate() {
+        let marker = if ordered {
+            format!("{}.", start + u64::try_from(index).unwrap_or(0))
+        } else {
+            "-".into()
+        };
+        let task = match item.checked {
+            Some(true) => "[x] ",
+            Some(false) => "[ ] ",
+            None => "",
+        };
+        let _ = writeln!(
+            output,
+            "{prefix}{marker} {task}{}",
+            serialize_inlines(&item.content)
+        );
+        for child in &item.children {
+            match child {
+                BlockNode::List {
+                    ordered,
+                    start,
+                    items,
+                } => {
+                    output.push_str(&serialize_list(*ordered, *start, items, indent + 2));
+                }
+                other => {
+                    let rendered = serialize_node(other);
+                    for line in rendered.lines().filter(|line| !line.is_empty()) {
+                        let _ = writeln!(output, "{prefix}  {line}");
+                    }
+                }
+            }
+        }
+    }
+    output
+}
+
 fn serialize_inlines(inlines: &[Inline]) -> String {
     let mut output = String::new();
     for inline in inlines {
@@ -1467,8 +1991,13 @@ fn serialize_inlines(inlines: &[Inline]) -> String {
                 let _ = write!(output, "~~{}~~", serialize_inlines(children));
             }
             Inline::Code(text) => {
-                let fence = if text.contains('`') { "``" } else { "`" };
-                let _ = write!(output, "{fence}{text}{fence}");
+                let fence = inline_code_fence(text);
+                let padded = text.starts_with([' ', '`']) || text.ends_with([' ', '`']);
+                if padded {
+                    let _ = write!(output, "{fence} {text} {fence}");
+                } else {
+                    let _ = write!(output, "{fence}{text}{fence}");
+                }
             }
             Inline::Link {
                 label,
@@ -1482,7 +2011,7 @@ fn serialize_inlines(inlines: &[Inline]) -> String {
                     escape_destination(destination)
                 );
                 if let Some(title) = title {
-                    let _ = write!(output, " \"{}\"", title.replace('"', "\\\""));
+                    let _ = write!(output, " \"{}\"", escape_title(title));
                 }
                 output.push(')');
             }
@@ -1498,7 +2027,7 @@ fn serialize_inlines(inlines: &[Inline]) -> String {
                     escape_destination(destination)
                 );
                 if let Some(title) = title {
-                    let _ = write!(output, " \"{}\"", title.replace('"', "\\\""));
+                    let _ = write!(output, " \"{}\"", escape_title(title));
                 }
                 output.push(')');
             }
@@ -1554,7 +2083,7 @@ fn serialize_attributes(attributes: &Attributes, leading_space: bool) -> String 
 fn escape_text(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     for character in text.chars() {
-        if matches!(character, '\\' | '*' | '_' | '`' | '[' | ']') {
+        if matches!(character, '\\' | '*' | '_' | '~' | '`' | '[' | ']' | '!') {
             output.push('\\');
         }
         output.push(character);
@@ -1563,11 +2092,44 @@ fn escape_text(text: &str) -> String {
 }
 
 fn escape_destination(value: &str) -> String {
-    value.replace(' ', "%20").replace(')', "%29")
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '(' | ')' | ' ') {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
 }
 
 fn escape_attribute(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn escape_title(value: &str) -> String {
+    escape_attribute(value)
+}
+
+fn inline_code_fence(value: &str) -> String {
+    "`".repeat(max_backtick_run(value).saturating_add(1).max(1))
+}
+
+fn markdown_fence(value: &str) -> String {
+    "`".repeat(max_backtick_run(value).saturating_add(1).max(3))
+}
+
+fn max_backtick_run(value: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for byte in value.bytes() {
+        if byte == b'`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 fn ensure_block_spacing(source: &str) -> String {
@@ -1812,6 +2374,7 @@ mod tests {
             "A. {#same .parchmint-style}\n\nB. {#same .parchmint-style style-id=\"gone\"}\n";
         let options = ParseOptions {
             known_style_ids: BTreeSet::from(["present".into()]),
+            ..ParseOptions::default()
         };
         let document = Document::parse_body(source, &options).unwrap();
         let codes = document
@@ -1912,5 +2475,113 @@ mod tests {
         }
         assert_eq!(saved, source);
         assert!(saved.contains("café — 雪"));
+    }
+
+    #[test]
+    fn changed_supported_blocks_and_inlines_reach_a_semantic_fixed_point() {
+        let cases = [
+            "Paragraph with *emphasis*, **strong**, ~~strike~~, `code`, <sup>up</sup>, <sub>down</sub>, [link\\] label](a\\(b\\) c \"a \\\"title\\\"\") and [style **inner**]{.parchmint-style style-id=\"style\"}.\\n",
+            "# Heading {#heading .chapter}\n\n",
+            "> Quoted source\n\n",
+            "````rust\ncontains ``` and `` ticks\n````\n\n",
+            "3. first\n4. second\n\n",
+            "- parent\n  - child\n  - second child\n  continued paragraph\n- sibling\n\n",
+            "---\n\n",
+            "::: {.parchmint-align align=\"center\"}\nCentered *child*.\n:::\n\n",
+            "<!-- parchmint:page-break -->\n\n",
+        ];
+        for source in cases {
+            let mut document = Document::parse_body(source, &ParseOptions::default()).unwrap();
+            let expected = document.blocks()[0].node.clone();
+            document.replace_block(0, expected.clone()).unwrap();
+            let mut saved = document.serialize_body();
+            for _ in 0..20 {
+                let mut reparsed = Document::parse_body(&saved, &ParseOptions::default()).unwrap();
+                assert_eq!(reparsed.blocks()[0].node, expected, "{source}");
+                let replacement = reparsed.blocks()[0].node.clone();
+                reparsed.replace_block(0, replacement).unwrap();
+                saved = reparsed.serialize_body();
+            }
+        }
+    }
+
+    #[test]
+    fn inline_escapes_variable_code_spans_and_links_are_lossless_when_changed() {
+        let source = r#"\*literal\* \[brackets\] \\ path [label\]](a\(b\)\ c%20d \"a \\\"title\\\"\") and ``a ` b``
+"#;
+        let mut document = Document::parse_body(source, &ParseOptions::default()).unwrap();
+        let expected = document.blocks()[0].node.clone();
+        for _ in 0..20 {
+            document.replace_block(0, expected.clone()).unwrap();
+            document =
+                Document::parse_body(&document.serialize_body(), &ParseOptions::default()).unwrap();
+            assert_eq!(document.blocks()[0].node, expected);
+        }
+    }
+
+    #[test]
+    fn malformed_attributes_and_reference_links_remain_visible_source() {
+        let malformed = Document::parse_body(
+            "Keep {#valid title=\"unterminated}\n",
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        let BlockNode::Paragraph {
+            content,
+            attributes,
+        } = &malformed.blocks()[0].node
+        else {
+            panic!()
+        };
+        assert_eq!(
+            content,
+            &[Inline::Text("Keep {#valid title=\"unterminated}".into())]
+        );
+        assert_eq!(attributes, &Attributes::default());
+
+        let references =
+            Document::parse_body("[chapter][ref]\n", &ParseOptions::default()).unwrap();
+        assert!(references.blocks()[0].node.is_opaque());
+        assert_eq!(references.serialize_body(), "[chapter][ref]\n");
+    }
+
+    #[test]
+    fn parser_limits_are_typed_and_bound_recursive_input() {
+        let byte_limited = ParseOptions {
+            max_document_bytes: 3,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            Document::parse_body("four", &byte_limited),
+            Err(MarkdownError::ResourceLimit {
+                kind: "document-byte",
+                ..
+            })
+        ));
+
+        let depth_limited = ParseOptions {
+            max_inline_depth: 4,
+            ..ParseOptions::default()
+        };
+        let source = "*".repeat(20) + "text" + &"*".repeat(20);
+        assert!(matches!(
+            Document::parse_body(&source, &depth_limited),
+            Err(MarkdownError::ResourceLimit {
+                kind: "inline-depth",
+                ..
+            })
+        ));
+
+        let delimiter_limited = ParseOptions {
+            max_delimiter_scans: 8,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            Document::parse_body("x *x *x *x *x *x *x *x *x *x", &delimiter_limited),
+            Err(MarkdownError::ResourceLimit {
+                kind: "delimiter-scan",
+                ..
+            })
+        ));
     }
 }

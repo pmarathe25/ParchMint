@@ -15,7 +15,7 @@ double millimetres(int micrometres) {
 }  // namespace
 
 bool parchmint_render_pdf_qt(const QString& destination,
-                             const QString& text,
+                             const QString& html,
                              int width_micrometres,
                              int height_micrometres,
                              int margin_left_micrometres,
@@ -34,7 +34,11 @@ bool parchmint_render_pdf_qt(const QString& destination,
                         QPageLayout::Millimeter);
   QTextDocument document;
   document.setDocumentMargin(0);
-  document.setPlainText(text);
+  // Rust supplies a self-contained, sanitized HTML projection of the semantic
+  // compile IR. QTextDocument gives Qt's native Unicode shaping, paragraph
+  // styles, images, and page-break CSS semantics; this is deliberately not a
+  // canonical Markdown conversion path.
+  document.setHtml(html);
   const QRect page = writer.pageLayout().paintRectPixels(writer.resolution());
   document.setPageSize(page.size());
 

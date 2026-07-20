@@ -245,7 +245,12 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: backend.exportProject(exportFormat.currentValue, exportDestination.text)
+        onAccepted: {
+            if (backend.exportDestinationExists(exportDestination.text))
+                overwriteExportDialog.open()
+            else
+                backend.exportProjectWithOverwrite(exportFormat.currentValue, exportDestination.text, false)
+        }
         contentItem: GridLayout {
             columns: 2
             rowSpacing: DesignTokens.space3
@@ -280,6 +285,20 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
                 opacity: .7
             }
+        }
+    }
+
+    Dialog {
+        id: overwriteExportDialog
+        title: qsTr("Replace existing export?")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: backend.exportProjectWithOverwrite(exportFormat.currentValue, exportDestination.text, true)
+        contentItem: Label {
+            width: 420
+            wrapMode: Text.Wrap
+            text: qsTr("The existing file will remain unchanged until the new export validates. Replace it only if you are sure.")
         }
     }
 

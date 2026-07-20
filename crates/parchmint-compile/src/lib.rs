@@ -24,10 +24,11 @@ use parchmint_domain::{
 use parchmint_markdown::{
     Alignment, Attributes, Block, BlockNode, Document, Inline, ListItem, ParseOptions,
 };
-use parchmint_storage::{AttachmentRecord, OpenProject, atomic_write};
+use parchmint_storage::{AttachmentRecord, OpenProject};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -172,6 +173,7 @@ pub enum CompileInline {
 pub struct CompileListItem {
     pub checked: Option<bool>,
     pub content: Vec<CompileInline>,
+    pub children: Vec<CompileBlock>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -464,6 +466,7 @@ pub fn compile_with_progress(
             body,
             &ParseOptions {
                 known_style_ids: known_style_ids.clone(),
+                ..ParseOptions::default()
             },
         )
         .map_err(|error| CompileError::Markdown {
@@ -742,7 +745,17 @@ fn convert_block(
                 start: *start,
                 items: items
                     .iter()
-                    .map(|item| convert_list_item(input, preset, node_id, item, styles, warnings))
+                    .map(|item| {
+                        convert_list_item(
+                            input,
+                            preset,
+                            node_id,
+                            document_id,
+                            item,
+                            styles,
+                            warnings,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?,
             },
             None,
@@ -814,6 +827,7 @@ fn convert_list_item(
     input: &CompileInput,
     preset: &CompilePreset,
     node_id: NodeId,
+    document_id: DocumentId,
     item: &ListItem,
     styles: &mut BTreeMap<StyleId, ResolvedStyle>,
     warnings: &mut Vec<CompileWarning>,
@@ -821,6 +835,153 @@ fn convert_list_item(
     Ok(CompileListItem {
         checked: item.checked,
         content: convert_inlines(input, preset, node_id, &item.content, styles, warnings)?,
+        children: item
+            .children
+            .iter()
+            .map(|child| {
+                convert_list_child(input, preset, node_id, document_id, child, styles, warnings)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+/// List-item children have no independent source slice in the compact Markdown
+/// AST, but retain normal semantic compile blocks so every exporter can keep
+/// nesting and continuation boundaries.
+fn convert_list_child(
+    input: &CompileInput,
+    preset: &CompilePreset,
+    node_id: NodeId,
+    document_id: DocumentId,
+    node: &BlockNode,
+    styles: &mut BTreeMap<StyleId, ResolvedStyle>,
+    warnings: &mut Vec<CompileWarning>,
+) -> Result<CompileBlock, CompileError> {
+    let provenance = SourceProvenance::Generated {
+        node_id: Some(node_id),
+        document_id: Some(document_id),
+        role: "list-item-child",
+    };
+    let (kind, style) = match node {
+        BlockNode::Paragraph {
+            content,
+            attributes,
+        } => (
+            CompileBlockKind::Paragraph {
+                content: convert_inlines(input, preset, node_id, content, styles, warnings)?,
+                attributes: convert_attributes(attributes),
+            },
+            resolve_style(input, preset, node_id, attributes, styles, warnings)?,
+        ),
+        BlockNode::Heading {
+            level,
+            content,
+            attributes,
+        } => (
+            CompileBlockKind::Heading {
+                level: (*level).clamp(1, 6),
+                content: convert_inlines(input, preset, node_id, content, styles, warnings)?,
+                attributes: convert_attributes(attributes),
+            },
+            resolve_style(input, preset, node_id, attributes, styles, warnings)?,
+        ),
+        BlockNode::BlockQuote { source } => (
+            CompileBlockKind::BlockQuote {
+                source: source.clone(),
+            },
+            None,
+        ),
+        BlockNode::CodeBlock { info, text } => (
+            CompileBlockKind::CodeBlock {
+                info: info.clone(),
+                text: text.clone(),
+            },
+            None,
+        ),
+        BlockNode::List {
+            ordered,
+            start,
+            items,
+        } => (
+            CompileBlockKind::List {
+                ordered: *ordered,
+                start: *start,
+                items: items
+                    .iter()
+                    .map(|item| {
+                        convert_list_item(
+                            input,
+                            preset,
+                            node_id,
+                            document_id,
+                            item,
+                            styles,
+                            warnings,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            None,
+        ),
+        BlockNode::Table { source } => (
+            CompileBlockKind::Table {
+                source: source.clone(),
+            },
+            None,
+        ),
+        BlockNode::Footnote { source } => (
+            CompileBlockKind::Footnote {
+                source: source.clone(),
+            },
+            None,
+        ),
+        BlockNode::ThematicBreak => (CompileBlockKind::ThematicBreak, None),
+        BlockNode::PageBreak => (CompileBlockKind::PageBreak, None),
+        BlockNode::Opaque { reason, source } => {
+            warnings.push(CompileWarning {
+                kind: WarningKind::UnsupportedContent,
+                code: "opaque-markdown",
+                message: format!("Preserved unsupported source: {reason}"),
+                node_id: Some(node_id),
+            });
+            (
+                CompileBlockKind::Opaque {
+                    reason: reason.clone(),
+                    source: source.clone(),
+                },
+                None,
+            )
+        }
+        BlockNode::Alignment {
+            alignment,
+            attributes,
+            children,
+        } => (
+            CompileBlockKind::Alignment {
+                alignment: *alignment,
+                attributes: convert_attributes(attributes),
+                children: children
+                    .iter()
+                    .map(|child| {
+                        convert_list_child(
+                            input,
+                            preset,
+                            node_id,
+                            document_id,
+                            &child.node,
+                            styles,
+                            warnings,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            resolve_style(input, preset, node_id, attributes, styles, warnings)?,
+        ),
+    };
+    Ok(CompileBlock {
+        kind,
+        style,
+        provenance,
     })
 }
 
@@ -1106,6 +1267,19 @@ pub struct ExportReport {
     pub warnings: Vec<ExportWarning>,
 }
 
+/// Validated destination-adjacent output which has not touched the requested
+/// path.  It is intentionally opaque: only [`commit_prepared_export`] may
+/// install it, and dropping it removes the temporary artifact.
+#[derive(Debug)]
+pub struct PreparedExport {
+    format: ExportFormat,
+    destination: PathBuf,
+    collision: CollisionPolicy,
+    bytes: u64,
+    warnings: Vec<ExportWarning>,
+    artifact: tempfile::NamedTempFile,
+}
+
 #[derive(Debug, Error)]
 pub enum ExportError {
     #[error("export cancelled before destination replacement")]
@@ -1118,6 +1292,8 @@ pub enum ExportError {
     DirectoryReplacement(PathBuf),
     #[error("export output failed structural validation: {0}")]
     Validation(String),
+    #[error("export archive exceeds the supported non-ZIP64 limit: {0}")]
+    ArchiveLimit(String),
     #[error("could not prepare export destination {path}: {error}")]
     PrepareDestination {
         path: PathBuf,
@@ -1154,7 +1330,76 @@ pub fn export_cancellable(
     {
         return export_markdown_directory(ir, options, cancellation);
     }
-    validate_file_destination(options)?;
+    let prepared = prepare_export(ir, options, cancellation)?;
+    commit_prepared_export(prepared, cancellation)
+}
+
+/// Renders and structurally validates into a same-directory temporary file.
+/// The returned value is safe to carry from a worker to the UI owner; it has
+/// no effect on the destination until it is explicitly committed.
+pub fn prepare_export(
+    ir: &CompileIr,
+    options: &ExportOptions,
+    cancellation: &CancellationToken,
+) -> Result<PreparedExport, ExportError> {
+    if cancellation.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    if options.format == ExportFormat::Markdown
+        && options.markdown_output == MarkdownOutput::Directory
+    {
+        return Err(ExportError::InvalidDestination(options.destination.clone()));
+    }
+    let (bytes, warnings) = render_export_bytes(ir, options)?;
+    prepare_export_bytes(options, &bytes, warnings, cancellation)
+}
+
+/// Validates already-rendered bytes into the normal destination-adjacent
+/// transaction. The Qt bridge uses this for its owner-thread PDF renderer;
+/// it receives exactly the same collision and stale-work protections as Rust
+/// exporters.
+pub fn prepare_export_bytes(
+    options: &ExportOptions,
+    bytes: &[u8],
+    warnings: Vec<ExportWarning>,
+    cancellation: &CancellationToken,
+) -> Result<PreparedExport, ExportError> {
+    if cancellation.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    let parent = validate_file_destination(options)?;
+    validate_export(options.format, bytes)?;
+    if cancellation.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    let mut artifact = TempBuilder::new()
+        .prefix(".parchmint-export-")
+        .tempfile_in(&parent)
+        .map_err(|error| ExportError::PrepareDestination {
+            path: parent.clone(),
+            error,
+        })?;
+    artifact
+        .write_all(bytes)
+        .and_then(|()| artifact.as_file().sync_all())
+        .map_err(|error| ExportError::Write {
+            path: artifact.path().to_owned(),
+            error,
+        })?;
+    Ok(PreparedExport {
+        format: options.format,
+        destination: options.destination.clone(),
+        collision: options.collision,
+        bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        warnings,
+        artifact,
+    })
+}
+
+fn render_export_bytes(
+    ir: &CompileIr,
+    options: &ExportOptions,
+) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
     let (bytes, warnings) = match options.format {
         ExportFormat::Markdown => (render_markdown(ir).into_bytes(), Vec::new()),
         ExportFormat::PlainText => (
@@ -1166,26 +1411,62 @@ pub fn export_cancellable(
             (html.into_bytes(), warnings)
         }
         ExportFormat::Pdf => render_pdf(ir),
-        ExportFormat::Epub => render_epub(ir),
-        ExportFormat::Docx => render_docx(ir),
+        ExportFormat::Epub => render_epub(ir)?,
+        ExportFormat::Docx => render_docx(ir)?,
     };
+    Ok((bytes, warnings))
+}
+
+/// Performs the only destination mutation.  `Fail` uses an atomic hard-link
+/// installation, so an appearance race cannot turn it into an overwrite.
+/// `ReplaceFile` is intentionally a separate policy selected after explicit
+/// UI confirmation.
+pub fn commit_prepared_export(
+    prepared: PreparedExport,
+    cancellation: &CancellationToken,
+) -> Result<ExportReport, ExportError> {
     if cancellation.is_cancelled() {
         return Err(ExportError::Cancelled);
     }
-    validate_export(options.format, &bytes)?;
-    if cancellation.is_cancelled() {
-        return Err(ExportError::Cancelled);
+    if prepared.destination.is_dir() {
+        return Err(ExportError::InvalidDestination(prepared.destination));
     }
-    atomic_write(&options.destination, &bytes)?;
+    let destination = prepared.destination.clone();
+    let bytes = prepared.bytes;
+    let warnings = prepared.warnings.clone();
+    let format = prepared.format;
+    match prepared.collision {
+        CollisionPolicy::Fail => {
+            fs::hard_link(prepared.artifact.path(), &destination).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    ExportError::DestinationExists(destination.clone())
+                } else {
+                    ExportError::Write {
+                        path: destination.clone(),
+                        error,
+                    }
+                }
+            })?;
+        }
+        CollisionPolicy::ReplaceFile => {
+            prepared
+                .artifact
+                .persist(&destination)
+                .map_err(|error| ExportError::Write {
+                    path: destination.clone(),
+                    error: error.error,
+                })?;
+        }
+    }
     Ok(ExportReport {
-        format: options.format,
-        destination: options.destination.clone(),
-        bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        format,
+        destination,
+        bytes,
         warnings,
     })
 }
 
-fn validate_file_destination(options: &ExportOptions) -> Result<(), ExportError> {
+fn validate_file_destination(options: &ExportOptions) -> Result<PathBuf, ExportError> {
     let destination = &options.destination;
     let Some(parent) = destination
         .parent()
@@ -1200,13 +1481,10 @@ fn validate_file_destination(options: &ExportOptions) -> Result<(), ExportError>
         path: parent.to_owned(),
         error,
     })?;
-    if destination.exists() && options.collision == CollisionPolicy::Fail {
-        return Err(ExportError::DestinationExists(destination.clone()));
-    }
     if destination.is_dir() {
         return Err(ExportError::InvalidDestination(destination.clone()));
     }
-    Ok(())
+    Ok(parent.to_owned())
 }
 
 fn export_markdown_directory(
@@ -1313,32 +1591,17 @@ fn markdown_block(block: &CompileBlock) -> String {
         | CompileBlockKind::Footnote { source }
         | CompileBlockKind::Opaque { source, .. } => spaced(source),
         CompileBlockKind::CodeBlock { info, text } => format!(
-            "```{info}\n{}{}```\n\n",
+            "{}{info}\n{}{}{}\n\n",
+            markdown_fence(text),
             text,
-            if text.ends_with('\n') { "" } else { "\n" }
+            if text.ends_with('\n') { "" } else { "\n" },
+            markdown_fence(text),
         ),
         CompileBlockKind::List {
             ordered,
             start,
             items,
-        } => {
-            let mut result = String::new();
-            for (index, item) in items.iter().enumerate() {
-                let marker = if *ordered {
-                    format!("{}.", start + u64::try_from(index).unwrap_or(0))
-                } else {
-                    "-".into()
-                };
-                let task = match item.checked {
-                    Some(true) => "[x] ",
-                    Some(false) => "[ ] ",
-                    None => "",
-                };
-                let _ = writeln!(result, "{marker} {task}{}", markdown_inlines(&item.content));
-            }
-            result.push('\n');
-            result
-        }
+        } => format!("{}\n", markdown_list(*ordered, *start, items, 0)),
         CompileBlockKind::ThematicBreak | CompileBlockKind::SceneBreak => "---\n\n".into(),
         CompileBlockKind::PageBreak => "<!-- parchmint:page-break -->\n\n".into(),
         CompileBlockKind::Alignment {
@@ -1370,6 +1633,46 @@ fn markdown_block(block: &CompileBlock) -> String {
     }
 }
 
+fn markdown_list(ordered: bool, start: u64, items: &[CompileListItem], indent: usize) -> String {
+    let mut result = String::new();
+    let prefix = " ".repeat(indent);
+    for (index, item) in items.iter().enumerate() {
+        let marker = if ordered {
+            format!("{}.", start + u64::try_from(index).unwrap_or(0))
+        } else {
+            "-".into()
+        };
+        let task = match item.checked {
+            Some(true) => "[x] ",
+            Some(false) => "[ ] ",
+            None => "",
+        };
+        let _ = writeln!(
+            result,
+            "{prefix}{marker} {task}{}",
+            markdown_inlines(&item.content)
+        );
+        for child in &item.children {
+            if let CompileBlockKind::List {
+                ordered,
+                start,
+                items,
+            } = &child.kind
+            {
+                result.push_str(&markdown_list(*ordered, *start, items, indent + 2));
+                continue;
+            }
+            for line in markdown_block(child)
+                .lines()
+                .filter(|line| !line.is_empty())
+            {
+                let _ = writeln!(result, "{prefix}  {line}");
+            }
+        }
+    }
+    result
+}
+
 fn markdown_inlines(inlines: &[CompileInline]) -> String {
     let mut result = String::new();
     for inline in inlines {
@@ -1385,8 +1688,12 @@ fn markdown_inlines(inlines: &[CompileInline]) -> String {
                 let _ = write!(result, "~~{}~~", markdown_inlines(children));
             }
             CompileInline::Code(text) => {
-                let fence = if text.contains('`') { "``" } else { "`" };
-                let _ = write!(result, "{fence}{text}{fence}");
+                let fence = markdown_inline_fence(text);
+                if text.starts_with([' ', '`']) || text.ends_with([' ', '`']) {
+                    let _ = write!(result, "{fence} {text} {fence}");
+                } else {
+                    let _ = write!(result, "{fence}{text}{fence}");
+                }
             }
             CompileInline::Link {
                 label,
@@ -1397,10 +1704,10 @@ fn markdown_inlines(inlines: &[CompileInline]) -> String {
                     result,
                     "[{}]({}",
                     markdown_inlines(label),
-                    destination.replace(')', "\\)")
+                    markdown_destination(destination)
                 );
                 if let Some(title) = title {
-                    let _ = write!(result, " \"{}\"", title.replace('"', "\\\""));
+                    let _ = write!(result, " \"{}\"", markdown_quoted(title));
                 }
                 result.push(')');
             }
@@ -1413,11 +1720,11 @@ fn markdown_inlines(inlines: &[CompileInline]) -> String {
                 let _ = write!(
                     result,
                     "![{}]({}",
-                    alt.replace(']', "\\]"),
-                    destination.replace(')', "\\)")
+                    markdown_text(alt),
+                    markdown_destination(destination)
                 );
                 if let Some(title) = title {
-                    let _ = write!(result, " \"{}\"", title.replace('"', "\\\""));
+                    let _ = write!(result, " \"{}\"", markdown_quoted(title));
                 }
                 result.push(')');
             }
@@ -1457,8 +1764,48 @@ fn markdown_text(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('*', "\\*")
         .replace('_', "\\_")
+        .replace('~', "\\~")
+        .replace('`', "\\`")
         .replace('[', "\\[")
         .replace(']', "\\]")
+        .replace('!', "\\!")
+}
+
+fn markdown_destination(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        if matches!(character, '\\' | '(' | ')' | ' ') {
+            output.push('\\');
+        }
+        output.push(character);
+    }
+    output
+}
+
+fn markdown_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn markdown_inline_fence(value: &str) -> String {
+    "`".repeat(markdown_backtick_run(value).saturating_add(1).max(1))
+}
+
+fn markdown_fence(value: &str) -> String {
+    "`".repeat(markdown_backtick_run(value).saturating_add(1).max(3))
+}
+
+fn markdown_backtick_run(value: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for byte in value.bytes() {
+        if byte == b'`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 fn markdown_attributes(attributes: &CompileAttributes, leading_space: bool) -> String {
@@ -1470,12 +1817,12 @@ fn markdown_attributes(attributes: &CompileAttributes, leading_space: bool) -> S
         values.push(format!("#{id}"));
     }
     values.extend(attributes.classes.iter().map(|class| format!(".{class}")));
-    values.extend(attributes.extra.iter().map(|(key, value)| {
-        format!(
-            "{key}=\"{}\"",
-            value.replace('\\', "\\\\").replace('"', "\\\"")
-        )
-    }));
+    values.extend(
+        attributes
+            .extra
+            .iter()
+            .map(|(key, value)| format!("{key}=\"{}\"", markdown_quoted(value))),
+    );
     format!(
         "{}{{{}}}",
         if leading_space { " " } else { "" },
@@ -1518,11 +1865,7 @@ fn plain_block(block: &CompileBlock) -> String {
         | CompileBlockKind::Table { source }
         | CompileBlockKind::Footnote { source }
         | CompileBlockKind::Opaque { source, .. } => source.clone(),
-        CompileBlockKind::List { items, .. } => items
-            .iter()
-            .map(|item| format!("• {}", plain_inlines(&item.content)))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        CompileBlockKind::List { items, .. } => plain_list(items, 0),
         CompileBlockKind::ThematicBreak | CompileBlockKind::SceneBreak => "***".into(),
         CompileBlockKind::PageBreak => "\u{c}".into(),
         CompileBlockKind::Alignment { children, .. } => children
@@ -1531,6 +1874,29 @@ fn plain_block(block: &CompileBlock) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
     }
+}
+
+fn plain_list(items: &[CompileListItem], indent: usize) -> String {
+    let mut output = String::new();
+    for item in items {
+        let _ = writeln!(
+            output,
+            "{}• {}",
+            " ".repeat(indent),
+            plain_inlines(&item.content)
+        );
+        for child in &item.children {
+            match &child.kind {
+                CompileBlockKind::List { items, .. } => {
+                    output.push_str(&plain_list(items, indent + 2));
+                }
+                _ => {
+                    let _ = writeln!(output, "{}{}", " ".repeat(indent + 2), plain_block(child));
+                }
+            }
+        }
+    }
+    output.trim_end().to_owned()
 }
 
 fn plain_inlines(inlines: &[CompileInline]) -> String {
@@ -1722,6 +2088,9 @@ fn html_block(
                     );
                 }
                 html_inlines(output, &item.content, ir, asset_mode, warnings);
+                for child in &item.children {
+                    html_block(output, child, ir, asset_mode, warnings);
+                }
                 output.push_str("</li>\n");
             }
             output.push_str(if *ordered { "</ol>\n" } else { "</ul>\n" });
@@ -2133,7 +2502,7 @@ fn dedupe_warnings(mut warnings: Vec<ExportWarning>) -> Vec<ExportWarning> {
     warnings
 }
 
-fn render_epub(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
+fn render_epub(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
     let mut warnings = Vec::new();
     let mut body = String::new();
     for block in &ir.blocks {
@@ -2213,7 +2582,7 @@ fn render_epub(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
         manifest
     );
     files.push(("OEBPS/content.opf".into(), opf.into_bytes()));
-    (zip_store(files), dedupe_warnings(warnings))
+    Ok((zip_store(files)?, dedupe_warnings(warnings)))
 }
 
 fn epub_nav(ir: &CompileIr) -> String {
@@ -2228,17 +2597,22 @@ fn epub_nav(ir: &CompileIr) -> String {
 
 fn append_epub_nav(blocks: &[CompileBlock], result: &mut String, heading_index: &mut usize) {
     for block in blocks {
-        let label = match &block.kind {
-            CompileBlockKind::Title { text } => Some(text.clone()),
-            CompileBlockKind::Heading { content, .. } => Some(plain_inlines(content)),
-            _ => None,
+        let (label, explicit_id) = match &block.kind {
+            CompileBlockKind::Title { text } => (Some(text.clone()), None),
+            CompileBlockKind::Heading {
+                content,
+                attributes,
+                ..
+            } => (Some(plain_inlines(content)), attributes.id.clone()),
+            _ => (None, None),
         };
         if let Some(label) = label {
             *heading_index += 1;
+            let id = explicit_id.unwrap_or_else(|| format!("section-{}", *heading_index));
             let _ = write!(
                 result,
-                "<li><a href=\"text/book.xhtml#section-{}\">{}</a></li>",
-                *heading_index,
+                "<li><a href=\"text/book.xhtml#{}\">{}</a></li>",
+                xml_escape(&id),
                 xml_escape(&label)
             );
         }
@@ -2314,11 +2688,28 @@ fn xml_escape(value: &str) -> String {
 /// Uncompressed deterministic ZIP writer. EPUB requires `mimetype` to be the
 /// first entry and uncompressed; using store mode for every entry makes both
 /// EPUB and golden DOCX output deterministic without a platform zlib binding.
-fn zip_store(files: Vec<(String, Vec<u8>)>) -> Vec<u8> {
+fn zip_store(files: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, ExportError> {
     let mut output = Vec::new();
     let mut entries = Vec::new();
     for (name, data) in files {
-        let offset = u32::try_from(output.len()).unwrap_or(u32::MAX);
+        if entries.len() >= usize::from(u16::MAX) {
+            return Err(ExportError::ArchiveLimit(
+                "more than 65,535 entries requires ZIP64".into(),
+            ));
+        }
+        if name.len() > usize::from(u16::MAX) {
+            return Err(ExportError::ArchiveLimit(format!(
+                "entry name exceeds 65,535 bytes: {name}"
+            )));
+        }
+        if data.len() > usize::try_from(u32::MAX).unwrap_or(usize::MAX) {
+            return Err(ExportError::ArchiveLimit(format!(
+                "entry exceeds 4 GiB: {name}"
+            )));
+        }
+        let offset = u32::try_from(output.len()).map_err(|_| {
+            ExportError::ArchiveLimit("archive offset exceeds 4 GiB; ZIP64 is required".into())
+        })?;
         let crc = crc32(&data);
         let name_bytes = name.as_bytes();
         push_u32(&mut output, 0x0403_4b50);
@@ -2328,18 +2719,24 @@ fn zip_store(files: Vec<(String, Vec<u8>)>) -> Vec<u8> {
         push_u16(&mut output, 0);
         push_u16(&mut output, 33);
         push_u32(&mut output, crc);
-        push_u32(&mut output, u32::try_from(data.len()).unwrap_or(u32::MAX));
-        push_u32(&mut output, u32::try_from(data.len()).unwrap_or(u32::MAX));
+        let size = u32::try_from(data.len())
+            .map_err(|_| ExportError::ArchiveLimit(format!("entry exceeds 4 GiB: {name}")))?;
+        push_u32(&mut output, size);
+        push_u32(&mut output, size);
         push_u16(
             &mut output,
-            u16::try_from(name_bytes.len()).unwrap_or(u16::MAX),
+            u16::try_from(name_bytes.len()).map_err(|_| {
+                ExportError::ArchiveLimit(format!("entry name exceeds 65,535 bytes: {name}"))
+            })?,
         );
         push_u16(&mut output, 0);
         output.extend_from_slice(name_bytes);
         output.extend_from_slice(&data);
         entries.push((name, crc, data.len(), offset));
     }
-    let central_offset = u32::try_from(output.len()).unwrap_or(u32::MAX);
+    let central_offset = u32::try_from(output.len()).map_err(|_| {
+        ExportError::ArchiveLimit("archive offset exceeds 4 GiB; ZIP64 is required".into())
+    })?;
     for (name, crc, size, offset) in &entries {
         let name_bytes = name.as_bytes();
         push_u32(&mut output, 0x0201_4b50);
@@ -2350,11 +2747,15 @@ fn zip_store(files: Vec<(String, Vec<u8>)>) -> Vec<u8> {
         push_u16(&mut output, 0);
         push_u16(&mut output, 33);
         push_u32(&mut output, *crc);
-        push_u32(&mut output, u32::try_from(*size).unwrap_or(u32::MAX));
-        push_u32(&mut output, u32::try_from(*size).unwrap_or(u32::MAX));
+        let size = u32::try_from(*size)
+            .map_err(|_| ExportError::ArchiveLimit(format!("entry exceeds 4 GiB: {name}")))?;
+        push_u32(&mut output, size);
+        push_u32(&mut output, size);
         push_u16(
             &mut output,
-            u16::try_from(name_bytes.len()).unwrap_or(u16::MAX),
+            u16::try_from(name_bytes.len()).map_err(|_| {
+                ExportError::ArchiveLimit(format!("entry name exceeds 65,535 bytes: {name}"))
+            })?,
         );
         push_u16(&mut output, 0);
         push_u16(&mut output, 0);
@@ -2364,24 +2765,23 @@ fn zip_store(files: Vec<(String, Vec<u8>)>) -> Vec<u8> {
         push_u32(&mut output, *offset);
         output.extend_from_slice(name_bytes);
     }
-    let central_size = u32::try_from(output.len())
-        .unwrap_or(u32::MAX)
-        .saturating_sub(central_offset);
+    let central_end = u32::try_from(output.len()).map_err(|_| {
+        ExportError::ArchiveLimit("central directory exceeds 4 GiB; ZIP64 is required".into())
+    })?;
+    let central_size = central_end
+        .checked_sub(central_offset)
+        .ok_or_else(|| ExportError::ArchiveLimit("invalid central directory size".into()))?;
     push_u32(&mut output, 0x0605_4b50);
     push_u16(&mut output, 0);
     push_u16(&mut output, 0);
-    push_u16(
-        &mut output,
-        u16::try_from(entries.len()).unwrap_or(u16::MAX),
-    );
-    push_u16(
-        &mut output,
-        u16::try_from(entries.len()).unwrap_or(u16::MAX),
-    );
+    let count = u16::try_from(entries.len())
+        .map_err(|_| ExportError::ArchiveLimit("more than 65,535 entries requires ZIP64".into()))?;
+    push_u16(&mut output, count);
+    push_u16(&mut output, count);
     push_u32(&mut output, central_size);
     push_u32(&mut output, central_offset);
     push_u16(&mut output, 0);
-    output
+    Ok(output)
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {
@@ -2406,7 +2806,7 @@ fn crc32(bytes: &[u8]) -> u32 {
     !crc
 }
 
-fn render_docx(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
+fn render_docx(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
     let mut renderer = DocxRenderer::new(ir);
     for block in &ir.blocks {
         renderer.block(block);
@@ -2421,18 +2821,19 @@ fn render_docx(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
         ("docProps/app.xml".into(), b"<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\"><Application>ParchMint</Application></Properties>".to_vec()),
         ("word/document.xml".into(), document.into_bytes()),
         ("word/styles.xml".into(), styles.into_bytes()),
-        ("word/numbering.xml".into(), docx_numbering().into_bytes()),
+        ("word/numbering.xml".into(), docx_numbering(&renderer.numbering).into_bytes()),
         ("word/_rels/document.xml.rels".into(), renderer.relationships_xml().into_bytes()),
     ];
     for image in &renderer.images {
         files.push((format!("word/media/{}", image.name), image.bytes.clone()));
     }
-    (zip_store(files), dedupe_warnings(renderer.warnings))
+    Ok((zip_store(files)?, dedupe_warnings(renderer.warnings)))
 }
 
 #[derive(Clone, Debug)]
 struct DocxImage {
     name: String,
+    media_type: String,
     bytes: Vec<u8>,
 }
 
@@ -2445,6 +2846,7 @@ struct DocxRenderer<'a> {
     warnings: Vec<ExportWarning>,
     next_relation: usize,
     next_drawing: usize,
+    numbering: Vec<(u32, bool, u64)>,
 }
 
 impl<'a> DocxRenderer<'a> {
@@ -2464,6 +2866,7 @@ impl<'a> DocxRenderer<'a> {
             warnings: Vec::new(),
             next_relation: 2,
             next_drawing: 1,
+            numbering: Vec::new(),
         }
     }
 
@@ -2486,10 +2889,25 @@ impl<'a> DocxRenderer<'a> {
             }
             CompileBlockKind::BlockQuote { source } => self.preformatted(source, Some("Quote")),
             CompileBlockKind::CodeBlock { text, .. } => self.preformatted(text, Some("Code")),
-            CompileBlockKind::List { ordered, items, .. } => {
+            CompileBlockKind::List {
+                ordered,
+                start,
+                items,
+            } => {
+                let number = self.new_numbering(*ordered, *start);
                 for item in items {
-                    let num = if *ordered { 1 } else { 2 };
-                    self.paragraph(&item.content, None, None, Some(num));
+                    self.paragraph(
+                        &item.content,
+                        None,
+                        None,
+                        Some(i32::try_from(number).unwrap_or(i32::MAX)),
+                    );
+                    // OOXML still receives each nested block rather than
+                    // silently dropping it. Nested list levels are rendered
+                    // through their own numbering instance below.
+                    for child in &item.children {
+                        self.block(child);
+                    }
                 }
             }
             CompileBlockKind::Table { source } | CompileBlockKind::Footnote { source } => {
@@ -2550,6 +2968,14 @@ impl<'a> DocxRenderer<'a> {
         }
     }
 
+    fn new_numbering(&mut self, ordered: bool, start: u64) -> u32 {
+        // `0` is reserved by OOXML; every canonical list gets its own `num`
+        // instance so separated ordered lists never continue one another.
+        let id = u32::try_from(self.numbering.len() + 1).unwrap_or(u32::MAX);
+        self.numbering.push((id, ordered, start));
+        id
+    }
+
     /// `number_or_alignment` reserves negative values for a paragraph
     /// justification request, keeping this renderer deliberately small.
     fn paragraph(
@@ -2560,11 +2986,12 @@ impl<'a> DocxRenderer<'a> {
         number_or_alignment: Option<i32>,
     ) {
         self.body.push_str("<w:p><w:pPr>");
-        if let Some(name) = builtin_style {
-            let _ = write!(self.body, "<w:pStyle w:val=\"{}\"/>", xml_escape(name));
-        }
-        if let Some(style) = style.filter(|style| style.kind == StyleKind::Paragraph) {
-            let _ = write!(self.body, "<w:pStyle w:val=\"{}\"/>", docx_style_id(style));
+        if let Some(name) = style
+            .filter(|style| style.kind == StyleKind::Paragraph)
+            .map(docx_style_id)
+            .or_else(|| builtin_style.map(str::to_owned))
+        {
+            let _ = write!(self.body, "<w:pStyle w:val=\"{}\"/>", xml_escape(&name));
         }
         match number_or_alignment {
             Some(number) if number > 0 => {
@@ -2593,37 +3020,58 @@ impl<'a> DocxRenderer<'a> {
     }
 
     fn inlines(&mut self, inlines: &[CompileInline], inherited_style: Option<&ResolvedStyle>) {
+        self.inlines_with_format(inlines, inherited_style, false, false, false, false, false);
+    }
+
+    fn inlines_with_format(
+        &mut self,
+        inlines: &[CompileInline],
+        inherited_style: Option<&ResolvedStyle>,
+        bold: bool,
+        italic: bool,
+        strike: bool,
+        super_script: bool,
+        sub_script: bool,
+    ) {
         for inline in inlines {
             match inline {
                 CompileInline::Text(text) | CompileInline::Code(text) => {
-                    self.run(text, inherited_style, false, false, false, false, false);
+                    self.run(
+                        text,
+                        inherited_style,
+                        bold,
+                        italic,
+                        strike,
+                        super_script,
+                        sub_script,
+                    );
                 }
                 CompileInline::Emphasis(children) => self.inlines_with_format(
                     children,
                     inherited_style,
-                    false,
+                    bold,
                     true,
-                    false,
-                    false,
-                    false,
+                    strike,
+                    super_script,
+                    sub_script,
                 ),
                 CompileInline::Strong(children) => self.inlines_with_format(
                     children,
                     inherited_style,
                     true,
-                    false,
-                    false,
-                    false,
-                    false,
+                    italic,
+                    strike,
+                    super_script,
+                    sub_script,
                 ),
                 CompileInline::Strikethrough(children) => self.inlines_with_format(
                     children,
                     inherited_style,
-                    false,
-                    false,
+                    bold,
+                    italic,
                     true,
-                    false,
-                    false,
+                    super_script,
+                    sub_script,
                 ),
                 CompileInline::Link {
                     label, destination, ..
@@ -2631,10 +3079,26 @@ impl<'a> DocxRenderer<'a> {
                     if safe_html_href(destination) {
                         let relation = self.external_relation(destination);
                         let _ = write!(self.body, "<w:hyperlink r:id=\"{relation}\">");
-                        self.inlines(label, inherited_style);
+                        self.inlines_with_format(
+                            label,
+                            inherited_style,
+                            bold,
+                            italic,
+                            strike,
+                            super_script,
+                            sub_script,
+                        );
                         self.body.push_str("</w:hyperlink>");
                     } else {
-                        self.inlines(label, inherited_style);
+                        self.inlines_with_format(
+                            label,
+                            inherited_style,
+                            bold,
+                            italic,
+                            strike,
+                            super_script,
+                            sub_script,
+                        );
                         self.warnings.push(ExportWarning {
                             code: "docx-unsafe-link-suppressed",
                             message: format!("Unsafe link was rendered as text: {destination}"),
@@ -2650,47 +3114,35 @@ impl<'a> DocxRenderer<'a> {
                 CompileInline::Superscript(children) => self.inlines_with_format(
                     children,
                     inherited_style,
-                    false,
-                    false,
-                    false,
+                    bold,
+                    italic,
+                    strike,
                     true,
                     false,
                 ),
                 CompileInline::Subscript(children) => self.inlines_with_format(
                     children,
                     inherited_style,
-                    false,
-                    false,
-                    false,
+                    bold,
+                    italic,
+                    strike,
                     false,
                     true,
                 ),
                 CompileInline::Styled {
                     children, style, ..
-                } => self.inlines(children, style.as_ref().or(inherited_style)),
+                } => self.inlines_with_format(
+                    children,
+                    style.as_ref().or(inherited_style),
+                    bold,
+                    italic,
+                    strike,
+                    super_script,
+                    sub_script,
+                ),
                 CompileInline::SoftBreak | CompileInline::HardBreak => {
                     self.body.push_str("<w:r><w:br/></w:r>");
                 }
-            }
-        }
-    }
-
-    fn inlines_with_format(
-        &mut self,
-        children: &[CompileInline],
-        style: Option<&ResolvedStyle>,
-        bold: bool,
-        italic: bool,
-        strike: bool,
-        super_script: bool,
-        sub_script: bool,
-    ) {
-        for child in children {
-            match child {
-                CompileInline::Text(text) | CompileInline::Code(text) => {
-                    self.run(text, style, bold, italic, strike, super_script, sub_script);
-                }
-                _ => self.inlines(std::slice::from_ref(child), style),
             }
         }
     }
@@ -2754,14 +3206,17 @@ impl<'a> DocxRenderer<'a> {
                 });
                 return;
             };
-            if !asset.media_type.starts_with("image/") {
+            let Some(extension) = docx_image_extension(&asset.media_type) else {
                 self.run(alt, None, false, false, false, false, false);
                 self.warnings.push(ExportWarning {
                     code: "docx-unsupported-image",
-                    message: format!("Asset is not an embeddable image: {}", asset.safe_name),
+                    message: format!(
+                        "DOCX cannot embed `{}` as {}; visible alt text was retained",
+                        asset.safe_name, asset.media_type
+                    ),
                 });
                 return;
-            }
+            };
             let Ok(bytes) = fs::read(&asset.source_path) else {
                 self.run(alt, None, false, false, false, false, false);
                 self.warnings.push(ExportWarning {
@@ -2770,13 +3225,15 @@ impl<'a> DocxRenderer<'a> {
                 });
                 return;
             };
+            let image_name = format!("image-{}.{}", self.images.len() + 1, extension);
             let relation = self.add_relation(
                 "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-                format!("media/{}", asset.safe_name),
+                format!("media/{image_name}"),
                 false,
             );
             self.images.push(DocxImage {
-                name: asset.safe_name.clone(),
+                name: image_name,
+                media_type: asset.media_type.clone(),
                 bytes,
             });
             self.image_relations.insert(asset_id, relation.clone());
@@ -2912,8 +3369,26 @@ fn docx_styles(ir: &CompileIr) -> String {
     output
 }
 
-fn docx_numbering() -> String {
-    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"•\"/></w:lvl></w:abstractNum><w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num><w:num w:numId=\"2\"><w:abstractNumId w:val=\"1\"/></w:num></w:numbering>".into()
+fn docx_numbering(instances: &[(u32, bool, u64)]) -> String {
+    let mut output = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:numbering xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:abstractNum w:abstractNumId=\"0\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"decimal\"/><w:lvlText w:val=\"%1.\"/></w:lvl></w:abstractNum><w:abstractNum w:abstractNumId=\"1\"><w:lvl w:ilvl=\"0\"><w:start w:val=\"1\"/><w:numFmt w:val=\"bullet\"/><w:lvlText w:val=\"•\"/></w:lvl></w:abstractNum>",
+    );
+    for (id, ordered, start) in instances {
+        let abstract_id = i32::from(!*ordered);
+        let _ = write!(
+            output,
+            "<w:num w:numId=\"{id}\"><w:abstractNumId w:val=\"{abstract_id}\"/>"
+        );
+        if *ordered && *start != 1 {
+            let _ = write!(
+                output,
+                "<w:lvlOverride w:ilvl=\"0\"><w:startOverride w:val=\"{start}\"/></w:lvlOverride>"
+            );
+        }
+        output.push_str("</w:num>");
+    }
+    output.push_str("</w:numbering>");
+    output
 }
 
 fn docx_content_types(images: &[DocxImage]) -> String {
@@ -2921,25 +3396,26 @@ fn docx_content_types(images: &[DocxImage]) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/><Default Extension=\"png\" ContentType=\"image/png\"/><Default Extension=\"jpg\" ContentType=\"image/jpeg\"/><Default Extension=\"jpeg\" ContentType=\"image/jpeg\"/><Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/><Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/><Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/><Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/><Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>",
     );
     for image in images {
-        if Path::new(&image.name)
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|extension| {
-                !matches!(
-                    extension.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg"
-                )
-            })
-        {
-            let _ = write!(
-                output,
-                "<Override PartName=\"/word/media/{}\" ContentType=\"application/octet-stream\"/>",
-                xml_escape(&image.name)
-            );
-        }
+        let _ = write!(
+            output,
+            "<Override PartName=\"/word/media/{}\" ContentType=\"{}\"/>",
+            xml_escape(&image.name),
+            xml_escape(&image.media_type),
+        );
     }
     output.push_str("</Types>");
     output
+}
+
+fn docx_image_extension(media_type: &str) -> Option<&'static str> {
+    match media_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpeg"),
+        "image/gif" => Some("gif"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        _ => None,
+    }
 }
 
 fn docx_core_properties(ir: &CompileIr) -> String {
@@ -3034,7 +3510,136 @@ pub fn validate_epub(bytes: &[u8]) -> Result<(), String> {
     if !archive.contains_key("OEBPS/nav.xhtml") {
         return Err("EPUB lacks navigation document".into());
     }
+    validate_epub_references(&archive)?;
     Ok(())
+}
+
+/// Validates every generated local `src`/`href` after URI percent decoding and
+/// path normalization. This catches the easy-to-miss distinction between a
+/// ZIP member path and a path resolved from `text/book.xhtml`.
+fn validate_epub_references(archive: &BTreeMap<String, &[u8]>) -> Result<(), String> {
+    for (member, bytes) in archive {
+        if !matches!(
+            Path::new(member)
+                .extension()
+                .and_then(|value| value.to_str()),
+            Some("xhtml" | "xml" | "opf")
+        ) {
+            continue;
+        }
+        let source = std::str::from_utf8(bytes)
+            .map_err(|_| format!("EPUB member is not UTF-8: {member}"))?;
+        for value in xml_uri_values(source) {
+            validate_epub_uri(member, &value, archive)?;
+        }
+    }
+    Ok(())
+}
+
+fn xml_uri_values(source: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for attribute in ["href", "src"] {
+        let needle = format!("{attribute}=\"");
+        let mut rest = source;
+        while let Some(start) = rest.find(&needle) {
+            let tail = &rest[start + needle.len()..];
+            let Some(end) = tail.find('"') else {
+                break;
+            };
+            values.push(tail[..end].replace("&amp;", "&"));
+            rest = &tail[end + 1..];
+        }
+    }
+    values
+}
+
+fn validate_epub_uri(
+    member: &str,
+    value: &str,
+    archive: &BTreeMap<String, &[u8]>,
+) -> Result<(), String> {
+    if allowed_external_uri(value) {
+        return Ok(());
+    }
+    let (location, fragment) = value
+        .split_once('#')
+        .map_or((value, None), |(path, fragment)| (path, Some(fragment)));
+    let target = if location.is_empty() {
+        member.to_owned()
+    } else {
+        resolve_epub_member(member, location)?
+    };
+    let bytes = archive.get(&target).ok_or_else(|| {
+        format!("EPUB reference `{value}` in `{member}` has no archive member `{target}`")
+    })?;
+    if let Some(fragment) = fragment {
+        let fragment = percent_decode(fragment)
+            .ok_or_else(|| format!("EPUB reference has invalid percent escape: `{value}`"))?;
+        let source = std::str::from_utf8(bytes)
+            .map_err(|_| format!("EPUB fragment target is not UTF-8: {target}"))?;
+        let id = format!("id=\"{}\"", fragment.replace('"', "&quot;"));
+        if !source.contains(&id) {
+            return Err(format!(
+                "EPUB fragment `#{fragment}` in `{value}` does not exist in `{target}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn allowed_external_uri(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://") || value.starts_with("mailto:")
+}
+
+fn resolve_epub_member(base: &str, value: &str) -> Result<String, String> {
+    if value.starts_with('/') || value.contains('?') {
+        return Err(format!(
+            "EPUB local URI is not a relative archive member: `{value}`"
+        ));
+    }
+    let value = percent_decode(value)
+        .ok_or_else(|| format!("EPUB URI has invalid percent escape: `{value}`"))?;
+    if value.contains('\\') {
+        return Err(format!("EPUB URI contains a platform separator: `{value}`"));
+    }
+    let mut parts = base.split('/').collect::<Vec<_>>();
+    parts.pop();
+    for part in value.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(format!("EPUB URI escapes archive root: `{value}`"));
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn percent_decode(value: &str) -> Option<String> {
+    let mut output = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            output.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let high = *bytes.get(index + 1)?;
+        let low = *bytes.get(index + 2)?;
+        let digit = |value: u8| match value {
+            b'0'..=b'9' => Some(value - b'0'),
+            b'a'..=b'f' => Some(value - b'a' + 10),
+            b'A'..=b'F' => Some(value - b'A' + 10),
+            _ => None,
+        };
+        output.push(digit(high)? * 16 + digit(low)?);
+        index += 3;
+    }
+    String::from_utf8(output).ok()
 }
 
 /// Checks the OOXML package parts required by Word/LibreOffice before the
@@ -3332,7 +3937,7 @@ mod tests {
         validate_html(html.as_bytes()).unwrap();
         let (pdf, _) = render_pdf(&ir);
         validate_pdf(&pdf).unwrap();
-        let (epub, _) = render_epub(&ir);
+        let (epub, _) = render_epub(&ir).unwrap();
         validate_epub(&epub).unwrap();
         let epub_parts = parse_store_zip(&epub).unwrap();
         assert!(
@@ -3340,10 +3945,10 @@ mod tests {
                 .unwrap()
                 .contains("id=\"section-1\"")
         );
-        assert_eq!(epub, render_epub(&ir).0);
-        let (docx, _) = render_docx(&ir);
+        assert_eq!(epub, render_epub(&ir).unwrap().0);
+        let (docx, _) = render_docx(&ir).unwrap();
         validate_docx(&docx).unwrap();
-        assert_eq!(docx, render_docx(&ir).0);
+        assert_eq!(docx, render_docx(&ir).unwrap().0);
     }
 
     #[test]
@@ -3387,6 +3992,61 @@ mod tests {
             &parchmint_markdown::ParseOptions::default(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn nested_list_boundaries_survive_compile_and_combined_markdown_export() {
+        let (_directory, mut input, scene, _) = fixture();
+        let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
+        input.bodies.insert(
+            document_id,
+            "3. parent\n   - child\n   - second\n4. sibling\n".into(),
+        );
+        let (ir, _) = compile(
+            &input,
+            &CompilePreset::manuscript("Manuscript"),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        let markdown = render_markdown(&ir);
+        assert!(
+            markdown.contains("3. parent\n  - child\n  - second\n4. sibling"),
+            "{markdown}"
+        );
+        let parsed = parchmint_markdown::Document::parse_body(
+            &markdown,
+            &parchmint_markdown::ParseOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            parsed
+                .blocks()
+                .iter()
+                .any(|block| matches!(block.node, BlockNode::List { .. }))
+        );
+    }
+
+    #[test]
+    fn docx_uses_distinct_list_instances_and_keeps_nested_run_formatting() {
+        let (_directory, mut input, scene, _) = fixture();
+        let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
+        input.bodies.insert(
+            document_id,
+            "1. *outer **inner***\n\n1. second list\n".into(),
+        );
+        let (ir, _) = compile(
+            &input,
+            &CompilePreset::manuscript("Manuscript"),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        let (docx, _) = render_docx(&ir).unwrap();
+        let parts = parse_store_zip(&docx).unwrap();
+        let numbering = std::str::from_utf8(parts["word/numbering.xml"]).unwrap();
+        assert!(numbering.contains("w:numId=\"1\""));
+        assert!(numbering.contains("w:numId=\"2\""));
+        let document = std::str::from_utf8(parts["word/document.xml"]).unwrap();
+        assert!(document.contains("<w:b/><w:i/>"), "{document}");
     }
 
     #[test]
@@ -3456,7 +4116,7 @@ mod tests {
             },
         });
 
-        let (epub, warnings) = render_epub(&ir);
+        let (epub, warnings) = render_epub(&ir).unwrap();
         assert!(
             !warnings
                 .iter()
@@ -3495,5 +4155,39 @@ mod tests {
         replacement.collision = CollisionPolicy::ReplaceFile;
         export(&ir, &replacement).unwrap();
         assert_ne!(fs::read_to_string(&destination).unwrap(), "original");
+    }
+
+    #[test]
+    fn prepared_exports_do_not_touch_stale_or_racing_destinations() {
+        let (directory, input, _, _) = fixture();
+        let (ir, _) = compile(
+            &input,
+            &CompilePreset::manuscript("Manuscript"),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        let destination = directory.path().join("transaction.md");
+        let options = ExportOptions::file(ExportFormat::Markdown, &destination);
+
+        let cancelled = CancellationToken::default();
+        let prepared = prepare_export(&ir, &options, &cancelled).unwrap();
+        cancelled.cancel();
+        assert!(matches!(
+            commit_prepared_export(prepared, &cancelled),
+            Err(ExportError::Cancelled)
+        ));
+        assert!(!destination.exists());
+
+        let active = CancellationToken::default();
+        let prepared = prepare_export(&ir, &options, &active).unwrap();
+        fs::write(&destination, "appeared after preparation").unwrap();
+        assert!(matches!(
+            commit_prepared_export(prepared, &active),
+            Err(ExportError::DestinationExists(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "appeared after preparation"
+        );
     }
 }

@@ -135,7 +135,13 @@ impl DocumentSession {
             .keys()
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
-        let semantic = Document::parse_body(body, &ParseOptions { known_style_ids })?;
+        let semantic = Document::parse_body(
+            body,
+            &ParseOptions {
+                known_style_ids,
+                ..ParseOptions::default()
+            },
+        )?;
         Ok(Self {
             document_id,
             project_root: opened.root().to_owned(),

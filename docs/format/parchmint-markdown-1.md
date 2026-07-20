@@ -56,7 +56,7 @@ identified in WYSIWYG mode. Attribute output order is `id`, class names,
 | Super/subscript | `<sup>…</sup>`, `<sub>…</sub>` | Character vertical alignment |
 | Links | `[label](destination "title")` | `http`, `https`, `mailto`, relative, and `asset` destinations |
 | Images | `![alt](asset:<uuid> "title")` | Project asset identity is the destination |
-| Lists/tasks | CommonMark markers and GFM tasks | List and checked state are semantic |
+| Lists/tasks | CommonMark markers and GFM tasks | List boundaries, ordered starts, nesting, continuations, and checked state are semantic |
 | Block quotes | CommonMark `>` | Source-aware supported block |
 | Code | Indented or fenced code | Info string and text are retained |
 | Tables | GFM pipe table | Source-aware supported block |
@@ -69,8 +69,13 @@ identified in WYSIWYG mode. Attribute output order is `id`, class names,
 Untouched supported blocks retain their exact UTF-8 source slice. A block that
 is semantically edited is reconstructed deterministically with two trailing
 newlines, ATX headings, `-` unordered markers, sequential `.` ordered markers,
-backtick fences, and the attribute ordering above. Repeated parse/serialize
-cycles are stable.
+collision-resistant backtick fences, and the attribute ordering above. The
+inline codec is escape-aware: it decodes only the backslash escapes emitted by
+the serializer, leaves percent escapes in destinations unchanged, supports
+escaped link brackets/parentheses and quoted titles, and reaches a semantic
+fixed point after one serialization. Reference links remain source-backed
+opaque content until a lossless reference-definition representation exists.
+Malformed attribute quotes are not partially consumed.
 
 ## Diagnostics and unsupported input
 
@@ -86,3 +91,7 @@ cycles are stable.
   nodes with diagnostics so raw mode retains the complete buffer.
 - Returning from raw mode is forbidden after a hard parse error until the user
   fixes the buffer or explicitly discards it.
+- The default hostile-input limits are 16 MiB source bytes, 100,000 blocks,
+  inline/fenced-div depth 64, 1,000,000 delimiter inspections, and 1,024
+  retained diagnostics. Crossing a limit returns a typed resource-limit error;
+  it never recurses without a bounded depth.

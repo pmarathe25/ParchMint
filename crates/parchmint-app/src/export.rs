@@ -7,8 +7,8 @@
 //! revision before presenting success.
 
 use parchmint_compile::{
-    CancellationToken, CompileError, CompileInput, ExportError, ExportOptions, ExportReport,
-    compile, export_cancellable,
+    CancellationToken, CompileError, CompileInput, CompileIr, ExportError, ExportOptions,
+    PreparedExport, compile, prepare_export,
 };
 use parchmint_domain::{CompilePreset, WorkStamp};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -22,12 +22,26 @@ pub struct CompileExportJob {
     pub preset: CompilePreset,
     pub options: ExportOptions,
     pub cancellation: CancellationToken,
+    /// PDF is rendered by the Qt owner after Rust compilation. All other
+    /// formats are fully prepared on this worker.
+    pub defer_pdf_render_to_ui: bool,
+}
+
+/// Worker result before a destination is committed.
+pub enum CompileExportOutput {
+    Prepared(PreparedExport),
+    Compiled {
+        ir: Box<CompileIr>,
+        options: ExportOptions,
+    },
 }
 
 /// Completion delivered without touching a Qt object on the worker thread.
 pub struct CompileExportCompletion {
     pub stamp: WorkStamp,
-    pub outcome: Result<ExportReport, CompileExportError>,
+    /// A validated temporary artifact. The UI owner compares the stamp and
+    /// commits it; workers never mutate the requested destination.
+    pub outcome: Result<CompileExportOutput, CompileExportError>,
 }
 
 /// Typed distinction between compiler and destination/export failures.
@@ -95,8 +109,16 @@ fn export_worker_loop(
         let outcome = compile(&job.input, &job.preset, &job.cancellation)
             .map_err(CompileExportError::Compile)
             .and_then(|(ir, _warnings)| {
-                export_cancellable(&ir, &job.options, &job.cancellation)
-                    .map_err(CompileExportError::Export)
+                if job.defer_pdf_render_to_ui {
+                    Ok(CompileExportOutput::Compiled {
+                        ir: Box::new(ir),
+                        options: job.options,
+                    })
+                } else {
+                    prepare_export(&ir, &job.options, &job.cancellation)
+                        .map(CompileExportOutput::Prepared)
+                        .map_err(CompileExportError::Export)
+                }
             });
         if results
             .send(CompileExportCompletion {
