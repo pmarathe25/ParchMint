@@ -63,7 +63,7 @@ pub struct RelativeProjectPath(String);
 impl RelativeProjectPath {
     /// Validates a portable relative path. Storage additionally rejects symlink escape.
     pub fn new(value: impl Into<String>) -> Result<Self, ProjectError> {
-        let value = value.into();
+        let value = value.into().replace('\\', "/");
         let path = Path::new(&value);
         if value.is_empty()
             || path.is_absolute()
@@ -73,7 +73,7 @@ impl RelativeProjectPath {
         {
             return Err(ProjectError::UnsafePath(value));
         }
-        Ok(Self(value.replace('\\', "/")))
+        Ok(Self(value))
     }
     /// Returns the portable slash-separated representation.
     pub fn as_str(&self) -> &str {
@@ -756,8 +756,7 @@ impl Project {
                 parent,
                 index,
             } => {
-                let tombstone = self
-                    .trash
+                self.trash
                     .remove(&node)
                     .ok_or(ProjectError::NotTrashed(node))?;
                 self.active_parent(parent)?;
@@ -771,8 +770,8 @@ impl Project {
                     undo: StructuralUndo {
                         inverse: ProjectCommand::TrashAt {
                             node,
-                            parent: tombstone.parent,
-                            index: tombstone.index,
+                            parent,
+                            index,
                         },
                     },
                 })
@@ -1695,6 +1694,7 @@ mod tests {
     #[test]
     fn style_cycles_and_path_traversal_are_rejected() {
         assert!(RelativeProjectPath::new("../outside").is_err());
+        assert!(RelativeProjectPath::new(r"..\..\outside.md").is_err());
         let mut project = Project::new("Novel");
         let a = StyleDefinition {
             id: StyleId::new(),
@@ -1735,6 +1735,31 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn restore_to_a_new_parent_can_be_undone_and_redone() {
+        let mut project = Project::new("Novel");
+        let manuscript = project.manuscript_root();
+        let research = project.research_root();
+        let node = create(&mut project, manuscript, "Scene");
+
+        project.execute(ProjectCommand::Trash { node }).unwrap();
+        let undo_restore = project
+            .execute(ProjectCommand::Restore {
+                node,
+                parent: research,
+                index: 0,
+            })
+            .unwrap()
+            .undo;
+        let redo_restore = project.execute(undo_restore.inverse).unwrap().undo;
+        assert!(project.is_trashed(node));
+
+        project.execute(redo_restore.inverse).unwrap();
+        assert_eq!(project.nodes[&node].parent, Some(research));
+        assert_eq!(project.nodes[&research].children, [node]);
+        project.validate().unwrap();
     }
     #[test]
     fn randomized_style_rename_inheritance_and_replacement_remain_resolvable() {

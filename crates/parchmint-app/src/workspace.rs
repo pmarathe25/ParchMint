@@ -456,6 +456,18 @@ impl ProjectWorkspace {
         node: Option<NodeId>,
         view: PaneView,
     ) -> Result<(), WorkspaceError> {
+        if let Some(node) = node
+            && self
+                .preferences
+                .panes
+                .iter()
+                .enumerate()
+                .any(|(other, pane)| other != index && pane.node == Some(node))
+        {
+            return Err(WorkspaceError::Invariant(
+                "document is already open in the other pane",
+            ));
+        }
         let pane = self
             .preferences
             .panes
@@ -480,6 +492,17 @@ impl ProjectWorkspace {
         let index = usize::from(self.preferences.focused_pane.min(1));
         if self.preferences.panes[index].pinned {
             return Ok(false);
+        }
+        if let Some((existing, _)) = self
+            .preferences
+            .panes
+            .iter()
+            .enumerate()
+            .find(|(pane, state)| *pane != index && state.node == Some(node))
+        {
+            self.preferences.focused_pane = u8::try_from(existing).unwrap_or(0);
+            self.save_preferences()?;
+            return Ok(true);
         }
         let view = preferred_view_for_node(&self.opened.project, node);
         self.open_in_pane(index, Some(node), view)?;
@@ -1172,10 +1195,18 @@ impl ProjectWorkspace {
             .get(&node)
             .cloned()
             .ok_or(ProjectError::NotTrashed(node))?;
+        let index = self
+            .opened
+            .project
+            .nodes
+            .get(&tombstone.parent)
+            .map_or(tombstone.index, |parent| {
+                tombstone.index.min(parent.children.len())
+            });
         self.apply(ProjectCommand::Restore {
             node,
             parent: tombstone.parent,
-            index: tombstone.index,
+            index,
         })?;
         self.select([node]);
         Ok(())
@@ -1630,6 +1661,22 @@ mod tests {
     }
 
     #[test]
+    fn restore_clamps_a_stale_sibling_index() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Restore").unwrap();
+        let root = workspace.project().manuscript_root();
+        let first = workspace.create_node(root, "First", false).unwrap();
+        let second = workspace.create_node(root, "Second", false).unwrap();
+
+        workspace.trash(second).unwrap();
+        workspace.trash(first).unwrap();
+        workspace.restore(second).unwrap();
+
+        assert_eq!(workspace.project().nodes[&root].children, [second]);
+        workspace.project().validate().unwrap();
+    }
+
+    #[test]
     fn before_after_inside_and_cycle_errors_leave_snapshot_authoritative() {
         let directory = tempdir().unwrap();
         let mut workspace = ProjectWorkspace::create(directory.path(), "Moves").unwrap();
@@ -1785,6 +1832,14 @@ mod tests {
         workspace
             .open_in_pane(1, Some(note), PaneView::Editor)
             .unwrap();
+        assert!(
+            workspace
+                .open_in_pane(0, Some(note), PaneView::Editor)
+                .is_err()
+        );
+        workspace.focus_pane(0).unwrap();
+        assert!(workspace.navigate_focused_pane(note).unwrap());
+        assert_eq!(workspace.preferences().focused_pane, 1);
         workspace
             .set_split(true, SplitOrientation::Vertical, 620)
             .unwrap();

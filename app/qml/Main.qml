@@ -596,6 +596,7 @@ ApplicationWindow {
             anchors.leftMargin: DesignTokens.space3
             anchors.rightMargin: DesignTokens.space3
             Label { text: backend.export_in_progress ? backend.export_status : (window.transientMessage.length ? window.transientMessage : qsTr("Local-first · structural changes are saved canonically")); Layout.fillWidth: true; elide: Text.ElideRight }
+            Label { text: backend.save_status; Accessible.name: qsTr("Save status") + ": " + text }
             Label { text: qsTr("%1 visible · %2 selected").arg(backend.node_count).arg(backend.selected_count) }
         }
     }

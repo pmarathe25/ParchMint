@@ -1313,7 +1313,7 @@ fn markdown_block(block: &CompileBlock) -> String {
         | CompileBlockKind::Footnote { source }
         | CompileBlockKind::Opaque { source, .. } => spaced(source),
         CompileBlockKind::CodeBlock { info, text } => format!(
-            "```{info}\n{}{}\n\n",
+            "```{info}\n{}{}```\n\n",
             text,
             if text.ends_with('\n') { "" } else { "\n" }
         ),
@@ -1363,7 +1363,7 @@ fn markdown_block(block: &CompileBlock) -> String {
             )
             .replacen(
                 ":::\n",
-                &format!(":::{}\n", markdown_attributes(&attributes, false)),
+                &format!("::: {}\n", markdown_attributes(&attributes, false)),
                 1,
             )
         }
@@ -1400,7 +1400,7 @@ fn markdown_inlines(inlines: &[CompileInline]) -> String {
                     destination.replace(')', "\\)")
                 );
                 if let Some(title) = title {
-                    let _ = write!(result, " \\\"{}\\\"", title.replace('"', "\\\""));
+                    let _ = write!(result, " \"{}\"", title.replace('"', "\\\""));
                 }
                 result.push(')');
             }
@@ -1417,7 +1417,7 @@ fn markdown_inlines(inlines: &[CompileInline]) -> String {
                     destination.replace(')', "\\)")
                 );
                 if let Some(title) = title {
-                    let _ = write!(result, " \\\"{}\\\"", title.replace('"', "\\\""));
+                    let _ = write!(result, " \"{}\"", title.replace('"', "\\\""));
                 }
                 result.push(')');
             }
@@ -1458,6 +1458,7 @@ fn markdown_text(text: &str) -> String {
         .replace('*', "\\*")
         .replace('_', "\\_")
         .replace('[', "\\[")
+        .replace(']', "\\]")
 }
 
 fn markdown_attributes(attributes: &CompileAttributes, leading_space: bool) -> String {
@@ -1469,12 +1470,12 @@ fn markdown_attributes(attributes: &CompileAttributes, leading_space: bool) -> S
         values.push(format!("#{id}"));
     }
     values.extend(attributes.classes.iter().map(|class| format!(".{class}")));
-    values.extend(
-        attributes
-            .extra
-            .iter()
-            .map(|(key, value)| format!("{key}=\\\"{}\\\"", value.replace('"', "\\\""))),
-    );
+    values.extend(attributes.extra.iter().map(|(key, value)| {
+        format!(
+            "{key}=\"{}\"",
+            value.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }));
     format!(
         "{}{{{}}}",
         if leading_space { " " } else { "" },
@@ -1987,6 +1988,7 @@ fn base64(input: &[u8]) -> String {
 /// silently.
 fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
     let mut warnings = Vec::new();
+    let mut warned_unicode = false;
     let plain = render_plain_text(ir, "\n\n");
     let width = micrometres_to_points(ir.page.width_micrometres);
     let height = micrometres_to_points(ir.page.height_micrometres);
@@ -2002,8 +2004,9 @@ fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
             if page.len() == max_lines {
                 pages.push(std::mem::take(&mut page));
             }
-            if !line.is_ascii() {
+            if !line.is_ascii() && !warned_unicode {
                 warnings.push(ExportWarning { code: "pdf-unicode-fallback", message: "The Qt PDF renderer is required for shaped non-Latin text on this platform; the portable fallback substituted unsupported glyphs.".into() });
+                warned_unicode = true;
             }
             page.push(pdf_latin1(&line));
         }
@@ -2136,6 +2139,8 @@ fn render_epub(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
     for block in &ir.blocks {
         html_block(&mut body, block, ir, HtmlAssetMode::Relative, &mut warnings);
     }
+    body = body.replace("src=\"assets/", "src=\"../assets/");
+    warnings.retain(|warning| warning.code != "html-relative-asset");
     let language = if ir.metadata.language.trim().is_empty() {
         "en"
     } else {
@@ -2214,25 +2219,33 @@ fn render_epub(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
 fn epub_nav(ir: &CompileIr) -> String {
     let mut result = String::new();
     let mut heading_index = 0usize;
-    for block in &ir.blocks {
+    append_epub_nav(&ir.blocks, &mut result, &mut heading_index);
+    if result.is_empty() {
+        result.push_str("<li><a href=\"text/book.xhtml\">Book</a></li>");
+    }
+    result
+}
+
+fn append_epub_nav(blocks: &[CompileBlock], result: &mut String, heading_index: &mut usize) {
+    for block in blocks {
         let label = match &block.kind {
             CompileBlockKind::Title { text } => Some(text.clone()),
             CompileBlockKind::Heading { content, .. } => Some(plain_inlines(content)),
             _ => None,
         };
         if let Some(label) = label {
-            heading_index += 1;
+            *heading_index += 1;
             let _ = write!(
                 result,
-                "<li><a href=\"text/book.xhtml#section-{heading_index}\">{}</a></li>",
+                "<li><a href=\"text/book.xhtml#section-{}\">{}</a></li>",
+                *heading_index,
                 xml_escape(&label)
             );
         }
+        if let CompileBlockKind::Alignment { children, .. } = &block.kind {
+            append_epub_nav(children, result, heading_index);
+        }
     }
-    if result.is_empty() {
-        result.push_str("<li><a href=\"text/book.xhtml\">Book</a></li>");
-    }
-    result
 }
 
 fn xhtml_void_elements(value: &str) -> String {
@@ -3331,6 +3344,134 @@ mod tests {
         let (docx, _) = render_docx(&ir);
         validate_docx(&docx).unwrap();
         assert_eq!(docx, render_docx(&ir).0);
+    }
+
+    #[test]
+    fn markdown_export_emits_reparseable_fences_attributes_and_titles() {
+        let (_directory, mut input, scene, _) = fixture();
+        let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
+        input.bodies.insert(
+            document_id,
+            "```rust\nfn main() {}\n```\n\n::: {.parchmint-align align=\"center\"}\nCentered.\n:::\n"
+                .into(),
+        );
+        let (mut ir, _) = compile(
+            &input,
+            &CompilePreset::manuscript("Manuscript"),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        ir.blocks.push(CompileBlock {
+            kind: CompileBlockKind::Paragraph {
+                content: vec![CompileInline::Link {
+                    label: vec![CompileInline::Text("closing]".into())],
+                    destination: "notes.md".into(),
+                    title: Some("A \"quote\"".into()),
+                }],
+                attributes: CompileAttributes::default(),
+            },
+            style: None,
+            provenance: SourceProvenance::Generated {
+                node_id: None,
+                document_id: None,
+                role: "test-link",
+            },
+        });
+        let markdown = render_markdown(&ir);
+        assert!(markdown.contains("fn main() {}\n```\n\n"));
+        assert!(markdown.contains("::: {.parchmint-align align=\"center\"}"));
+        assert!(markdown.contains("[closing\\]](notes.md"), "{markdown}");
+        assert!(markdown.contains(" \"A \\\"quote\\\"\""), "{markdown}");
+        parchmint_markdown::Document::parse_body(
+            &markdown,
+            &parchmint_markdown::ParseOptions::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn epub_links_packaged_assets_and_nested_headings() {
+        let (directory, input, _, _) = fixture();
+        let (mut ir, _) = compile(
+            &input,
+            &CompilePreset::manuscript("Manuscript"),
+            &CancellationToken::default(),
+        )
+        .unwrap();
+        let asset_id = parchmint_domain::AssetId::new();
+        let safe_name = "cover #snow.png";
+        let source_path = directory.path().join(safe_name);
+        fs::write(&source_path, b"not-a-real-png").unwrap();
+        ir.assets.insert(
+            asset_id,
+            CompileAsset {
+                id: asset_id,
+                display_name: safe_name.into(),
+                safe_name: safe_name.into(),
+                media_type: "image/png".into(),
+                bytes: 14,
+                source_path,
+            },
+        );
+        ir.blocks.push(CompileBlock {
+            kind: CompileBlockKind::Paragraph {
+                content: vec![CompileInline::Image {
+                    alt: "Cover".into(),
+                    asset: Some(asset_id),
+                    destination: "asset:cover".into(),
+                    title: None,
+                }],
+                attributes: CompileAttributes::default(),
+            },
+            style: None,
+            provenance: SourceProvenance::Generated {
+                node_id: None,
+                document_id: None,
+                role: "test-image",
+            },
+        });
+        ir.blocks.push(CompileBlock {
+            kind: CompileBlockKind::Alignment {
+                alignment: Alignment::Center,
+                attributes: CompileAttributes::default(),
+                children: vec![CompileBlock {
+                    kind: CompileBlockKind::Heading {
+                        level: 2,
+                        content: vec![CompileInline::Text("Nested heading".into())],
+                        attributes: CompileAttributes::default(),
+                    },
+                    style: None,
+                    provenance: SourceProvenance::Generated {
+                        node_id: None,
+                        document_id: None,
+                        role: "test-heading",
+                    },
+                }],
+            },
+            style: None,
+            provenance: SourceProvenance::Generated {
+                node_id: None,
+                document_id: None,
+                role: "test-alignment",
+            },
+        });
+
+        let (epub, warnings) = render_epub(&ir);
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.code == "html-relative-asset")
+        );
+        let parts = parse_store_zip(&epub).unwrap();
+        assert!(parts.contains_key("OEBPS/assets/cover #snow.png"));
+        let book = std::str::from_utf8(parts["OEBPS/text/book.xhtml"]).unwrap();
+        assert!(book.contains("src=\"../assets/cover%20%23snow.png\""));
+        let nav = std::str::from_utf8(parts["OEBPS/nav.xhtml"]).unwrap();
+        assert!(nav.contains(">Nested heading</a>"));
+        for fragment in nav.split("#section-").skip(1) {
+            let number = fragment.split('"').next().unwrap();
+            assert!(book.contains(&format!("id=\"section-{number}\"")));
+        }
     }
 
     #[test]

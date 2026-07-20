@@ -175,6 +175,7 @@ impl Block {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Document {
+    has_front_matter: bool,
     raw_front_matter: String,
     front_matter: Mapping,
     blocks: Vec<Block>,
@@ -187,12 +188,19 @@ impl Document {
     }
 
     pub fn parse_with_options(source: &str, options: &ParseOptions) -> Result<Self, MarkdownError> {
-        let (raw_front_matter, front_matter, body, body_offset, mut diagnostics) =
-            parse_front_matter(source)?;
+        let ParsedFrontMatter {
+            has_front_matter,
+            raw_front_matter,
+            front_matter,
+            body,
+            body_offset,
+            mut diagnostics,
+        } = parse_front_matter(source)?;
         validate_commonmark(body, body_offset)?;
         let mut blocks = scan_blocks(body, body_offset, &mut diagnostics);
         validate_extensions(&mut blocks, options, &mut diagnostics);
         Ok(Self {
+            has_front_matter,
             raw_front_matter,
             front_matter,
             blocks,
@@ -207,6 +215,7 @@ impl Document {
         let mut blocks = scan_blocks(body, 0, &mut diagnostics);
         validate_extensions(&mut blocks, options, &mut diagnostics);
         Ok(Self {
+            has_front_matter: false,
             raw_front_matter: String::new(),
             front_matter: Mapping::new(),
             blocks,
@@ -289,10 +298,10 @@ impl Document {
 
     pub fn serialize(&self) -> String {
         let body = self.serialize_body();
-        if self.raw_front_matter.is_empty() {
-            body
-        } else {
+        if self.has_front_matter {
             format!("---\n{}---\n{body}", self.raw_front_matter)
+        } else {
+            body
         }
     }
 }
@@ -309,26 +318,56 @@ pub enum MarkdownError {
     BlockIndex { index: usize, count: usize },
 }
 
-fn parse_front_matter(
-    source: &str,
-) -> Result<(String, Mapping, &str, usize, Vec<Diagnostic>), MarkdownError> {
-    if !source.starts_with("---\n") {
-        return Ok((String::new(), Mapping::new(), source, 0, Vec::new()));
+struct ParsedFrontMatter<'a> {
+    has_front_matter: bool,
+    raw_front_matter: String,
+    front_matter: Mapping,
+    body: &'a str,
+    body_offset: usize,
+    diagnostics: Vec<Diagnostic>,
+}
+
+fn parse_front_matter(source: &str) -> Result<ParsedFrontMatter<'_>, MarkdownError> {
+    let opening_len = if source.starts_with("---\r\n") {
+        5
+    } else if source.starts_with("---\n") {
+        4
+    } else {
+        return Ok(ParsedFrontMatter {
+            has_front_matter: false,
+            raw_front_matter: String::new(),
+            front_matter: Mapping::new(),
+            body: source,
+            body_offset: 0,
+            diagnostics: Vec::new(),
+        });
+    };
+    let tail = &source[opening_len..];
+    let mut line_start = 0;
+    let mut closing = None;
+    for line in tail.split_inclusive('\n') {
+        let line_end = line_start + line.len();
+        if line.trim_end_matches(['\r', '\n']) == "---" {
+            closing = Some((line_start, line_end));
+            break;
+        }
+        line_start = line_end;
     }
-    let tail = &source[4..];
-    let end = tail
-        .find("\n---\n")
-        .ok_or(MarkdownError::UnclosedFrontMatter)?;
-    let raw = &tail[..=end];
-    let value: Value = yaml::from_str(raw)
-        .map_err(|error| MarkdownError::InvalidFrontMatter(error.to_string()))?;
-    let mapping = value
-        .as_mapping()
-        .cloned()
-        .ok_or_else(|| MarkdownError::InvalidFrontMatter("root must be a mapping".into()))?;
+    let (closing_start, closing_end) = closing.ok_or(MarkdownError::UnclosedFrontMatter)?;
+    let raw = &tail[..closing_start];
+    let mapping = if raw.trim().is_empty() {
+        Mapping::new()
+    } else {
+        let value: Value = yaml::from_str(raw)
+            .map_err(|error| MarkdownError::InvalidFrontMatter(error.to_string()))?;
+        value
+            .as_mapping()
+            .cloned()
+            .ok_or_else(|| MarkdownError::InvalidFrontMatter("root must be a mapping".into()))?
+    };
     let mut diagnostics = Vec::new();
     let mut keys = BTreeSet::new();
-    let mut cursor = 4;
+    let mut cursor = opening_len;
     for line in raw.lines() {
         let trimmed = line.trim_start();
         if trimmed.len() == line.len()
@@ -348,14 +387,15 @@ fn parse_front_matter(
         }
         cursor += line.len() + 1;
     }
-    let offset = 4 + end + 5;
-    Ok((
-        raw.to_owned(),
-        mapping,
-        &source[offset..],
-        offset,
+    let offset = opening_len + closing_end;
+    Ok(ParsedFrontMatter {
+        has_front_matter: true,
+        raw_front_matter: raw.to_owned(),
+        front_matter: mapping,
+        body: &source[offset..],
+        body_offset: offset,
         diagnostics,
-    ))
+    })
 }
 
 fn validate_commonmark(body: &str, offset: usize) -> Result<(), MarkdownError> {
@@ -854,7 +894,10 @@ fn has_unsupported_inline_html(source: &str) -> bool {
             rest = &rest[1..];
             continue;
         }
-        if rest.find('>').is_some() {
+        let looks_like_tag = rest[1..].chars().next().is_some_and(|character| {
+            character.is_ascii_alphabetic() || matches!(character, '/' | '!' | '?')
+        });
+        if looks_like_tag && rest.find('>').is_some() {
             return true;
         }
         break;
@@ -867,7 +910,10 @@ fn split_trailing_attributes(text: &str) -> (&str, Attributes) {
     if let Some(start) = trimmed.rfind(" {")
         && trimmed.ends_with('}')
     {
-        return (&trimmed[..start], parse_attributes(&trimmed[start + 1..]));
+        let attributes = parse_attributes(&trimmed[start + 1..]);
+        if attributes != Attributes::default() {
+            return (&trimmed[..start], attributes);
+        }
     }
     (text, Attributes::default())
 }
@@ -1345,7 +1391,7 @@ fn serialize_node(node: &BlockNode) -> String {
         | BlockNode::Opaque { source, .. } => ensure_block_spacing(source),
         BlockNode::CodeBlock { info, text } => {
             format!(
-                "```{info}\n{}{}\n\n",
+                "```{info}\n{}{}```\n\n",
                 text,
                 if text.ends_with('\n') { "" } else { "\n" }
             )
@@ -1397,7 +1443,7 @@ fn serialize_node(node: &BlockNode) -> String {
                 attributes.classes.push("parchmint-align".into());
             }
             attributes.extra.insert("align".into(), align.into());
-            let mut output = format!(":::{}\n", serialize_attributes(&attributes, false));
+            let mut output = format!("::: {}\n", serialize_attributes(&attributes, false));
             output.push_str(&children.iter().map(Block::serialize).collect::<String>());
             output.push_str(":::\n\n");
             output
@@ -1667,6 +1713,82 @@ mod tests {
             document.serialize_body(),
             "[**new**]{.parchmint-style style-id=\"style-1\" z=\"last\"}\n\n"
         );
+    }
+
+    #[test]
+    fn changed_code_and_alignment_blocks_reparse_without_corruption() {
+        let mut code = Document::parse_body(
+            "```rust\nfn main() {}\n```\n\nAfter.\n",
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        let code_node = code.blocks()[0].node.clone();
+        code.replace_block(0, code_node).unwrap();
+        let saved = code.serialize_body();
+        assert!(saved.contains("fn main() {}\n```\n\nAfter."));
+        let reparsed = Document::parse_body(&saved, &ParseOptions::default()).unwrap();
+        assert!(matches!(
+            reparsed.blocks()[0].node,
+            BlockNode::CodeBlock { .. }
+        ));
+        assert!(matches!(
+            reparsed.blocks()[1].node,
+            BlockNode::Paragraph { .. }
+        ));
+
+        let mut alignment = Document::parse_body(
+            "::: {.parchmint-align align=\"center\"}\nCentered.\n:::\n",
+            &ParseOptions::default(),
+        )
+        .unwrap();
+        let alignment_node = alignment.blocks()[0].node.clone();
+        alignment.replace_block(0, alignment_node).unwrap();
+        let saved = alignment.serialize_body();
+        assert!(saved.starts_with("::: {.parchmint-align align=\"center\"}\n"));
+        let reparsed = Document::parse_body(&saved, &ParseOptions::default()).unwrap();
+        assert!(matches!(
+            reparsed.blocks()[0].node,
+            BlockNode::Alignment { .. }
+        ));
+    }
+
+    #[test]
+    fn benign_front_matter_variants_are_accepted() {
+        let crlf = "---\r\ntitle: Novel\r\n---\r\nBody.\r\n";
+        let parsed = Document::parse(crlf).unwrap();
+        assert_eq!(
+            parsed.front_matter()["title"],
+            Value::String("Novel".into())
+        );
+
+        let empty = Document::parse("---\n---\nBody.\n").unwrap();
+        assert!(empty.front_matter().is_empty());
+        assert_eq!(empty.serialize(), "---\n---\nBody.\n");
+
+        let eof = Document::parse("---\ntitle: Novel\n---").unwrap();
+        assert_eq!(eof.front_matter()["title"], Value::String("Novel".into()));
+        assert!(eof.serialize_body().is_empty());
+    }
+
+    #[test]
+    fn plain_braces_and_comparisons_remain_editable_text() {
+        let document =
+            Document::parse_body("Keep {x}\n\n1 < 2 > 0\n", &ParseOptions::default()).unwrap();
+        assert!(
+            document
+                .blocks()
+                .iter()
+                .all(|block| !block.node.is_opaque())
+        );
+        let BlockNode::Paragraph {
+            content,
+            attributes,
+        } = &document.blocks()[0].node
+        else {
+            panic!("expected paragraph")
+        };
+        assert_eq!(content, &[Inline::Text("Keep {x}".into())]);
+        assert_eq!(attributes, &Attributes::default());
     }
 
     #[test]

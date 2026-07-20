@@ -38,6 +38,17 @@ Terra at maximum reasoning is a cost-conscious fallback for a very-hard stage, b
 | 8 | [Fixtures, documentation, and regression matrix](08-luna-easy-fixtures-documentation-and-regression-matrix.md) | Luna/easy | High-volume coverage and user/developer documentation | 1–7 |
 | 9 | [Cross-platform hardening and release](09-very-hard-cross-platform-hardening-and-release.md) | Very hard | Accessible, performant, packaged version 1 release | 1–8 |
 
+## Post-audit remediation stages
+
+The codebase audit in [10-audit-report.md](10-audit-report.md) found that several earlier acceptance gates were implemented in isolated layers but not met by the shipping application. These stages supersede the affected handoff claims and must be completed in order.
+
+| Stage | Plan | Difficulty | Primary outcome | Depends on |
+|---:|---|---|---|---|
+| 11 | [Markdown and export integrity](11-hard-markdown-and-export-integrity.md) | Hard | Bounded, fixed-point Markdown and transaction-safe faithful exports | 1–10 |
+| 12 | [Live document and project safety](12-very-hard-live-document-and-project-safety.md) | Very hard | Autosave/recovery/external changes, safe transitions, paths, and locks in the running app | 11 |
+| 13 | [Production workflows and visual system](13-hard-production-workflows-and-visual-system.md) | Hard | Reachable WYSIWYG/planning/trash/compile workflows and coherent desktop UI | 11–12 |
+| 14 | [Incremental scale architecture](14-very-hard-incremental-scale-architecture.md) | Very hard | 10k-node/10M-word performance with incremental bounded work | 11–13 |
+
 Stages 1–3 deliberately cluster the hardest foundational changes at the beginning. Stage 9 deliberately collects the hardest integration, operating-system, performance, and release work at the end. This prevents medium-difficulty product agents from building against an unproven editor or changing platform architecture opportunistically.
 
 ## Agent operating contract
@@ -70,4 +81,3 @@ An agent may not declare a stage complete if its acceptance gate is unmet. If th
 The stage plans identify primary paths. They are ownership boundaries, not absolute prohibitions: integration sometimes requires a narrow edit elsewhere. An agent making a cross-boundary edit must preserve existing APIs when possible, add regression coverage, and document the reason in its handoff.
 
 Tests required to prove a feature belong with the feature stage. Stage 8 expands breadth and documentation; it is not a substitute for tests omitted by stages 1–7.
-

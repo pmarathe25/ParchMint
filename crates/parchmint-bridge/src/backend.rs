@@ -1269,7 +1269,7 @@ impl ParchMintBackend {
                 .ok()
                 .map(|(path, _)| path)
         });
-        path.map(|path| format!("file://{}", path.to_string_lossy().replace(' ', "%20")))
+        path.map(|path| local_file_url(&path))
             .map_or_else(QString::default, QString::from)
     }
 
@@ -1509,5 +1509,26 @@ fn pane_view_name(view: PaneView) -> &'static str {
         PaneView::Attachment => "attachment",
         PaneView::Outline => "outline",
         PaneView::Cards => "cards",
+    }
+}
+
+fn local_file_url(path: &Path) -> String {
+    let portable = path.to_string_lossy().replace('\\', "/");
+    let encoded = portable
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':')
+            {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect::<String>();
+    if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
     }
 }
