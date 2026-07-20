@@ -66,6 +66,7 @@ add_custom_target(
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/InspectorPane.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/FormattingBar.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/SourceEditor.qml
+          ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/PaneHost.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/StyleManager.qml
           ${CMAKE_CURRENT_SOURCE_DIR}/app/qml/components/StylePicker.qml
   DEPENDS parchmint_adaptersplugin

@@ -81,6 +81,19 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: attachmentDialog
+        title: qsTr("Import research attachment")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: backend.importAttachment(backend.selected_id, attachmentPath.text)
+        contentItem: ColumnLayout {
+            Label { text: qsTr("File path (copied safely into this project)") }
+            TextField { id: attachmentPath; Layout.preferredWidth: 440; placeholderText: qsTr("/path/to/reference.pdf") }
+        }
+    }
+
     menuBar: MenuBar {
         Menu {
             title: qsTr("Project")
@@ -101,9 +114,19 @@ ApplicationWindow {
             Action { text: qsTr("Move to Trash"); enabled: backend.selected_id.length > 0; onTriggered: backend.trashNode(backend.selected_id) }
         }
         Menu {
+            title: qsTr("Research")
+            Action { text: qsTr("New research group"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Group"), true) }
+            Action { text: qsTr("New research note"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Note"), false) }
+            Action { text: qsTr("Import attachment…"); enabled: backend.selected_id.length > 0; onTriggered: attachmentDialog.open() }
+        }
+        Menu {
             title: qsTr("View")
             Action { text: qsTr("Binder"); checkable: true; checked: window.binderVisible; onTriggered: window.binderVisible = !window.binderVisible }
             Action { text: qsTr("Inspector"); checkable: true; checked: window.inspectorVisible; onTriggered: window.inspectorVisible = !window.inspectorVisible }
+            MenuSeparator {}
+            Action { text: qsTr("Split workspace"); checkable: true; checked: backend.split_enabled; enabled: backend.project_open; onTriggered: backend.setSplit(!backend.split_enabled, "horizontal", 500) }
+            Action { text: qsTr("Focus next pane"); enabled: backend.split_enabled; onTriggered: backend.focusNextPane() }
+            Action { text: qsTr("Swap panes"); enabled: backend.split_enabled; onTriggered: backend.swapPanes() }
         }
     }
 
@@ -114,6 +137,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+]"; enabled: backend.selected_id.length > 0; onActivated: backend.indentNode(backend.selected_id) }
     Shortcut { sequence: "Ctrl+["; enabled: backend.selected_id.length > 0; onActivated: backend.outdentNode(backend.selected_id) }
     Shortcut { sequence: StandardKey.Delete; enabled: backend.selected_id.length > 0; onActivated: backend.trashNode(backend.selected_id) }
+    Shortcut { sequence: "Ctrl+Tab"; enabled: backend.split_enabled; onActivated: backend.focusNextPane() }
 
     header: ToolBar {
         RowLayout {
@@ -139,34 +163,13 @@ ApplicationWindow {
         BinderPane { Layout.preferredWidth: 276; Layout.fillHeight: true; visible: window.binderVisible; backend: backend; model: outlineModel }
         Rectangle { Layout.preferredWidth: window.binderVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
 
-        ColumnLayout {
+        RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
-            TabBar {
-                id: views
-                Layout.fillWidth: true
-                enabled: backend.project_open
-                TabButton { text: qsTr("Outline") }
-                TabButton { text: qsTr("Cards") }
-                TabButton { text: qsTr("Editor") }
-            }
-            StackLayout {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                currentIndex: views.currentIndex
-                OutlineView { backend: backend; model: outlineModel }
-                CardsView { backend: backend; model: outlineModel }
-                Pane {
-                    padding: DesignTokens.space6
-                    ColumnLayout {
-                        anchors.fill: parent
-                        Label { text: backend.selected_title.length ? backend.selected_title : qsTr("Select a manuscript document"); font.pixelSize: 24; font.bold: true }
-                        Label { text: qsTr("Document bodies remain owned by the Rust document session."); opacity: .7 }
-                        TextArea { Layout.fillWidth: true; Layout.fillHeight: true; readOnly: true; text: backend.selected_id.length ? qsTr("Open the selected document from the binder to begin writing.") : ""; placeholderText: qsTr("Select a scene in the binder.") }
-                    }
-                }
-            }
+            PaneHost { Layout.fillWidth: true; Layout.fillHeight: true; backend: backend; model: outlineModel; paneIndex: 0; nodeId: backend.pane_one_id; viewName: backend.pane_one_view; pinned: backend.pane_one_pinned }
+            Rectangle { Layout.preferredWidth: backend.split_enabled ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
+            PaneHost { Layout.preferredWidth: backend.split_enabled ? 520 : 0; Layout.fillHeight: true; visible: backend.split_enabled; backend: backend; model: outlineModel; paneIndex: 1; nodeId: backend.pane_two_id; viewName: backend.pane_two_view; pinned: backend.pane_two_pinned }
         }
 
         Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }

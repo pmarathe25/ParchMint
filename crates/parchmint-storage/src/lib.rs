@@ -14,7 +14,7 @@ use parchmint_domain::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -27,6 +27,11 @@ pub const MAX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// Maximum YAML front-matter size accepted before parsing.
 pub const MAX_FRONT_MATTER_BYTES: usize = 256 * 1024;
+/// Maximum imported attachment size. Attachments are copied rather than linked
+/// so a project remains portable and the original is never modified.
+pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
+/// Independently versioned catalog format. It is additive to project format 1.
+pub const ASSET_CATALOG_VERSION: u32 = 1;
 const MAX_YAML_NESTING: usize = 64;
 
 /// Whether an opened project may make canonical changes.
@@ -64,12 +69,40 @@ pub struct OpenProject {
     manifest_extra: BTreeMap<String, toml::Value>,
     outline_extra: BTreeMap<String, toml::Value>,
     styles_extra: BTreeMap<String, toml::Value>,
+    attachments: BTreeMap<parchmint_domain::AssetId, AttachmentRecord>,
+}
+
+/// Safe, immutable metadata for one copied project attachment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AttachmentRecord {
+    pub id: parchmint_domain::AssetId,
+    /// Original user-facing filename; never used as a path.
+    pub display_name: String,
+    /// Validated filename below `assets/`, generated from the stable ID.
+    pub safe_name: String,
+    /// Conservative media type inferred from the filename extension only.
+    pub media_type: String,
+    pub bytes: u64,
+}
+
+/// Rendering policy for an attachment. No active content is embedded or run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachmentPreview {
+    Image,
+    Pdf,
+    PlainText,
+    ExternalOnly,
 }
 
 impl OpenProject {
     /// Canonical filesystem root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    /// Immutable asset catalog. The catalog is canonical but attachment bytes
+    /// are never parsed or executed by Rust/QML.
+    pub fn attachments(&self) -> &BTreeMap<parchmint_domain::AssetId, AttachmentRecord> {
+        &self.attachments
     }
     /// Open mode selected by the caller.
     pub const fn mode(&self) -> OpenMode {
@@ -211,6 +244,7 @@ impl ProjectStorage {
             manifest_extra: BTreeMap::new(),
             outline_extra: BTreeMap::new(),
             styles_extra: BTreeMap::new(),
+            attachments: BTreeMap::new(),
         };
         Self::save(&mut opened)?;
         Ok(opened)
@@ -273,6 +307,7 @@ impl ProjectStorage {
                 .collect(),
         };
         project.ensure_required_builtin_styles();
+        let attachments = load_attachment_catalog(&canonical)?;
         let mut bodies = BTreeMap::new();
         let mut extras = BTreeMap::new();
         let mut locations = BTreeMap::new();
@@ -311,6 +346,7 @@ impl ProjectStorage {
             manifest_extra: manifest.extra,
             outline_extra: outline.extra,
             styles_extra: styles.extra,
+            attachments,
         })
     }
     /// Persists all canonical files deterministically. A read-only handle is never modified.
@@ -351,6 +387,7 @@ impl ProjectStorage {
         write_toml(&opened.root.join("parchmint.toml"), &manifest)?;
         write_toml(&opened.root.join("outline.toml"), &outline)?;
         write_toml(&opened.root.join("styles.toml"), &styles)?;
+        save_attachment_catalog(&opened.root, &opened.attachments)?;
         let records = opened.project.documents.keys().copied().collect::<Vec<_>>();
         for id in records {
             Self::save_document(opened, id)?;
@@ -408,6 +445,117 @@ impl ProjectStorage {
     pub fn close(mut opened: OpenProject) -> Result<(), StorageError> {
         Self::save(&mut opened)
     }
+
+    /// Imports an ordinary file into `assets/` under a UUID-derived safe name.
+    /// Source symlinks, device files, excessive files, and unsafe catalog
+    /// entries are rejected. Deduplication is deliberately not attempted:
+    /// equal bytes can still be distinct research material to a writer.
+    pub fn import_attachment(
+        opened: &mut OpenProject,
+        source: impl AsRef<Path>,
+    ) -> Result<AttachmentRecord, StorageError> {
+        if opened.mode == OpenMode::ReadOnly {
+            return Err(StorageError::ReadOnly);
+        }
+        let source = source.as_ref();
+        let metadata = fs::symlink_metadata(source).map_err(|error| StorageError::Read {
+            path: source.to_owned(),
+            error,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(StorageError::AttachmentSourceSymlink(source.to_owned()));
+        }
+        if !metadata.is_file() {
+            return Err(StorageError::AttachmentSourceNotFile(source.to_owned()));
+        }
+        if metadata.len() > MAX_ATTACHMENT_BYTES {
+            return Err(StorageError::SizeLimit("attachment", MAX_ATTACHMENT_BYTES));
+        }
+        let display_name = source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| StorageError::InvalidAttachmentName(source.to_owned()))?
+            .to_owned();
+        let id = parchmint_domain::AssetId::new();
+        let extension = safe_extension(&display_name);
+        let safe_name = format!(
+            "{id}{}",
+            extension
+                .as_deref()
+                .map_or(String::new(), |ext| format!(".{ext}"))
+        );
+        let relative = RelativeProjectPath::new(format!("assets/{safe_name}"))?;
+        let destination = resolve_project_path(&opened.root, &relative)?;
+        let parent = destination
+            .parent()
+            .ok_or(StorageError::InvalidSchema("assets parent"))?;
+        fs::create_dir_all(parent).map_err(StorageError::CreateDirectory)?;
+        // Resolve after creating the directory so a malicious pre-existing
+        // `assets` symlink cannot redirect the copy.
+        let destination = resolve_project_path(&opened.root, &relative)?;
+        if destination.exists() {
+            return Err(StorageError::AttachmentDestinationExists(destination));
+        }
+        let mut input = File::open(source).map_err(|error| StorageError::Read {
+            path: source.to_owned(),
+            error,
+        })?;
+        let mut temporary =
+            NamedTempFile::new_in(parent).map_err(AtomicWriteError::CreateTemporary)?;
+        let copied = io::copy(
+            &mut Read::by_ref(&mut input).take(MAX_ATTACHMENT_BYTES + 1),
+            temporary.as_file_mut(),
+        )
+        .map_err(StorageError::CopyAttachment)?;
+        if copied > MAX_ATTACHMENT_BYTES {
+            return Err(StorageError::SizeLimit("attachment", MAX_ATTACHMENT_BYTES));
+        }
+        temporary
+            .as_file_mut()
+            .sync_all()
+            .map_err(AtomicWriteError::FlushTemporary)?;
+        temporary
+            .persist_noclobber(&destination)
+            .map_err(|error| StorageError::AttachmentPersist(error.error))?;
+        sync_parent(parent)?;
+        let record = AttachmentRecord {
+            id,
+            display_name,
+            safe_name,
+            media_type: media_type_for(extension.as_deref()),
+            bytes: copied,
+        };
+        opened.attachments.insert(id, record.clone());
+        if let Err(error) = save_attachment_catalog(&opened.root, &opened.attachments) {
+            opened.attachments.remove(&id);
+            return Err(error);
+        }
+        Ok(record)
+    }
+
+    /// Returns a contained local path and a passive preview policy. Callers
+    /// must require a separate, explicit system-open action for ExternalOnly.
+    pub fn attachment_preview(
+        opened: &OpenProject,
+        id: parchmint_domain::AssetId,
+    ) -> Result<(PathBuf, AttachmentPreview), StorageError> {
+        let record = opened
+            .attachments
+            .get(&id)
+            .ok_or(StorageError::MissingAttachment(id))?;
+        let path = resolve_project_path(
+            &opened.root,
+            &RelativeProjectPath::new(format!("assets/{}", record.safe_name))?,
+        )?;
+        let preview = match record.media_type.as_str() {
+            "image" => AttachmentPreview::Image,
+            "pdf" => AttachmentPreview::Pdf,
+            "text" => AttachmentPreview::PlainText,
+            _ => AttachmentPreview::ExternalOnly,
+        };
+        Ok((path, preview))
+    }
     /// Reopens an acknowledged project directory, useful after close/restart tests.
     pub fn reopen(root: impl AsRef<Path>, mode: OpenMode) -> Result<OpenProject, StorageError> {
         Self::open(root, mode)
@@ -460,6 +608,92 @@ struct Styles {
     compile_presets: Vec<parchmint_domain::CompilePreset>,
     #[serde(flatten, default)]
     extra: BTreeMap<String, toml::Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AttachmentCatalog {
+    version: u32,
+    #[serde(default)]
+    attachments: Vec<AttachmentRecord>,
+}
+
+fn load_attachment_catalog(
+    root: &Path,
+) -> Result<BTreeMap<parchmint_domain::AssetId, AttachmentRecord>, StorageError> {
+    let path = root.join("assets.toml");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let catalog: AttachmentCatalog = parse_toml(&path, "assets.toml")?;
+    if catalog.version != ASSET_CATALOG_VERSION {
+        return Err(StorageError::UnsupportedAssetCatalog(catalog.version));
+    }
+    let mut items = BTreeMap::new();
+    for item in catalog.attachments {
+        validate_attachment_record(root, &item)?;
+        if items.insert(item.id, item).is_some() {
+            return Err(StorageError::InvalidSchema("duplicate attachment ID"));
+        }
+    }
+    Ok(items)
+}
+
+fn save_attachment_catalog(
+    root: &Path,
+    attachments: &BTreeMap<parchmint_domain::AssetId, AttachmentRecord>,
+) -> Result<(), StorageError> {
+    write_toml(
+        &root.join("assets.toml"),
+        &AttachmentCatalog {
+            version: ASSET_CATALOG_VERSION,
+            attachments: attachments.values().cloned().collect(),
+        },
+    )
+}
+
+fn validate_attachment_record(root: &Path, record: &AttachmentRecord) -> Result<(), StorageError> {
+    if record.display_name.is_empty()
+        || record.display_name.len() > 255
+        || record.display_name.chars().any(char::is_control)
+        || record.safe_name.contains('/')
+        || record.safe_name.contains('\\')
+        || !record.safe_name.starts_with(&record.id.to_string())
+        || record.safe_name.len() > 300
+        || record.bytes > MAX_ATTACHMENT_BYTES
+    {
+        return Err(StorageError::InvalidSchema(
+            "invalid attachment catalog entry",
+        ));
+    }
+    let path = resolve_project_path(
+        root,
+        &RelativeProjectPath::new(format!("assets/{}", record.safe_name))?,
+    )?;
+    let metadata = fs::metadata(&path).map_err(|error| StorageError::Read { path, error })?;
+    if !metadata.is_file() || metadata.len() != record.bytes {
+        return Err(StorageError::InvalidSchema(
+            "attachment file does not match catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn safe_extension(name: &str) -> Option<String> {
+    let extension = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    (!extension.is_empty()
+        && extension.len() <= 16
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    .then_some(extension)
+}
+
+fn media_type_for(extension: Option<&str>) -> String {
+    match extension.unwrap_or_default() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "image",
+        "pdf" => "pdf",
+        "txt" | "md" | "csv" | "json" | "log" => "text",
+        _ => "external",
+    }
+    .to_owned()
 }
 
 fn parse_toml<T: for<'de> Deserialize<'de>>(
@@ -525,7 +759,15 @@ fn parse_document(
             "document_id disagrees with outline",
         ));
     }
-    let known = ["title", "summary", "status", "labels", "tags", "flags"];
+    let known = [
+        "title",
+        "summary",
+        "status",
+        "labels",
+        "tags",
+        "flags",
+        "attachment",
+    ];
     let mut metadata_map = Mapping::new();
     for key in known {
         if let Some(value) = mapping.remove(key) {
@@ -568,6 +810,9 @@ fn serialize_document(
             "flags".into(),
             yaml::to_value(&metadata.flags).map_err(|e| StorageError::Yaml(e.to_string()))?,
         );
+    }
+    if let Some(attachment) = metadata.attachment {
+        entries.insert("attachment".into(), Value::String(attachment.to_string()));
     }
     for (key, value) in unknown {
         if entries.contains_key(key) || key == "document_id" {
@@ -815,6 +1060,9 @@ pub enum StorageError {
     /// Canonical files disagree on their format version.
     #[error("canonical manifest versions disagree")]
     InconsistentVersion,
+    /// Asset catalog is newer than this executable.
+    #[error("asset catalog version {0} is unsupported; upgrade ParchMint")]
+    UnsupportedAssetCatalog(u32),
     /// No older migration exists yet.
     #[error("no migration from project format version {0} is available")]
     MigrationUnavailable(u32),
@@ -830,6 +1078,21 @@ pub enum StorageError {
     /// Body was missing for a document record.
     #[error("document body is missing: {0}")]
     MissingBody(DocumentId),
+    /// Attachment ID does not exist in the catalog.
+    #[error("attachment is missing: {0}")]
+    MissingAttachment(parchmint_domain::AssetId),
+    #[error("attachment import source is a symlink: {0}")]
+    AttachmentSourceSymlink(PathBuf),
+    #[error("attachment import source is not a regular file: {0}")]
+    AttachmentSourceNotFile(PathBuf),
+    #[error("attachment source has no usable filename: {0}")]
+    InvalidAttachmentName(PathBuf),
+    #[error("attachment destination already exists: {0}")]
+    AttachmentDestinationExists(PathBuf),
+    #[error("could not copy attachment: {0}")]
+    CopyAttachment(io::Error),
+    #[error("could not persist attachment: {0}")]
+    AttachmentPersist(io::Error),
     /// Lexical/canonical path containment failed.
     #[error("project path escapes root: {0}")]
     PathEscape(String),
@@ -904,6 +1167,48 @@ mod tests {
             assert!(resolve_project_path(&root, &path).is_err());
         }
         drop(writer);
+    }
+
+    #[test]
+    fn attachment_import_copies_to_uuid_catalog_and_never_overwrites_source_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let source = directory.path().join("reference notes.txt");
+        fs::write(&source, b"ordinary reference text").unwrap();
+        let mut opened = ProjectStorage::create(&root, "Novel").unwrap();
+        let attachment = ProjectStorage::import_attachment(&mut opened, &source).unwrap();
+        assert_eq!(attachment.display_name, "reference notes.txt");
+        assert!(attachment.safe_name.starts_with(&attachment.id.to_string()));
+        assert_eq!(attachment.media_type, "text");
+        let (path, preview) = ProjectStorage::attachment_preview(&opened, attachment.id).unwrap();
+        assert_eq!(preview, AttachmentPreview::PlainText);
+        assert_eq!(fs::read(path).unwrap(), b"ordinary reference text");
+        assert!(root.join("assets.toml").is_file());
+        drop(opened);
+        let reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
+        assert!(reopened.attachments().contains_key(&attachment.id));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attachment_import_rejects_source_symlinks_and_asset_symlink_escape() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let source = directory.path().join("source.txt");
+        fs::write(&source, b"reference").unwrap();
+        let source_link = directory.path().join("source-link.txt");
+        std::os::unix::fs::symlink(&source, &source_link).unwrap();
+        let mut opened = ProjectStorage::create(&root, "Novel").unwrap();
+        assert!(matches!(
+            ProjectStorage::import_attachment(&mut opened, &source_link),
+            Err(StorageError::AttachmentSourceSymlink(_))
+        ));
+        fs::remove_dir(root.join("assets")).ok();
+        std::os::unix::fs::symlink(directory.path(), root.join("assets")).unwrap();
+        assert!(matches!(
+            ProjectStorage::import_attachment(&mut opened, &source),
+            Err(StorageError::SymlinkEscape(_))
+        ));
     }
     #[test]
     fn newer_version_and_unknown_keys_are_safe() {

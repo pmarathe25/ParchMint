@@ -35,6 +35,7 @@ Pane {
                     MenuItem { text: qsTr("New scene"); onTriggered: root.backend.createChild(nodeId, qsTr("Untitled Scene"), false) }
                     MenuSeparator {}
                     MenuItem { text: qsTr("Duplicate"); onTriggered: root.backend.duplicateNode(nodeId) }
+                    MenuItem { text: qsTr("Open in other pane"); onTriggered: root.backend.openInOtherPane(nodeId) }
                     MenuItem { text: qsTr("Move up"); onTriggered: root.backend.moveUp(nodeId) }
                     MenuItem { text: qsTr("Move down"); onTriggered: root.backend.moveDown(nodeId) }
                     MenuItem { text: qsTr("Indent"); onTriggered: root.backend.indentNode(nodeId) }

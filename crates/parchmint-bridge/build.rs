@@ -14,7 +14,8 @@ fn main() {
         .qml_file("qml/components/InspectorPane.qml")
         .qml_file("qml/components/StylePicker.qml")
         .qml_file("qml/components/StyleManager.qml")
-        .qml_file("qml/components/SourceEditor.qml");
+        .qml_file("qml/components/SourceEditor.qml")
+        .qml_file("qml/components/PaneHost.qml");
 
     CxxQtBuilder::new_qml_module(module)
         .qt_module("Network")

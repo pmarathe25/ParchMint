@@ -34,6 +34,14 @@ Collections are written in UUID order except `roots` and node `children`, whose
 order is semantic. Fields are emitted in declaration order. TOML unknown keys
 are preserved where they occur at a file's top level.
 
+`assets.toml` is an optional, independently versioned attachment catalog. Its
+current `version` is 1 and its ordered `attachments` entries contain an asset
+UUID, display name, UUID-derived safe filename, conservative media type, and
+byte count. The display name is metadata only; imports never use it as a path.
+Attachment bytes live at `assets/<asset-id>.<safe-extension>`. Missing,
+symlinked, escaped, oversized, duplicate-ID, or size-mismatched entries make
+the catalog invalid. An absent catalog means the project has no attachments.
+
 ## Documents and trash
 
 An active document lives at `manuscript/<node-id>.md` or
@@ -55,7 +63,8 @@ future-plugin: retained
 Body in ParchMint Markdown 1.0.
 ```
 
-`document_id`, `title`, `summary`, `status`, `labels`, `tags`, and `flags` are
+`document_id`, `title`, `summary`, `status`, `labels`, `tags`, `flags`, and
+optional `attachment` (an asset UUID) are
 known keys. Other string-keyed mappings are retained. Titles and summaries are
 only here, never copied to `outline.toml`. YAML is limited to 256 KiB and 64
 levels; a whole document is limited to 64 MiB and a TOML manifest to 4 MiB.

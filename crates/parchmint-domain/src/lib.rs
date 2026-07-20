@@ -110,6 +110,11 @@ pub struct DocumentMetadata {
     /// Document flags with stable machine keys.
     #[serde(default)]
     pub flags: BTreeMap<String, bool>,
+    /// Immutable attachment represented by this research document, if any.
+    /// The attachment bytes and display metadata live in the project asset
+    /// catalog; this is only a stable reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AssetId>,
 }
 
 /// Markdown document associated with one user node.
