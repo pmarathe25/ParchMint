@@ -4,6 +4,7 @@ mod commands;
 mod diagnostics;
 mod document;
 mod export;
+mod path;
 mod search;
 mod workspace;
 
@@ -11,6 +12,7 @@ pub use commands::*;
 pub use diagnostics::*;
 pub use document::*;
 pub use export::*;
+pub use path::*;
 pub use search::*;
 pub use workspace::*;
 

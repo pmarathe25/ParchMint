@@ -24,6 +24,7 @@ fn main() {
             .file("src/backend.rs")
             .cc_builder(|cc| {
                 cc.file("src/pdf_renderer.cpp");
+                cc.file("src/path_helper.cpp");
             })
             .build();
     }

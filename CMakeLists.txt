@@ -54,6 +54,8 @@ add_subdirectory(app/cpp)
 
 add_test(NAME parchmint-smoke COMMAND parchmint --smoke-test)
 set_tests_properties(parchmint-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 15)
+add_test(NAME parchmint-lifecycle-smoke COMMAND parchmint --lifecycle-smoke-test)
+set_tests_properties(parchmint-lifecycle-smoke PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
 
 add_custom_target(
   qmllint

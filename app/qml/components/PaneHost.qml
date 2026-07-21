@@ -8,6 +8,7 @@ import QtQuick.Layouts
 // Qt undo stack, cursor, or scroll position.
 Pane {
     id: root
+    objectName: "paneHost" + paneIndex
     required property var backend
     required property var model
     required property int paneIndex
@@ -16,6 +17,8 @@ Pane {
     required property bool pinned
     property bool focused: backend.focused_pane === paneIndex
     property string loadedNode: ""
+    property int loadedRevision: 0
+    property bool loadingBody: false
     property bool findVisible: false
     property string pendingExternalUrl: ""
     padding: 0
@@ -25,11 +28,30 @@ Pane {
         findField.forceActiveFocus()
     }
 
-    function reloadBody() {
-        if (viewName === "editor" && nodeId.length > 0 && loadedNode !== nodeId) {
-            editor.text = backend.paneDocumentBody(paneIndex)
+    function reloadBody(force) {
+        if (viewName === "editor" && nodeId.length > 0
+                && (force || loadedNode !== nodeId)) {
+            const liveBody = backend.paneDocumentBody(paneIndex)
+            const liveRevision = backend.paneDocumentRevision(paneIndex)
+            if (loadedNode !== nodeId || editor.text !== liveBody) {
+                loadingBody = true
+                editor.text = liveBody
+                loadingBody = false
+            }
             loadedNode = nodeId
+            loadedRevision = liveRevision
+        } else if (!nodeId.length) {
+            loadingBody = true
+            editor.clear()
+            loadingBody = false
+            loadedNode = ""
+            loadedRevision = 0
         }
+    }
+    function syncLiveBody() {
+        if (viewName === "editor" && loadedNode === nodeId && nodeId.length)
+            return backend.updatePaneBody(paneIndex, editor.text, 0, Math.max(1, editor.lineCount))
+        return true
     }
     function findNext() {
         const query = findField.text
@@ -80,9 +102,13 @@ Pane {
         }
         editor.cursorPosition = positions.length ? positions[0] + replaceField.text.length : editor.cursorPosition
     }
-    onNodeIdChanged: reloadBody()
-    onViewNameChanged: reloadBody()
-    Component.onCompleted: reloadBody()
+    onNodeIdChanged: reloadBody(false)
+    onViewNameChanged: reloadBody(false)
+    Component.onCompleted: reloadBody(false)
+    Connections {
+        target: root.backend
+        function onDocumentRevisionChanged() { root.reloadBody(true) }
+    }
     background: Rectangle {
         color: root.focused ? root.palette.base : root.palette.alternateBase
         border.width: root.focused ? 1 : 0
@@ -98,6 +124,12 @@ Pane {
                 anchors.fill: parent
                 ToolButton { text: root.pinned ? "●" : "○"; checkable: true; checked: root.pinned; Accessible.name: qsTr("Pin pane"); onClicked: root.backend.setPanePinned(root.paneIndex, checked) }
                 Label { text: root.viewName === "attachment" ? qsTr("Attachment") : root.viewName; Layout.fillWidth: true; elide: Text.ElideRight }
+                Label {
+                    visible: root.viewName === "editor" && root.nodeId.length > 0
+                    text: root.backend.document_revision >= 0 ? root.backend.paneSaveStatus(root.paneIndex) : ""
+                    opacity: .7
+                    Accessible.name: qsTr("Pane save status") + ": " + text
+                }
                 ToolButton { text: "⌕"; Accessible.name: qsTr("Find and replace in document"); onClicked: root.findVisible = !root.findVisible }
                 ToolButton { text: "×"; Accessible.name: qsTr("Close pane"); onClicked: root.backend.closePane(root.paneIndex) }
             }
@@ -120,21 +152,27 @@ Pane {
             Item {
                 TextArea {
                     id: editor
+                    objectName: "paneEditor" + root.paneIndex
                     anchors.fill: parent
                     textFormat: TextEdit.PlainText
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
                     persistentSelection: true
+                    readOnly: root.backend.project_read_only
                     placeholderText: root.nodeId.length ? qsTr("Markdown research or manuscript note") : qsTr("Select a document")
                     Accessible.name: qsTr("Document editor")
                     onActiveFocusChanged: {
                         if (activeFocus)
                             root.backend.focusPane(root.paneIndex)
                         else if (root.loadedNode === root.nodeId && root.nodeId.length > 0)
-                            root.backend.savePaneBody(root.paneIndex, text)
+                            root.backend.flushPane(root.paneIndex, text)
+                    }
+                    onTextChanged: {
+                        liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
+                        if (!root.loadingBody && root.loadedNode === root.nodeId && root.nodeId.length > 0)
+                            root.backend.updatePaneBody(root.paneIndex, text, 0, Math.max(1, lineCount))
                     }
                     onSelectedTextChanged: liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
-                    onTextChanged: liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
                 }
                 Label {
                     id: liveCounts

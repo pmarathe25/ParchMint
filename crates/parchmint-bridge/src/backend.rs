@@ -10,15 +10,27 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use parchmint_app::{
     CancellationToken, CollisionPolicy, CommandSpec, CompileExportJob, CompileExportOutput,
-    CompileExportWorker, CompileIr, DiagnosticsSnapshot, DropPlacement, ExportFormat,
-    ExportOptions, HtmlAssetMode, OutlineSort, PaneView, PreparedExport, ProjectReplacePreview,
-    ProjectWorkspace, SearchQuery, SearchResult, SplitOrientation, commit_prepared_export,
-    export_diagnostics, matching_commands, prepare_export_bytes, render_html, text_statistics,
+    CompileExportWorker, CompileIr, DiagnosticsSnapshot, DocumentLifecycleWorker, DocumentWorkKind,
+    DocumentWorkPayload, DropPlacement, ExportFormat, ExportOptions, ExternalChange, HtmlAssetMode,
+    OutlineSort, PaneView, PathInputError, PreparedExport, ProjectPathIntent,
+    ProjectReplacePreview, ProjectWorkspace, RecoveryCandidate, RecoveryIssue, SaveState,
+    SearchQuery, SearchResult, SplitOrientation, commit_prepared_export, export_diagnostics,
+    matching_commands, normalize_path_input, prepare_export_bytes, render_html, text_statistics,
+    validate_project_creation, validate_project_path,
 };
 use parchmint_domain::{
-    CompilePreset, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
+    CompilePreset, DocumentId, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
 };
-use std::{fs, path::Path};
+use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+use std::{fs, thread};
+
+#[derive(Clone, Debug)]
+enum RecoveryUiEntry {
+    Candidate(RecoveryCandidate),
+    Corrupt(RecoveryIssue),
+}
 
 /// Rust state hidden behind the generated QObject.
 pub struct ParchMintBackendRust {
@@ -29,7 +41,10 @@ pub struct ParchMintBackendRust {
     save_status: QString,
     source_mode: bool,
     project_name: QString,
+    project_path: QString,
     project_open: bool,
+    project_read_only: bool,
+    read_only_offer: bool,
     selected_count: i32,
     selected_id: QString,
     selected_title: QString,
@@ -50,6 +65,14 @@ pub struct ParchMintBackendRust {
     export_in_progress: bool,
     command_count: i32,
     replace_count: i32,
+    recovery_count: i32,
+    recovery_title: QString,
+    recovery_preview: QString,
+    recovery_corrupt: bool,
+    external_conflict: bool,
+    external_conflict_title: QString,
+    external_local_preview: QString,
+    external_disk_preview: QString,
     search_results: Vec<SearchResult>,
     command_results: Vec<CommandSpec>,
     command_query: String,
@@ -59,6 +82,12 @@ pub struct ParchMintBackendRust {
     project_generation: u64,
     export_worker: Option<CompileExportWorker>,
     export_cancellation: Option<CancellationToken>,
+    document_worker: Option<DocumentLifecycleWorker>,
+    document_inflight: BTreeMap<DocumentId, DocumentWorkKind>,
+    last_external_poll: Instant,
+    recovery_entries: VecDeque<RecoveryUiEntry>,
+    conflict_document: Option<DocumentId>,
+    pending_read_only_path: Option<PathBuf>,
     workspace: Option<ProjectWorkspace>,
 }
 
@@ -73,7 +102,10 @@ impl Default for ParchMintBackendRust {
             save_status: QString::from("No project"),
             source_mode: false,
             project_name: QString::default(),
+            project_path: QString::default(),
             project_open: false,
+            project_read_only: false,
+            read_only_offer: false,
             selected_count: 0,
             selected_id: QString::default(),
             selected_title: QString::default(),
@@ -94,6 +126,14 @@ impl Default for ParchMintBackendRust {
             export_in_progress: false,
             command_count: i32::try_from(command_results.len()).unwrap_or(i32::MAX),
             replace_count: 0,
+            recovery_count: 0,
+            recovery_title: QString::default(),
+            recovery_preview: QString::default(),
+            recovery_corrupt: false,
+            external_conflict: false,
+            external_conflict_title: QString::default(),
+            external_local_preview: QString::default(),
+            external_disk_preview: QString::default(),
             search_results: Vec::new(),
             command_results,
             command_query: String::new(),
@@ -103,6 +143,12 @@ impl Default for ParchMintBackendRust {
             project_generation: 1,
             export_worker: None,
             export_cancellation: None,
+            document_worker: None,
+            document_inflight: BTreeMap::new(),
+            last_external_poll: Instant::now(),
+            recovery_entries: VecDeque::new(),
+            conflict_document: None,
+            pending_read_only_path: None,
             workspace: None,
         }
     }
@@ -113,8 +159,10 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         include!("pdf_renderer.h");
+        include!("path_helper.h");
         type QString = cxx_qt_lib::QString;
 
+        #[allow(clippy::too_many_arguments)]
         fn parchmint_render_pdf_qt(
             destination: &QString,
             html: &QString,
@@ -125,6 +173,8 @@ pub mod qobject {
             margin_right_micrometres: i32,
             margin_bottom_micrometres: i32,
         ) -> bool;
+        fn parchmint_documents_location() -> QString;
+        fn parchmint_home_location() -> QString;
     }
 
     extern "RustQt" {
@@ -137,7 +187,10 @@ pub mod qobject {
         #[qproperty(QString, save_status)]
         #[qproperty(bool, source_mode)]
         #[qproperty(QString, project_name)]
+        #[qproperty(QString, project_path)]
         #[qproperty(bool, project_open)]
+        #[qproperty(bool, project_read_only)]
+        #[qproperty(bool, read_only_offer)]
         #[qproperty(i32, selected_count, READ, NOTIFY)]
         #[qproperty(QString, selected_id)]
         #[qproperty(QString, selected_title)]
@@ -158,6 +211,14 @@ pub mod qobject {
         #[qproperty(bool, export_in_progress)]
         #[qproperty(i32, command_count, READ, NOTIFY)]
         #[qproperty(i32, replace_count, READ, NOTIFY)]
+        #[qproperty(i32, recovery_count, READ, NOTIFY)]
+        #[qproperty(QString, recovery_title)]
+        #[qproperty(QString, recovery_preview)]
+        #[qproperty(bool, recovery_corrupt)]
+        #[qproperty(bool, external_conflict)]
+        #[qproperty(QString, external_conflict_title)]
+        #[qproperty(QString, external_local_preview)]
+        #[qproperty(QString, external_disk_preview)]
         type ParchMintBackend = super::ParchMintBackendRust;
 
         #[qinvokable]
@@ -291,8 +352,26 @@ pub mod qobject {
         #[cxx_name = "openProject"]
         fn open_project(self: Pin<&mut ParchMintBackend>, path: &QString) -> bool;
         #[qinvokable]
+        #[cxx_name = "openProjectReadOnly"]
+        fn open_project_read_only(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "dismissReadOnlyOffer"]
+        fn dismiss_read_only_offer(self: Pin<&mut ParchMintBackend>);
+        #[qinvokable]
         #[cxx_name = "closeProject"]
-        fn close_project(self: Pin<&mut ParchMintBackend>);
+        fn close_project(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "prepareQuit"]
+        fn prepare_quit(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "emergencyJournal"]
+        fn emergency_journal(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "flushAllDocuments"]
+        fn flush_all_documents(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "pollDocumentLifecycle"]
+        fn poll_document_lifecycle(self: Pin<&mut ParchMintBackend>);
         #[qinvokable]
         #[cxx_name = "selectNode"]
         fn select_node(self: Pin<&mut ParchMintBackend>, id: &QString, additive: bool);
@@ -400,7 +479,25 @@ pub mod qobject {
         fn focus_pane(self: Pin<&mut ParchMintBackend>, pane: i32);
         #[qinvokable]
         #[cxx_name = "paneDocumentBody"]
-        fn pane_document_body(self: &ParchMintBackend, pane: i32) -> QString;
+        fn pane_document_body(self: Pin<&mut ParchMintBackend>, pane: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "updatePaneBody"]
+        fn update_pane_body(
+            self: Pin<&mut ParchMintBackend>,
+            pane: i32,
+            body: &QString,
+            first_block: i32,
+            last_block: i32,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "flushPane"]
+        fn flush_pane(self: Pin<&mut ParchMintBackend>, pane: i32, body: &QString) -> bool;
+        #[qinvokable]
+        #[cxx_name = "paneSaveStatus"]
+        fn pane_save_status(self: &ParchMintBackend, pane: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "paneDocumentRevision"]
+        fn pane_document_revision(self: &ParchMintBackend, pane: i32) -> u64;
         #[qinvokable]
         #[cxx_name = "savePaneBody"]
         fn save_pane_body(self: Pin<&mut ParchMintBackend>, pane: i32, body: &QString) -> bool;
@@ -428,6 +525,24 @@ pub mod qobject {
             first_block: i32,
             last_block: i32,
         );
+        #[qinvokable]
+        #[cxx_name = "restoreRecovery"]
+        fn restore_recovery(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "discardRecovery"]
+        fn discard_recovery(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "saveRecoveryCopy"]
+        fn save_recovery_copy(self: Pin<&mut ParchMintBackend>, destination: &QString) -> bool;
+        #[qinvokable]
+        #[cxx_name = "resolveExternalReload"]
+        fn resolve_external_reload(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "resolveExternalOverwrite"]
+        fn resolve_external_overwrite(self: Pin<&mut ParchMintBackend>) -> bool;
+        #[qinvokable]
+        #[cxx_name = "saveExternalCopy"]
+        fn save_external_copy(self: Pin<&mut ParchMintBackend>, destination: &QString) -> bool;
 
         #[qsignal]
         #[cxx_name = "commandCompleted"]
@@ -547,6 +662,12 @@ impl ParchMintBackend {
     }
 
     pub fn apply_project_replace(mut self: Pin<&mut Self>) -> bool {
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
         let Some(preview) = self.as_mut().rust_mut().replace_preview.take() else {
             return self
                 .as_mut()
@@ -603,7 +724,14 @@ impl ParchMintBackend {
                 index_warning: workspace.index_diagnostic().map(str::to_owned),
             },
         );
-        match export_diagnostics(Path::new(&destination.to_string()), &snapshot) {
+        let destination = match self
+            .as_ref()
+            .normalize_path(destination, ProjectPathIntent::FileDestination)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        match export_diagnostics(&destination, &snapshot) {
             Ok(()) => {
                 self.as_mut().bump("Export diagnostics");
                 true
@@ -769,8 +897,8 @@ impl ParchMintBackend {
     }
 
     pub fn export_destination_exists(&self, destination: &QString) -> bool {
-        let destination = destination.to_string();
-        !destination.trim().is_empty() && Path::new(destination.trim()).is_file()
+        self.normalize_path(destination, ProjectPathIntent::FileDestination)
+            .is_ok_and(|path| path.is_file())
     }
 
     pub fn export_project_with_overwrite(
@@ -788,9 +916,18 @@ impl ParchMintBackend {
             "docx" => ExportFormat::Docx,
             _ => return self.as_mut().fail("Choose a supported export format"),
         };
-        let destination = destination.to_string();
-        if destination.trim().is_empty() {
-            return self.as_mut().fail("Choose an export destination");
+        let destination = match self
+            .as_ref()
+            .normalize_path(destination, ProjectPathIntent::FileDestination)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
         }
         self.as_mut().cancel_export();
         let stamp = self.as_ref().export_stamp();
@@ -815,7 +952,7 @@ impl ParchMintBackend {
         };
         let cancellation = CancellationToken::default();
         let mut options = ExportOptions::file(format, &destination);
-        if Path::new(&destination).exists() {
+        if destination.exists() {
             if !overwrite_confirmed {
                 return self.as_mut().fail("The export destination already exists; explicit overwrite confirmation is required");
             }
@@ -934,7 +1071,25 @@ impl ParchMintBackend {
     }
 
     pub fn create_project(mut self: Pin<&mut Self>, path: &QString, name: &QString) -> bool {
-        match ProjectWorkspace::create(path.to_string(), name.to_string()) {
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
+        let parent = match self
+            .as_ref()
+            .normalize_path(path, ProjectPathIntent::CreateParent)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let name = name.to_string();
+        let root = match validate_project_creation(&parent, &name) {
+            Ok(root) => root,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        match ProjectWorkspace::create(root, name) {
             Ok(workspace) => {
                 self.as_mut().install_workspace(workspace);
                 true
@@ -943,7 +1098,24 @@ impl ParchMintBackend {
         }
     }
     pub fn create_sample_project(mut self: Pin<&mut Self>, path: &QString) -> bool {
-        let result = ProjectWorkspace::create(path.to_string(), "ParchMint Tour").and_then(
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
+        let parent = match self
+            .as_ref()
+            .normalize_path(path, ProjectPathIntent::CreateParent)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let root = match validate_project_creation(&parent, "ParchMint Tour") {
+            Ok(root) => root,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let result = ProjectWorkspace::create(root, "ParchMint Tour").and_then(
             |mut workspace| {
                 let manuscript = workspace.project().manuscript_root();
                 let research = workspace.project().research_root();
@@ -973,7 +1145,42 @@ impl ParchMintBackend {
         }
     }
     pub fn open_project(mut self: Pin<&mut Self>, path: &QString) -> bool {
-        match ProjectWorkspace::open(path.to_string()) {
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
+        let path = match self.as_ref().normalize_path(path, ProjectPathIntent::Open) {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        match ProjectWorkspace::open(&path) {
+            Ok(workspace) => {
+                self.as_mut().rust_mut().pending_read_only_path = None;
+                self.as_mut().set_read_only_offer(false);
+                self.as_mut().install_workspace(workspace);
+                true
+            }
+            Err(error) if error.is_project_locked() => {
+                self.as_mut().rust_mut().pending_read_only_path = Some(path);
+                self.as_mut().set_read_only_offer(true);
+                self.as_mut().set_status(QString::from(
+                    "This project is already open for writing in another process",
+                ));
+                false
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+    pub fn open_project_read_only(mut self: Pin<&mut Self>) -> bool {
+        let Some(path) = self.as_mut().rust_mut().pending_read_only_path.take() else {
+            return self
+                .as_mut()
+                .fail("No locked project is waiting to open read-only");
+        };
+        self.as_mut().set_read_only_offer(false);
+        match ProjectWorkspace::open_read_only(path) {
             Ok(workspace) => {
                 self.as_mut().install_workspace(workspace);
                 true
@@ -981,11 +1188,29 @@ impl ParchMintBackend {
             Err(error) => self.as_mut().fail(error),
         }
     }
-    pub fn close_project(mut self: Pin<&mut Self>) {
+    pub fn dismiss_read_only_offer(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().pending_read_only_path = None;
+        self.as_mut().set_read_only_offer(false);
+    }
+    pub fn close_project(mut self: Pin<&mut Self>) -> bool {
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
         self.as_mut().cancel_export();
+        self.as_mut().rust_mut().document_inflight.clear();
+        if let Some(worker) = self.as_ref().rust().document_worker.as_ref() {
+            let _ = worker.clear_current();
+        }
         self.as_mut().rust_mut().workspace = None;
         self.as_mut().set_project_open(false);
+        self.as_mut().set_project_read_only(false);
+        self.as_mut().set_read_only_offer(false);
+        self.as_mut().rust_mut().pending_read_only_path = None;
         self.as_mut().set_project_name(QString::default());
+        self.as_mut().set_project_path(QString::default());
         self.as_mut().rust_mut().node_count = 0;
         self.as_mut().node_count_changed();
         self.as_mut().rust_mut().selected_count = 0;
@@ -1003,10 +1228,26 @@ impl ParchMintBackend {
         self.as_mut().rust_mut().replace_preview = None;
         self.as_mut().rust_mut().replace_count = 0;
         self.as_mut().replace_count_changed();
+        self.as_mut().rust_mut().recovery_entries.clear();
+        self.as_mut().sync_recovery();
+        self.as_mut().rust_mut().conflict_document = None;
+        self.as_mut().set_external_conflict(false);
+        self.as_mut()
+            .set_external_conflict_title(QString::default());
+        self.as_mut().set_external_local_preview(QString::default());
+        self.as_mut().set_external_disk_preview(QString::default());
         self.as_mut().refresh_commands();
         self.as_mut().bump("Close project");
+        true
     }
     pub fn select_node(mut self: Pin<&mut Self>, id: &QString, additive: bool) {
+        if !additive
+            && !self
+                .as_mut()
+                .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return;
+        }
         let parsed = parse_node(id);
         if let (Some(workspace), Some(id)) = (self.as_mut().rust_mut().workspace.as_mut(), parsed) {
             let mut selection = if additive {
@@ -1057,7 +1298,13 @@ impl ParchMintBackend {
     }
     pub fn import_attachment(mut self: Pin<&mut Self>, parent: &QString, path: &QString) -> bool {
         let parent = parse_node(parent);
-        let path = path.to_string();
+        let path = match self
+            .as_ref()
+            .normalize_path(path, ProjectPathIntent::FileSource)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
         self.as_mut().perform("Import attachment", |workspace| {
             workspace
                 .import_attachment(parent.ok_or("Select a research group")?, path)
@@ -1289,29 +1536,101 @@ impl ParchMintBackend {
         }
         self.as_mut().refresh_projection("Focus pane");
     }
-    pub fn pane_document_body(&self, pane: i32) -> QString {
+    pub fn pane_document_body(mut self: Pin<&mut Self>, pane: i32) -> QString {
+        let body = usize::try_from(pane).ok().and_then(|pane| {
+            self.as_mut()
+                .rust_mut()
+                .workspace
+                .as_mut()?
+                .pane_live_body(pane)
+                .ok()
+                .map(str::to_owned)
+        });
+        body.map_or_else(QString::default, QString::from)
+    }
+    pub fn update_pane_body(
+        mut self: Pin<&mut Self>,
+        pane: i32,
+        body: &QString,
+        first_block: i32,
+        last_block: i32,
+    ) -> bool {
+        if *self.project_read_only() {
+            return self.as_mut().fail("This project is open read-only");
+        }
+        let Ok(pane) = usize::try_from(pane) else {
+            return self.as_mut().fail("Choose a valid pane");
+        };
+        let first = usize::try_from(first_block.max(0)).unwrap_or(0);
+        let last = usize::try_from(last_block.max(first_block + 1)).unwrap_or(first + 1);
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .update_pane_live_body(pane, body.to_string(), first, last, Instant::now())
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(stamp) => {
+                if let Err(error) = self.as_mut().publish_document_stamp(stamp, pane) {
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut().cancel_export();
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+    pub fn flush_pane(mut self: Pin<&mut Self>, pane: i32, body: &QString) -> bool {
+        if *self.project_read_only() {
+            return true;
+        }
+        if !self.as_mut().update_pane_body(pane, body, 0, i32::MAX) {
+            return false;
+        }
+        let document = {
+            let backend = self.as_ref();
+            let workspace = backend.rust().workspace.as_ref();
+            usize::try_from(pane).ok().and_then(|pane| {
+                let workspace = workspace?;
+                workspace
+                    .pane(pane)
+                    .and_then(|state| state.node)
+                    .and_then(|node| workspace.project().nodes.get(&node))
+                    .and_then(|node| node.kind.document_id())
+            })
+        };
+        document.is_none_or(|document| self.as_mut().schedule_document(document, true))
+    }
+    pub fn pane_save_status(&self, pane: i32) -> QString {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane_save_state(pane))
+            .map_or_else(
+                || QString::from("No document"),
+                |state| QString::from(save_state_name(state)),
+            )
+    }
+    pub fn pane_document_revision(&self, pane: i32) -> u64 {
         usize::try_from(pane)
             .ok()
             .and_then(|pane| {
                 self.rust()
                     .workspace
-                    .as_ref()?
-                    .pane_document_body(pane)
-                    .ok()
+                    .as_ref()
+                    .map(|workspace| workspace.pane_revision(pane).get())
             })
-            .map_or_else(QString::default, QString::from)
+            .unwrap_or(0)
     }
     pub fn save_pane_body(mut self: Pin<&mut Self>, pane: i32, body: &QString) -> bool {
-        let body = body.to_string();
-        self.as_mut().perform("Save document", |workspace| {
-            usize::try_from(pane)
-                .map_err(|_| "Choose a valid pane".to_owned())
-                .and_then(|pane| {
-                    workspace
-                        .save_pane_document_body(pane, body)
-                        .map_err(|error| error.to_string())
-                })
-        })
+        self.as_mut().flush_pane(pane, body)
     }
     pub fn pane_attachment_description(&self, pane: i32) -> QString {
         let description = usize::try_from(pane)
@@ -1389,20 +1708,830 @@ impl ParchMintBackend {
         self.as_mut().set_save_status(QString::from("Unsaved"));
     }
 
-    fn install_workspace(mut self: Pin<&mut Self>, workspace: ProjectWorkspace) {
+    fn ensure_document_worker(mut self: Pin<&mut Self>) -> Result<(), String> {
+        if self.as_ref().rust().document_worker.is_none() {
+            let worker = DocumentLifecycleWorker::start("parchmint-documents")
+                .map_err(|error| error.to_string())?;
+            self.as_mut().rust_mut().document_worker = Some(worker);
+        }
+        Ok(())
+    }
+
+    fn publish_document_stamp(
+        mut self: Pin<&mut Self>,
+        stamp: WorkStamp,
+        pane: usize,
+    ) -> Result<(), String> {
+        self.as_mut().ensure_document_worker()?;
+        let document = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.pane(pane))
+            .and_then(|state| state.node)
+            .and_then(|node| {
+                self.as_ref()
+                    .rust()
+                    .workspace
+                    .as_ref()?
+                    .project()
+                    .nodes
+                    .get(&node)?
+                    .kind
+                    .document_id()
+            })
+            .ok_or_else(|| "pane document is unavailable".to_owned())?;
+        self.as_ref()
+            .rust()
+            .document_worker
+            .as_ref()
+            .expect("worker was initialized")
+            .publish_current(document, stamp)
+            .map_err(|error| error.to_string())
+    }
+
+    fn schedule_document(mut self: Pin<&mut Self>, document: DocumentId, force: bool) -> bool {
+        if self
+            .as_ref()
+            .rust()
+            .document_inflight
+            .contains_key(&document)
+        {
+            return true;
+        }
+        if let Err(error) = self.as_mut().ensure_document_worker() {
+            return self.as_mut().fail(error);
+        }
+        let journal = {
+            let mut rust = self.as_mut().rust_mut();
+            let Some(workspace) = rust.workspace.as_mut() else {
+                return true;
+            };
+            match workspace.prepare_session_journal(document, Instant::now(), force) {
+                Ok(request) => request,
+                Err(error) => return self.as_mut().fail(error),
+            }
+        };
+        if let Some(request) = journal {
+            let stamp = request.stamp;
+            let submitted = self
+                .as_ref()
+                .rust()
+                .document_worker
+                .as_ref()
+                .expect("worker was initialized")
+                .publish_current(document, stamp)
+                .and_then(|()| {
+                    self.as_ref()
+                        .rust()
+                        .document_worker
+                        .as_ref()
+                        .expect("worker was initialized")
+                        .submit_journal(document, request)
+                });
+            if let Err(error) = submitted {
+                if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                    workspace.acknowledge_session_journal(document, stamp, Err(error.to_string()));
+                }
+                return self.as_mut().fail(error);
+            }
+            self.as_mut()
+                .rust_mut()
+                .document_inflight
+                .insert(document, DocumentWorkKind::Journal);
+            self.as_mut().sync_document_status();
+            return true;
+        }
+        self.as_mut().schedule_canonical(document)
+    }
+
+    fn schedule_canonical(mut self: Pin<&mut Self>, document: DocumentId) -> bool {
+        if self
+            .as_ref()
+            .rust()
+            .document_inflight
+            .contains_key(&document)
+        {
+            return true;
+        }
+        let prepared = {
+            let mut rust = self.as_mut().rust_mut();
+            let Some(workspace) = rust.workspace.as_mut() else {
+                return true;
+            };
+            workspace.prepare_session_canonical(document)
+        };
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let Some((request, plan)) = prepared else {
+            return true;
+        };
+        let stamp = request.stamp;
+        let submitted = self
+            .as_ref()
+            .rust()
+            .document_worker
+            .as_ref()
+            .expect("worker was initialized")
+            .publish_current(document, stamp)
+            .and_then(|()| {
+                self.as_ref()
+                    .rust()
+                    .document_worker
+                    .as_ref()
+                    .expect("worker was initialized")
+                    .submit_canonical(request, plan)
+            });
+        if let Err(error) = submitted {
+            if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                workspace.acknowledge_session_canonical(document, stamp, Err(error.to_string()));
+            }
+            return self.as_mut().fail(error);
+        }
+        self.as_mut()
+            .rust_mut()
+            .document_inflight
+            .insert(document, DocumentWorkKind::Canonical);
+        self.as_mut().sync_document_status();
+        true
+    }
+
+    fn process_document_results(mut self: Pin<&mut Self>) {
+        loop {
+            let completion = self
+                .as_ref()
+                .rust()
+                .document_worker
+                .as_ref()
+                .map(DocumentLifecycleWorker::try_result);
+            let Some(completion) = completion else {
+                break;
+            };
+            let completion = match completion {
+                Ok(Some(completion)) => completion,
+                Ok(None) => break,
+                Err(error) => {
+                    self.as_mut().fail(error);
+                    break;
+                }
+            };
+            if self
+                .as_ref()
+                .rust()
+                .document_inflight
+                .get(&completion.document_id)
+                == Some(&completion.kind)
+            {
+                self.as_mut()
+                    .rust_mut()
+                    .document_inflight
+                    .remove(&completion.document_id);
+            }
+            match completion.kind {
+                DocumentWorkKind::Journal => {
+                    let succeeded = completion.outcome.is_ok();
+                    let outcome = completion.outcome.map(|_| ());
+                    let disposition = self.as_mut().rust_mut().workspace.as_mut().map_or(
+                        parchmint_app::CompletionDisposition::Stale,
+                        |workspace| {
+                            workspace.acknowledge_session_journal(
+                                completion.document_id,
+                                completion.stamp,
+                                outcome,
+                            )
+                        },
+                    );
+                    if succeeded && disposition == parchmint_app::CompletionDisposition::Applied {
+                        self.as_mut().schedule_canonical(completion.document_id);
+                    }
+                }
+                DocumentWorkKind::Canonical => {
+                    let outcome = completion.outcome.and_then(|payload| match payload {
+                        DocumentWorkPayload::Saved { fingerprint, plan } => Ok((fingerprint, plan)),
+                        _ => Err("document worker returned the wrong save payload".into()),
+                    });
+                    if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                        workspace.acknowledge_session_canonical(
+                            completion.document_id,
+                            completion.stamp,
+                            outcome,
+                        );
+                    }
+                }
+                DocumentWorkKind::ExternalPoll => {
+                    let outcome = completion.outcome.and_then(|payload| match payload {
+                        DocumentWorkPayload::ExternalBody(body) => Ok(body),
+                        _ => Err("document worker returned the wrong external payload".into()),
+                    });
+                    if let Ok(body) = outcome {
+                        let change =
+                            self.as_mut()
+                                .rust_mut()
+                                .workspace
+                                .as_mut()
+                                .and_then(|workspace| {
+                                    workspace
+                                        .observe_external_body(
+                                            completion.document_id,
+                                            completion.stamp,
+                                            body,
+                                        )
+                                        .ok()
+                                });
+                        if matches!(change, Some(ExternalChange::AutoReloaded(_))) {
+                            let revision = self.document_revision().saturating_add(1);
+                            self.as_mut().set_document_revision(revision);
+                        }
+                    }
+                }
+            }
+        }
+        self.as_mut().sync_document_status();
+        self.as_mut().sync_external_conflict();
+    }
+
+    fn schedule_due_documents(mut self: Pin<&mut Self>) {
+        let documents =
+            self.as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .map_or_else(Vec::new, |workspace| {
+                    workspace
+                        .dirty_session_ids()
+                        .into_iter()
+                        .filter(|document| {
+                            !matches!(
+                                workspace.session_save_state(*document),
+                                Some(SaveState::Error(_))
+                            )
+                        })
+                        .collect()
+                });
+        for document in documents {
+            if !self
+                .as_ref()
+                .rust()
+                .document_inflight
+                .contains_key(&document)
+            {
+                self.as_mut().schedule_document(document, false);
+            }
+        }
+    }
+
+    fn schedule_external_polls(mut self: Pin<&mut Self>) {
+        if self.as_ref().rust().last_external_poll.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.as_mut().rust_mut().last_external_poll = Instant::now();
+        let documents = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .map_or_else(Vec::new, ProjectWorkspace::open_session_ids);
+        for document in documents {
+            if self
+                .as_ref()
+                .rust()
+                .document_inflight
+                .contains_key(&document)
+            {
+                continue;
+            }
+            let plan = self
+                .as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.external_poll_plan(document).ok());
+            let Some((stamp, canonical_path)) = plan else {
+                continue;
+            };
+            if self.as_mut().ensure_document_worker().is_err() {
+                return;
+            }
+            let submitted = self
+                .as_ref()
+                .rust()
+                .document_worker
+                .as_ref()
+                .expect("worker was initialized")
+                .publish_current(document, stamp)
+                .and_then(|()| {
+                    self.as_ref()
+                        .rust()
+                        .document_worker
+                        .as_ref()
+                        .expect("worker was initialized")
+                        .submit_external_poll(document, stamp, canonical_path)
+                });
+            if submitted.is_ok() {
+                self.as_mut()
+                    .rust_mut()
+                    .document_inflight
+                    .insert(document, DocumentWorkKind::ExternalPoll);
+            }
+        }
+    }
+
+    pub fn poll_document_lifecycle(mut self: Pin<&mut Self>) {
+        self.as_mut().process_document_results();
+        self.as_mut().schedule_due_documents();
+        self.as_mut().schedule_external_polls();
+    }
+
+    fn flush_for_transition(
+        mut self: Pin<&mut Self>,
+        timeout: Duration,
+        allow_journal_fallback: bool,
+    ) -> bool {
+        if self.as_ref().rust().workspace.is_none() {
+            return true;
+        }
+        let documents = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .map_or_else(Vec::new, ProjectWorkspace::dirty_session_ids);
+        for document in documents {
+            if !self
+                .as_ref()
+                .rust()
+                .document_inflight
+                .contains_key(&document)
+            {
+                self.as_mut().schedule_document(document, true);
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.as_mut().process_document_results();
+            let (saved, journaled, error) =
+                self.as_ref()
+                    .rust()
+                    .workspace
+                    .as_ref()
+                    .map_or((true, true, None), |workspace| {
+                        (
+                            workspace.all_sessions_saved(),
+                            workspace.all_dirty_sessions_journaled(),
+                            workspace.first_session_error(),
+                        )
+                    });
+            if saved {
+                return true;
+            }
+            if let Some(error) = error {
+                return self.as_mut().fail(format!(
+                    "The transition was stopped because the document could not be saved: {error}"
+                ));
+            }
+            if Instant::now() >= deadline {
+                if allow_journal_fallback && journaled {
+                    self.as_mut().set_save_status(QString::from(
+                        "Recovery journal saved; canonical shutdown save timed out",
+                    ));
+                    return true;
+                }
+                return self.as_mut().fail(
+                    "The transition was stopped because saving did not finish in time; your editor remains open",
+                );
+            }
+            let documents = self
+                .as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .map_or_else(Vec::new, ProjectWorkspace::dirty_session_ids);
+            for document in documents {
+                if !self
+                    .as_ref()
+                    .rust()
+                    .document_inflight
+                    .contains_key(&document)
+                {
+                    self.as_mut().schedule_document(document, true);
+                }
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    pub fn flush_all_documents(mut self: Pin<&mut Self>) -> bool {
+        self.as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+    }
+
+    pub fn prepare_quit(mut self: Pin<&mut Self>) -> bool {
+        self.as_mut()
+            .flush_for_transition(Duration::from_secs(3), true)
+    }
+
+    pub fn emergency_journal(mut self: Pin<&mut Self>) -> bool {
+        let documents = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .map_or_else(Vec::new, ProjectWorkspace::dirty_session_ids);
+        for document in documents {
+            let request = self
+                .as_mut()
+                .rust_mut()
+                .workspace
+                .as_mut()
+                .and_then(|workspace| {
+                    workspace
+                        .prepare_session_journal(document, Instant::now(), true)
+                        .ok()
+                        .flatten()
+                });
+            if let Some(request) = request {
+                let stamp = request.stamp;
+                let outcome = request.execute().map_err(|error| error.to_string());
+                if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                    workspace.acknowledge_session_journal(document, stamp, outcome);
+                }
+            }
+        }
+        let journaled = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .is_none_or(ProjectWorkspace::all_dirty_sessions_journaled);
+        if !journaled {
+            self.as_mut()
+                .operation_failed(QString::from("Emergency recovery journaling failed"));
+        }
+        journaled
+    }
+
+    pub fn restore_recovery(mut self: Pin<&mut Self>) -> bool {
+        let entry = self.as_mut().rust_mut().recovery_entries.pop_front();
+        let Some(RecoveryUiEntry::Candidate(candidate)) = entry else {
+            if let Some(entry) = entry {
+                self.as_mut().rust_mut().recovery_entries.push_front(entry);
+            }
+            return self
+                .as_mut()
+                .fail("This corrupt recovery record cannot be restored");
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .restore_recovery(&candidate, Instant::now())
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(stamp) => {
+                if let Some(worker) = self.as_ref().rust().document_worker.as_ref() {
+                    let _ = worker.publish_current(candidate.record.document_id, stamp);
+                }
+                self.as_mut()
+                    .schedule_document(candidate.record.document_id, true);
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_recovery();
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => {
+                self.as_mut()
+                    .rust_mut()
+                    .recovery_entries
+                    .push_front(RecoveryUiEntry::Candidate(candidate));
+                self.as_mut().fail(error)
+            }
+        }
+    }
+
+    pub fn discard_recovery(mut self: Pin<&mut Self>) -> bool {
+        let entry = self.as_mut().rust_mut().recovery_entries.pop_front();
+        let result = match entry.clone() {
+            Some(RecoveryUiEntry::Candidate(candidate)) => {
+                ProjectWorkspace::discard_recovery(candidate)
+            }
+            Some(RecoveryUiEntry::Corrupt(issue)) => {
+                ProjectWorkspace::discard_recovery_issue(issue)
+            }
+            None => return true,
+        };
+        match result {
+            Ok(()) => {
+                self.as_mut().sync_recovery();
+                true
+            }
+            Err(error) => {
+                if let Some(entry) = entry {
+                    self.as_mut().rust_mut().recovery_entries.push_front(entry);
+                }
+                self.as_mut().fail(error)
+            }
+        }
+    }
+
+    pub fn save_recovery_copy(mut self: Pin<&mut Self>, destination: &QString) -> bool {
+        let destination = match self
+            .as_ref()
+            .normalize_path(destination, ProjectPathIntent::FileDestination)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let entry = self.as_mut().rust_mut().recovery_entries.pop_front();
+        let Some(RecoveryUiEntry::Candidate(candidate)) = entry else {
+            if let Some(entry) = entry {
+                self.as_mut().rust_mut().recovery_entries.push_front(entry);
+            }
+            return self
+                .as_mut()
+                .fail("This corrupt recovery record cannot be copied");
+        };
+        let result = candidate
+            .save_copy(&destination)
+            .and_then(|()| candidate.clone().discard());
+        match result {
+            Ok(()) => {
+                self.as_mut().sync_recovery();
+                true
+            }
+            Err(error) => {
+                self.as_mut()
+                    .rust_mut()
+                    .recovery_entries
+                    .push_front(RecoveryUiEntry::Candidate(candidate));
+                self.as_mut().fail(error)
+            }
+        }
+    }
+
+    pub fn resolve_external_reload(mut self: Pin<&mut Self>) -> bool {
+        let Some(document) = self.as_ref().rust().conflict_document else {
+            return true;
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .resolve_external_reload(document)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_external_conflict();
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
+    pub fn resolve_external_overwrite(mut self: Pin<&mut Self>) -> bool {
+        let Some(document) = self.as_ref().rust().conflict_document else {
+            return true;
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .resolve_external_overwrite(document)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                self.as_mut().sync_external_conflict();
+                self.as_mut().schedule_document(document, true);
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
+    pub fn save_external_copy(mut self: Pin<&mut Self>, destination: &QString) -> bool {
+        let Some(document) = self.as_ref().rust().conflict_document else {
+            return true;
+        };
+        let destination = match self
+            .as_ref()
+            .normalize_path(destination, ProjectPathIntent::FileDestination)
+        {
+            Ok(path) => path,
+            Err(error) => return self.as_mut().fail(error),
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .save_external_conflict_copy(document, &destination)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_external_conflict();
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+
+    fn install_workspace(mut self: Pin<&mut Self>, mut workspace: ProjectWorkspace) {
         let name = QString::from(workspace.project().name.clone());
+        let path = QString::from(workspace.project_root().to_string_lossy().into_owned());
+        let read_only = workspace.is_read_only();
         let generation = self
             .as_ref()
             .rust()
             .project_generation
             .saturating_add(1)
             .max(1);
+        let generation_value = ProjectGeneration::new(generation).expect("generation is non-zero");
+        if let Err(error) = workspace.set_project_generation(generation_value) {
+            self.as_mut().fail(error);
+            return;
+        }
+        // A read-only fallback may coexist with the live writer that owns
+        // these journals. It must neither offer to consume nor discard that
+        // writer's recovery state.
+        let recovery = if read_only {
+            parchmint_app::RecoveryScan::default()
+        } else {
+            workspace.recovery_scan().unwrap_or_else(|error| {
+                let path = workspace.project_root().join(".parchmint/recovery");
+                parchmint_app::RecoveryScan {
+                    candidates: Vec::new(),
+                    issues: vec![RecoveryIssue {
+                        path,
+                        message: error.to_string(),
+                    }],
+                }
+            })
+        };
+        let mut recovery_entries = recovery
+            .candidates
+            .into_iter()
+            .map(RecoveryUiEntry::Candidate)
+            .collect::<VecDeque<_>>();
+        recovery_entries.extend(recovery.issues.into_iter().map(RecoveryUiEntry::Corrupt));
         self.as_mut().rust_mut().project_generation = generation;
+        self.as_mut().rust_mut().document_inflight.clear();
+        if let Some(worker) = self.as_ref().rust().document_worker.as_ref() {
+            let _ = worker.clear_current();
+        }
+        self.as_mut().rust_mut().recovery_entries = recovery_entries;
         self.as_mut().rust_mut().workspace = Some(workspace);
         self.as_mut().set_project_name(name);
+        self.as_mut().set_project_path(path);
         self.as_mut().set_project_open(true);
-        self.as_mut().set_save_status(QString::from("Saved"));
+        self.as_mut().set_project_read_only(read_only);
+        self.as_mut()
+            .set_save_status(QString::from(if read_only { "Read-only" } else { "Saved" }));
+        self.as_mut().sync_recovery();
+        self.as_mut().sync_document_status();
         self.as_mut().refresh_projection("Open project");
+    }
+
+    fn sync_document_status(mut self: Pin<&mut Self>) {
+        if *self.project_read_only() {
+            self.as_mut().set_save_status(QString::from("Read-only"));
+            self.as_mut().document_revision_changed();
+            return;
+        }
+        let state = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .map_or("No project", |workspace| {
+                let states = workspace
+                    .open_session_ids()
+                    .into_iter()
+                    .filter_map(|id| workspace.session_save_state(id));
+                let mut value = "Saved";
+                for state in states {
+                    match state {
+                        SaveState::Error(_) => return "Save error",
+                        SaveState::Saving => value = "Saving…",
+                        SaveState::Journaling if value == "Saved" => value = "Journaling…",
+                        SaveState::Dirty if value == "Saved" => value = "Unsaved",
+                        SaveState::Saved | SaveState::Journaling | SaveState::Dirty => {}
+                    }
+                }
+                value
+            });
+        self.as_mut().set_save_status(QString::from(state));
+        // Per-pane status labels call back into the backend; this notifier is
+        // their dependency as well as the live-body refresh trigger.
+        self.as_mut().document_revision_changed();
+    }
+
+    fn sync_recovery(mut self: Pin<&mut Self>) {
+        let count = i32::try_from(self.as_ref().rust().recovery_entries.len()).unwrap_or(i32::MAX);
+        self.as_mut().rust_mut().recovery_count = count;
+        self.as_mut().recovery_count_changed();
+        let current = self.as_ref().rust().recovery_entries.front().cloned();
+        match current {
+            Some(RecoveryUiEntry::Candidate(candidate)) => {
+                let title = self
+                    .as_ref()
+                    .rust()
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| {
+                        workspace
+                            .project()
+                            .documents
+                            .get(&candidate.record.document_id)
+                    })
+                    .map_or_else(
+                        || candidate.record.document_id.to_string(),
+                        |record| record.metadata.title.clone(),
+                    );
+                self.as_mut().set_recovery_title(QString::from(title));
+                self.as_mut()
+                    .set_recovery_preview(QString::from(preview_text(candidate.preview())));
+                self.as_mut().set_recovery_corrupt(false);
+            }
+            Some(RecoveryUiEntry::Corrupt(issue)) => {
+                let title = issue
+                    .path
+                    .file_name()
+                    .map_or_else(|| "Recovery record".into(), |name| name.to_string_lossy());
+                self.as_mut()
+                    .set_recovery_title(QString::from(title.into_owned()));
+                self.as_mut()
+                    .set_recovery_preview(QString::from(issue.message));
+                self.as_mut().set_recovery_corrupt(true);
+            }
+            None => {
+                self.as_mut().set_recovery_title(QString::default());
+                self.as_mut().set_recovery_preview(QString::default());
+                self.as_mut().set_recovery_corrupt(false);
+            }
+        }
+    }
+
+    fn sync_external_conflict(mut self: Pin<&mut Self>) {
+        let conflict = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.external_conflicts().iter().next())
+            .map(|(id, conflict)| (*id, conflict.clone()));
+        self.as_mut().rust_mut().conflict_document = conflict.as_ref().map(|(id, _)| *id);
+        self.as_mut().set_external_conflict(conflict.is_some());
+        if let Some((document, conflict)) = conflict {
+            let title = self
+                .as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.project().documents.get(&document))
+                .map_or_else(
+                    || document.to_string(),
+                    |record| record.metadata.title.clone(),
+                );
+            self.as_mut()
+                .set_external_conflict_title(QString::from(title));
+            self.as_mut()
+                .set_external_local_preview(QString::from(preview_text(&conflict.local_body)));
+            self.as_mut()
+                .set_external_disk_preview(QString::from(preview_text(&conflict.external_body)));
+        } else {
+            self.as_mut()
+                .set_external_conflict_title(QString::default());
+            self.as_mut().set_external_local_preview(QString::default());
+            self.as_mut().set_external_disk_preview(QString::default());
+        }
     }
     fn refresh_projection(mut self: Pin<&mut Self>, command: &str) {
         let (count, selected) = {
@@ -1507,6 +2636,12 @@ impl ParchMintBackend {
     where
         F: FnOnce(&mut ProjectWorkspace) -> Result<(), String>,
     {
+        if !self
+            .as_mut()
+            .flush_for_transition(Duration::from_secs(5), false)
+        {
+            return false;
+        }
         let result = self
             .as_mut()
             .rust_mut()
@@ -1547,6 +2682,17 @@ impl ParchMintBackend {
                 .edit_metadata(id, metadata)
                 .map_err(|error| error.to_string())
         })
+    }
+    fn normalize_path(
+        &self,
+        input: &QString,
+        intent: ProjectPathIntent,
+    ) -> Result<PathBuf, PathInputError> {
+        let documents = PathBuf::from(qobject::parchmint_documents_location().to_string());
+        let home = PathBuf::from(qobject::parchmint_home_location().to_string());
+        let path = normalize_path_input(&input.to_string(), &documents, Some(&home))?;
+        validate_project_path(&path, intent)?;
+        Ok(path)
     }
     #[allow(clippy::needless_pass_by_value)]
     fn fail(mut self: Pin<&mut Self>, error: impl ToString) -> bool {
@@ -1624,6 +2770,25 @@ fn pane_view_name(view: PaneView) -> &'static str {
         PaneView::Outline => "outline",
         PaneView::Cards => "cards",
     }
+}
+
+fn save_state_name(state: &SaveState) -> String {
+    match state {
+        SaveState::Saved => "Saved".into(),
+        SaveState::Dirty => "Unsaved".into(),
+        SaveState::Journaling => "Journaling…".into(),
+        SaveState::Saving => "Saving…".into(),
+        SaveState::Error(error) => format!("Save error: {error}"),
+    }
+}
+
+fn preview_text(source: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 8_000;
+    let mut preview = source.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    if source.chars().count() > MAX_PREVIEW_CHARS {
+        preview.push_str("\n…");
+    }
+    preview
 }
 
 fn local_file_url(path: &Path) -> String {

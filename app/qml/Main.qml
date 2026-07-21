@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
+import QtQuick.Dialogs
 import QtQuick.Layouts
 import QtQuick.Window
 import QtCore
@@ -23,6 +24,7 @@ ApplicationWindow {
     property string transientMessage: ""
     property bool binderVisible: true
     property bool inspectorVisible: true
+    property bool quitApproved: false
 
     function rememberProject(path) {
         const normalized = path.trim()
@@ -35,8 +37,8 @@ ApplicationWindow {
 
     function dispatchCommand(id) {
         switch (id) {
-        case "project.new": projectDialog.openExisting = false; projectDialog.open(); break
-        case "project.open": projectDialog.openExisting = true; projectDialog.open(); break
+        case "project.new": newProjectDialog.open(); break
+        case "project.open": openProjectFolderDialog.open(); break
         case "project.close": backend.closeProject(); break
         case "project.export": exportDialog.open(); break
         case "project.diagnostics": diagnosticsDialog.open(); break
@@ -74,6 +76,17 @@ ApplicationWindow {
     Component.onCompleted: {
         if (!appSettings.onboardingComplete)
             onboardingDialog.open()
+    }
+
+    onClosing: function(close) {
+        if (quitApproved) {
+            close.accepted = true
+            return
+        }
+        paneOne.syncLiveBody()
+        paneTwo.syncLiveBody()
+        close.accepted = backend.prepareQuit()
+        quitApproved = close.accepted
     }
 
     Popup {
@@ -167,6 +180,7 @@ ApplicationWindow {
 
     ParchMintBackend {
         id: backend
+        objectName: "parchmintBackend"
         onCommandRequested: function(id) { window.dispatchCommand(id) }
         onCommandCompleted: function(command, revision) {
             window.transientMessage = qsTr("%1 at revision %2").arg(command).arg(revision)
@@ -202,41 +216,61 @@ ApplicationWindow {
     }
 
     Dialog {
-        id: projectDialog
-        title: qsTr("Create project")
+        id: readOnlyDialog
+        visible: backend.read_only_offer
+        title: qsTr("Project already open")
         modal: true
         anchors.centerIn: Overlay.overlay
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        property bool openExisting: false
-        onAccepted: {
-            const opened = openExisting
-                ? backend.openProject(pathField.text)
-                : backend.createProject(pathField.text, nameField.text)
-            if (opened)
-                window.rememberProject(pathField.text)
-        }
-        contentItem: GridLayout {
-            columns: 2
-            rowSpacing: DesignTokens.space3
-            columnSpacing: DesignTokens.space3
-            Label { text: qsTr("Project folder") }
-            TextField { id: pathField; Layout.preferredWidth: 440; placeholderText: qsTr("/path/to/My Novel") }
-            Label { visible: !projectDialog.openExisting; text: qsTr("Project name") }
-            TextField { id: nameField; visible: !projectDialog.openExisting; text: qsTr("Untitled Novel"); Layout.fillWidth: true }
+        standardButtons: Dialog.Cancel
+        onRejected: backend.dismissReadOnlyOffer()
+        contentItem: ColumnLayout {
+            Label { text: qsTr("Another live process owns this project's writer lock. ParchMint will not break that lock or allow a second writer."); wrapMode: Text.Wrap; Layout.preferredWidth: 460 }
+            Button { text: qsTr("Open Read-Only"); highlighted: true; Layout.alignment: Qt.AlignRight; onClicked: backend.openProjectReadOnly() }
         }
     }
 
     Dialog {
-        id: attachmentDialog
-        title: qsTr("Import research attachment")
+        id: newProjectDialog
+        title: qsTr("Create project")
         modal: true
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: backend.importAttachment(backend.selected_id, attachmentPath.text)
-        contentItem: ColumnLayout {
-            Label { text: qsTr("File path (copied safely into this project)") }
-            TextField { id: attachmentPath; Layout.preferredWidth: 440; placeholderText: qsTr("/path/to/reference.pdf") }
+        onAccepted: {
+            createProjectParentDialog.open()
         }
+        contentItem: ColumnLayout {
+            Label { text: qsTr("Project name") }
+            TextField { id: nameField; text: qsTr("Untitled Novel"); Layout.preferredWidth: 440; selectByMouse: true }
+            Label { text: qsTr("After continuing, choose the parent folder in the native folder picker."); wrapMode: Text.Wrap; Layout.fillWidth: true; opacity: .7 }
+        }
+    }
+
+    FolderDialog {
+        id: createProjectParentDialog
+        title: qsTr("Choose the parent folder for the new project")
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: {
+            if (backend.createProject(selectedFolder.toString(), nameField.text))
+                window.rememberProject(backend.project_path)
+        }
+    }
+
+    FolderDialog {
+        id: openProjectFolderDialog
+        title: qsTr("Open a ParchMint project folder")
+        currentFolder: backend.project_open ? backend.project_path : StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: {
+            if (backend.openProject(selectedFolder.toString()))
+                window.rememberProject(backend.project_path)
+        }
+    }
+
+    FileDialog {
+        id: attachmentFileDialog
+        title: qsTr("Import research attachment")
+        fileMode: FileDialog.OpenFile
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: backend.importAttachment(backend.selected_id, selectedFile.toString())
     }
 
     Dialog {
@@ -245,12 +279,7 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: {
-            if (backend.exportDestinationExists(exportDestination.text))
-                overwriteExportDialog.open()
-            else
-                backend.exportProjectWithOverwrite(exportFormat.currentValue, exportDestination.text, false)
-        }
+        onAccepted: exportFileDialog.open()
         contentItem: GridLayout {
             columns: 2
             rowSpacing: DesignTokens.space3
@@ -271,13 +300,6 @@ ApplicationWindow {
                 ]
                 Accessible.name: qsTr("Export format")
             }
-            Label { text: qsTr("Destination") }
-            TextField {
-                id: exportDestination
-                Layout.preferredWidth: 440
-                placeholderText: qsTr("/path/to/manuscript")
-                Accessible.name: qsTr("Export destination")
-            }
             Label {
                 Layout.columnSpan: 2
                 Layout.fillWidth: true
@@ -288,13 +310,37 @@ ApplicationWindow {
         }
     }
 
+    FileDialog {
+        id: exportFileDialog
+        title: qsTr("Save exported manuscript")
+        fileMode: FileDialog.SaveFile
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        nameFilters: {
+            switch (exportFormat.currentValue) {
+            case "markdown": return [qsTr("Markdown files (*.md)")]
+            case "plain_text": return [qsTr("Text files (*.txt)")]
+            case "html": return [qsTr("HTML files (*.html)")]
+            case "pdf": return [qsTr("PDF files (*.pdf)")]
+            case "epub": return [qsTr("EPUB files (*.epub)")]
+            case "docx": return [qsTr("Word documents (*.docx)")]
+            }
+            return [qsTr("All files (*)")]
+        }
+        onAccepted: {
+            if (backend.exportDestinationExists(selectedFile.toString()))
+                overwriteExportDialog.open()
+            else
+                backend.exportProjectWithOverwrite(exportFormat.currentValue, selectedFile.toString(), false)
+        }
+    }
+
     Dialog {
         id: overwriteExportDialog
         title: qsTr("Replace existing export?")
         modal: true
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: backend.exportProjectWithOverwrite(exportFormat.currentValue, exportDestination.text, true)
+        onAccepted: backend.exportProjectWithOverwrite(exportFormat.currentValue, exportFileDialog.selectedFile.toString(), true)
         contentItem: Label {
             width: 420
             wrapMode: Text.Wrap
@@ -355,18 +401,13 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
+    FileDialog {
         id: diagnosticsDialog
         title: qsTr("Export diagnostics")
-        modal: true
-        anchors.centerIn: Overlay.overlay
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        onAccepted: backend.exportDiagnostics(diagnosticsPath.text)
-        contentItem: ColumnLayout {
-            Label { text: qsTr("Save local diagnostics to"); font.bold: true }
-            TextField { id: diagnosticsPath; Layout.preferredWidth: 480; placeholderText: qsTr("/path/to/parchmint-diagnostics.txt"); Accessible.name: qsTr("Diagnostics destination") }
-            Label { text: qsTr("The report contains versions, platform, counts, and non-content warnings. It contains no writing or project paths and is never uploaded."); wrapMode: Text.Wrap; Layout.fillWidth: true }
-        }
+        fileMode: FileDialog.SaveFile
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        nameFilters: [qsTr("Text files (*.txt)")]
+        onAccepted: backend.exportDiagnostics(selectedFile.toString())
     }
 
     Dialog {
@@ -452,18 +493,106 @@ ApplicationWindow {
             spacing: DesignTokens.space3
             Label { text: qsTr("Plan, write, research, and export—locally."); font.pixelSize: 22; font.bold: true; Accessible.role: Accessible.Heading }
             Label { text: qsTr("Projects are ordinary folders of Markdown and TOML. ParchMint does not need an account or network connection."); wrapMode: Text.Wrap; Layout.preferredWidth: 520 }
-            TextField { id: samplePath; Layout.fillWidth: true; placeholderText: qsTr("Folder for a guided sample project") }
             Button {
-                text: qsTr("Create sample project")
-                enabled: samplePath.text.trim().length > 0
-                onClicked: {
-                    if (backend.createSampleProject(samplePath.text)) {
-                        window.rememberProject(samplePath.text)
-                        onboardingDialog.close()
-                    }
-                }
+                text: qsTr("Choose a folder and create the sample…")
+                onClicked: sampleProjectParentDialog.open()
             }
         }
+    }
+
+    FolderDialog {
+        id: sampleProjectParentDialog
+        title: qsTr("Choose the parent folder for ParchMint Tour")
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        onAccepted: {
+            if (backend.createSampleProject(selectedFolder.toString())) {
+                window.rememberProject(backend.project_path)
+                onboardingDialog.close()
+            }
+        }
+    }
+
+    Dialog {
+        id: recoveryDialog
+        objectName: "recoveryDialog"
+        visible: backend.recovery_count > 0
+        title: backend.recovery_corrupt ? qsTr("Corrupt recovery record") : qsTr("Recover unsaved writing")
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        closePolicy: Popup.NoAutoClose
+        contentItem: ColumnLayout {
+            spacing: DesignTokens.space3
+            Label { text: backend.recovery_title; font.bold: true; Layout.fillWidth: true }
+            ScrollView {
+                Layout.preferredWidth: 620
+                Layout.preferredHeight: 300
+                TextArea { text: backend.recovery_preview; readOnly: true; wrapMode: TextEdit.Wrap; Accessible.name: qsTr("Recovery preview") }
+            }
+            Label {
+                text: backend.recovery_corrupt
+                    ? qsTr("This record is isolated. Discarding it does not affect other recovery records or canonical documents.")
+                    : qsTr("Restore returns this text to its live document session. Save a copy preserves it separately; discard removes only this recovery record.")
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                Button { text: qsTr("Discard"); onClicked: backend.discardRecovery() }
+                Button { text: qsTr("Save Copy…"); visible: !backend.recovery_corrupt; onClicked: recoveryCopyDialog.open() }
+                Button { text: qsTr("Restore"); visible: !backend.recovery_corrupt; highlighted: true; onClicked: backend.restoreRecovery() }
+            }
+        }
+    }
+
+    FileDialog {
+        id: recoveryCopyDialog
+        title: qsTr("Save recovered writing as a copy")
+        fileMode: FileDialog.SaveFile
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        nameFilters: [qsTr("Markdown files (*.md)"), qsTr("Text files (*.txt)")]
+        onAccepted: backend.saveRecoveryCopy(selectedFile.toString())
+    }
+
+    Dialog {
+        id: externalConflictDialog
+        visible: backend.external_conflict
+        title: qsTr("%1 changed outside ParchMint").arg(backend.external_conflict_title)
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        closePolicy: Popup.NoAutoClose
+        contentItem: ColumnLayout {
+            spacing: DesignTokens.space3
+            RowLayout {
+                Layout.preferredWidth: 760
+                Layout.preferredHeight: 320
+                ColumnLayout {
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Label { text: qsTr("Your unsaved version"); font.bold: true }
+                    ScrollView { Layout.fillWidth: true; Layout.fillHeight: true; TextArea { text: backend.external_local_preview; readOnly: true; wrapMode: TextEdit.Wrap } }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    Label { text: qsTr("Version on disk"); font.bold: true }
+                    ScrollView { Layout.fillWidth: true; Layout.fillHeight: true; TextArea { text: backend.external_disk_preview; readOnly: true; wrapMode: TextEdit.Wrap } }
+                }
+            }
+            Label { text: qsTr("Reload uses the disk version. Overwrite explicitly replaces it with your live version after journaling. Save Copy preserves your version separately, then reloads the disk version."); wrapMode: Text.Wrap; Layout.fillWidth: true }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                Button { text: qsTr("Save Copy…"); onClicked: externalCopyDialog.open() }
+                Button { text: qsTr("Reload Disk Version"); onClicked: backend.resolveExternalReload() }
+                Button { text: qsTr("Overwrite with Mine"); highlighted: true; onClicked: backend.resolveExternalOverwrite() }
+            }
+        }
+    }
+
+    FileDialog {
+        id: externalCopyDialog
+        title: qsTr("Save your version as a copy")
+        fileMode: FileDialog.SaveFile
+        currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
+        nameFilters: [qsTr("Markdown files (*.md)"), qsTr("Text files (*.txt)")]
+        onAccepted: backend.saveExternalCopy(selectedFile.toString())
     }
 
     Dialog {
@@ -481,6 +610,13 @@ ApplicationWindow {
         running: backend.export_in_progress
         repeat: true
         onTriggered: backend.pollExport()
+    }
+
+    Timer {
+        interval: 100
+        running: backend.project_open
+        repeat: true
+        onTriggered: backend.pollDocumentLifecycle()
     }
 
     menuBar: MenuBar {
@@ -520,7 +656,7 @@ ApplicationWindow {
             title: qsTr("Research")
             Action { text: qsTr("New research group"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Group"), true) }
             Action { text: qsTr("New research note"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Note"), false) }
-            Action { text: qsTr("Import attachment…"); enabled: backend.selected_id.length > 0; onTriggered: attachmentDialog.open() }
+            Action { text: qsTr("Import attachment…"); enabled: backend.selected_id.length > 0; onTriggered: attachmentFileDialog.open() }
         }
         Menu {
             title: qsTr("View")
@@ -546,6 +682,7 @@ ApplicationWindow {
     Shortcut { sequence: StandardKey.New; onActivated: backend.requestCommand("project.new") }
     Shortcut { sequence: StandardKey.Open; onActivated: backend.requestCommand("project.open") }
     Shortcut { sequence: StandardKey.Close; enabled: backend.project_open; onActivated: backend.requestCommand("project.close") }
+    Shortcut { sequence: StandardKey.Save; enabled: backend.project_open; onActivated: backend.flushAllDocuments() }
     Shortcut { sequences: ["Ctrl+Shift+E", "Meta+Shift+E"]; enabled: backend.project_open; onActivated: backend.requestCommand("project.export") }
     Shortcut { sequence: "Ctrl+Shift+Up"; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_up") }
     Shortcut { sequence: "Ctrl+Shift+Down"; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_down") }

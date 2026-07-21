@@ -3,12 +3,17 @@
 
 use parchmint_domain::{DocumentId, ProjectGeneration, Revision, WorkStamp};
 use parchmint_markdown::{BlockNode, Diagnostic, Document, MarkdownError, ParseOptions};
-use parchmint_storage::{OpenProject, ProjectStorage, StorageError, atomic_write};
+use parchmint_storage::{
+    DocumentSavePlan, OpenProject, PreparedAtomicWrite, ProjectStorage, StorageError, atomic_write,
+    prepare_atomic_write, read_document_body_at, read_document_bytes_bounded,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -110,6 +115,8 @@ pub struct DocumentSession {
     saved_revision: Revision,
     journaled_revision: Revision,
     semantic: Document,
+    body: String,
+    parse_options: ParseOptions,
     mode: EditorMode,
     raw_buffer: Option<String>,
     raw_status: SourceParseStatus,
@@ -135,13 +142,11 @@ impl DocumentSession {
             .keys()
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
-        let semantic = Document::parse_body(
-            body,
-            &ParseOptions {
-                known_style_ids,
-                ..ParseOptions::default()
-            },
-        )?;
+        let parse_options = ParseOptions {
+            known_style_ids,
+            ..ParseOptions::default()
+        };
+        let semantic = Document::parse_body(body, &parse_options)?;
         Ok(Self {
             document_id,
             project_root: opened.root().to_owned(),
@@ -150,6 +155,8 @@ impl DocumentSession {
             saved_revision: Revision::INITIAL,
             journaled_revision: Revision::INITIAL,
             semantic,
+            body: body.to_owned(),
+            parse_options,
             mode: EditorMode::Wysiwyg,
             raw_buffer: None,
             raw_status: SourceParseStatus::NotInSourceMode,
@@ -172,6 +179,10 @@ impl DocumentSession {
 
     pub const fn saved_revision(&self) -> Revision {
         self.saved_revision
+    }
+
+    pub const fn journaled_revision(&self) -> Revision {
+        self.journaled_revision
     }
 
     pub const fn mode(&self) -> EditorMode {
@@ -210,6 +221,50 @@ impl DocumentSession {
         self.revision != self.saved_revision
     }
 
+    /// Authoritative live Markdown body projected into any pane referencing
+    /// this session. QML editor strings are never the persistence authority.
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// Replaces the live projection after a Qt text delta. Parsing uses the
+    /// same project style and resource options as the original open.
+    pub fn replace_body(
+        &mut self,
+        body: String,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<Revision, DocumentLifecycleError> {
+        self.require_wysiwyg()?;
+        if body == self.body {
+            return Ok(self.revision);
+        }
+        match Document::parse_body(&body, &self.parse_options) {
+            Ok(document) => {
+                let status = source_parse_status(&document);
+                self.semantic = document;
+                self.raw_status = match status {
+                    SourceParseStatus::Invalid { message } => {
+                        SourceParseStatus::Invalid { message }
+                    }
+                    _ => SourceParseStatus::NotInSourceMode,
+                };
+            }
+            Err(error) => {
+                // The live string is still authoritative even while it is not
+                // valid canonical Markdown. Keep journaling it so a temporary
+                // or user-authored syntax error cannot discard acknowledged
+                // typing; canonical save remains vetoed until it parses.
+                self.raw_status = SourceParseStatus::Invalid {
+                    message: error.to_string(),
+                };
+            }
+        }
+        self.body = body;
+        self.record_edit(first_block..last_block_exclusive.max(first_block + 1), now)
+    }
+
     pub fn replace_block(
         &mut self,
         index: usize,
@@ -218,6 +273,7 @@ impl DocumentSession {
     ) -> Result<Revision, DocumentLifecycleError> {
         self.require_wysiwyg()?;
         self.semantic.replace_block(index, node)?;
+        self.body = self.semantic.serialize_body();
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -229,6 +285,7 @@ impl DocumentSession {
     ) -> Result<Revision, DocumentLifecycleError> {
         self.require_wysiwyg()?;
         self.semantic.insert_block(index, node)?;
+        self.body = self.semantic.serialize_body();
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -239,6 +296,7 @@ impl DocumentSession {
     ) -> Result<Revision, DocumentLifecycleError> {
         self.require_wysiwyg()?;
         self.semantic.remove_block(index)?;
+        self.body = self.semantic.serialize_body();
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -265,7 +323,7 @@ impl DocumentSession {
         Ok(self.revision)
     }
 
-    fn stamp(&self) -> WorkStamp {
+    pub fn stamp(&self) -> WorkStamp {
         WorkStamp {
             generation: self.generation,
             revision: self.revision,
@@ -332,7 +390,11 @@ impl DocumentSession {
             return Ok(None);
         }
         if let SourceParseStatus::Invalid { message } = &self.raw_status {
-            return Err(DocumentLifecycleError::InvalidRawSource(message.clone()));
+            let message = message.clone();
+            self.save_state = SaveState::Error(format!(
+                "The current text is safely journaled but cannot replace the document yet: {message}"
+            ));
+            return Err(DocumentLifecycleError::InvalidRawSource(message));
         }
         if self.journaled_revision < self.revision {
             return Err(DocumentLifecycleError::JournalRequired(self.revision));
@@ -414,12 +476,13 @@ impl DocumentSession {
         if self.mode != EditorMode::Source {
             return Err(DocumentLifecycleError::WrongMode);
         }
-        self.raw_status = match Document::parse_body(&raw, &ParseOptions::default()) {
+        self.raw_status = match Document::parse_body(&raw, &self.parse_options) {
             Ok(document) => source_parse_status(&document),
             Err(error) => SourceParseStatus::Invalid {
                 message: error.to_string(),
             },
         };
+        self.body.clone_from(&raw);
         self.raw_buffer = Some(raw);
         self.revision = self.revision.next()?;
         self.dirty_blocks
@@ -434,7 +497,7 @@ impl DocumentSession {
             return Err(DocumentLifecycleError::WrongMode);
         }
         let raw = self.raw_buffer.as_deref().unwrap_or_default();
-        let document = Document::parse_body(raw, &ParseOptions::default()).map_err(|error| {
+        let document = Document::parse_body(raw, &self.parse_options).map_err(|error| {
             self.raw_status = SourceParseStatus::Invalid {
                 message: error.to_string(),
             };
@@ -447,9 +510,11 @@ impl DocumentSession {
             return Err(DocumentLifecycleError::InvalidRawSource(message));
         }
         self.semantic = document;
+        self.body = raw.to_owned();
         self.raw_buffer = None;
         self.raw_status = SourceParseStatus::NotInSourceMode;
         self.mode = EditorMode::Wysiwyg;
+        self.body = self.semantic.serialize_body();
         self.undo_epoch = self.undo_epoch.saturating_add(1);
         Ok(())
     }
@@ -461,6 +526,7 @@ impl DocumentSession {
         self.raw_buffer = None;
         self.raw_status = SourceParseStatus::NotInSourceMode;
         self.mode = EditorMode::Wysiwyg;
+        self.body = self.semantic.serialize_body();
         self.undo_epoch = self.undo_epoch.saturating_add(1);
         Ok(())
     }
@@ -470,6 +536,15 @@ impl DocumentSession {
         opened: &OpenProject,
     ) -> Result<ExternalChange, DocumentLifecycleError> {
         let external = opened.canonical_body_on_disk(self.document_id)?;
+        self.observe_external_body(external)
+    }
+
+    /// Applies a canonical body read by the project worker. Clean sessions
+    /// reload; dirty sessions retain both sides for explicit resolution.
+    pub fn observe_external_body(
+        &mut self,
+        external: String,
+    ) -> Result<ExternalChange, DocumentLifecycleError> {
         let fingerprint = ContentFingerprint::of(&external);
         if fingerprint == self.disk_fingerprint {
             return Ok(ExternalChange::Unchanged);
@@ -483,7 +558,8 @@ impl DocumentSession {
                 external_body: external,
             }));
         }
-        self.semantic = Document::parse_body(&external, &ParseOptions::default())?;
+        self.semantic = Document::parse_body(&external, &self.parse_options)?;
+        self.body = external;
         self.revision = self.revision.next()?;
         self.saved_revision = self.revision;
         self.journaled_revision = self.revision;
@@ -499,7 +575,8 @@ impl DocumentSession {
         conflict: &ExternalConflict,
     ) -> Result<(), DocumentLifecycleError> {
         self.check_conflict(conflict)?;
-        self.semantic = Document::parse_body(&conflict.external_body, &ParseOptions::default())?;
+        self.semantic = Document::parse_body(&conflict.external_body, &self.parse_options)?;
+        self.body.clone_from(&conflict.external_body);
         self.revision = self.revision.next()?;
         self.saved_revision = self.revision;
         self.journaled_revision = self.revision;
@@ -540,11 +617,7 @@ impl DocumentSession {
     }
 
     fn current_body_owned(&self) -> String {
-        if self.mode == EditorMode::Source {
-            self.raw_buffer.clone().unwrap_or_default()
-        } else {
-            self.semantic.serialize_body()
-        }
+        self.body.clone()
     }
 
     fn require_wysiwyg(&self) -> Result<(), DocumentLifecycleError> {
@@ -721,7 +794,114 @@ pub struct CanonicalSaveRequest {
     pub rotating_backups: usize,
 }
 
+struct PreparedCanonicalDiskCommit {
+    canonical: PreparedAtomicWrite,
+    backup: Option<(PreparedAtomicWrite, PathBuf)>,
+}
+
 impl CanonicalSaveRequest {
+    /// Freezes storage-owned front matter and the resolved canonical path on
+    /// the project owner before this request crosses to its worker.
+    pub fn prepare_disk_plan(
+        &self,
+        opened: &OpenProject,
+    ) -> Result<DocumentSavePlan, DocumentLifecycleError> {
+        ProjectStorage::prepare_document_save(opened, self.document_id, self.body.clone())
+            .map_err(DocumentLifecycleError::Storage)
+    }
+
+    /// Executes only bounded filesystem work from an immutable plan. The
+    /// caller supplies the latest worker-visible stamp immediately before the
+    /// external fingerprint check and mutation.
+    pub fn execute_disk(
+        &self,
+        plan: &DocumentSavePlan,
+        current: WorkStamp,
+    ) -> Result<ContentFingerprint, DocumentLifecycleError> {
+        self.execute_disk_with_fault(plan, current, None)
+    }
+
+    pub fn execute_disk_with_fault(
+        &self,
+        plan: &DocumentSavePlan,
+        current: WorkStamp,
+        fault: Option<PersistenceFault>,
+    ) -> Result<ContentFingerprint, DocumentLifecycleError> {
+        let prepared = self.prepare_disk_commit(plan, current, fault)?;
+        self.commit_disk(prepared, fault)
+    }
+
+    fn prepare_disk_commit(
+        &self,
+        plan: &DocumentSavePlan,
+        current: WorkStamp,
+        fault: Option<PersistenceFault>,
+    ) -> Result<PreparedCanonicalDiskCommit, DocumentLifecycleError> {
+        if self.stamp != current {
+            return Err(DocumentLifecycleError::StaleWork(self.stamp));
+        }
+        let observed = ContentFingerprint::of(&read_document_body_at(
+            &plan.canonical_path,
+            self.document_id,
+        )?);
+        if observed != self.expected_disk_fingerprint {
+            return Err(DocumentLifecycleError::ExternalChangedDuringSave {
+                expected: self.expected_disk_fingerprint,
+                observed,
+            });
+        }
+        if matches!(
+            fault,
+            Some(
+                PersistenceFault::CanonicalBeforeBackup
+                    | PersistenceFault::FullDisk
+                    | PersistenceFault::PermissionDenied
+            )
+        ) {
+            return Err(DocumentLifecycleError::InjectedFault(fault.unwrap()));
+        }
+        let backup = self.prepare_backup_from_path(&plan.canonical_path)?;
+        if fault == Some(PersistenceFault::CanonicalBeforeWrite) {
+            return Err(DocumentLifecycleError::InjectedFault(
+                PersistenceFault::CanonicalBeforeWrite,
+            ));
+        }
+        let canonical = prepare_atomic_write(&plan.canonical_path, &plan.canonical_bytes)?;
+        Ok(PreparedCanonicalDiskCommit { canonical, backup })
+    }
+
+    fn commit_disk(
+        &self,
+        prepared: PreparedCanonicalDiskCommit,
+        fault: Option<PersistenceFault>,
+    ) -> Result<ContentFingerprint, DocumentLifecycleError> {
+        if let Some((backup, directory)) = prepared.backup {
+            backup.commit()?;
+            rotate(&directory, self.rotating_backups)?;
+        }
+        prepared.canonical.commit()?;
+        if fault == Some(PersistenceFault::CanonicalAfterWrite) {
+            return Err(DocumentLifecycleError::InjectedFault(
+                PersistenceFault::CanonicalAfterWrite,
+            ));
+        }
+        Ok(ContentFingerprint::of(&self.body))
+    }
+
+    fn commit_disk_if_current(
+        &self,
+        prepared: PreparedCanonicalDiskCommit,
+        current: &Mutex<BTreeMap<DocumentId, WorkStamp>>,
+    ) -> Result<ContentFingerprint, DocumentLifecycleError> {
+        let latest = current
+            .lock()
+            .map_err(|_| DocumentLifecycleError::WorkerStatePoisoned)?;
+        if latest.get(&self.document_id) != Some(&self.stamp) {
+            return Err(DocumentLifecycleError::StaleWork(self.stamp));
+        }
+        self.commit_disk(prepared, None)
+    }
+
     /// Runs on the project worker. `current` is checked immediately before mutation;
     /// one serial worker per project guarantees request ordering after that point.
     pub fn execute(
@@ -785,16 +965,38 @@ impl CanonicalSaveRequest {
             .ok_or(DocumentLifecycleError::MissingDocument(self.document_id))?;
         let canonical = parchmint_storage::resolve_project_path(opened.root(), &record.path)?;
         if canonical.is_file() {
-            let backup_dir = opened
-                .root()
-                .join(".parchmint/backups")
-                .join(self.document_id.to_string());
-            let backup = backup_dir.join(format!("{:020}.md", self.stamp.revision.get()));
-            let bytes = fs::read(canonical).map_err(DocumentLifecycleError::ReadBackupSource)?;
-            atomic_write(&backup, &bytes)?;
-            rotate(&backup_dir, self.rotating_backups)?;
+            self.create_backup_from_path(&canonical)?;
         }
         Ok(())
+    }
+
+    fn create_backup_from_path(&self, canonical: &Path) -> Result<(), DocumentLifecycleError> {
+        if let Some((backup, directory)) = self.prepare_backup_from_path(canonical)? {
+            backup.commit()?;
+            rotate(&directory, self.rotating_backups)?;
+        }
+        Ok(())
+    }
+
+    fn prepare_backup_from_path(
+        &self,
+        canonical: &Path,
+    ) -> Result<Option<(PreparedAtomicWrite, PathBuf)>, DocumentLifecycleError> {
+        if self.rotating_backups == 0 || !canonical.is_file() {
+            return Ok(None);
+        }
+        let project_root = canonical
+            .ancestors()
+            .find(|ancestor| ancestor.join(".parchmint").is_dir())
+            .ok_or(DocumentLifecycleError::BackupProjectRoot)?;
+        let backup_dir = project_root
+            .join(".parchmint/backups")
+            .join(self.document_id.to_string());
+        let backup = backup_dir.join(format!("{:020}.md", self.stamp.revision.get()));
+        let bytes =
+            read_document_bytes_bounded(canonical).map_err(DocumentLifecycleError::Storage)?;
+        let prepared = prepare_atomic_write(&backup, &bytes)?;
+        Ok(Some((prepared, backup_dir)))
     }
 }
 
@@ -810,6 +1012,257 @@ fn rotate(directory: &Path, retain: usize) -> Result<(), DocumentLifecycleError>
         fs::remove_file(entry.path()).map_err(DocumentLifecycleError::RotateBackup)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentWorkKind {
+    Journal,
+    Canonical,
+    ExternalPoll,
+}
+
+#[derive(Debug)]
+pub enum DocumentWorkPayload {
+    Journaled,
+    Saved {
+        fingerprint: ContentFingerprint,
+        plan: DocumentSavePlan,
+    },
+    ExternalBody(String),
+}
+
+#[derive(Debug)]
+pub struct DocumentWorkCompletion {
+    pub document_id: DocumentId,
+    pub stamp: WorkStamp,
+    pub kind: DocumentWorkKind,
+    pub outcome: Result<DocumentWorkPayload, String>,
+}
+
+enum DocumentWorkJob {
+    Journal {
+        document_id: DocumentId,
+        request: JournalRequest,
+    },
+    Canonical {
+        request: CanonicalSaveRequest,
+        plan: DocumentSavePlan,
+    },
+    ExternalPoll {
+        document_id: DocumentId,
+        stamp: WorkStamp,
+        canonical_path: PathBuf,
+    },
+}
+
+/// One serial persistence worker per open project. The current-stamp registry
+/// is published on every editor delta so delayed requests are rejected before
+/// they inspect or replace canonical files.
+pub struct DocumentLifecycleWorker {
+    jobs: Option<mpsc::Sender<DocumentWorkJob>>,
+    results: mpsc::Receiver<DocumentWorkCompletion>,
+    current: Arc<Mutex<BTreeMap<DocumentId, WorkStamp>>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl DocumentLifecycleWorker {
+    pub fn start(name: &str) -> Result<Self, std::io::Error> {
+        let (job_sender, job_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let current = Arc::new(Mutex::new(BTreeMap::new()));
+        let worker_current = Arc::clone(&current);
+        let worker = thread::Builder::new()
+            .name(name.into())
+            .spawn(move || document_worker_loop(&job_receiver, &result_sender, &worker_current))?;
+        Ok(Self {
+            jobs: Some(job_sender),
+            results: result_receiver,
+            current,
+            worker: Some(worker),
+        })
+    }
+
+    pub fn publish_current(
+        &self,
+        document_id: DocumentId,
+        stamp: WorkStamp,
+    ) -> Result<(), DocumentWorkerError> {
+        self.current
+            .lock()
+            .map_err(|_| DocumentWorkerError::Poisoned)?
+            .insert(document_id, stamp);
+        Ok(())
+    }
+
+    pub fn clear_current(&self) -> Result<(), DocumentWorkerError> {
+        self.current
+            .lock()
+            .map_err(|_| DocumentWorkerError::Poisoned)?
+            .clear();
+        Ok(())
+    }
+
+    pub fn submit_journal(
+        &self,
+        document_id: DocumentId,
+        request: JournalRequest,
+    ) -> Result<(), DocumentWorkerError> {
+        self.submit(DocumentWorkJob::Journal {
+            document_id,
+            request,
+        })
+    }
+
+    pub fn submit_canonical(
+        &self,
+        request: CanonicalSaveRequest,
+        plan: DocumentSavePlan,
+    ) -> Result<(), DocumentWorkerError> {
+        self.submit(DocumentWorkJob::Canonical { request, plan })
+    }
+
+    pub fn submit_external_poll(
+        &self,
+        document_id: DocumentId,
+        stamp: WorkStamp,
+        canonical_path: PathBuf,
+    ) -> Result<(), DocumentWorkerError> {
+        self.submit(DocumentWorkJob::ExternalPoll {
+            document_id,
+            stamp,
+            canonical_path,
+        })
+    }
+
+    fn submit(&self, job: DocumentWorkJob) -> Result<(), DocumentWorkerError> {
+        self.jobs
+            .as_ref()
+            .ok_or(DocumentWorkerError::Closed)?
+            .send(job)
+            .map_err(|_| DocumentWorkerError::Closed)
+    }
+
+    pub fn try_result(&self) -> Result<Option<DocumentWorkCompletion>, DocumentWorkerError> {
+        match self.results.try_recv() {
+            Ok(result) => Ok(Some(result)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(DocumentWorkerError::Closed),
+        }
+    }
+}
+
+impl Drop for DocumentLifecycleWorker {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            // Joining an I/O-stalled worker here would defeat the bounded
+            // shutdown handshake. Completed workers are reaped; an active
+            // worker is detached and process teardown releases it after the
+            // current recovery-safe shutdown decision.
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+fn document_worker_loop(
+    jobs: &mpsc::Receiver<DocumentWorkJob>,
+    results: &mpsc::Sender<DocumentWorkCompletion>,
+    current: &Mutex<BTreeMap<DocumentId, WorkStamp>>,
+) {
+    while let Ok(job) = jobs.recv() {
+        let (document_id, stamp, kind, outcome) = match job {
+            DocumentWorkJob::Journal {
+                document_id,
+                request,
+            } => {
+                let current_stamp = current
+                    .lock()
+                    .ok()
+                    .and_then(|values| values.get(&document_id).copied());
+                let outcome = if current_stamp == Some(request.stamp) {
+                    request
+                        .execute()
+                        .map(|()| DocumentWorkPayload::Journaled)
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err(DocumentLifecycleError::StaleWork(request.stamp).to_string())
+                };
+                (
+                    document_id,
+                    request.stamp,
+                    DocumentWorkKind::Journal,
+                    outcome,
+                )
+            }
+            DocumentWorkJob::Canonical { request, plan } => {
+                let initial_stamp = current
+                    .lock()
+                    .ok()
+                    .and_then(|values| values.get(&request.document_id).copied())
+                    .unwrap_or(WorkStamp {
+                        generation: request.stamp.generation,
+                        revision: Revision::INITIAL,
+                    });
+                let outcome = request
+                    .prepare_disk_commit(&plan, initial_stamp, None)
+                    .and_then(|prepared| {
+                        // The expensive reads, serialization, and temporary
+                        // writes happened above. Hold the stamp mutex only for
+                        // the short authoritative replacements so a newly
+                        // published editor revision linearizes either wholly
+                        // before or wholly after this commit.
+                        request.commit_disk_if_current(prepared, current)
+                    })
+                    .map(|fingerprint| DocumentWorkPayload::Saved { fingerprint, plan })
+                    .map_err(|error| error.to_string());
+                (
+                    request.document_id,
+                    request.stamp,
+                    DocumentWorkKind::Canonical,
+                    outcome,
+                )
+            }
+            DocumentWorkJob::ExternalPoll {
+                document_id,
+                stamp,
+                canonical_path,
+            } => {
+                let current_stamp = current
+                    .lock()
+                    .ok()
+                    .and_then(|values| values.get(&document_id).copied());
+                let outcome = if current_stamp == Some(stamp) {
+                    read_document_body_at(&canonical_path, document_id)
+                        .map(DocumentWorkPayload::ExternalBody)
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err(DocumentLifecycleError::StaleWork(stamp).to_string())
+                };
+                (document_id, stamp, DocumentWorkKind::ExternalPoll, outcome)
+            }
+        };
+        if results
+            .send(DocumentWorkCompletion {
+                document_id,
+                stamp,
+                kind,
+                outcome,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DocumentWorkerError {
+    #[error("document lifecycle worker is closed")]
+    Closed,
+    #[error("document lifecycle worker stamp registry is unavailable")]
+    Poisoned,
 }
 
 #[derive(Clone, Debug)]
@@ -840,13 +1293,38 @@ impl RecoveryCandidate {
 
 pub struct RecoveryStore;
 
+#[derive(Clone, Debug)]
+pub struct RecoveryIssue {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl RecoveryIssue {
+    pub fn discard(self) -> Result<(), DocumentLifecycleError> {
+        fs::remove_file(self.path).map_err(DocumentLifecycleError::DiscardRecovery)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RecoveryScan {
+    pub candidates: Vec<RecoveryCandidate>,
+    pub issues: Vec<RecoveryIssue>,
+}
+
 impl RecoveryStore {
     pub fn scan(opened: &OpenProject) -> Result<Vec<RecoveryCandidate>, DocumentLifecycleError> {
+        Ok(Self::scan_isolated(opened)?.candidates)
+    }
+
+    /// Scans every record independently. A malformed or unsupported record is
+    /// reported with its path and can never hide another recoverable document.
+    pub fn scan_isolated(opened: &OpenProject) -> Result<RecoveryScan, DocumentLifecycleError> {
         let directory = opened.root().join(".parchmint/recovery");
         if !directory.is_dir() {
-            return Ok(Vec::new());
+            return Ok(RecoveryScan::default());
         }
         let mut candidates = Vec::new();
+        let mut issues = Vec::new();
         for entry in
             fs::read_dir(directory).map_err(DocumentLifecycleError::ReadRecoveryDirectory)?
         {
@@ -855,7 +1333,16 @@ impl RecoveryStore {
             if path.extension().and_then(|value| value.to_str()) != Some("toml") {
                 continue;
             }
-            let record = RecoveryRecord::read(&path)?;
+            let record = match RecoveryRecord::read(&path) {
+                Ok(record) => record,
+                Err(error) => {
+                    issues.push(RecoveryIssue {
+                        path,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            };
             let canonical_fingerprint = opened
                 .canonical_body_on_disk(record.document_id)
                 .ok()
@@ -870,7 +1357,8 @@ impl RecoveryStore {
         }
         candidates
             .sort_by_key(|candidate| (candidate.record.document_id, candidate.record.revision));
-        Ok(candidates)
+        issues.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(RecoveryScan { candidates, issues })
     }
 
     pub fn restore(
@@ -881,7 +1369,8 @@ impl RecoveryStore {
         if session.document_id != candidate.record.document_id {
             return Err(DocumentLifecycleError::ConflictDocument);
         }
-        session.semantic = Document::parse_body(&candidate.record.body, &ParseOptions::default())?;
+        session.semantic = Document::parse_body(&candidate.record.body, &session.parse_options)?;
+        session.body.clone_from(&candidate.record.body);
         session.mode = EditorMode::Wysiwyg;
         session.raw_buffer = None;
         session.raw_status = SourceParseStatus::NotInSourceMode;
@@ -930,6 +1419,8 @@ pub enum DocumentLifecycleError {
     JournalRequired(Revision),
     #[error("background work is stale: {0}")]
     StaleWork(WorkStamp),
+    #[error("document worker revision state is unavailable")]
+    WorkerStatePoisoned,
     #[error(
         "canonical document changed again while saving (expected {expected:?}, observed {observed:?})"
     )]
@@ -965,6 +1456,8 @@ pub enum DocumentLifecycleError {
     DiscardRecovery(std::io::Error),
     #[error("could not read canonical backup source: {0}")]
     ReadBackupSource(std::io::Error),
+    #[error("could not identify the project root for a canonical backup")]
+    BackupProjectRoot,
     #[error("could not list rotating backups: {0}")]
     ReadBackupDirectory(std::io::Error),
     #[error("could not rotate old backup: {0}")]
@@ -1017,6 +1510,17 @@ mod tests {
         BlockNode::Paragraph {
             content: vec![Inline::Text(text.into())],
             attributes: Attributes::default(),
+        }
+    }
+
+    fn wait_for_worker(worker: &DocumentLifecycleWorker) -> DocumentWorkCompletion {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(completion) = worker.try_result().unwrap() {
+                return completion;
+            }
+            assert!(Instant::now() < deadline, "document worker timed out");
+            std::thread::yield_now();
         }
     }
 
@@ -1078,6 +1582,163 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_recovery_is_isolated_from_valid_candidates() {
+        let (directory, opened, id) = project_with_document();
+        let mut session = DocumentSession::open(
+            &opened,
+            id,
+            ProjectGeneration::new(20).unwrap(),
+            DocumentLifecycleConfig::default(),
+        )
+        .unwrap();
+        session
+            .replace_block(0, replacement("Recover me"), Instant::now())
+            .unwrap();
+        session
+            .prepare_journal(Instant::now(), true)
+            .unwrap()
+            .unwrap()
+            .execute()
+            .unwrap();
+        let corrupt = directory.path().join(".parchmint/recovery/corrupt.toml");
+        fs::write(&corrupt, b"this is not a recovery record").unwrap();
+        let scan = RecoveryStore::scan_isolated(&opened).unwrap();
+        assert_eq!(scan.candidates.len(), 1);
+        assert_eq!(scan.candidates[0].record.document_id, id);
+        assert_eq!(scan.issues.len(), 1);
+        assert_eq!(scan.issues[0].path, corrupt);
+    }
+
+    #[test]
+    fn serial_worker_rejects_delayed_stale_journal_and_saves_latest_revision() {
+        let (_directory, mut opened, id) = project_with_document();
+        let generation = ProjectGeneration::new(21).unwrap();
+        let mut session = DocumentSession::open(
+            &opened,
+            id,
+            generation,
+            DocumentLifecycleConfig {
+                journal_debounce: Duration::ZERO,
+                rotating_backups: 1,
+            },
+        )
+        .unwrap();
+        let worker = DocumentLifecycleWorker::start("document-worker-test").unwrap();
+        session
+            .replace_block(0, replacement("Old revision"), Instant::now())
+            .unwrap();
+        let stale = session
+            .prepare_journal(Instant::now(), true)
+            .unwrap()
+            .unwrap();
+        session
+            .replace_block(0, replacement("Latest revision"), Instant::now())
+            .unwrap();
+        worker.publish_current(id, session.stamp()).unwrap();
+        worker.submit_journal(id, stale).unwrap();
+        let completion = wait_for_worker(&worker);
+        assert_eq!(completion.kind, DocumentWorkKind::Journal);
+        assert!(completion.outcome.is_err());
+        assert!(session.is_dirty());
+
+        let journal = session
+            .prepare_journal(Instant::now(), true)
+            .unwrap()
+            .unwrap();
+        worker.publish_current(id, journal.stamp).unwrap();
+        worker.submit_journal(id, journal).unwrap();
+        let completion = wait_for_worker(&worker);
+        assert!(completion.outcome.is_ok());
+        session.acknowledge_journal(completion.stamp, Ok(()));
+        let save = session.prepare_canonical_save().unwrap().unwrap();
+        let plan = save.prepare_disk_plan(&opened).unwrap();
+        worker.publish_current(id, save.stamp).unwrap();
+        worker.submit_canonical(save, plan).unwrap();
+        let completion = wait_for_worker(&worker);
+        let DocumentWorkPayload::Saved { fingerprint, plan } = completion.outcome.unwrap() else {
+            panic!("canonical worker returned unexpected payload")
+        };
+        ProjectStorage::acknowledge_document_save(&mut opened, &plan).unwrap();
+        session.acknowledge_canonical_save(completion.stamp, Ok(fingerprint));
+        assert!(!session.is_dirty());
+        assert!(
+            opened
+                .canonical_body_on_disk(id)
+                .unwrap()
+                .contains("Latest revision")
+        );
+    }
+
+    #[test]
+    fn canonical_commit_rechecks_revision_after_temporary_write() {
+        let (_directory, opened, id) = project_with_document();
+        let mut session = DocumentSession::open(
+            &opened,
+            id,
+            ProjectGeneration::new(23).unwrap(),
+            DocumentLifecycleConfig {
+                journal_debounce: Duration::ZERO,
+                rotating_backups: 1,
+            },
+        )
+        .unwrap();
+        session
+            .replace_block(0, replacement("Prepared old revision"), Instant::now())
+            .unwrap();
+        let journal = session
+            .prepare_journal(Instant::now(), true)
+            .unwrap()
+            .unwrap();
+        journal.execute().unwrap();
+        session.acknowledge_journal(journal.stamp, Ok(()));
+        let save = session.prepare_canonical_save().unwrap().unwrap();
+        let plan = save.prepare_disk_plan(&opened).unwrap();
+        let prepared = save.prepare_disk_commit(&plan, save.stamp, None).unwrap();
+
+        session
+            .replace_block(0, replacement("Newer live revision"), Instant::now())
+            .unwrap();
+        let current = Mutex::new(BTreeMap::from([(id, session.stamp())]));
+        assert!(matches!(
+            save.commit_disk_if_current(prepared, &current),
+            Err(DocumentLifecycleError::StaleWork(_))
+        ));
+        assert!(
+            opened
+                .canonical_body_on_disk(id)
+                .unwrap()
+                .contains("Original."),
+            "a stale prepared artifact must never replace canonical content"
+        );
+    }
+
+    #[test]
+    fn backup_source_is_bounded_before_copy() {
+        let (directory, _opened, id) = project_with_document();
+        let oversized = directory.path().join("oversized.md");
+        let file = fs::File::create(&oversized).unwrap();
+        file.set_len(parchmint_storage::MAX_DOCUMENT_BYTES + 1)
+            .unwrap();
+        let request = CanonicalSaveRequest {
+            stamp: WorkStamp {
+                generation: ProjectGeneration::new(22).unwrap(),
+                revision: Revision::new(1),
+            },
+            document_id: id,
+            body: "body".into(),
+            expected_disk_fingerprint: ContentFingerprint::of(""),
+            rotating_backups: 1,
+        };
+        assert!(matches!(
+            request.create_backup_from_path(&oversized),
+            Err(DocumentLifecycleError::Storage(StorageError::SizeLimit(
+                "document",
+                parchmint_storage::MAX_DOCUMENT_BYTES
+            )))
+        ));
+    }
+
+    #[test]
     fn invalid_raw_buffer_is_retained_until_explicit_resolution() {
         let (_directory, opened, id) = project_with_document();
         let mut session = DocumentSession::open(
@@ -1113,8 +1774,43 @@ mod tests {
     }
 
     #[test]
+    fn invalid_live_wysiwyg_text_is_journaled_and_vetoes_canonical_save() {
+        let (_directory, opened, id) = project_with_document();
+        let mut session = DocumentSession::open(
+            &opened,
+            id,
+            ProjectGeneration::new(31).unwrap(),
+            DocumentLifecycleConfig::default(),
+        )
+        .unwrap();
+        let invalid = "```\nunclosed";
+        session
+            .replace_body(invalid.into(), 0, 1, Instant::now())
+            .unwrap();
+        assert_eq!(session.body(), invalid);
+        assert!(matches!(
+            session.raw_status(),
+            SourceParseStatus::Invalid { .. }
+        ));
+
+        let journal = session
+            .prepare_journal(Instant::now(), true)
+            .unwrap()
+            .unwrap();
+        journal.execute().unwrap();
+        let recovered = RecoveryRecord::read(&journal.path).unwrap();
+        assert_eq!(recovered.body, invalid);
+        session.acknowledge_journal(journal.stamp, Ok(()));
+        assert!(matches!(
+            session.prepare_canonical_save(),
+            Err(DocumentLifecycleError::InvalidRawSource(_))
+        ));
+        assert!(matches!(session.save_state(), SaveState::Error(_)));
+    }
+
+    #[test]
     fn external_change_auto_reloads_clean_but_conflicts_with_dirty() {
-        let (_directory, mut opened, id) = project_with_document();
+        let (directory, mut opened, id) = project_with_document();
         let mut session = DocumentSession::open(
             &opened,
             id,
@@ -1145,6 +1841,24 @@ mod tests {
         };
         assert!(conflict.local_body.contains("Local"));
         assert!(conflict.external_body.contains("Again"));
+        let copy = directory.path().join("local-conflict-copy.md");
+        session.save_conflict_copy(&conflict, &copy).unwrap();
+        assert!(fs::read_to_string(copy).unwrap().contains("Local"));
+        session.resolve_external_reload(&conflict).unwrap();
+        assert!(session.body().contains("Again"));
+        assert!(!session.is_dirty());
+
+        session
+            .replace_block(0, replacement("Local overwrite"), Instant::now())
+            .unwrap();
+        let source = fs::read_to_string(&path)
+            .unwrap()
+            .replace("Again.", "Second.");
+        atomic_write(&path, source.as_bytes()).unwrap();
+        let ExternalChange::Conflict(conflict) = session.poll_external_change(&opened).unwrap()
+        else {
+            panic!("second dirty external edit must conflict")
+        };
         session.resolve_external_overwrite(&conflict).unwrap();
         let journal = session
             .prepare_journal(Instant::now(), true)
@@ -1155,7 +1869,7 @@ mod tests {
         let save = session.prepare_canonical_save().unwrap().unwrap();
         let source = fs::read_to_string(&path)
             .unwrap()
-            .replace("Again.", "Third.");
+            .replace("Second.", "Third.");
         atomic_write(&path, source.as_bytes()).unwrap();
         assert!(matches!(
             save.execute(&mut opened, save.stamp),

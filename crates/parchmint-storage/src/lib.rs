@@ -13,7 +13,7 @@ use parchmint_domain::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use tempfile::NamedTempFile;
@@ -70,6 +70,17 @@ pub struct OpenProject {
     outline_extra: BTreeMap<String, toml::Value>,
     styles_extra: BTreeMap<String, toml::Value>,
     attachments: BTreeMap<parchmint_domain::AssetId, AttachmentRecord>,
+}
+
+/// Immutable canonical write payload prepared on the Rust owner thread and
+/// safe to execute on a persistence worker. It contains no mutable project
+/// state and therefore cannot let a worker race the domain model.
+#[derive(Clone, Debug)]
+pub struct DocumentSavePlan {
+    pub document_id: DocumentId,
+    pub body: String,
+    pub canonical_path: PathBuf,
+    pub canonical_bytes: Vec<u8>,
 }
 
 /// Safe, immutable metadata for one copied project attachment.
@@ -440,6 +451,50 @@ impl ProjectStorage {
             }
         }
         Ok(())
+    }
+
+    /// Freezes one complete document replacement without performing file I/O.
+    /// The returned plan can be sent to the serial project persistence worker.
+    pub fn prepare_document_save(
+        opened: &OpenProject,
+        id: DocumentId,
+        body: String,
+    ) -> Result<DocumentSavePlan, StorageError> {
+        if opened.mode == OpenMode::ReadOnly {
+            return Err(StorageError::ReadOnly);
+        }
+        if body.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(StorageError::SizeLimit("document", MAX_DOCUMENT_BYTES));
+        }
+        let record = opened
+            .project
+            .documents
+            .get(&id)
+            .ok_or(StorageError::MissingBody(id))?;
+        let desired = canonical_document_path(&opened.project, record.node_id)?;
+        let unknown = opened
+            .unknown_front_matter
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let canonical_bytes =
+            serialize_document(id, &record.metadata, &unknown, &body)?.into_bytes();
+        let canonical_path = resolve_project_path(&opened.root, &desired)?;
+        Ok(DocumentSavePlan {
+            document_id: id,
+            body,
+            canonical_path,
+            canonical_bytes,
+        })
+    }
+
+    /// Updates the owner-thread cache after a matching worker replacement has
+    /// completed. This method performs no disk mutation.
+    pub fn acknowledge_document_save(
+        opened: &mut OpenProject,
+        plan: &DocumentSavePlan,
+    ) -> Result<(), StorageError> {
+        opened.set_body(plan.document_id, plan.body.clone())
     }
     /// Saves and releases any advisory writer lock.
     pub fn close(mut opened: OpenProject) -> Result<(), StorageError> {
@@ -858,6 +913,29 @@ fn read_bounded(path: &Path, limit: u64, kind: &'static str) -> Result<String, S
     })
 }
 
+/// Reads and validates a canonical Markdown file at a frozen path. Lifecycle
+/// workers use this for fingerprint checks without borrowing `OpenProject`.
+pub fn read_document_body_at(path: &Path, document_id: DocumentId) -> Result<String, StorageError> {
+    let source = read_bounded(path, MAX_DOCUMENT_BYTES, "document")?;
+    let (_, body, _) = parse_document(&source, document_id)?;
+    Ok(body)
+}
+
+/// Reads a backup source with the same hard bound as canonical documents.
+pub fn read_document_bytes_bounded(path: &Path) -> Result<Vec<u8>, StorageError> {
+    let metadata = fs::metadata(path).map_err(|error| StorageError::Read {
+        path: path.to_owned(),
+        error,
+    })?;
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(StorageError::SizeLimit("document", MAX_DOCUMENT_BYTES));
+    }
+    fs::read(path).map_err(|error| StorageError::Read {
+        path: path.to_owned(),
+        error,
+    })
+}
+
 fn canonical_document_path(
     project: &Project,
     node: NodeId,
@@ -958,8 +1036,7 @@ fn copy_canonical_tree(current: &Path, backup: &Path, root: &Path) -> Result<(),
 }
 
 struct AdvisoryLock {
-    path: PathBuf,
-    _file: File,
+    file: File,
 }
 impl AdvisoryLock {
     fn acquire(root: &Path) -> Result<Self, StorageError> {
@@ -969,28 +1046,79 @@ impl AdvisoryLock {
                 .ok_or(StorageError::InvalidSchema("lock parent"))?,
         )
         .map_err(StorageError::CreateDirectory)?;
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
+            .read(true)
             .write(true)
-            .create_new(true)
+            .create(true)
+            .truncate(false)
             .open(&path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    StorageError::ProjectLocked(path.clone())
-                } else {
-                    StorageError::Lock(error)
-                }
-            })?;
-        Ok(Self { path, _file: file })
-    }
-}
-impl Drop for AdvisoryLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+            .map_err(StorageError::Lock)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(StorageError::ProjectLocked(path)),
+            Err(TryLockError::Error(error)) => return Err(StorageError::Lock(error)),
+        }
+
+        // This is diagnostic context only. The open file handle and OS lock
+        // above are the sole lock authority, so stale metadata after a crash is
+        // harmless and is replaced by the next successful owner.
+        let hostname = std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .unwrap_or_else(|_| "unknown".into());
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        file.set_len(0).map_err(StorageError::Lock)?;
+        writeln!(
+            file,
+            "pid = {}\nhostname = {:?}\nacquired_unix_seconds = {timestamp}",
+            std::process::id(),
+            hostname
+        )
+        .map_err(StorageError::Lock)?;
+        file.sync_all().map_err(StorageError::Lock)?;
+        Ok(Self { file })
     }
 }
 
-/// Writes `contents` beside `destination`, flushes it, atomically replaces it, and flushes directory metadata on Unix.
-pub fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), AtomicWriteError> {
+impl Drop for AdvisoryLock {
+    fn drop(&mut self) {
+        // Closing the handle also releases the OS lock. Unlock explicitly so
+        // same-process close/reopen transitions are deterministic on every
+        // supported primitive and do not depend on descriptor-close timing.
+        let _ = self.file.unlock();
+    }
+}
+
+/// A fully written and flushed same-directory temporary file awaiting its
+/// short atomic replacement step.
+pub struct PreparedAtomicWrite {
+    destination: PathBuf,
+    temporary: NamedTempFile,
+}
+
+impl PreparedAtomicWrite {
+    /// Atomically installs the prepared bytes and flushes directory metadata.
+    pub fn commit(self) -> Result<(), AtomicWriteError> {
+        let parent = self
+            .destination
+            .parent()
+            .expect("prepared atomic destinations always have a parent")
+            .to_owned();
+        self.temporary
+            .persist(&self.destination)
+            .map_err(|error| AtomicWriteError::Replace(error.error))?;
+        sync_parent(&parent)
+    }
+}
+
+/// Writes and flushes `contents` beside `destination` without replacing the
+/// destination. Dropping the result leaves canonical data untouched.
+pub fn prepare_atomic_write(
+    destination: &Path,
+    contents: &[u8],
+) -> Result<PreparedAtomicWrite, AtomicWriteError> {
     let parent = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -1004,11 +1132,15 @@ pub fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), AtomicWri
         .as_file_mut()
         .sync_all()
         .map_err(AtomicWriteError::FlushTemporary)?;
-    temporary
-        .persist(destination)
-        .map_err(|error| AtomicWriteError::Replace(error.error))?;
-    sync_parent(parent)?;
-    Ok(())
+    Ok(PreparedAtomicWrite {
+        destination: destination.to_owned(),
+        temporary,
+    })
+}
+
+/// Writes `contents` beside `destination`, flushes it, atomically replaces it, and flushes directory metadata on Unix.
+pub fn atomic_write(destination: &Path, contents: &[u8]) -> Result<(), AtomicWriteError> {
+    prepare_atomic_write(destination, contents)?.commit()
 }
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> Result<(), AtomicWriteError> {
@@ -1167,6 +1299,53 @@ mod tests {
             assert!(resolve_project_path(&root, &path).is_err());
         }
         drop(writer);
+        assert!(
+            root.join(".parchmint/open.lock").is_file(),
+            "diagnostic metadata may remain after release"
+        );
+        if let Err(error) = ProjectStorage::open(&root, OpenMode::ReadWrite) {
+            panic!("reopen after release failed: {error}");
+        }
+    }
+
+    #[test]
+    fn advisory_lock_child() {
+        let Ok(root) = std::env::var("PARCHMINT_LOCK_CHILD_ROOT") else {
+            return;
+        };
+        let project = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
+        fs::write(Path::new(&root).join("child-ready"), b"ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        drop(project);
+    }
+
+    #[test]
+    fn killed_process_releases_advisory_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        let executable = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(executable)
+            .args(["--exact", "tests::advisory_lock_child", "--nocapture"])
+            .env("PARCHMINT_LOCK_CHILD_ROOT", &root)
+            .spawn()
+            .unwrap();
+        let ready = root.join("child-ready");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.is_file() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(ready.is_file(), "lock-holder helper did not start");
+        assert!(matches!(
+            ProjectStorage::open(&root, OpenMode::ReadWrite),
+            Err(StorageError::ProjectLocked(_))
+        ));
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            ProjectStorage::open(&root, OpenMode::ReadWrite).is_ok(),
+            "process death must release the OS lock even with metadata present"
+        );
     }
 
     #[test]

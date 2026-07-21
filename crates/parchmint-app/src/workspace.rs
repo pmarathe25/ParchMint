@@ -5,14 +5,20 @@
 //! state such as an expanded item, but it never owns another mutable copy of
 //! the project graph.
 
-use crate::{ContentFingerprint, IndexStatus, ProjectSearch, SearchServiceError};
+use crate::{
+    CanonicalSaveRequest, CompletionDisposition, ContentFingerprint, DocumentLifecycleConfig,
+    DocumentLifecycleError, DocumentSession, ExternalChange, ExternalConflict, IndexStatus,
+    JournalRequest, ProjectSearch, RecoveryCandidate, RecoveryIssue, RecoveryScan, RecoveryStore,
+    SaveState, SearchServiceError,
+};
 use parchmint_compile::{
     self, CancellationToken, CompileError, CompileInput, CompileIr, CompilePreview, ExportError,
     ExportOptions, ExportReport,
 };
 use parchmint_domain::{
     CompilePreset, CompilePresetId, DocumentId, DocumentMetadata, DocumentRecord, Node, NodeId,
-    NodeKind, Project, ProjectCommand, ProjectError, ProjectEvent, RelativeProjectPath, WorkStamp,
+    NodeKind, Project, ProjectCommand, ProjectError, ProjectEvent, ProjectGeneration,
+    RelativeProjectPath, Revision, WorkStamp,
 };
 use parchmint_index::{CountTotals, SearchQuery, SearchResult};
 use parchmint_storage::{
@@ -20,9 +26,10 @@ use parchmint_storage::{
     atomic_write,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 use thiserror::Error;
 
 /// Presentation-only outline sort.  It never changes canonical binder order.
@@ -331,6 +338,10 @@ struct ProjectReplaceUndo {
 /// One project incarnation and all Stage 04 structural/metadata use cases.
 pub struct ProjectWorkspace {
     opened: OpenProject,
+    generation: ProjectGeneration,
+    lifecycle_config: DocumentLifecycleConfig,
+    sessions: BTreeMap<DocumentId, DocumentSession>,
+    external_conflicts: BTreeMap<DocumentId, ExternalConflict>,
     snapshot: BinderSnapshot,
     selection: Vec<NodeId>,
     undo: Vec<ProjectCommand>,
@@ -354,6 +365,12 @@ impl ProjectWorkspace {
         Ok(Self::from_opened(opened))
     }
 
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, WorkspaceError> {
+        let opened =
+            ProjectStorage::open(root, OpenMode::ReadOnly).map_err(WorkspaceError::Storage)?;
+        Ok(Self::from_opened(opened))
+    }
+
     fn from_opened(opened: OpenProject) -> Self {
         let (mut preferences, workspace_diagnostic) = load_preferences(opened.root());
         reconcile_preferences(&opened.project, &mut preferences);
@@ -367,6 +384,10 @@ impl ProjectWorkspace {
         let search = ProjectSearch::open(opened.root());
         Self {
             opened,
+            generation: ProjectGeneration::new(1).expect("one is a valid generation"),
+            lifecycle_config: DocumentLifecycleConfig::default(),
+            sessions: BTreeMap::new(),
+            external_conflicts: BTreeMap::new(),
             snapshot,
             selection: valid,
             undo: Vec::new(),
@@ -381,6 +402,362 @@ impl ProjectWorkspace {
 
     pub fn project(&self) -> &Project {
         &self.opened.project
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.opened.root()
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.opened.mode() == OpenMode::ReadOnly
+    }
+
+    pub fn set_project_generation(
+        &mut self,
+        generation: ProjectGeneration,
+    ) -> Result<(), WorkspaceError> {
+        if self.generation != generation {
+            self.sessions.clear();
+            self.external_conflicts.clear();
+            self.generation = generation;
+        }
+        let nodes = self
+            .preferences
+            .panes
+            .iter()
+            .filter_map(|pane| pane.node)
+            .collect::<Vec<_>>();
+        for node in nodes {
+            if let Ok(document) = document_for_node(&self.opened.project, node) {
+                self.ensure_session(document)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_lifecycle_config(&mut self, config: DocumentLifecycleConfig) {
+        self.lifecycle_config = config;
+    }
+
+    fn ensure_session(&mut self, document: DocumentId) -> Result<(), WorkspaceError> {
+        if !self.sessions.contains_key(&document) {
+            let session = DocumentSession::open(
+                &self.opened,
+                document,
+                self.generation,
+                self.lifecycle_config.clone(),
+            )?;
+            self.sessions.insert(document, session);
+        }
+        Ok(())
+    }
+
+    fn pane_document_id(&self, pane: usize) -> Result<DocumentId, WorkspaceError> {
+        let node = self
+            .pane(pane)
+            .and_then(|state| state.node)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        document_for_node(&self.opened.project, node)
+    }
+
+    pub fn pane_live_body(&mut self, pane: usize) -> Result<&str, WorkspaceError> {
+        let document = self.pane_document_id(pane)?;
+        self.ensure_session(document)?;
+        Ok(self.sessions[&document].body())
+    }
+
+    pub fn update_pane_live_body(
+        &mut self,
+        pane: usize,
+        body: String,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<WorkStamp, WorkspaceError> {
+        let document = self.pane_document_id(pane)?;
+        self.ensure_session(document)?;
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .expect("session was just initialized");
+        session.replace_body(body, first_block, last_block_exclusive, now)?;
+        Ok(session.stamp())
+    }
+
+    pub fn open_session_ids(&self) -> Vec<DocumentId> {
+        self.sessions.keys().copied().collect()
+    }
+
+    pub fn dirty_session_ids(&self) -> Vec<DocumentId> {
+        self.sessions
+            .iter()
+            .filter_map(|(id, session)| session.is_dirty().then_some(*id))
+            .collect()
+    }
+
+    pub fn session_stamp(&self, document: DocumentId) -> Option<WorkStamp> {
+        self.sessions.get(&document).map(DocumentSession::stamp)
+    }
+
+    pub fn session_revision(&self, document: DocumentId) -> Revision {
+        self.sessions
+            .get(&document)
+            .map_or(Revision::INITIAL, DocumentSession::revision)
+    }
+
+    pub fn session_save_state(&self, document: DocumentId) -> Option<&SaveState> {
+        self.sessions
+            .get(&document)
+            .map(DocumentSession::save_state)
+    }
+
+    pub fn pane_save_state(&self, pane: usize) -> Option<&SaveState> {
+        let document = self.pane_document_id(pane).ok()?;
+        self.session_save_state(document)
+    }
+
+    pub fn pane_revision(&self, pane: usize) -> Revision {
+        self.pane_document_id(pane)
+            .ok()
+            .map_or(Revision::INITIAL, |id| self.session_revision(id))
+    }
+
+    pub fn all_sessions_saved(&self) -> bool {
+        self.sessions.values().all(|session| !session.is_dirty())
+    }
+
+    pub fn all_dirty_sessions_journaled(&self) -> bool {
+        self.sessions.values().all(|session| {
+            !session.is_dirty() || session.journaled_revision() >= session.revision()
+        })
+    }
+
+    pub fn first_session_error(&self) -> Option<String> {
+        self.sessions
+            .values()
+            .find_map(|session| match session.save_state() {
+                SaveState::Error(error) => Some(error.clone()),
+                _ => None,
+            })
+    }
+
+    pub fn prepare_session_journal(
+        &mut self,
+        document: DocumentId,
+        now: Instant,
+        force: bool,
+    ) -> Result<Option<JournalRequest>, WorkspaceError> {
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?;
+        session
+            .prepare_journal(now, force)
+            .map_err(WorkspaceError::Lifecycle)
+    }
+
+    pub fn acknowledge_session_journal(
+        &mut self,
+        document: DocumentId,
+        stamp: WorkStamp,
+        outcome: Result<(), String>,
+    ) -> CompletionDisposition {
+        self.sessions
+            .get_mut(&document)
+            .map_or(CompletionDisposition::Stale, |session| {
+                session.acknowledge_journal(stamp, outcome)
+            })
+    }
+
+    pub fn prepare_session_canonical(
+        &mut self,
+        document: DocumentId,
+    ) -> Result<Option<(CanonicalSaveRequest, parchmint_storage::DocumentSavePlan)>, WorkspaceError>
+    {
+        let request = self
+            .sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?
+            .prepare_canonical_save()?;
+        request
+            .map(|request| {
+                let plan = request.prepare_disk_plan(&self.opened)?;
+                Ok((request, plan))
+            })
+            .transpose()
+            .map_err(WorkspaceError::Lifecycle)
+    }
+
+    pub fn acknowledge_session_canonical(
+        &mut self,
+        document: DocumentId,
+        stamp: WorkStamp,
+        outcome: Result<(ContentFingerprint, parchmint_storage::DocumentSavePlan), String>,
+    ) -> CompletionDisposition {
+        let Some(session) = self.sessions.get_mut(&document) else {
+            return CompletionDisposition::Stale;
+        };
+        if session.stamp() != stamp {
+            return CompletionDisposition::Stale;
+        }
+        match outcome {
+            Ok((fingerprint, plan)) => {
+                if let Err(error) =
+                    ProjectStorage::acknowledge_document_save(&mut self.opened, &plan)
+                {
+                    return session.acknowledge_canonical_save(stamp, Err(error.to_string()));
+                }
+                let disposition = session.acknowledge_canonical_save(stamp, Ok(fingerprint));
+                if disposition == CompletionDisposition::Applied
+                    && let Some(record) = self.opened.project.documents.get(&document)
+                {
+                    self.update_index_node(record.node_id);
+                }
+                disposition
+            }
+            Err(error) => session.acknowledge_canonical_save(stamp, Err(error)),
+        }
+    }
+
+    pub fn external_poll_plan(
+        &self,
+        document: DocumentId,
+    ) -> Result<(WorkStamp, PathBuf), WorkspaceError> {
+        let session = self
+            .sessions
+            .get(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?;
+        let plan = ProjectStorage::prepare_document_save(
+            &self.opened,
+            document,
+            session.body().to_owned(),
+        )?;
+        Ok((session.stamp(), plan.canonical_path))
+    }
+
+    pub fn observe_external_body(
+        &mut self,
+        document: DocumentId,
+        stamp: WorkStamp,
+        body: String,
+    ) -> Result<ExternalChange, WorkspaceError> {
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?;
+        if session.stamp() != stamp {
+            return Ok(ExternalChange::Unchanged);
+        }
+        let change = session.observe_external_body(body)?;
+        match &change {
+            ExternalChange::Conflict(conflict) => {
+                self.external_conflicts.insert(document, conflict.clone());
+            }
+            ExternalChange::AutoReloaded(_) => {
+                self.external_conflicts.remove(&document);
+                if let Some(node_id) = self
+                    .opened
+                    .project
+                    .documents
+                    .get(&document)
+                    .map(|record| record.node_id)
+                {
+                    let body = session.body().to_owned();
+                    self.opened.set_body(document, body)?;
+                    self.update_index_node(node_id);
+                }
+            }
+            ExternalChange::Unchanged => {}
+        }
+        Ok(change)
+    }
+
+    pub fn external_conflicts(&self) -> &BTreeMap<DocumentId, ExternalConflict> {
+        &self.external_conflicts
+    }
+
+    pub fn resolve_external_reload(&mut self, document: DocumentId) -> Result<(), WorkspaceError> {
+        let conflict =
+            self.external_conflicts
+                .remove(&document)
+                .ok_or(WorkspaceError::Invariant(
+                    "external conflict is unavailable",
+                ))?;
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?;
+        session.resolve_external_reload(&conflict)?;
+        self.opened.set_body(document, session.body().to_owned())?;
+        Ok(())
+    }
+
+    pub fn resolve_external_overwrite(
+        &mut self,
+        document: DocumentId,
+    ) -> Result<(), WorkspaceError> {
+        let conflict =
+            self.external_conflicts
+                .remove(&document)
+                .ok_or(WorkspaceError::Invariant(
+                    "external conflict is unavailable",
+                ))?;
+        self.sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?
+            .resolve_external_overwrite(&conflict)?;
+        Ok(())
+    }
+
+    pub fn save_external_conflict_copy(
+        &mut self,
+        document: DocumentId,
+        destination: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let conflict =
+            self.external_conflicts
+                .remove(&document)
+                .ok_or(WorkspaceError::Invariant(
+                    "external conflict is unavailable",
+                ))?;
+        self.sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?
+            .save_conflict_copy(&conflict, destination)?;
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .expect("session was checked above");
+        session.resolve_external_reload(&conflict)?;
+        self.opened.set_body(document, session.body().to_owned())?;
+        Ok(())
+    }
+
+    pub fn recovery_scan(&self) -> Result<RecoveryScan, WorkspaceError> {
+        RecoveryStore::scan_isolated(&self.opened).map_err(WorkspaceError::Lifecycle)
+    }
+
+    pub fn restore_recovery(
+        &mut self,
+        candidate: &RecoveryCandidate,
+        now: Instant,
+    ) -> Result<WorkStamp, WorkspaceError> {
+        let document = candidate.record.document_id;
+        self.ensure_session(document)?;
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .expect("session was just initialized");
+        RecoveryStore::restore(session, candidate, now)?;
+        Ok(session.stamp())
+    }
+
+    pub fn discard_recovery(candidate: RecoveryCandidate) -> Result<(), WorkspaceError> {
+        candidate.discard().map_err(WorkspaceError::Lifecycle)
+    }
+
+    pub fn discard_recovery_issue(issue: RecoveryIssue) -> Result<(), WorkspaceError> {
+        issue.discard().map_err(WorkspaceError::Lifecycle)
     }
 
     pub fn snapshot(&self) -> &BinderSnapshot {
@@ -457,28 +834,37 @@ impl ProjectWorkspace {
         view: PaneView,
     ) -> Result<(), WorkspaceError> {
         if let Some(node) = node
-            && self
+            && let Some((other, _)) = self
                 .preferences
                 .panes
                 .iter()
                 .enumerate()
-                .any(|(other, pane)| other != index && pane.node == Some(node))
+                .find(|(other, pane)| *other != index && pane.node == Some(node))
         {
-            return Err(WorkspaceError::Invariant(
-                "document is already open in the other pane",
-            ));
+            self.preferences.focused_pane = u8::try_from(other).unwrap_or(0);
+            self.save_preferences()?;
+            return Ok(());
         }
-        let pane = self
-            .preferences
-            .panes
-            .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
         if let Some(node) = node
             && (!self.opened.project.nodes.contains_key(&node)
                 || self.opened.project.is_trashed(node))
         {
             return Err(WorkspaceError::Invariant("pane node is unavailable"));
         }
+        if let Some(document) = node.and_then(|node| {
+            self.opened
+                .project
+                .nodes
+                .get(&node)
+                .and_then(|entry| entry.kind.document_id())
+        }) {
+            self.ensure_session(document)?;
+        }
+        let pane = self
+            .preferences
+            .panes
+            .get_mut(index)
+            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
         pane.node = node;
         pane.view = view;
         pane.cursor = 0;
@@ -590,6 +976,7 @@ impl ProjectWorkspace {
     }
 
     pub fn close_pane(&mut self, index: usize) -> Result<(), WorkspaceError> {
+        let closing_document = self.pane_document_id(index).ok();
         let pane = self
             .preferences
             .panes
@@ -602,6 +989,18 @@ impl ProjectWorkspace {
         if index == 1 {
             self.preferences.split_enabled = false;
             self.preferences.focused_pane = 0;
+        }
+        if let Some(document) = closing_document {
+            let still_open = self.preferences.panes.iter().any(|pane| {
+                pane.node
+                    .and_then(|node| self.opened.project.nodes.get(&node))
+                    .and_then(|node| node.kind.document_id())
+                    == Some(document)
+            });
+            if !still_open {
+                self.sessions.remove(&document);
+                self.external_conflicts.remove(&document);
+            }
         }
         self.save_preferences()
     }
@@ -738,6 +1137,9 @@ impl ProjectWorkspace {
     /// This small bridge is intentionally node-agnostic so a research note has
     /// exactly the same editor behavior as a manuscript note.
     pub fn save_document_body(&mut self, node: NodeId, body: String) -> Result<(), WorkspaceError> {
+        if self.is_read_only() {
+            return Err(StorageError::ReadOnly.into());
+        }
         let document = document_for_node(&self.opened.project, node)?;
         parchmint_markdown::Document::parse_body(
             &body,
@@ -828,6 +1230,9 @@ impl ProjectWorkspace {
         &mut self,
         preview: &ProjectReplacePreview,
     ) -> Result<usize, WorkspaceError> {
+        if self.is_read_only() {
+            return Err(StorageError::ReadOnly.into());
+        }
         let mut by_node = std::collections::BTreeMap::<NodeId, Vec<&ProjectReplaceMatch>>::new();
         for item in preview.matches.iter().filter(|item| item.selected) {
             by_node.entry(item.node).or_default().push(item);
@@ -1154,7 +1559,35 @@ impl ProjectWorkspace {
     }
 
     pub fn trash(&mut self, node: NodeId) -> Result<(), WorkspaceError> {
+        let mut subtree = BTreeSet::new();
+        let mut pending = vec![node];
+        while let Some(current) = pending.pop() {
+            if !subtree.insert(current) {
+                continue;
+            }
+            if let Some(entry) = self.opened.project.nodes.get(&current) {
+                pending.extend(entry.children.iter().copied());
+            }
+        }
+        let documents = subtree
+            .iter()
+            .filter_map(|id| self.opened.project.nodes[id].kind.document_id())
+            .collect::<Vec<_>>();
         self.apply(ProjectCommand::Trash { node })?;
+        for pane in &mut self.preferences.panes {
+            if pane.node.is_some_and(|id| subtree.contains(&id)) {
+                *pane = PaneWorkspaceState {
+                    view: PaneView::Outline,
+                    ..PaneWorkspaceState::default()
+                };
+            }
+        }
+        for document in documents {
+            self.sessions.remove(&document);
+            self.external_conflicts.remove(&document);
+        }
+        self.preferences.focused_pane = self.preferences.focused_pane.min(1);
+        self.save_preferences()?;
         let remaining = self
             .selection
             .iter()
@@ -1239,6 +1672,9 @@ impl ProjectWorkspace {
     }
 
     pub fn save_preferences(&self) -> Result<(), WorkspaceError> {
+        if self.is_read_only() {
+            return Ok(());
+        }
         let path = self.opened.root().join(".parchmint/workspace.toml");
         let source =
             toml::to_string_pretty(&self.preferences).map_err(WorkspaceError::Preferences)?;
@@ -1257,6 +1693,9 @@ impl ProjectWorkspace {
         &mut self,
         command: ProjectCommand,
     ) -> Result<ProjectCommand, WorkspaceError> {
+        if self.is_read_only() {
+            return Err(StorageError::ReadOnly.into());
+        }
         let outcome = self
             .opened
             .execute(command)
@@ -1579,6 +2018,8 @@ pub enum WorkspaceError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
+    Lifecycle(#[from] DocumentLifecycleError),
+    #[error(transparent)]
     Domain(#[from] ProjectError),
     #[error("workspace state could not be read: {0}")]
     ReadPreferences(std::io::Error),
@@ -1608,11 +2049,32 @@ pub enum WorkspaceError {
     Export(ExportError),
 }
 
+impl WorkspaceError {
+    pub fn is_project_locked(&self) -> bool {
+        matches!(self, Self::Storage(StorageError::ProjectLocked(_)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    fn flush_live_document(workspace: &mut ProjectWorkspace, document: DocumentId) {
+        let journal = workspace
+            .prepare_session_journal(document, Instant::now(), true)
+            .unwrap()
+            .unwrap();
+        journal.execute().unwrap();
+        workspace.acknowledge_session_journal(document, journal.stamp, Ok(()));
+        let (request, plan) = workspace
+            .prepare_session_canonical(document)
+            .unwrap()
+            .unwrap();
+        let fingerprint = request.execute_disk(&plan, request.stamp).unwrap();
+        workspace.acknowledge_session_canonical(document, request.stamp, Ok((fingerprint, plan)));
+    }
 
     #[test]
     fn structural_commands_filtering_undo_and_restart_share_one_snapshot() {
@@ -1832,11 +2294,11 @@ mod tests {
         workspace
             .open_in_pane(1, Some(note), PaneView::Editor)
             .unwrap();
-        assert!(
-            workspace
-                .open_in_pane(0, Some(note), PaneView::Editor)
-                .is_err()
-        );
+        workspace
+            .open_in_pane(0, Some(note), PaneView::Editor)
+            .unwrap();
+        assert_eq!(workspace.preferences().focused_pane, 1);
+        assert_eq!(workspace.pane(0).unwrap().node, Some(scene));
         workspace.focus_pane(0).unwrap();
         assert!(workspace.navigate_focused_pane(note).unwrap());
         assert_eq!(workspace.preferences().focused_pane, 1);
@@ -1855,6 +2317,54 @@ mod tests {
         let reopened = ProjectWorkspace::open(&root).unwrap();
         assert_eq!(reopened.pane(0).unwrap().node, Some(attachment));
         assert!(reopened.attachments().contains_key(&asset.id));
+    }
+
+    #[test]
+    fn live_revision_survives_export_swap_close_trash_and_reopen_without_focus_loss() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        workspace
+            .set_project_generation(ProjectGeneration::new(91).unwrap())
+            .unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Scene", false)
+            .unwrap();
+        let document = document_for_node(workspace.project(), scene).unwrap();
+        workspace
+            .open_in_pane(0, Some(scene), PaneView::Editor)
+            .unwrap();
+        workspace
+            .set_split(true, SplitOrientation::Horizontal, 500)
+            .unwrap();
+        let latest = "Typing that never lost focus.\n";
+        let stamp = workspace
+            .update_pane_live_body(0, latest.into(), 0, 1, Instant::now())
+            .unwrap();
+        assert_eq!(stamp.revision, Revision::new(1));
+        assert_eq!(workspace.pane_live_body(0).unwrap(), latest);
+
+        flush_live_document(&mut workspace, document);
+        let compile = workspace.compile_input(stamp).unwrap();
+        assert_eq!(compile.bodies[&document], latest);
+
+        workspace.swap_panes().unwrap();
+        assert_eq!(workspace.pane_live_body(1).unwrap(), latest);
+        workspace.close_pane(1).unwrap();
+        assert!(workspace.open_session_ids().is_empty());
+
+        workspace
+            .open_in_pane(0, Some(scene), PaneView::Editor)
+            .unwrap();
+        assert_eq!(workspace.pane_live_body(0).unwrap(), latest);
+        workspace.trash(scene).unwrap();
+        assert!(workspace.pane(0).unwrap().node.is_none());
+        assert!(workspace.open_session_ids().is_empty());
+        drop(workspace);
+
+        let reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(reopened.document_body(scene).unwrap(), latest);
+        assert!(reopened.project().is_trashed(scene));
     }
 
     #[test]
