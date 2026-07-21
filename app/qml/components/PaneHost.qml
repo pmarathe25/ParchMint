@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import org.parchmint.adapters 1.0
 
 // One host is instantiated twice by Main.qml. It intentionally owns its
 // TextArea for its whole lifetime: replacing the other pane cannot discard its
@@ -21,15 +22,27 @@ Pane {
     property bool loadingBody: false
     property bool findVisible: false
     property string pendingExternalUrl: ""
+    property bool sourceMode: false
+    property string sourceBuffer: ""
+    property string sourceError: ""
+    readonly property var paragraphStyles: [
+        { "id": "body", "name": qsTr("Body") },
+        { "id": "heading-1", "name": qsTr("Heading 1") },
+        { "id": "heading-2", "name": qsTr("Heading 2") }
+    ]
     padding: 0
 
     function showFind() {
         findVisible = true
         findField.forceActiveFocus()
     }
+    function localStatistics(value) {
+        const words = value.trim().length ? value.trim().split(/\s+/).length : 0
+        return qsTr("%1 words · %2 characters").arg(words).arg(value.length)
+    }
 
     function reloadBody(force) {
-        if (viewName === "editor" && nodeId.length > 0
+        if (!sourceMode && viewName === "editor" && nodeId.length > 0
                 && (force || loadedNode !== nodeId)) {
             const liveBody = backend.paneDocumentBody(paneIndex)
             const liveRevision = backend.paneDocumentRevision(paneIndex)
@@ -49,9 +62,33 @@ Pane {
         }
     }
     function syncLiveBody() {
-        if (viewName === "editor" && loadedNode === nodeId && nodeId.length)
+        if (!sourceMode && viewName === "editor" && loadedNode === nodeId && nodeId.length)
             return backend.updatePaneBody(paneIndex, editor.text, 0, Math.max(1, editor.lineCount))
         return true
+    }
+    function beginSource() {
+        if (!syncLiveBody())
+            return
+        sourceBuffer = backend.paneDocumentBody(paneIndex)
+        sourceError = backend.validateMarkdown(sourceBuffer)
+        if (!sourceError.length && backend.beginSourceMode(sourceBuffer))
+            sourceMode = true
+    }
+    function commitSource(source) {
+        sourceError = backend.validateMarkdown(source)
+        if (sourceError.length)
+            return
+        if (backend.commitSourceMode(source)) {
+            loadingBody = true
+            editor.text = source
+            loadingBody = false
+            sourceMode = false
+            backend.updatePaneBody(paneIndex, source, 0, Math.max(1, editor.lineCount))
+        }
+    }
+    function discardSource() {
+        sourceMode = false
+        reloadBody(true)
     }
     function findNext() {
         const query = findField.text
@@ -104,15 +141,14 @@ Pane {
     }
     onNodeIdChanged: reloadBody(false)
     onViewNameChanged: reloadBody(false)
-    Component.onCompleted: reloadBody(false)
-    Connections {
-        target: root.backend
-        function onDocumentRevisionChanged() { root.reloadBody(true) }
+    Component.onCompleted: {
+        editorAdapter.defineStyle("body", {}, true, "body")
+        editorAdapter.defineStyle("heading-1", { "font-weight": 700, "font-size": 24 }, true, "body")
+        editorAdapter.defineStyle("heading-2", { "font-weight": 700, "font-size": 20 }, true, "body")
+        reloadBody(false)
     }
     background: Rectangle {
-        color: root.focused ? root.palette.base : root.palette.alternateBase
-        border.width: root.focused ? 1 : 0
-        border.color: root.palette.highlight
+        color: DesignTokens.surface
     }
 
     ColumnLayout {
@@ -122,16 +158,20 @@ Pane {
             Layout.fillWidth: true
             RowLayout {
                 anchors.fill: parent
-                ToolButton { text: root.pinned ? "●" : "○"; checkable: true; checked: root.pinned; Accessible.name: qsTr("Pin pane"); onClicked: root.backend.setPanePinned(root.paneIndex, checked) }
-                Label { text: root.viewName === "attachment" ? qsTr("Attachment") : root.viewName; Layout.fillWidth: true; elide: Text.ElideRight }
+                ToolButton { checkable: true; checked: root.pinned; Accessible.name: root.pinned ? qsTr("Unpin pane") : qsTr("Pin pane"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.backend.setPanePinned(root.paneIndex, checked); contentItem: Image { source: "qrc:/icons/pin.svg"; width: 18; height: 18; anchors.centerIn: parent } }
+                Label { text: root.viewName === "attachment" ? qsTr("Attachment") : (root.backend.paneTitle(root.paneIndex).length ? root.backend.paneTitle(root.paneIndex) : qsTr("No document")); Layout.fillWidth: true; elide: Text.ElideRight; font.bold: true }
+                ButtonGroup { id: viewGroup }
+                ToolButton { text: qsTr("Editor"); checkable: true; checked: root.viewName === "editor"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "editor"); Accessible.name: qsTr("Show editor") }
+                ToolButton { text: qsTr("Outline"); checkable: true; checked: root.viewName === "outline"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "outline"); Accessible.name: qsTr("Show outline") }
+                ToolButton { text: qsTr("Cards"); checkable: true; checked: root.viewName === "cards"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "cards"); Accessible.name: qsTr("Show cards") }
                 Label {
                     visible: root.viewName === "editor" && root.nodeId.length > 0
                     text: root.backend.document_revision >= 0 ? root.backend.paneSaveStatus(root.paneIndex) : ""
                     opacity: .7
                     Accessible.name: qsTr("Pane save status") + ": " + text
                 }
-                ToolButton { text: "⌕"; Accessible.name: qsTr("Find and replace in document"); onClicked: root.findVisible = !root.findVisible }
-                ToolButton { text: "×"; Accessible.name: qsTr("Close pane"); onClicked: root.backend.closePane(root.paneIndex) }
+                ToolButton { Accessible.name: qsTr("Find and replace in document"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.findVisible = !root.findVisible; contentItem: Image { source: "qrc:/icons/search.svg"; width: 18; height: 18; anchors.centerIn: parent } }
+                ToolButton { Accessible.name: qsTr("Close pane"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.backend.closePane(root.paneIndex); contentItem: Image { source: "qrc:/icons/close.svg"; width: 18; height: 18; anchors.centerIn: parent } }
             }
         }
         RowLayout {
@@ -150,12 +190,35 @@ Pane {
             Layout.fillHeight: true
             currentIndex: root.viewName === "outline" ? 1 : root.viewName === "cards" ? 2 : root.viewName === "attachment" ? 3 : 0
             Item {
-                TextArea {
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: 0
+                    FormattingBar {
+                        Layout.fillWidth: true
+                        adapter: editorAdapter
+                        visible: !root.sourceMode
+                        styleModel: root.paragraphStyles
+                        onSourceModeRequested: root.beginSource()
+                    }
+                    TextArea {
                     id: editor
                     objectName: "paneEditor" + root.paneIndex
-                    anchors.fill: parent
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    // The live-session contract transports the exact Markdown
+                    // source. EditorAdapter applies semantic QTextDocument
+                    // formats directly; Qt's Markdown importer is never a
+                    // persistence conversion step.
                     textFormat: TextEdit.PlainText
+                    visible: !root.sourceMode
                     wrapMode: TextEdit.Wrap
+                    Layout.maximumWidth: 880
+                    Layout.alignment: Qt.AlignHCenter
+                    leftPadding: 36
+                    rightPadding: 36
+                    topPadding: 28
+                    bottomPadding: 56
+                    font.pixelSize: 16
                     selectByMouse: true
                     persistentSelection: true
                     readOnly: root.backend.project_read_only
@@ -168,15 +231,52 @@ Pane {
                             root.backend.flushPane(root.paneIndex, text)
                     }
                     onTextChanged: {
-                        liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
+                        liveCounts.text = root.localStatistics(selectedText.length ? selectedText : text)
                         if (!root.loadingBody && root.loadedNode === root.nodeId && root.nodeId.length > 0)
                             root.backend.updatePaneBody(root.paneIndex, text, 0, Math.max(1, lineCount))
                     }
-                    onSelectedTextChanged: liveCounts.text = root.backend.textStatistics(selectedText.length ? selectedText : text)
+                    onSelectedTextChanged: liveCounts.text = root.localStatistics(selectedText.length ? selectedText : text)
+                    Keys.priority: Keys.BeforeItem
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Backspace) {
+                            editorAdapter.deletePreviousSemanticUnit()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Delete) {
+                            editorAdapter.deleteNextSemanticUnit()
+                            event.accepted = true
+                        }
+                    }
+                    }
+                    SourceEditor {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        visible: root.sourceMode
+                        text: root.sourceBuffer
+                        valid: root.sourceError.length === 0
+                        diagnostics: root.sourceError.length ? [{ start: 0, message: root.sourceError }] : []
+                        onTextChanged: { root.sourceBuffer = text; root.sourceError = root.backend.validateMarkdown(text) }
+                        onAcceptRequested: function(source) { root.commitSource(source) }
+                        onDiscardRequested: root.discardSource()
+                    }
+                }
+                EditorAdapter {
+                    id: editorAdapter
+                    textDocument: editor.textDocument
+                    focused: editor.activeFocus
+                    onAdapterError: function(message) { console.warn("ParchMint editor:", message) }
+                    onIncrementalDirty: function(revision, position, removed, added, firstBlock, lastBlockExclusive) {
+                        root.backend.noteEditorDelta(revision, firstBlock, lastBlockExclusive)
+                    }
+                }
+                Connections {
+                    target: editor
+                    function onCursorPositionChanged() { editorAdapter.cursorPosition = editor.cursorPosition }
+                    function onSelectionStartChanged() { editorAdapter.selectionStart = editor.selectionStart }
+                    function onSelectionEndChanged() { editorAdapter.selectionEnd = editor.selectionEnd }
                 }
                 Label {
                     id: liveCounts
-                    text: root.backend.textStatistics(editor.selectedText.length ? editor.selectedText : editor.text)
+                    text: root.localStatistics(editor.selectedText.length ? editor.selectedText : editor.text)
                     Accessible.name: qsTr("Live document statistics") + ": " + text
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom

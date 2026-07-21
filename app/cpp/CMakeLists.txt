@@ -8,14 +8,18 @@ qt_add_qml_module(parchmint_adapters
     editor_adapter.cpp editor_adapter.h
     markdown_highlighter.cpp markdown_highlighter.h
     semantic_object_renderer.cpp semantic_object_renderer.h
-    models/outline_model.cpp models/outline_model.h)
-target_include_directories(parchmint_adapters PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+    models/outline_model.cpp models/outline_model.h
+    models/cards_model.cpp models/cards_model.h)
+target_include_directories(parchmint_adapters PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/models)
 target_link_libraries(parchmint_adapters PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 
 qt_add_executable(parchmint main.cpp)
 set(parchmint_qml_sources
   "${CMAKE_SOURCE_DIR}/app/qml/Main.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/DesignTokens.qml"
+  "${CMAKE_SOURCE_DIR}/app/qml/components/IconButton.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/FormattingBar.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/BinderPane.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/OutlineView.qml"
@@ -53,6 +57,17 @@ set_source_files_properties(${parchmint_icon} PROPERTIES QT_RESOURCE_ALIAS "org.
 qt_add_resources(parchmint "parchmint_icons"
   PREFIX "/"
   FILES ${parchmint_icon})
+qt_add_resources(parchmint "parchmint_ui_icons"
+  PREFIX "/icons"
+  BASE "${CMAKE_SOURCE_DIR}/app/qml/icons"
+  FILES
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/binder.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/inspector.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/pin.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/search.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/close.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/chevron.svg"
+    "${CMAKE_SOURCE_DIR}/app/qml/icons/document.svg")
 
 target_link_libraries(parchmint PRIVATE
   parchmint_qml

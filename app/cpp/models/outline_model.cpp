@@ -2,6 +2,10 @@
 
 #include <QMetaObject>
 
+namespace {
+constexpr auto NodeMimeType = "application/x-parchmint-node-id";
+}
+
 OutlineModel::OutlineModel(QObject* parent)
   : QAbstractListModel(parent)
 {
@@ -64,6 +68,10 @@ QVariant OutlineModel::data(const QModelIndex& index, int role) const
       return invoke("nodeIsGroup", index.row());
     case RootRole:
       return invoke("nodeIsRoot", index.row());
+    case WordCountRole:
+      return invoke("nodeWordCount", index.row());
+    case IncludeInCompileRole:
+      return invoke("nodeIncludeInCompile", index.row());
     default:
       return {};
   }
@@ -81,7 +89,61 @@ QHash<int, QByteArray> OutlineModel::roleNames() const
     { LabelRole, QByteArrayLiteral("label") },
     { GroupRole, QByteArrayLiteral("isGroup") },
     { RootRole, QByteArrayLiteral("isRoot") },
+    { WordCountRole, QByteArrayLiteral("wordCount") },
+    { IncludeInCompileRole, QByteArrayLiteral("includeInCompile") },
   };
+}
+
+Qt::ItemFlags OutlineModel::flags(const QModelIndex& index) const
+{
+  if (!index.isValid())
+    return Qt::ItemIsDropEnabled;
+  const bool root = data(index, RootRole).toBool();
+  auto result = Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDropEnabled;
+  if (!root)
+    result |= Qt::ItemIsDragEnabled;
+  return result;
+}
+
+QStringList OutlineModel::mimeTypes() const { return { QString::fromLatin1(NodeMimeType) }; }
+
+QMimeData* OutlineModel::mimeData(const QModelIndexList& indexes) const
+{
+  if (indexes.isEmpty())
+    return nullptr;
+  const auto index = indexes.constFirst();
+  if (!index.isValid() || data(index, RootRole).toBool())
+    return nullptr;
+  auto* mime = new QMimeData;
+  mime->setData(NodeMimeType, data(index, IdRole).toString().toUtf8());
+  return mime;
+}
+
+bool OutlineModel::dropMimeData(const QMimeData* mime,
+                                Qt::DropAction action,
+                                int row,
+                                int,
+                                const QModelIndex& parent)
+{
+  if (action == Qt::IgnoreAction)
+    return true;
+  if (action != Qt::MoveAction || !mime || !mime->hasFormat(NodeMimeType) || !m_source
+      || rowCount() == 0)
+    return false;
+  const auto sourceId = QString::fromUtf8(mime->data(NodeMimeType));
+  const int targetRow = parent.isValid() ? parent.row() : qBound(0, row, rowCount() - 1);
+  const auto target = index(targetRow, 0);
+  if (!target.isValid())
+    return false;
+  bool moved = false;
+  return QMetaObject::invokeMethod(m_source,
+                                   "moveNode",
+                                   Qt::DirectConnection,
+                                   Q_RETURN_ARG(bool, moved),
+                                   Q_ARG(QString, sourceId),
+                                   Q_ARG(QString, data(target, IdRole).toString()),
+                                   Q_ARG(QString, QStringLiteral("before")))
+    && moved;
 }
 
 QVariant OutlineModel::invoke(const char* method, int row) const

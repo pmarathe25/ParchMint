@@ -19,6 +19,7 @@ class EditorAdapter : public QObject
   Q_PROPERTY(int selectionEnd READ selectionEnd WRITE setSelectionEnd NOTIFY selectionChanged)
   Q_PROPERTY(bool bold READ bold NOTIFY selectionFormatChanged)
   Q_PROPERTY(bool italic READ italic NOTIFY selectionFormatChanged)
+  Q_PROPERTY(bool underline READ underline NOTIFY selectionFormatChanged)
   Q_PROPERTY(int boldState READ boldState NOTIFY selectionFormatChanged)
   Q_PROPERTY(int italicState READ italicState NOTIFY selectionFormatChanged)
   Q_PROPERTY(int paragraphAlignment READ paragraphAlignment NOTIFY selectionFormatChanged)
@@ -42,6 +43,7 @@ public:
   void setSelectionEnd(int position);
   bool bold() const;
   bool italic() const;
+  bool underline() const;
   int boldState() const;
   int italicState() const;
   int paragraphAlignment() const;
@@ -56,6 +58,7 @@ public:
   Q_INVOKABLE QVariantList semanticBlocks() const;
   Q_INVOKABLE void toggleBold();
   Q_INVOKABLE void toggleItalic();
+  Q_INVOKABLE void toggleUnderline();
   Q_INVOKABLE void setVerticalAlignment(int alignment);
   Q_INVOKABLE void setParagraphAlignment(int alignment);
   Q_INVOKABLE void setHeadingLevel(int level);
@@ -74,6 +77,7 @@ public:
   Q_INVOKABLE void insertPageBreak();
   Q_INVOKABLE void insertSceneBreak();
   Q_INVOKABLE void deletePreviousSemanticUnit();
+  Q_INVOKABLE void deleteNextSemanticUnit();
   Q_INVOKABLE void pastePlainText(const QString& text);
   Q_INVOKABLE void pasteRichHtml(const QString& html);
   Q_INVOKABLE void undo();
@@ -103,6 +107,8 @@ signals:
 private:
   QTextCursor cursor() const;
   void mergeCharacterFormat(const QTextCharFormat& format);
+  bool canReplaceSelection(const QTextCursor& cursor, const QString& action);
+  void applyNextParagraphStyle(QTextCursor& cursor, const QString& currentStyle);
   int uniformCharacterProperty(int property, const QVariant& enabledValue) const;
   bool selectionContainsProtectedObject(const QTextCursor& cursor) const;
   void connectDocumentSignals();

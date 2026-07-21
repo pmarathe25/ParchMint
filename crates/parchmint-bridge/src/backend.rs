@@ -51,6 +51,7 @@ pub struct ParchMintBackendRust {
     selected_synopsis: QString,
     selected_status: QString,
     selected_label: QString,
+    selected_include_in_compile: bool,
     pane_one_id: QString,
     pane_two_id: QString,
     pane_one_view: QString,
@@ -63,6 +64,8 @@ pub struct ParchMintBackendRust {
     search_status: QString,
     export_status: QString,
     export_in_progress: bool,
+    compile_preset_count: i32,
+    selected_compile_preset: QString,
     command_count: i32,
     replace_count: i32,
     recovery_count: i32,
@@ -112,6 +115,7 @@ impl Default for ParchMintBackendRust {
             selected_synopsis: QString::default(),
             selected_status: QString::default(),
             selected_label: QString::default(),
+            selected_include_in_compile: false,
             pane_one_id: QString::default(),
             pane_two_id: QString::default(),
             pane_one_view: QString::from("editor"),
@@ -124,6 +128,8 @@ impl Default for ParchMintBackendRust {
             search_status: QString::from("Index ready when you search"),
             export_status: QString::from("No export in progress"),
             export_in_progress: false,
+            compile_preset_count: 1,
+            selected_compile_preset: QString::from("__default__"),
             command_count: i32::try_from(command_results.len()).unwrap_or(i32::MAX),
             replace_count: 0,
             recovery_count: 0,
@@ -197,6 +203,7 @@ pub mod qobject {
         #[qproperty(QString, selected_synopsis)]
         #[qproperty(QString, selected_status)]
         #[qproperty(QString, selected_label)]
+        #[qproperty(bool, selected_include_in_compile)]
         #[qproperty(QString, pane_one_id)]
         #[qproperty(QString, pane_two_id)]
         #[qproperty(QString, pane_one_view)]
@@ -209,6 +216,8 @@ pub mod qobject {
         #[qproperty(QString, search_status)]
         #[qproperty(QString, export_status)]
         #[qproperty(bool, export_in_progress)]
+        #[qproperty(i32, compile_preset_count, READ, NOTIFY)]
+        #[qproperty(QString, selected_compile_preset)]
         #[qproperty(i32, command_count, READ, NOTIFY)]
         #[qproperty(i32, replace_count, READ, NOTIFY)]
         #[qproperty(i32, recovery_count, READ, NOTIFY)]
@@ -295,6 +304,12 @@ pub mod qobject {
         #[cxx_name = "nodeIsRoot"]
         fn node_is_root(self: &ParchMintBackend, row: i32) -> bool;
         #[qinvokable]
+        #[cxx_name = "nodeWordCount"]
+        fn node_word_count(self: &ParchMintBackend, row: i32) -> i32;
+        #[qinvokable]
+        #[cxx_name = "nodeIncludeInCompile"]
+        fn node_include_in_compile(self: &ParchMintBackend, row: i32) -> bool;
+        #[qinvokable]
         #[cxx_name = "projectSearch"]
         fn project_search(self: Pin<&mut ParchMintBackend>, query: &QString);
         #[qinvokable]
@@ -316,6 +331,22 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "textStatistics"]
         fn text_statistics(self: &ParchMintBackend, text: &QString) -> QString;
+        #[qinvokable]
+        #[cxx_name = "compilePresetId"]
+        fn compile_preset_id(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "compilePresetName"]
+        fn compile_preset_name(self: &ParchMintBackend, row: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "selectCompilePreset"]
+        fn select_compile_preset(self: Pin<&mut ParchMintBackend>, id: &QString) -> bool;
+        #[qinvokable]
+        #[cxx_name = "renameCompilePreset"]
+        fn rename_compile_preset(
+            self: Pin<&mut ParchMintBackend>,
+            id: &QString,
+            name: &QString,
+        ) -> bool;
         #[qinvokable]
         #[cxx_name = "exportProject"]
         fn export_project(
@@ -417,6 +448,13 @@ pub mod qobject {
         #[cxx_name = "editLabel"]
         fn edit_label(self: Pin<&mut ParchMintBackend>, id: &QString, label: &QString) -> bool;
         #[qinvokable]
+        #[cxx_name = "setIncludeInCompile"]
+        fn set_include_in_compile(
+            self: Pin<&mut ParchMintBackend>,
+            id: &QString,
+            include: bool,
+        ) -> bool;
+        #[qinvokable]
         #[cxx_name = "duplicateNode"]
         fn duplicate_node(self: Pin<&mut ParchMintBackend>, id: &QString) -> bool;
         #[qinvokable]
@@ -467,6 +505,9 @@ pub mod qobject {
         #[cxx_name = "setPanePinned"]
         fn set_pane_pinned(self: Pin<&mut ParchMintBackend>, pane: i32, pinned: bool) -> bool;
         #[qinvokable]
+        #[cxx_name = "setPaneView"]
+        fn set_pane_view(self: Pin<&mut ParchMintBackend>, pane: i32, view: &QString) -> bool;
+        #[qinvokable]
         #[cxx_name = "setSplit"]
         fn set_split(
             self: Pin<&mut ParchMintBackend>,
@@ -480,6 +521,9 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "paneDocumentBody"]
         fn pane_document_body(self: Pin<&mut ParchMintBackend>, pane: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "paneTitle"]
+        fn pane_title(self: &ParchMintBackend, pane: i32) -> QString;
         #[qinvokable]
         #[cxx_name = "updatePaneBody"]
         fn update_pane_body(
@@ -793,6 +837,14 @@ impl ParchMintBackend {
     pub fn node_is_root(&self, row: i32) -> bool {
         self.row(row).is_some_and(|value| value.is_root)
     }
+    pub fn node_word_count(&self, row: i32) -> i32 {
+        self.row(row)
+            .and_then(|value| i32::try_from(value.word_count).ok())
+            .unwrap_or(0)
+    }
+    pub fn node_include_in_compile(&self, row: i32) -> bool {
+        self.row(row).is_some_and(|value| value.include_in_compile)
+    }
     pub fn project_search(mut self: Pin<&mut Self>, query: &QString) {
         let query_text = query.to_string();
         let result = self
@@ -887,6 +939,99 @@ impl ParchMintBackend {
         ))
     }
 
+    pub fn compile_preset_id(&self, row: i32) -> QString {
+        if row < 0 {
+            return QString::default();
+        }
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.compile_presets().get(row as usize).copied())
+            .map_or_else(
+                || {
+                    if row == 0 {
+                        QString::from("__default__")
+                    } else {
+                        QString::default()
+                    }
+                },
+                |preset| QString::from(preset.id.to_string()),
+            )
+    }
+
+    pub fn compile_preset_name(&self, row: i32) -> QString {
+        if row < 0 {
+            return QString::default();
+        }
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.compile_presets().get(row as usize).copied())
+            .map_or_else(
+                || {
+                    if row == 0 {
+                        QString::from("Manuscript")
+                    } else {
+                        QString::default()
+                    }
+                },
+                |preset| QString::from(&preset.name),
+            )
+    }
+
+    pub fn select_compile_preset(mut self: Pin<&mut Self>, id: &QString) -> bool {
+        let id = id.to_string();
+        let exists = id == "__default__"
+            || self
+                .as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .is_some_and(|workspace| {
+                    workspace
+                        .compile_presets()
+                        .iter()
+                        .any(|preset| preset.id.to_string() == id)
+                });
+        if !exists {
+            return self.as_mut().fail("Choose a current compile preset");
+        }
+        self.as_mut().set_selected_compile_preset(QString::from(id));
+        true
+    }
+
+    pub fn rename_compile_preset(mut self: Pin<&mut Self>, id: &QString, name: &QString) -> bool {
+        let id = id.to_string();
+        let name = name.to_string().trim().to_owned();
+        if name.is_empty() {
+            return self.as_mut().fail("A compile preset needs a name");
+        }
+        let mut selected = String::new();
+        let renamed = self.as_mut().perform("Edit compile preset", |workspace| {
+            let mut preset = if id == "__default__" {
+                CompilePreset::manuscript(&name)
+            } else {
+                workspace
+                    .compile_presets()
+                    .iter()
+                    .find(|preset| preset.id.to_string() == id)
+                    .map(|preset| (*preset).clone())
+                    .ok_or_else(|| "Choose a current compile preset".to_owned())?
+            };
+            preset.name.clone_from(&name);
+            selected = preset.id.to_string();
+            workspace
+                .save_compile_preset(preset)
+                .map_err(|error| error.to_string())
+        });
+        if renamed {
+            self.as_mut()
+                .set_selected_compile_preset(QString::from(selected));
+            self.as_mut().sync_compile_presets();
+        }
+        renamed
+    }
+
     pub fn export_project(
         mut self: Pin<&mut Self>,
         format: &QString,
@@ -931,6 +1076,7 @@ impl ParchMintBackend {
         }
         self.as_mut().cancel_export();
         let stamp = self.as_ref().export_stamp();
+        let selected_preset = self.selected_compile_preset().to_string();
         let (input, preset) = match self
             .as_ref()
             .rust()
@@ -938,10 +1084,15 @@ impl ParchMintBackend {
             .as_ref()
             .ok_or_else(|| "Create or open a project first".to_owned())
             .and_then(|workspace| {
-                let preset = workspace.compile_presets().first().map_or_else(
-                    || CompilePreset::manuscript("Manuscript"),
-                    |preset| (*preset).clone(),
-                );
+                let presets = workspace.compile_presets();
+                let preset = presets
+                    .iter()
+                    .find(|preset| preset.id.to_string() == selected_preset)
+                    .or_else(|| presets.first())
+                    .map_or_else(
+                        || CompilePreset::manuscript("Manuscript"),
+                        |preset| (*preset).clone(),
+                    );
                 workspace
                     .compile_input(stamp)
                     .map(|input| (input, preset))
@@ -1220,6 +1371,7 @@ impl ParchMintBackend {
         self.as_mut().set_selected_synopsis(QString::default());
         self.as_mut().set_selected_status(QString::default());
         self.as_mut().set_selected_label(QString::default());
+        self.as_mut().set_selected_include_in_compile(false);
         self.as_mut().set_pane_one_id(QString::default());
         self.as_mut().set_pane_two_id(QString::default());
         self.as_mut().set_split_enabled(false);
@@ -1370,6 +1522,17 @@ impl ParchMintBackend {
             "Edit label",
         )
     }
+    pub fn set_include_in_compile(mut self: Pin<&mut Self>, id: &QString, include: bool) -> bool {
+        self.as_mut().edit_metadata_field(
+            id,
+            |metadata| {
+                metadata
+                    .flags
+                    .insert("include-in-compile".to_owned(), include);
+            },
+            "Set compile inclusion",
+        )
+    }
     pub fn duplicate_node(mut self: Pin<&mut Self>, id: &QString) -> bool {
         self.as_mut().perform("Duplicate node", |workspace| {
             workspace
@@ -1506,6 +1669,23 @@ impl ParchMintBackend {
                 })
         })
     }
+    pub fn set_pane_view(mut self: Pin<&mut Self>, pane: i32, view: &QString) -> bool {
+        let view = match view.to_string().as_str() {
+            "editor" => PaneView::Editor,
+            "outline" => PaneView::Outline,
+            "cards" => PaneView::Cards,
+            _ => return self.as_mut().fail("Choose Editor, Outline, or Cards"),
+        };
+        self.as_mut().perform("Change pane view", |workspace| {
+            usize::try_from(pane)
+                .map_err(|_| "Choose a valid pane".to_owned())
+                .and_then(|pane| {
+                    workspace
+                        .set_pane_view(pane, view)
+                        .map_err(|error| error.to_string())
+                })
+        })
+    }
     pub fn set_split(
         mut self: Pin<&mut Self>,
         enabled: bool,
@@ -1547,6 +1727,24 @@ impl ParchMintBackend {
                 .map(str::to_owned)
         });
         body.map_or_else(QString::default, QString::from)
+    }
+    pub fn pane_title(&self, pane: i32) -> QString {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| {
+                let workspace = self.rust().workspace.as_ref()?;
+                let node = workspace.pane(pane)?.node?;
+                workspace
+                    .project()
+                    .nodes
+                    .get(&node)?
+                    .kind
+                    .document_id()
+                    .and_then(|id| workspace.project().documents.get(&id))
+                    .map(|record| record.metadata.title.as_str())
+                    .or_else(|| workspace.project().builtin_root_key(node))
+            })
+            .map_or_else(QString::default, QString::from)
     }
     pub fn update_pane_body(
         mut self: Pin<&mut Self>,
@@ -2550,6 +2748,7 @@ impl ParchMintBackend {
         self.as_mut().selected_count_changed();
         self.as_mut().sync_selected();
         self.as_mut().sync_panes();
+        self.as_mut().sync_compile_presets();
         self.as_mut().refresh_commands();
         self.as_mut().bump(command);
     }
@@ -2594,16 +2793,19 @@ impl ParchMintBackend {
                                     row.synopsis.clone(),
                                     row.status.clone(),
                                     row.label.clone(),
+                                    row.include_in_compile,
                                 )
                             })
                     })
             });
-        let (id, title, synopsis, status, label) = values.unwrap_or_default();
+        let (id, title, synopsis, status, label, include_in_compile) = values.unwrap_or_default();
         self.as_mut().set_selected_id(QString::from(id));
         self.as_mut().set_selected_title(QString::from(title));
         self.as_mut().set_selected_synopsis(QString::from(synopsis));
         self.as_mut().set_selected_status(QString::from(status));
         self.as_mut().set_selected_label(QString::from(label));
+        self.as_mut()
+            .set_selected_include_in_compile(include_in_compile);
     }
     fn sync_panes(mut self: Pin<&mut Self>) {
         let values = self.as_ref().rust().workspace.as_ref().map(|workspace| {
@@ -2631,6 +2833,34 @@ impl ParchMintBackend {
             .as_ref()
             .is_some_and(|workspace| workspace.preferences().split_enabled);
         self.as_mut().set_split_enabled(split);
+    }
+    fn sync_compile_presets(mut self: Pin<&mut Self>) {
+        let preset_ids =
+            self.as_ref()
+                .rust()
+                .workspace
+                .as_ref()
+                .map_or_else(Vec::new, |workspace| {
+                    workspace
+                        .compile_presets()
+                        .into_iter()
+                        .map(|preset| preset.id.to_string())
+                        .collect::<Vec<_>>()
+                });
+        let count = i32::try_from(preset_ids.len().max(1)).unwrap_or(i32::MAX);
+        if self.as_ref().rust().compile_preset_count != count {
+            self.as_mut().rust_mut().compile_preset_count = count;
+            self.as_mut().compile_preset_count_changed();
+        }
+        let current = self.selected_compile_preset().to_string();
+        if current != "__default__" && !preset_ids.iter().any(|id| id == &current) {
+            self.as_mut().set_selected_compile_preset(QString::from(
+                preset_ids
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "__default__".to_owned()),
+            ));
+        }
     }
     fn perform<F>(mut self: Pin<&mut Self>, label: &str, operation: F) -> bool
     where

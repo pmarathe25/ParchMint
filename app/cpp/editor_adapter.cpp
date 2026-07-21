@@ -11,6 +11,7 @@
 #include <QTextImageFormat>
 #include <QTextList>
 #include <QTextListFormat>
+#include <QRegularExpression>
 #include <QUrl>
 #include <QVariantMap>
 
@@ -31,6 +32,51 @@ bool isProtected(const QTextCharFormat& format)
     || format.objectType() == ParchMintOpaqueObject;
 }
 
+bool isAllowedLink(const QString& destination)
+{
+  const QUrl url(destination);
+  return destination.isEmpty()
+    || (url.isValid()
+        && (url.scheme().isEmpty() || url.scheme() == QStringLiteral("https")
+            || url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("mailto")
+            || url.scheme() == QStringLiteral("asset")));
+}
+
+QTextCharFormat allowedPasteFormat(const QTextCharFormat& source)
+{
+  // Never retain a Qt HTML importer object/resource format. This deliberately
+  // projects rich clipboard input into the small local semantic run surface.
+  QTextCharFormat result;
+  result.setFontWeight(source.fontWeight() >= QFont::Bold ? QFont::Bold : QFont::Normal);
+  result.setFontItalic(source.fontItalic());
+  result.setFontUnderline(source.fontUnderline());
+  result.setFontStrikeOut(source.fontStrikeOut());
+  result.setVerticalAlignment(source.verticalAlignment());
+  if (source.isAnchor() && isAllowedLink(source.anchorHref())) {
+    result.setAnchor(true);
+    result.setAnchorHref(source.anchorHref());
+  }
+  return result;
+}
+
+QString inertHtml(QString html)
+{
+  // QTextDocument does not execute scripts, but imported image resources may
+  // still be fetched by a layout. Remove every active/embedded construct and
+  // every image before the importer sees it. ParchMint image insertion is the
+  // explicit local `asset:` action, never a clipboard side effect.
+  const QRegularExpression paired(
+    QString::fromLatin1(R"(<(script|style|iframe|object|embed|svg)[^>]*>.*?</\1\s*>)"),
+    QRegularExpression::CaseInsensitiveOption | QRegularExpression::DotMatchesEverythingOption);
+  html.remove(paired);
+  html.remove(QRegularExpression(QStringLiteral("<(img|link|meta|base)[^>]*>"),
+                                 QRegularExpression::CaseInsensitiveOption));
+  html.remove(QRegularExpression(QString::fromLatin1(R"(\s+on[a-z]+\s*=\s*(['"]).*?\1)"),
+                                 QRegularExpression::CaseInsensitiveOption
+                                   | QRegularExpression::DotMatchesEverythingOption));
+  return html;
+}
+
 void insertRuns(QTextCursor& cursor, const QVariantMap& block)
 {
   const auto runs = block.value(QStringLiteral("runs")).toList();
@@ -43,6 +89,7 @@ void insertRuns(QTextCursor& cursor, const QVariantMap& block)
     QTextCharFormat format;
     format.setFontWeight(run.value(QStringLiteral("bold")).toBool() ? QFont::Bold : QFont::Normal);
     format.setFontItalic(run.value(QStringLiteral("italic")).toBool());
+    format.setFontUnderline(run.value(QStringLiteral("underline")).toBool());
     format.setFontStrikeOut(run.value(QStringLiteral("strike")).toBool());
     if (run.value(QStringLiteral("superscript")).toBool())
       format.setVerticalAlignment(QTextCharFormat::AlignSuperScript);
@@ -187,6 +234,11 @@ void EditorAdapter::setSelectionEnd(int position)
 
 bool EditorAdapter::bold() const { return boldState() == 1; }
 bool EditorAdapter::italic() const { return italicState() == 1; }
+bool EditorAdapter::underline() const
+{
+  const auto textCursor = cursor();
+  return !textCursor.isNull() && textCursor.charFormat().fontUnderline();
+}
 
 int EditorAdapter::boldState() const
 {
@@ -408,6 +460,7 @@ QVariantList EditorAdapter::semanticBlocks() const
       run.insert(QStringLiteral("text"), fragment.text());
       run.insert(QStringLiteral("bold"), format.fontWeight() >= QFont::Bold);
       run.insert(QStringLiteral("italic"), format.fontItalic());
+      run.insert(QStringLiteral("underline"), format.fontUnderline());
       run.insert(QStringLiteral("strike"), format.fontStrikeOut());
       run.insert(QStringLiteral("superscript"),
                  format.verticalAlignment() == QTextCharFormat::AlignSuperScript);
@@ -444,6 +497,14 @@ void EditorAdapter::toggleItalic()
 {
   QTextCharFormat format;
   format.setFontItalic(italicState() != 1);
+  format.setProperty(ParchMintDirectFormatting, true);
+  mergeCharacterFormat(format);
+}
+
+void EditorAdapter::toggleUnderline()
+{
+  QTextCharFormat format;
+  format.setFontUnderline(!underline());
   format.setProperty(ParchMintDirectFormatting, true);
   mergeCharacterFormat(format);
 }
@@ -578,27 +639,45 @@ void EditorAdapter::toggleList(bool ordered)
   if (textCursor.isNull())
     return;
   textCursor.beginEditBlock();
-  if (textCursor.currentList()) {
-    QTextBlockFormat block = textCursor.blockFormat();
-    block.setObjectIndex(-1);
-    textCursor.setBlockFormat(block);
+  const auto start = textCursor.selectionStart();
+  const auto end = textCursor.hasSelection() ? textCursor.selectionEnd() : start;
+  auto first = m_document->findBlock(start);
+  auto last = m_document->findBlock(end);
+  if (!last.isValid())
+    last = first;
+  bool everyBlockIsInAList = true;
+  for (auto block = first; block.isValid(); block = block.next()) {
+    everyBlockIsInAList = everyBlockIsInAList && block.textList();
+    if (block == last)
+      break;
+  }
+  if (everyBlockIsInAList) {
+    for (auto block = first; block.isValid(); block = block.next()) {
+      QTextCursor blockCursor(block);
+      auto format = blockCursor.blockFormat();
+      format.setObjectIndex(-1);
+      blockCursor.setBlockFormat(format);
+      if (block == last)
+        break;
+    }
   } else {
     QTextListFormat format;
     format.setStyle(ordered ? QTextListFormat::ListDecimal : QTextListFormat::ListDisc);
-    textCursor.createList(format);
+    QTextCursor firstCursor(first);
+    auto* list = firstCursor.createList(format);
+    for (auto block = first.next(); block.isValid(); block = block.next()) {
+      list->add(block);
+      if (block == last)
+        break;
+    }
   }
   textCursor.endEditBlock();
+  emit selectionFormatChanged();
 }
 
 void EditorAdapter::setLink(const QString& destination)
 {
-  const QUrl url(destination);
-  if (!destination.isEmpty()
-      && (!url.isValid()
-          || (!url.scheme().isEmpty() && url.scheme() != QStringLiteral("https")
-              && url.scheme() != QStringLiteral("http")
-              && url.scheme() != QStringLiteral("mailto")
-              && url.scheme() != QStringLiteral("asset")))) {
+  if (!isAllowedLink(destination)) {
     emit adapterError(tr("The link uses an unsupported or unsafe destination."));
     return;
   }
@@ -613,6 +692,8 @@ void EditorAdapter::insertImage(const QString& assetId, const QString& altText)
   auto textCursor = cursor();
   if (textCursor.isNull())
     return;
+  if (!canReplaceSelection(textCursor, tr("replace")))
+    return;
   QTextImageFormat image;
   image.setName(assetId.startsWith(QStringLiteral("asset:")) ? assetId
                                                               : QStringLiteral("asset:") + assetId);
@@ -625,6 +706,9 @@ void EditorAdapter::insertOpaqueBlock(const QString& source, const QString& reas
   auto textCursor = cursor();
   if (textCursor.isNull())
     return;
+  if (!canReplaceSelection(textCursor, tr("replace")))
+    return;
+  const auto currentStyle = textCursor.blockFormat().property(ParchMintStableStyle).toString();
   QTextCharFormat format;
   format.setObjectType(ParchMintOpaqueObject);
   format.setProperty(ParchMintObjectKind, QStringLiteral("parchmint:opaque"));
@@ -634,6 +718,7 @@ void EditorAdapter::insertOpaqueBlock(const QString& source, const QString& reas
   textCursor.beginEditBlock();
   textCursor.insertText(QString(QChar::ObjectReplacementCharacter), format);
   textCursor.insertBlock();
+  applyNextParagraphStyle(textCursor, currentStyle);
   textCursor.endEditBlock();
 }
 
@@ -666,6 +751,9 @@ void EditorAdapter::insertPageBreak()
     emit adapterError(tr("No editor document is connected."));
     return;
   }
+  if (!canReplaceSelection(textCursor, tr("replace")))
+    return;
+  const auto currentStyle = textCursor.blockFormat().property(ParchMintStableStyle).toString();
   QTextCharFormat format;
   format.setObjectType(ParchMintPageBreakObject);
   format.setProperty(ParchMintObjectKind, QStringLiteral("parchmint:page-break"));
@@ -674,6 +762,7 @@ void EditorAdapter::insertPageBreak()
   textCursor.beginEditBlock();
   textCursor.insertText(QString(QChar::ObjectReplacementCharacter), format);
   textCursor.insertBlock();
+  applyNextParagraphStyle(textCursor, currentStyle);
   textCursor.endEditBlock();
 }
 
@@ -682,6 +771,9 @@ void EditorAdapter::insertSceneBreak()
   auto textCursor = cursor();
   if (textCursor.isNull())
     return;
+  if (!canReplaceSelection(textCursor, tr("replace")))
+    return;
+  const auto currentStyle = textCursor.blockFormat().property(ParchMintStableStyle).toString();
   textCursor.beginEditBlock();
   textCursor.insertBlock();
   QTextBlockFormat centered;
@@ -690,6 +782,7 @@ void EditorAdapter::insertSceneBreak()
   textCursor.setBlockFormat(centered);
   textCursor.insertText(QStringLiteral("* * *"));
   textCursor.insertBlock();
+  applyNextParagraphStyle(textCursor, currentStyle);
   textCursor.endEditBlock();
 }
 
@@ -723,10 +816,26 @@ void EditorAdapter::deletePreviousSemanticUnit()
   textCursor.endEditBlock();
 }
 
+void EditorAdapter::deleteNextSemanticUnit()
+{
+  auto textCursor = cursor();
+  if (textCursor.isNull())
+    return;
+  textCursor.beginEditBlock();
+  if (textCursor.hasSelection()) {
+    // Like Backspace, this is an explicit delete action. Formatting and paste
+    // cannot silently delete a protected page/opaque object.
+    textCursor.removeSelectedText();
+  } else if (textCursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor)) {
+    textCursor.removeSelectedText();
+  }
+  textCursor.endEditBlock();
+}
+
 void EditorAdapter::pastePlainText(const QString& text)
 {
   auto textCursor = cursor();
-  if (!textCursor.isNull())
+  if (!textCursor.isNull() && canReplaceSelection(textCursor, tr("paste over")))
     textCursor.insertFragment(QTextDocumentFragment::fromPlainText(text));
 }
 
@@ -735,9 +844,24 @@ void EditorAdapter::pasteRichHtml(const QString& html)
   auto textCursor = cursor();
   if (textCursor.isNull())
     return;
-  // Qt's fragment importer drops scripts and active elements. Semantic save
-  // later retains only formats represented by `semanticBlocks()`.
-  textCursor.insertFragment(QTextDocumentFragment::fromHtml(html));
+  if (!canReplaceSelection(textCursor, tr("paste over")))
+    return;
+
+  QTextDocument imported;
+  imported.setHtml(inertHtml(html));
+  textCursor.beginEditBlock();
+  bool first = true;
+  for (auto block = imported.begin(); block.isValid(); block = block.next()) {
+    if (!first)
+      textCursor.insertBlock();
+    first = false;
+    for (auto it = block.begin(); !it.atEnd(); ++it) {
+      const auto fragment = it.fragment();
+      if (fragment.isValid())
+        textCursor.insertText(fragment.text(), allowedPasteFormat(fragment.charFormat()));
+    }
+  }
+  textCursor.endEditBlock();
 }
 
 void EditorAdapter::undo()
@@ -788,6 +912,43 @@ void EditorAdapter::mergeCharacterFormat(const QTextCharFormat& format)
   textCursor.mergeCharFormat(format);
   textCursor.endEditBlock();
   emit selectionFormatChanged();
+}
+
+bool EditorAdapter::canReplaceSelection(const QTextCursor& textCursor, const QString& action)
+{
+  if (!selectionContainsProtectedObject(textCursor))
+    return true;
+  emit adapterError(tr("Protected source and page-break objects cannot be %1 by paste or insertion. Use Delete or Backspace to remove them explicitly.")
+                      .arg(action));
+  return false;
+}
+
+void EditorAdapter::applyNextParagraphStyle(QTextCursor& textCursor, const QString& currentStyle)
+{
+  const auto nextStyle = m_nextStyles.value(currentStyle, currentStyle);
+  QTextBlockFormat block;
+  block.clearProperty(ParchMintObjectKind);
+  block.clearProperty(ParchMintDirectFormatting);
+  if (nextStyle.isEmpty())
+    block.clearProperty(ParchMintStableStyle);
+  else
+    block.setProperty(ParchMintStableStyle, nextStyle);
+  textCursor.mergeBlockFormat(block);
+
+  // Custom object insertion otherwise leaves its protected char format as the
+  // typing format. Start the new paragraph from a neutral semantic run, then
+  // apply only the named style's computed appearance.
+  QTextCharFormat character;
+  character.setFontWeight(QFont::Normal);
+  character.setFontItalic(false);
+  character.setFontUnderline(false);
+  character.setFontStrikeOut(false);
+  character.setVerticalAlignment(QTextCharFormat::AlignNormal);
+  if (!nextStyle.isEmpty()) {
+    character.setProperty(ParchMintStableStyle, nextStyle);
+    applyCharacterAppearance(character, m_styleDefinitions.value(nextStyle));
+  }
+  textCursor.setCharFormat(character);
 }
 
 int EditorAdapter::uniformCharacterProperty(int property, const QVariant& enabledValue) const

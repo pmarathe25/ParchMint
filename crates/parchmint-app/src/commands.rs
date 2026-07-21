@@ -70,6 +70,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("view.split", "Split workspace", "", true, false),
     command("view.next_pane", "Focus next pane", "Ctrl+Tab", true, false),
     command("view.swap_panes", "Swap panes", "", true, false),
+    command("view.editor", "Show Editor", "Ctrl+1", true, false),
+    command("view.outline", "Show Outline", "Ctrl+2", true, false),
+    command("view.cards", "Show Cards", "Ctrl+3", true, false),
     command("view.settings", "Settings…", "Ctrl+,", false, false),
     command(
         "help.keyboard",

@@ -254,6 +254,109 @@ private slots:
     QVERIFY(!document.toPlainText().contains(QStringLiteral("active")));
   }
 
+  void protectedInsertionResetsToNextStyleAndRequiresExplicitDeletion()
+  {
+    auto checkNextStyle = [](auto insert) {
+      QTextDocument document;
+      document.setPlainText(QStringLiteral("Heading"));
+      EditorAdapter adapter;
+      adapter.setDocumentForTesting(&document);
+      adapter.defineStyle(QStringLiteral("body"), {}, true, QStringLiteral("body"));
+      adapter.defineStyle(QStringLiteral("heading"), {}, true, QStringLiteral("body"));
+      adapter.setCursorPosition(7);
+      adapter.setSelectionStart(7);
+      adapter.setSelectionEnd(7);
+      adapter.setParagraphStyle(QStringLiteral("heading"));
+      insert(adapter);
+
+      const auto last = document.lastBlock();
+      QCOMPARE(last.blockFormat().property(QTextFormat::UserProperty + 10).toString(),
+               QStringLiteral("body"));
+      const auto format = last.begin().atEnd() ? QTextCharFormat()
+                                                : last.begin().fragment().charFormat();
+      QVERIFY(!format.fontUnderline());
+      QVERIFY(format.objectType() < QTextFormat::UserObject);
+    };
+    checkNextStyle([](EditorAdapter& adapter) { adapter.insertPageBreak(); });
+    checkNextStyle([](EditorAdapter& adapter) {
+      adapter.insertOpaqueBlock(QStringLiteral("@future[value]"), QStringLiteral("future"));
+    });
+    checkNextStyle([](EditorAdapter& adapter) { adapter.insertSceneBreak(); });
+
+    QTextDocument document;
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.insertPageBreak();
+    adapter.setSelectionStart(0);
+    adapter.setSelectionEnd(1);
+    QSignalSpy errors(&adapter, &EditorAdapter::adapterError);
+    adapter.pastePlainText(QStringLiteral("cannot replace protected"));
+    QCOMPARE(errors.size(), 1);
+    QVERIFY(document.toPlainText().contains(QChar::ObjectReplacementCharacter));
+    adapter.deletePreviousSemanticUnit();
+    QVERIFY(!document.toPlainText().contains(QChar::ObjectReplacementCharacter));
+  }
+
+  void richPasteProjectsOnlyAllowedSemanticRuns()
+  {
+    QTextDocument document;
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.pasteRichHtml(QStringLiteral(
+      "<img src='https://remote.invalid/tracker.png'>"
+      "<a href='ftp://remote.invalid'>unsafe</a>"
+      "<a href='https://example.invalid'>safe</a>"
+      "<u>underlined</u><script>active()</script>"));
+
+    QVERIFY(document.toPlainText().contains(QStringLiteral("unsafe")));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("safe")));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("underlined")));
+    QVERIFY(!document.toPlainText().contains(QStringLiteral("active")));
+
+    bool hasImage = false;
+    bool safeLink = false;
+    bool unsafeLink = false;
+    bool underlined = false;
+    for (auto block = document.begin(); block.isValid(); block = block.next()) {
+      for (auto it = block.begin(); !it.atEnd(); ++it) {
+        const auto fragment = it.fragment();
+        const auto format = fragment.charFormat();
+        hasImage |= format.isImageFormat();
+        safeLink |= format.isAnchor() && format.anchorHref() == QStringLiteral("https://example.invalid");
+        unsafeLink |= format.isAnchor() && format.anchorHref().startsWith(QStringLiteral("ftp:"));
+        underlined |= fragment.text().contains(QStringLiteral("underlined")) && format.fontUnderline();
+      }
+    }
+    QVERIFY(!hasImage);
+    QVERIFY(safeLink);
+    QVERIFY(!unsafeLink);
+    QVERIFY(underlined);
+  }
+
+  void groupedListsAndUnderlineSurviveSemanticProjection()
+  {
+    QTextDocument document;
+    document.setPlainText(QStringLiteral("first\nsecond"));
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.setSelectionStart(0);
+    adapter.setSelectionEnd(document.characterCount() - 1);
+    adapter.toggleList(true);
+    auto first = document.begin();
+    auto second = first.next();
+    QVERIFY(first.textList());
+    QCOMPARE(first.textList(), second.textList());
+
+    adapter.setSelectionStart(0);
+    adapter.setSelectionEnd(5);
+    adapter.toggleUnderline();
+    const auto blocks = adapter.semanticBlocks();
+    QVERIFY(blocks[0].toMap().value(QStringLiteral("runs")).toList()[0]
+              .toMap()
+              .value(QStringLiteral("underline"))
+              .toBool());
+  }
+
   void unicodeFixtureHasStableGraphemeBoundaries()
   {
     const QString text = QStringLiteral("café 👩🏽‍💻 क्ष שלום مرحبا");

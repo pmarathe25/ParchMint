@@ -9,7 +9,7 @@ use crate::{
     CanonicalSaveRequest, CompletionDisposition, ContentFingerprint, DocumentLifecycleConfig,
     DocumentLifecycleError, DocumentSession, ExternalChange, ExternalConflict, IndexStatus,
     JournalRequest, ProjectSearch, RecoveryCandidate, RecoveryIssue, RecoveryScan, RecoveryStore,
-    SaveState, SearchServiceError,
+    SaveState, SearchServiceError, text_statistics,
 };
 use parchmint_compile::{
     self, CancellationToken, CompileError, CompileInput, CompileIr, CompilePreview, ExportError,
@@ -910,6 +910,26 @@ impl ProjectWorkspace {
         self.save_preferences()
     }
 
+    /// Switches the presentation for one live pane without replacing its node
+    /// or document session. This keeps the editor's Rust session and the Qt
+    /// pane-local cursor/undo state authoritative while planning views are
+    /// selected from the same pane header.
+    pub fn set_pane_view(&mut self, index: usize, view: PaneView) -> Result<(), WorkspaceError> {
+        let pane = self
+            .preferences
+            .panes
+            .get_mut(index)
+            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
+        if pane.node.is_none() && matches!(view, PaneView::Editor | PaneView::Attachment) {
+            return Err(WorkspaceError::Invariant(
+                "open a document before selecting this view",
+            ));
+        }
+        pane.view = view;
+        self.preferences.focused_pane = u8::try_from(index).unwrap_or(0);
+        self.save_preferences()
+    }
+
     pub fn focus_next_pane(&mut self) -> usize {
         self.preferences.focused_pane = if self.preferences.split_enabled {
             1 - self.preferences.focused_pane.min(1)
@@ -1381,7 +1401,31 @@ impl ProjectWorkspace {
     /// Rebuilds a projection from authoritative Rust state. Filtering keeps all
     /// ancestors of a matching row, and sorting is never a structural mutation.
     pub fn project_snapshot(&mut self, focus: Option<NodeId>, filter: &str, sort: OutlineSort) {
-        self.snapshot = build_snapshot(&self.opened.project, focus, filter, sort);
+        let mut snapshot = build_snapshot(&self.opened.project, focus, filter, sort);
+        // Counts are projected once with a structural/selection refresh rather
+        // than through a QML-to-Rust full-text call on every keystroke. Open
+        // sessions win over canonical bytes so a planning view immediately
+        // reflects unsaved live text when it next becomes visible.
+        for row in &mut snapshot.rows {
+            let Some(document) = self
+                .opened
+                .project
+                .nodes
+                .get(&row.id)
+                .and_then(|node| node.kind.document_id())
+            else {
+                continue;
+            };
+            let body = self
+                .sessions
+                .get(&document)
+                .map(|session| session.body())
+                .or_else(|| self.opened.body(document).ok());
+            row.word_count = body.map_or(0, |body| {
+                usize::try_from(text_statistics(body).words).unwrap_or(usize::MAX)
+            });
+        }
+        self.snapshot = snapshot;
     }
 
     pub fn create_node(
@@ -2092,6 +2136,9 @@ mod tests {
         metadata.status = Some("Draft".into());
         metadata.labels = vec!["Opening".into()];
         workspace.edit_metadata(scene, metadata).unwrap();
+        workspace
+            .save_document_body(scene, "Mara reaches the orchard at dawn.".into())
+            .unwrap();
         workspace.project_snapshot(None, "orchard", OutlineSort::Title);
         assert_eq!(
             workspace.snapshot().rows().len(),
@@ -2099,6 +2146,7 @@ mod tests {
             "matching row retains ancestors"
         );
         assert_eq!(workspace.snapshot().rows()[3].title, "Arrival");
+        assert_eq!(workspace.snapshot().rows()[3].word_count, 6);
         workspace.project_snapshot(None, "", OutlineSort::Binder);
         workspace.indent(scene).unwrap(); // first child cannot indent, so this is a no-op
         workspace.trash(chapter).unwrap();
@@ -2120,6 +2168,26 @@ mod tests {
         drop(workspace);
         let reopened = ProjectWorkspace::open(directory.path()).unwrap();
         assert_eq!(reopened.snapshot().rows().len(), 5);
+    }
+
+    #[test]
+    fn pane_view_switches_keep_the_live_document_reference() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Views").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let scene = workspace.create_node(manuscript, "Scene", false).unwrap();
+        workspace.open_node_in_pane(0, scene).unwrap();
+        let live = workspace.pane_document_id(0).unwrap();
+
+        workspace.set_pane_view(0, PaneView::Outline).unwrap();
+        workspace.set_pane_view(0, PaneView::Cards).unwrap();
+        workspace.set_pane_view(0, PaneView::Editor).unwrap();
+        assert_eq!(workspace.pane_document_id(0).unwrap(), live);
+        assert_eq!(workspace.pane(0).unwrap().view, PaneView::Editor);
+
+        workspace.close_pane(0).unwrap();
+        assert!(workspace.set_pane_view(0, PaneView::Editor).is_err());
+        workspace.set_pane_view(0, PaneView::Cards).unwrap();
     }
 
     #[test]

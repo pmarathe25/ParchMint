@@ -25,7 +25,7 @@ ApplicationWindow {
     property bool binderVisible: true
     property bool inspectorVisible: true
     property bool quitApproved: false
-
+    property bool startViewVisible: !backend.project_open
     function rememberProject(path) {
         const normalized = path.trim()
         if (!normalized.length)
@@ -59,9 +59,12 @@ ApplicationWindow {
         case "view.split": backend.setSplit(!backend.split_enabled, "horizontal", 500); break
         case "view.next_pane": backend.focusNextPane(); break
         case "view.swap_panes": backend.swapPanes(); break
+        case "view.editor": backend.setPaneView(backend.focused_pane, "editor"); break
+        case "view.outline": backend.setPaneView(backend.focused_pane, "outline"); break
+        case "view.cards": backend.setPaneView(backend.focused_pane, "cards"); break
         case "view.settings": settingsDialog.open(); break
         case "help.keyboard": keyboardDialog.open(); break
-        case "help.onboarding": onboardingDialog.open(); break
+        case "help.onboarding": window.startViewVisible = true; break
         }
     }
 
@@ -73,9 +76,9 @@ ApplicationWindow {
         property var recentProjects: []
     }
 
-    Component.onCompleted: {
-        if (!appSettings.onboardingComplete)
-            onboardingDialog.open()
+    Connections {
+        target: backend
+        function onProjectOpenChanged() { window.startViewVisible = !backend.project_open }
     }
 
     onClosing: function(close) {
@@ -169,9 +172,19 @@ ApplicationWindow {
                     ToolButton {
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        text: "↗"
                         Accessible.name: qsTr("Open search result in other pane")
+                        ToolTip.visible: hovered
+                        ToolTip.text: Accessible.name
                         onClicked: { backend.openSearchResult(index, true); searchPopup.close() }
+                        contentItem: Image {
+                            source: "qrc:/icons/chevron.svg"
+                            sourceSize.width: DesignTokens.iconSize
+                            sourceSize.height: DesignTokens.iconSize
+                            width: DesignTokens.iconSize
+                            height: DesignTokens.iconSize
+                            anchors.centerIn: parent
+                            rotation: -90
+                        }
                     }
                 }
             }
@@ -280,6 +293,15 @@ ApplicationWindow {
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Ok | Dialog.Cancel
         onAccepted: exportFileDialog.open()
+        function rebuildPresets() {
+            exportPresets.clear()
+            for (let index = 0; index < backend.compile_preset_count; ++index) {
+                const id = backend.compilePresetId(index)
+                exportPresets.append({ "presetId": id, "name": backend.compilePresetName(index) })
+            }
+            presetChooser.currentIndex = Math.max(0, presetChooser.indexOfValue(backend.selected_compile_preset))
+        }
+        onOpened: rebuildPresets()
         contentItem: GridLayout {
             columns: 2
             rowSpacing: DesignTokens.space3
@@ -300,6 +322,29 @@ ApplicationWindow {
                 ]
                 Accessible.name: qsTr("Export format")
             }
+            Label { text: qsTr("Compile preset") }
+            RowLayout {
+                Layout.preferredWidth: 300
+                ComboBox {
+                    id: presetChooser
+                    Layout.fillWidth: true
+                    model: ListModel { id: exportPresets }
+                    textRole: "name"
+                    valueRole: "presetId"
+                    Accessible.name: qsTr("Compile preset")
+                    onActivated: backend.selectCompilePreset(currentValue)
+                }
+                Button {
+                    text: qsTr("Edit…")
+                    enabled: presetChooser.currentIndex >= 0
+                    Accessible.name: qsTr("Edit compile preset")
+                    onClicked: {
+                        presetName.presetId = presetChooser.currentValue
+                        presetName.text = presetChooser.currentText
+                        presetName.open()
+                    }
+                }
+            }
             Label {
                 Layout.columnSpan: 2
                 Layout.fillWidth: true
@@ -307,6 +352,25 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
                 opacity: .7
             }
+        }
+    }
+
+    Dialog {
+        id: presetName
+        property string presetId: ""
+        title: qsTr("Compile preset name")
+        modal: true
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        TextField {
+            id: presetNameField
+            width: 320
+            placeholderText: qsTr("Preset name")
+            Accessible.name: qsTr("Compile preset name")
+        }
+        property alias text: presetNameField.text
+        onAccepted: {
+            if (backend.renameCompilePreset(presetId, text))
+                exportDialog.rebuildPresets()
         }
     }
 
@@ -694,20 +758,16 @@ ApplicationWindow {
     Shortcut { sequences: ["Ctrl+Alt+F", "Meta+Alt+F"]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.replace_project") }
     Shortcut { sequence: StandardKey.Preferences; onActivated: backend.requestCommand("view.settings") }
     Shortcut { sequence: "Ctrl+Shift+F"; enabled: backend.project_open; onActivated: projectSearchField.forceActiveFocus() }
+    Shortcut { sequences: ["Ctrl+1", "Meta+1"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.editor") }
+    Shortcut { sequences: ["Ctrl+2", "Meta+2"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.outline") }
+    Shortcut { sequences: ["Ctrl+3", "Meta+3"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.cards") }
 
     header: ToolBar {
         RowLayout {
             anchors.fill: parent
             anchors.margins: DesignTokens.space2
-            ToolButton { text: "☰"; Accessible.name: qsTr("Toggle binder"); onClicked: window.binderVisible = !window.binderVisible }
-            ToolButton { text: "ⓘ"; Accessible.name: qsTr("Toggle inspector"); onClicked: window.inspectorVisible = !window.inspectorVisible }
-            TextField {
-                Layout.preferredWidth: 220
-                placeholderText: qsTr("Filter outline")
-                enabled: backend.project_open
-                onTextChanged: backend.setFilter(text)
-                Accessible.name: qsTr("Filter outline")
-            }
+            ToolButton { Accessible.name: qsTr("Toggle binder"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: window.binderVisible = !window.binderVisible; contentItem: Image { source: "qrc:/icons/binder.svg"; width: 18; height: 18; anchors.centerIn: parent } }
+            ToolButton { Accessible.name: qsTr("Toggle inspector"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: window.inspectorVisible = !window.inspectorVisible; contentItem: Image { source: "qrc:/icons/inspector.svg"; width: 18; height: 18; anchors.centerIn: parent } }
             TextField {
                 id: projectSearchField
                 Layout.preferredWidth: 300
@@ -744,6 +804,51 @@ ApplicationWindow {
 
         Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
         InspectorPane { Layout.preferredWidth: 310; Layout.fillHeight: true; visible: window.inspectorVisible; backend: backend }
+    }
+
+    Rectangle {
+        id: startView
+        anchors.fill: parent
+        z: 10
+        visible: window.startViewVisible
+        color: DesignTokens.base
+        Accessible.name: qsTr("ParchMint start view")
+        ColumnLayout {
+            anchors.centerIn: parent
+            width: Math.min(720, parent.width - DesignTokens.space8 * 2)
+            spacing: DesignTokens.space4
+            Label { text: qsTr("ParchMint"); font.pixelSize: DesignTokens.typeDisplay; font.bold: true; Accessible.role: Accessible.Heading }
+            Label { text: qsTr("A calm, local place to plan and write long-form work."); font.pixelSize: DesignTokens.typeTitle; color: DesignTokens.textMuted; wrapMode: Text.Wrap; Layout.fillWidth: true }
+            RowLayout {
+                Layout.fillWidth: true
+                Button { text: qsTr("New project…"); highlighted: true; onClicked: newProjectDialog.open(); Accessible.name: text }
+                Button { text: qsTr("Open project…"); onClicked: openProjectFolderDialog.open(); Accessible.name: text }
+                Button { text: qsTr("Create sample project…"); onClicked: sampleProjectParentDialog.open(); Accessible.name: text }
+            }
+            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: DesignTokens.outline; Layout.topMargin: DesignTokens.space2 }
+            Label { text: qsTr("Recent projects"); font.bold: true; visible: appSettings.recentProjects.length > 0 }
+            ListView {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(contentHeight, 220)
+                clip: true
+                visible: appSettings.recentProjects.length > 0
+                model: appSettings.recentProjects
+                delegate: ItemDelegate {
+                    required property string modelData
+                    width: ListView.view.width
+                    text: modelData
+                    Accessible.name: qsTr("Open recent project %1").arg(modelData)
+                    onClicked: {
+                        if (backend.openProject(modelData)) {
+                            window.rememberProject(backend.project_path)
+                            window.startViewVisible = false
+                        }
+                    }
+                }
+            }
+            Label { visible: appSettings.recentProjects.length === 0; text: qsTr("Recent projects will appear here after you open one."); color: DesignTokens.textMuted }
+            Label { text: qsTr("Projects stay in ordinary folders of Markdown and TOML. ParchMint makes no network request."); wrapMode: Text.Wrap; Layout.fillWidth: true; color: DesignTokens.textMuted }
+        }
     }
 
     footer: ToolBar {

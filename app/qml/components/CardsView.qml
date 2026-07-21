@@ -2,12 +2,14 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import org.parchmint.adapters 1.0
 
 Pane {
     id: root
     required property var backend
     required property var model
     padding: 16
+    CardsModel { id: cardsModel; source: root.model }
     ColumnLayout {
         anchors.fill: parent
         RowLayout {
@@ -18,16 +20,14 @@ Pane {
         GridView {
             Layout.fillWidth: true; Layout.fillHeight: true
             cellWidth: 250; cellHeight: 176
-            clip: true; reuseItems: true; model: root.model
+            clip: true; reuseItems: true; model: cardsModel
             delegate: ItemDelegate {
                 required property string nodeId
                 required property string title
                 required property string synopsis
                 required property string status
                 required property string label
-                required property bool isRoot
                 width: 234; height: 160
-                visible: !isRoot
                 highlighted: root.backend.selected_id === nodeId
                 Accessible.name: qsTr("Card %1").arg(title)
                 contentItem: ColumnLayout {

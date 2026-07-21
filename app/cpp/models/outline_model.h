@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QMimeData>
 #include <QPointer>
 #include <qqmlintegration.h>
 
@@ -21,6 +22,8 @@ public:
     LabelRole,
     GroupRole,
     RootRole,
+    WordCountRole,
+    IncludeInCompileRole,
   };
   Q_ENUM(Role)
 
@@ -30,6 +33,14 @@ public:
   int rowCount(const QModelIndex& parent = QModelIndex()) const override;
   QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
   QHash<int, QByteArray> roleNames() const override;
+  Qt::ItemFlags flags(const QModelIndex& index) const override;
+  QStringList mimeTypes() const override;
+  QMimeData* mimeData(const QModelIndexList& indexes) const override;
+  bool dropMimeData(const QMimeData* data,
+                    Qt::DropAction action,
+                    int row,
+                    int column,
+                    const QModelIndex& parent) override;
 
 signals:
   void sourceChanged();
