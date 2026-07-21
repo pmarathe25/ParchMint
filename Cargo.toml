@@ -24,7 +24,10 @@ default-members = [
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
-license = "LicenseRef-ParchMint-Undecided"
+license = "GPL-3.0-or-later"
+# Binaries are distributed through packaging/ and the release workflow; the
+# crates themselves are never published to a registry.
+publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.103"

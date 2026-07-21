@@ -1,4 +1,4 @@
-#![allow(missing_docs)] // Error payload fields are self-describing and documented in the handoff.
+#![allow(missing_docs)] // Error payload fields are self-describing; see docs/format/project-format-1.md.
 //! Canonical ParchMint v1 project storage.
 //!
 //! `.parchmint/` is deliberately absent from the authoritative model: it can
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10k/10M open gate")]
+    #[cfg_attr(debug_assertions, ignore = "release-mode 10k/10M open gate")]
     #[allow(clippy::too_many_lines)]
     fn ten_thousand_node_ten_million_word_project_opens_with_bodies_deferred() {
         use std::fmt::Write as _;
@@ -2211,7 +2211,7 @@ mod tests {
         let mut reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
         let elapsed = started.elapsed();
         eprintln!(
-            "stage14 canonical-nodes=10000 canonical-words=10020000 open={elapsed:?} loaded-bodies={}",
+            "scale canonical-nodes=10000 canonical-words=10020000 open={elapsed:?} loaded-bodies={}",
             reopened.loaded_body_count()
         );
         assert_eq!(reopened.project.documents.len(), 10_000);
@@ -2265,7 +2265,7 @@ mod tests {
         assert_eq!(body_metrics.files_written, 1);
         assert_eq!(body_metrics.files_removed, 0);
         eprintln!(
-            "stage14 rename-owner={rename_owner:?} rename-worker={rename_worker:?}/{rename_metrics:?} metadata-owner={metadata_owner:?} metadata-worker={metadata_worker:?}/{metadata_metrics:?} reorder-owner={reorder_owner:?} reorder-worker={reorder_worker:?}/{reorder_metrics:?} body-save={body_save:?}/{body_metrics:?}"
+            "scale rename-owner={rename_owner:?} rename-worker={rename_worker:?}/{rename_metrics:?} metadata-owner={metadata_owner:?} metadata-worker={metadata_worker:?}/{metadata_metrics:?} reorder-owner={reorder_owner:?} reorder-worker={reorder_worker:?}/{reorder_metrics:?} body-save={body_save:?}/{body_metrics:?}"
         );
         for (operation, duration) in [
             ("rename owner", rename_owner),
@@ -2413,6 +2413,136 @@ mod tests {
             Err(StorageError::UnsupportedFormat(99))
         ));
     }
+
+    fn project_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/project")
+            .join(name)
+    }
+
+    #[test]
+    fn fixture_manifest_with_newer_format_version_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        fs::copy(
+            project_fixture("parchmint-newer-version.toml"),
+            root.join("parchmint.toml"),
+        )
+        .unwrap();
+        assert!(matches!(
+            ProjectStorage::open(&root, OpenMode::ReadOnly),
+            Err(StorageError::UnsupportedFormat(99))
+        ));
+    }
+
+    #[test]
+    fn fixture_outline_with_hostile_parent_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        fs::copy(
+            project_fixture("outline-unsafe.toml"),
+            root.join("outline.toml"),
+        )
+        .unwrap();
+        assert!(ProjectStorage::open(&root, OpenMode::ReadOnly).is_err());
+    }
+
+    #[test]
+    fn fixture_attachment_catalog_with_duplicate_ids_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        // The first duplicate entry must exist on disk so catalog validation
+        // reaches the second, conflicting entry.
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(
+            root.join("assets/018f0be2-a8ea-7d2d-89ea-45aa663708d6.txt"),
+            b"x",
+        )
+        .unwrap();
+        fs::copy(
+            project_fixture("assets-duplicate-id.toml"),
+            root.join("assets.toml"),
+        )
+        .unwrap();
+        assert!(matches!(
+            ProjectStorage::open(&root, OpenMode::ReadOnly),
+            Err(StorageError::InvalidSchema(_))
+        ));
+    }
+
+    #[test]
+    fn fixture_attachment_catalog_with_valid_entry_opens() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        fs::create_dir_all(root.join("assets")).unwrap();
+        fs::write(
+            root.join("assets/018f0be2-a8ea-7d2d-89ea-45aa663708d6.png"),
+            vec![0u8; 128],
+        )
+        .unwrap();
+        fs::copy(
+            project_fixture("assets-valid.toml"),
+            root.join("assets.toml"),
+        )
+        .unwrap();
+        let opened = ProjectStorage::open(&root, OpenMode::ReadOnly).unwrap();
+        let record = opened
+            .attachments()
+            .values()
+            .next()
+            .expect("valid catalog fixture must load one attachment");
+        assert_eq!(record.display_name, "map reference.png");
+        assert_eq!(record.bytes, 128);
+    }
+
+    #[test]
+    fn fixture_styles_with_all_fields_open_with_compile_preset() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        fs::copy(
+            project_fixture("styles-all-fields.toml"),
+            root.join("styles.toml"),
+        )
+        .unwrap();
+        let opened = ProjectStorage::open(&root, OpenMode::ReadOnly).unwrap();
+        let preset = opened
+            .project
+            .compile_presets
+            .values()
+            .next()
+            .expect("styles fixture must load one compile preset");
+        assert_eq!(preset.name, "Research appendix");
+        assert_eq!(preset.page.width_micrometres, 210_000);
+        assert_eq!(preset.page.header, "Research appendix");
+        assert_eq!(preset.metadata.author, "ParchMint fixture");
+        assert_eq!(
+            preset.exporter_settings["html"]["asset_mode"],
+            "self_contained"
+        );
+        opened.project.validate().unwrap();
+    }
+
+    #[test]
+    fn migration_fixture_records_format_one_noop_chain() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        drop(ProjectStorage::create(&root, "Novel").unwrap());
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/migration/v1-noop/parchmint.toml"),
+            root.join("parchmint.toml"),
+        )
+        .unwrap();
+        let opened = ProjectStorage::open(&root, OpenMode::ReadOnly).unwrap();
+        assert_eq!(opened.project.name, "Version One Migration Fixture");
+        opened.project.validate().unwrap();
+    }
+
     #[test]
     fn atomic_write_replaces_complete_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -2603,7 +2733,6 @@ mod tests {
             ("medium-novel", "The Lantern Route", 3),
             ("research-heavy", "Field Notes for a Small Harbor", 3),
             ("unicode-notes", "Unicode Notes", 1),
-            ("format-edge-case", "Format Edge Cases", 1),
         ];
         for (directory, name, documents) in examples {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2617,5 +2746,15 @@ mod tests {
                 "example {directory}"
             );
         }
+    }
+
+    #[test]
+    fn format_edge_case_fixture_opens_and_validates() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/projects/format-edge-case");
+        let opened = ProjectStorage::open(root, OpenMode::ReadOnly).unwrap();
+        assert_eq!(opened.project.name, "Format Edge Cases");
+        assert_eq!(opened.project.documents.len(), 1);
+        opened.project.validate().unwrap();
     }
 }

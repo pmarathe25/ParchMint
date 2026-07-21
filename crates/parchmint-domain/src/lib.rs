@@ -1,4 +1,4 @@
-#![allow(missing_docs)] // Variant-field prose is documented in the format/API handoff.
+#![allow(missing_docs)] // Variant-field prose is documented in docs/format/project-format-1.md.
 //! Qt-free, validated project graph and command layer.
 //!
 //! Canonical files are implemented by `parchmint-storage`; this crate owns the
@@ -410,7 +410,7 @@ pub struct CompilePreset {
     /// interpreted as executable commands.
     #[serde(default)]
     pub exporter_settings: BTreeMap<String, BTreeMap<String, String>>,
-    /// Deprecated Stage 02 placeholder settings, retained for opening early
+    /// Deprecated format-1 placeholder settings, retained for opening early
     /// project-format-1 files without losing user data.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, String>,
@@ -1921,7 +1921,7 @@ pub struct EditorSnapshot {
     /// Blocks in order.
     pub blocks: Vec<EditorBlock>,
 }
-/// Minimal semantic Stage 01 editor blocks.
+/// Minimal semantic editor blocks retained at the public boundary.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EditorBlock {
     /// Paragraph.

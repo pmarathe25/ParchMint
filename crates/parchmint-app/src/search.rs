@@ -1,4 +1,4 @@
-#![allow(missing_docs)] // Revisioned worker protocol is documented in the Stage 14 handoff.
+#![allow(missing_docs)] // Revisioned worker protocol follows ADR-0014.
 //! Project-facing search/cache coordination and Unicode-aware text statistics.
 
 use parchmint_domain::{DocumentId, NodeId, Project};

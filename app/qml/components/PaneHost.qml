@@ -106,25 +106,41 @@ Pane {
         sourceMode = false
         reloadBody(true)
     }
+    // Case-insensitive matching must never lowercase the whole document:
+    // Unicode case folding can change string length (for example İ folds to
+    // two code units), which shifts every later match offset and would
+    // corrupt selections and replacements. A RegExp with the Unicode flag
+    // matches case-insensitively while reporting UTF-16 offsets in the
+    // original string.
+    function escapeRegExp(text) {
+        return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    }
+    function findRegExp(query) {
+        return new RegExp(escapeRegExp(query), caseCheck.checked ? "gu" : "giu")
+    }
+    function queryMatches(text) {
+        return text.length > 0
+                && new RegExp("^(?:" + escapeRegExp(findField.text) + ")$",
+                              caseCheck.checked ? "u" : "iu").test(text)
+    }
     function findNext() {
         const query = findField.text
         if (!query.length)
             return
-        const source = caseCheck.checked ? editor.text : editor.text.toLocaleLowerCase()
-        const needle = caseCheck.checked ? query : query.toLocaleLowerCase()
-        let start = editor.selectionEnd
-        let found = source.indexOf(needle, start)
-        if (found < 0 && start > 0)
-            found = source.indexOf(needle)
-        if (found >= 0) {
-            editor.select(found, found + needle.length)
+        const matcher = findRegExp(query)
+        matcher.lastIndex = editor.selectionEnd
+        let match = matcher.exec(editor.text)
+        if (!match && editor.selectionEnd > 0) {
+            matcher.lastIndex = 0
+            match = matcher.exec(editor.text)
+        }
+        if (match) {
+            editor.select(match.index, match.index + match[0].length)
             editor.forceActiveFocus()
         }
     }
     function replaceSelection() {
-        const selected = caseCheck.checked ? editor.selectedText : editor.selectedText.toLocaleLowerCase()
-        const query = caseCheck.checked ? findField.text : findField.text.toLocaleLowerCase()
-        if (selected.length && selected === query) {
+        if (queryMatches(editor.selectedText)) {
             const start = editor.selectionStart
             editor.remove(editor.selectionStart, editor.selectionEnd)
             editor.insert(start, replaceField.text)
@@ -134,26 +150,32 @@ Pane {
             findNext()
         }
     }
+    readonly property int replaceAllLimit: 10000
     function replaceAll() {
         const query = findField.text
         if (!query.length)
             return
-        let source = caseCheck.checked ? editor.text : editor.text.toLocaleLowerCase()
-        const needle = caseCheck.checked ? query : query.toLocaleLowerCase()
+        const matcher = findRegExp(query)
         const positions = []
-        let start = 0
-        while (positions.length < 10000) {
-            const found = source.indexOf(needle, start)
-            if (found < 0)
+        let truncated = false
+        let match
+        while ((match = matcher.exec(editor.text)) !== null) {
+            if (positions.length >= replaceAllLimit) {
+                truncated = true
                 break
-            positions.push(found)
-            start = found + needle.length
+            }
+            positions.push([match.index, match[0].length])
+            if (match[0].length === 0)
+                matcher.lastIndex += 1
         }
         for (let index = positions.length - 1; index >= 0; --index) {
-            editor.remove(positions[index], positions[index] + query.length)
-            editor.insert(positions[index], replaceField.text)
+            editor.remove(positions[index][0], positions[index][0] + positions[index][1])
+            editor.insert(positions[index][0], replaceField.text)
         }
-        editor.cursorPosition = positions.length ? positions[0] + replaceField.text.length : editor.cursorPosition
+        editor.cursorPosition = positions.length ? positions[0][0] + replaceField.text.length : editor.cursorPosition
+        replaceStatus.text = truncated
+            ? qsTr("Replaced the first %1 matches; more remain").arg(positions.length)
+            : qsTr("Replaced %1 matches").arg(positions.length)
     }
     onNodeIdChanged: reloadBody(false)
     onViewNameChanged: reloadBody(false)
@@ -200,6 +222,7 @@ Pane {
             Button { text: qsTr("Next"); onClicked: root.findNext() }
             Button { text: qsTr("Replace"); onClicked: root.replaceSelection() }
             Button { text: qsTr("Replace all"); onClicked: root.replaceAll() }
+            Label { id: replaceStatus; opacity: .7 }
         }
         StackLayout {
             Layout.fillWidth: true
@@ -277,11 +300,21 @@ Pane {
                     focused: editor.activeFocus
                     onAdapterError: function(message) { console.warn("ParchMint editor:", message) }
                     onIncrementalDirty: function(revision, position, removed, added, insertedText, firstBlock, lastBlockExclusive) {
-                        if (!root.loadingBody && root.loadedNode === root.nodeId && root.nodeId.length > 0
-                                && root.backend.applyPaneTextDelta(root.paneIndex, position, removed,
-                                                                  insertedText, firstBlock,
-                                                                  lastBlockExclusive))
+                        if (root.loadingBody || root.loadedNode !== root.nodeId || root.nodeId.length === 0)
+                            return
+                        if (root.backend.applyPaneTextDelta(root.paneIndex, position, removed,
+                                                            insertedText, firstBlock,
+                                                            lastBlockExclusive)) {
                             root.refreshStatistics()
+                        } else {
+                            // The workspace rejected the delta; the editor and
+                            // the live document would otherwise drift apart.
+                            // Force a full-body resync and show one non-modal
+                            // notice instead of a popup per keystroke.
+                            resyncNotice.visible = true
+                            resyncNoticeTimer.restart()
+                            root.reloadBody(true)
+                        }
                     }
                 }
                 Connections {
@@ -299,6 +332,23 @@ Pane {
                     anchors.margins: 8
                     z: 1
                     opacity: .75
+                }
+                Label {
+                    id: resyncNotice
+                    visible: false
+                    text: qsTr("Editor resynchronized after a sync error")
+                    Accessible.name: text
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 8
+                    z: 1
+                    padding: 6
+                    background: Rectangle { color: DesignTokens.overlay; radius: DesignTokens.radiusSmall }
+                    Timer {
+                        id: resyncNoticeTimer
+                        interval: 4000
+                        onTriggered: resyncNotice.visible = false
+                    }
                 }
             }
             OutlineView { backend: root.backend; model: root.model }

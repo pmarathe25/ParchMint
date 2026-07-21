@@ -1,4 +1,4 @@
-#![allow(missing_docs)] // Public bridge vocabulary is documented by the Stage 04 handoff.
+#![allow(missing_docs)] // Public workspace vocabulary follows docs/user-guide/projects.md.
 //! Rust-owned binder, outline, cards, and project-shell use cases.
 //!
 //! This module deliberately exposes immutable rows.  Qt/QML may retain visual
@@ -460,7 +460,7 @@ impl Drop for StructuralSaveWorker {
     }
 }
 
-/// One project incarnation and all Stage 04 structural/metadata use cases.
+/// One project incarnation and all structural/metadata use cases.
 pub struct ProjectWorkspace {
     opened: OpenProject,
     generation: ProjectGeneration,
@@ -1603,7 +1603,7 @@ impl ProjectWorkspace {
     }
 
     /// Creates a normal Markdown note below the research root or a research
-    /// group. The existing stage-3 lifecycle treats it exactly like a
+    /// group. The document lifecycle treats it exactly like a
     /// manuscript note; only default compile inclusion differs.
     pub fn create_research_node(
         &mut self,
@@ -1823,13 +1823,18 @@ impl ProjectWorkspace {
         let mut written = Vec::new();
         for (node, original, output) in &updates {
             if let Err(error) = self.save_document_body(*node, output.clone()) {
-                if let Ok(document) = document_for_node(&self.opened.project, *node) {
-                    let _ = self.opened.set_body(document, original.clone());
+                let mut rollback_failures = Vec::new();
+                if let Ok(document) = document_for_node(&self.opened.project, *node)
+                    && self.opened.set_body(document, original.clone()).is_err()
+                {
+                    rollback_failures.push(*node);
                 }
                 for (written_node, written_body) in written.into_iter().rev() {
-                    let _ = self.save_document_body(written_node, written_body);
+                    if self.save_document_body(written_node, written_body).is_err() {
+                        rollback_failures.push(written_node);
+                    }
                 }
-                return Err(error);
+                return Err(replace_rollback_error(error, &rollback_failures));
             }
             written.push((*node, original.clone()));
         }
@@ -1859,17 +1864,21 @@ impl ProjectWorkspace {
         let mut restored = Vec::new();
         for (node, body) in &undo.originals {
             if let Err(error) = self.save_document_body(*node, body.clone()) {
+                let mut rollback_failures = Vec::new();
                 for restored_node in restored.into_iter().rev() {
                     if let Some((_, replacement)) = undo
                         .replacements
                         .iter()
                         .find(|(candidate, _)| *candidate == restored_node)
+                        && self
+                            .save_document_body(restored_node, replacement.clone())
+                            .is_err()
                     {
-                        let _ = self.save_document_body(restored_node, replacement.clone());
+                        rollback_failures.push(restored_node);
                     }
                 }
                 self.replace_undo = Some(undo);
-                return Err(error);
+                return Err(replace_rollback_error(error, &rollback_failures));
             }
             restored.push(*node);
         }
@@ -2689,6 +2698,24 @@ fn document_for_node(project: &Project, node: NodeId) -> Result<DocumentId, Work
         .get(&node)
         .and_then(|entry| entry.kind.document_id())
         .ok_or(ProjectError::MissingDocumentForNode(node).into())
+}
+
+/// Wraps a project-replace failure so the user learns when the best-effort
+/// rollback also failed; otherwise the project could be left partially
+/// replaced with no visible signal.
+fn replace_rollback_error(error: WorkspaceError, rollback_failures: &[NodeId]) -> WorkspaceError {
+    if rollback_failures.is_empty() {
+        return error;
+    }
+    let nodes = rollback_failures
+        .iter()
+        .map(NodeId::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    WorkspaceError::InvalidReplace(format!(
+        "{error}; rollback also failed for {} document(s) ({nodes}). Compare them against the originals under .parchmint/backups/project-replace.",
+        rollback_failures.len()
+    ))
 }
 
 fn parent_for(project: &Project, node: NodeId) -> Result<NodeId, WorkspaceError> {

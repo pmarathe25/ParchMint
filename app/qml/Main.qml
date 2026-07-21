@@ -40,6 +40,7 @@ ApplicationWindow {
         case "project.new": newProjectDialog.open(); break
         case "project.open": openProjectFolderDialog.open(); break
         case "project.close": backend.closeProject(); break
+        case "project.save": backend.flushAllDocuments(); break
         case "project.export": exportDialog.open(); break
         case "project.diagnostics": diagnosticsDialog.open(); break
         case "edit.undo": backend.undoStructural(); break
@@ -741,23 +742,24 @@ ApplicationWindow {
         }
     }
 
-    Shortcut { sequence: StandardKey.Undo; enabled: backend.project_open; onActivated: backend.requestCommand("edit.undo") }
-    Shortcut { sequence: StandardKey.Redo; enabled: backend.project_open; onActivated: backend.requestCommand("edit.redo") }
-    Shortcut { sequence: StandardKey.New; onActivated: backend.requestCommand("project.new") }
-    Shortcut { sequence: StandardKey.Open; onActivated: backend.requestCommand("project.open") }
-    Shortcut { sequence: StandardKey.Close; enabled: backend.project_open; onActivated: backend.requestCommand("project.close") }
-    Shortcut { sequence: StandardKey.Save; enabled: backend.project_open; onActivated: backend.flushAllDocuments() }
+    Shortcut { sequences: [StandardKey.Undo]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.undo") }
+    Shortcut { sequences: [StandardKey.Redo]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.redo") }
+    Shortcut { sequences: [StandardKey.New]; onActivated: backend.requestCommand("project.new") }
+    Shortcut { sequences: [StandardKey.Open]; onActivated: backend.requestCommand("project.open") }
+    Shortcut { sequences: [StandardKey.Close]; enabled: backend.project_open; onActivated: backend.requestCommand("project.close") }
+    Shortcut { sequences: [StandardKey.Save]; enabled: backend.project_open; onActivated: backend.requestCommand("project.save") }
     Shortcut { sequences: ["Ctrl+Shift+E", "Meta+Shift+E"]; enabled: backend.project_open; onActivated: backend.requestCommand("project.export") }
-    Shortcut { sequence: "Ctrl+Shift+Up"; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_up") }
-    Shortcut { sequence: "Ctrl+Shift+Down"; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_down") }
-    Shortcut { sequence: "Ctrl+]"; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.indent") }
-    Shortcut { sequence: "Ctrl+["; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.outdent") }
-    Shortcut { sequence: StandardKey.Delete; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.trash") }
+    Shortcut { sequences: ["Ctrl+Shift+Up", "Meta+Shift+Up"]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_up") }
+    Shortcut { sequences: ["Ctrl+Shift+Down", "Meta+Shift+Down"]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.move_down") }
+    Shortcut { sequences: ["Ctrl+]", "Meta+]"]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.indent") }
+    Shortcut { sequences: ["Ctrl+[", "Meta+["]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.outdent") }
+    Shortcut { sequences: [StandardKey.Delete]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.trash") }
     Shortcut { sequence: "Ctrl+Tab"; enabled: backend.split_enabled; onActivated: backend.requestCommand("view.next_pane") }
-    Shortcut { sequence: StandardKey.Find; enabled: backend.project_open; onActivated: backend.requestCommand("edit.find") }
+    Shortcut { sequences: [StandardKey.Find]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.find") }
     Shortcut { sequences: ["Ctrl+Alt+F", "Meta+Alt+F"]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.replace_project") }
-    Shortcut { sequence: StandardKey.Preferences; onActivated: backend.requestCommand("view.settings") }
-    Shortcut { sequence: "Ctrl+Shift+F"; enabled: backend.project_open; onActivated: projectSearchField.forceActiveFocus() }
+    Shortcut { sequences: [StandardKey.Preferences]; onActivated: backend.requestCommand("view.settings") }
+    Shortcut { sequences: ["Ctrl+Shift+F", "Meta+Shift+F"]; enabled: backend.project_open; onActivated: projectSearchField.forceActiveFocus() }
+    Shortcut { sequences: ["Ctrl+?", "Meta+?"]; onActivated: backend.requestCommand("help.keyboard") }
     Shortcut { sequences: ["Ctrl+1", "Meta+1"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.editor") }
     Shortcut { sequences: ["Ctrl+2", "Meta+2"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.outline") }
     Shortcut { sequences: ["Ctrl+3", "Meta+3"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.cards") }
@@ -791,18 +793,18 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
         BinderPane { Layout.preferredWidth: 276; Layout.fillHeight: true; visible: window.binderVisible; backend: backend; model: outlineModel }
-        Rectangle { Layout.preferredWidth: window.binderVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
+        Rectangle { Layout.preferredWidth: window.binderVisible ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
 
         RowLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
             spacing: 0
             PaneHost { id: paneOne; Layout.fillWidth: true; Layout.fillHeight: true; backend: backend; model: outlineModel; paneIndex: 0; nodeId: backend.pane_one_id; viewName: backend.pane_one_view; pinned: backend.pane_one_pinned }
-            Rectangle { Layout.preferredWidth: backend.split_enabled ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
+            Rectangle { Layout.preferredWidth: backend.split_enabled ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
             PaneHost { id: paneTwo; Layout.preferredWidth: backend.split_enabled ? 520 : 0; Layout.fillHeight: true; visible: backend.split_enabled; backend: backend; model: outlineModel; paneIndex: 1; nodeId: backend.pane_two_id; viewName: backend.pane_two_view; pinned: backend.pane_two_pinned }
         }
 
-        Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: window.palette.mid; opacity: .35 }
+        Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
         InspectorPane { Layout.preferredWidth: 310; Layout.fillHeight: true; visible: window.inspectorVisible; backend: backend }
     }
 

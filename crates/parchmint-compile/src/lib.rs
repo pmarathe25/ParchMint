@@ -3983,7 +3983,7 @@ fn percent_decode(value: &str) -> Option<String> {
 
 /// Checks the OOXML package parts required by Word/LibreOffice before the
 /// temporary export replaces a destination. Full consumer compatibility is
-/// covered by the platform matrix in Stage 08/09.
+/// covered by the maintained platform verification matrix.
 pub fn validate_docx(bytes: &[u8]) -> Result<(), String> {
     let archive = parse_store_zip(bytes)?;
     for name in [
@@ -4553,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10M-word gate")]
+    #[cfg_attr(debug_assertions, ignore = "release-mode 10M-word gate")]
     fn ten_million_word_compile_cancels_within_budget() {
         let directory = tempfile::tempdir().unwrap();
         let mut opened = ProjectStorage::create(directory.path(), "Cancellation").unwrap();
@@ -4590,7 +4590,7 @@ mod tests {
             Err(CompileError::Cancelled)
         ));
         let elapsed = started.elapsed();
-        eprintln!("stage14 compile-words=10000000 cancellation={elapsed:?}");
+        eprintln!("scale compile-words=10000000 cancellation={elapsed:?}");
         assert!(
             elapsed < std::time::Duration::from_millis(250),
             "compile cancellation took {elapsed:?}"

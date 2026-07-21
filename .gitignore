@@ -1,9 +1,12 @@
 /build/
 /target/
-/.toolchains/
+**/.qmlls.ini
 /.idea/
 /.vscode/
 *.user
 *.swp
 *.tmp
 .DS_Store
+# Local project state (journals, recovery, search cache) created when an
+# example project is opened read-write from the checkout.
+**/.parchmint/

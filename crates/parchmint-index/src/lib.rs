@@ -45,7 +45,7 @@ pub struct IndexDocument<'a> {
     pub character_count: u64,
 }
 
-/// Compatibility source row retained for the Stage 01 spike API.
+/// Compatibility source row retained for the original public API.
 #[derive(Clone, Copy, Debug)]
 pub struct SourceDocument<'a> {
     /// Stable row identity.
@@ -277,7 +277,7 @@ impl SearchIndex {
         Ok(())
     }
 
-    /// Stage 01 compatibility wrapper.
+    /// Compatibility wrapper for the original public API.
     pub fn upsert(&mut self, document: SourceDocument<'_>) -> Result<(), IndexError> {
         self.upsert_document(document.into())
     }
@@ -424,7 +424,7 @@ impl SearchIndex {
         }))
     }
 
-    /// Stage 01 compatibility wrapper.
+    /// Compatibility wrapper for the original public API.
     pub fn rebuild<'a>(
         &mut self,
         documents: impl IntoIterator<Item = SourceDocument<'a>>,
@@ -732,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10M-word gate")]
+    #[cfg_attr(debug_assertions, ignore = "release-mode 10M-word gate")]
     fn records_stress_corpus_rebuild_and_first_result_timing() {
         let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
         let directory = tempfile::tempdir_in(target).unwrap();
@@ -760,7 +760,7 @@ mod tests {
         let results = index.search("orch", 50).unwrap();
         let first_results = start.elapsed();
         eprintln!(
-            "stage14 words=10020000 index-rebuild={rebuild:?}; first-results={first_results:?}"
+            "scale words=10020000 index-rebuild={rebuild:?}; first-results={first_results:?}"
         );
         assert!(
             rebuild < std::time::Duration::from_mins(1),
@@ -780,7 +780,7 @@ mod tests {
                 .and_then(|value| value.split_whitespace().next())
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap();
-            eprintln!("stage14 peak-rss-kib={peak_kib}");
+            eprintln!("scale peak-rss-kib={peak_kib}");
             assert!(peak_kib < 500 * 1024, "peak RSS was {peak_kib} KiB");
         }
     }

@@ -1,5 +1,8 @@
 # Format 1 compatibility promise
 
+> Read when changing canonical schemas, migrations, unknown-field handling, or
+> version support.
+
 The canonical project format, ParchMint Markdown extensions, and recovery record
 format documented under `docs/format/` are frozen as version 1. Version numbers
 for project and recovery schemas are independent from the application version.

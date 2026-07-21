@@ -18,7 +18,7 @@ Item {
             Layout.fillWidth: true
             Label {
                 text: root.valid ? qsTr("Markdown source") : qsTr("Source has errors — buffer retained")
-                color: root.valid ? palette.text : palette.brightText
+                color: root.valid ? DesignTokens.text : DesignTokens.danger
                 Layout.fillWidth: true
             }
             Button {

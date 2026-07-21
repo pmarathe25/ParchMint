@@ -19,7 +19,6 @@ qt_add_executable(parchmint main.cpp)
 set(parchmint_qml_sources
   "${CMAKE_SOURCE_DIR}/app/qml/Main.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/DesignTokens.qml"
-  "${CMAKE_SOURCE_DIR}/app/qml/components/IconButton.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/FormattingBar.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/BinderPane.qml"
   "${CMAKE_SOURCE_DIR}/app/qml/components/OutlineView.qml"
@@ -73,6 +72,25 @@ target_link_libraries(parchmint PRIVATE
   parchmint_qml
   parchmint_adaptersplugin
   Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+
+# Translation pipeline: compile the checked-in catalogs in translations/ and
+# embed the .qm files. Skipped where the Qt linguist tools are unavailable.
+if(TARGET Qt6::lrelease)
+  file(GLOB parchmint_ts_files CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/translations/*.ts")
+  qt_add_lrelease(
+    LRELEASE_TARGET parchmint_lrelease
+    TS_FILES ${parchmint_ts_files}
+    QM_FILES_OUTPUT_VARIABLE parchmint_qm_files)
+  foreach(qm_file IN LISTS parchmint_qm_files)
+    get_filename_component(qm_name "${qm_file}" NAME)
+    set_source_files_properties("${qm_file}" PROPERTIES QT_RESOURCE_ALIAS "${qm_name}")
+  endforeach()
+  qt_add_resources(parchmint "parchmint_translations"
+    PREFIX "/i18n"
+    FILES ${parchmint_qm_files})
+  add_dependencies(parchmint parchmint_lrelease)
+  target_compile_definitions(parchmint PRIVATE PARCHMINT_HAS_TRANSLATIONS=1)
+endif()
 
 qt_import_plugins(parchmint
   INCLUDE_BY_TYPE platforms

@@ -1,4 +1,4 @@
-#![allow(missing_docs)] // Public lifecycle surface is described in the Stage 03 handoff.
+#![allow(missing_docs)] // Public lifecycle surface follows ADR-0010 and docs/format/recovery-1.md.
 //! Safe lifecycle for one open editor document.
 
 use parchmint_domain::{DocumentId, ProjectGeneration, Revision, WorkStamp};
@@ -1677,6 +1677,20 @@ mod tests {
     }
 
     #[test]
+    fn recovery_fixtures_parse_v1_and_reject_newer_versions() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/recovery");
+        let record = RecoveryRecord::read(&fixtures.join("recovery-v1.toml")).unwrap();
+        assert_eq!(record.format_version, RECOVERY_FORMAT_VERSION);
+        assert_eq!(record.project_generation, 3);
+        assert_eq!(record.revision, 7);
+        assert!(record.body.contains('雪'));
+        assert!(matches!(
+            RecoveryRecord::read(&fixtures.join("recovery-newer-version.toml")),
+            Err(DocumentLifecycleError::RecoveryVersion(99))
+        ));
+    }
+
+    #[test]
     fn journal_precedes_save_and_stale_completions_never_acknowledge() {
         let (_directory, mut opened, id) = project_with_document();
         let generation = ProjectGeneration::new(1).unwrap();
@@ -2190,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 performance gate")]
+    #[cfg_attr(debug_assertions, ignore = "release-mode performance gate")]
     fn records_large_document_journal_and_save_latency() {
         let (_directory, mut opened, id) = project_with_document();
         let mut large = String::with_capacity(1_500_000);

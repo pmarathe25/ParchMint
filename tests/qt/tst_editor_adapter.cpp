@@ -1,6 +1,7 @@
 #include "editor_adapter.h"
 
 #include <QCoreApplication>
+#include <QFile>
 #include <QInputMethodEvent>
 #include <QQmlComponent>
 #include <QQmlEngine>
@@ -253,18 +254,29 @@ private slots:
 
   void plainAndRichPasteTakeDistinctPaths()
   {
+    const QString plainPath = QFINDTESTDATA("../fixtures/spike/clipboard-plain.txt");
+    const QString richPath = QFINDTESTDATA("../fixtures/spike/clipboard-rich.html");
+    QVERIFY(!plainPath.isEmpty());
+    QVERIFY(!richPath.isEmpty());
+    QFile plainFile(plainPath);
+    QFile richFile(richPath);
+    QVERIFY(plainFile.open(QIODevice::ReadOnly));
+    QVERIFY(richFile.open(QIODevice::ReadOnly));
+
     QTextDocument document;
-    QTextCursor cursor(&document);
-    cursor.insertFragment(QTextDocumentFragment::fromPlainText(QStringLiteral("**literal**")));
-    QCOMPARE(document.toPlainText(), QStringLiteral("**literal**"));
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    adapter.pastePlainText(QString::fromUtf8(plainFile.readAll()));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("**asterisks**")));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("👩🏽‍💻")));
     QVERIFY(document.begin().begin().fragment().charFormat().fontWeight() < QFont::Bold);
 
-    cursor.movePosition(QTextCursor::End);
-    cursor.insertBlock();
-    cursor.insertFragment(QTextDocumentFragment::fromHtml(
-      QStringLiteral("<strong>bold</strong><script>active()</script>")));
-    QVERIFY(document.toPlainText().contains(QStringLiteral("bold")));
-    QVERIFY(!document.toPlainText().contains(QStringLiteral("active")));
+    adapter.setCursorPosition(document.characterCount() - 1);
+    adapter.insertParagraphBreak();
+    adapter.pasteRichHtml(QString::fromUtf8(richFile.readAll()));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("Bold")));
+    QVERIFY(document.toPlainText().contains(QStringLiteral("linked")));
+    QVERIFY(!document.toPlainText().contains(QStringLiteral("must be removed")));
   }
 
   void protectedInsertionResetsToNextStyleAndRequiresExplicitDeletion()

@@ -1,19 +1,46 @@
-# ParchMint
+<p align="center">
+  <img src="packaging/icons/org.parchmint.ParchMint.svg" width="104" alt="ParchMint logo">
+</p>
 
-ParchMint is a native, local-first long-form writing application. The version 1
-release candidate combines Rust application services with Qt 6 Quick/QML through
-CXX-Qt; it does not use a browser, WebView, or network client.
+<h1 align="center">ParchMint</h1>
 
-The product and architecture contract is in [`PLAN.md`](PLAN.md). Start with
-[`docs/development/bootstrap.md`](docs/development/bootstrap.md) to build the
-foundation application.
+<p align="center">
+  Native, local-first planning and writing for long-form work.
+</p>
 
-Developer navigation, commands, the regression matrix, and platform charter
-are in [`docs/development/`](docs/development/). The user guide is in
-[`docs/user-guide/`](docs/user-guide/), and the exporter support contract is in
-[`docs/export/support-matrix.md`](docs/export/support-matrix.md).
+<p align="center">
+  <strong>Markdown + TOML</strong> · <strong>Windows, macOS, Linux</strong> · <strong>GPL-3.0-or-later</strong>
+</p>
 
-Engineering packages and release automation are available under `packaging/`
-and `.github/workflows/release.yml`. The final distribution license is not yet
-selected: do not sign, notarize, publish, or statically link Qt until ADR-0013 is
-accepted and the protected release environment explicitly authorizes publishing.
+ParchMint keeps manuscripts, research, structure, styles, and exports in
+human-readable project folders. It requires no browser runtime, cloud account,
+telemetry, or network service.
+
+## What it does
+
+- Nested binder, outline, cards, synopses, labels, and status.
+- Split-pane writing and research.
+- Source-preserving ParchMint Markdown.
+- Project search, Unicode-aware counts, autosave, recovery, and backups.
+- Binder-ordered Markdown, text, HTML, PDF, EPUB, and DOCX export.
+
+## Start
+
+- [Install or build ParchMint](docs/user-guide/install.md)
+- [Create a project](docs/user-guide/quick-start.md)
+- [Open an example](docs/user-guide/examples.md)
+
+## Documentation
+
+| Audience | Start here |
+|---|---|
+| Users | [User guide](docs/user-guide/README.md) |
+| Contributors | [Developer guide](docs/development/README.md) |
+| Agents and unfamiliar tasks | [Documentation router](docs/README.md) |
+| Format implementers | [Format specifications](docs/format/README.md) |
+| Packagers | [Release process](docs/release/process.md) |
+
+A project’s canonical data is Markdown, TOML, and assets. `.parchmint/` holds
+local cache, workspace, recovery, and backup state. See the
+[product contract](docs/product/README.md), [privacy statement](docs/legal/PRIVACY.md),
+and [GPL-3.0-or-later license](LICENSE).

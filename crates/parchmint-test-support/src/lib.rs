@@ -90,7 +90,7 @@ impl CorpusManifest {
 /// Errors returned by the corpus helper.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CorpusError {
-    /// The stage's documented stress sizes are the only accepted sizes.
+    /// The suite's documented stress sizes are the only accepted sizes.
     #[error("unsupported corpus node count {0}; expected 100, 1000, or 10000")]
     UnsupportedNodeCount(u32),
     /// A document must contain at least one word.

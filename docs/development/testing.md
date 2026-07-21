@@ -1,28 +1,34 @@
-# Build and test commands
+# Testing
 
-Use the pinned Qt environment described in [`bootstrap.md`](bootstrap.md).
-The Qt-free commands are useful for storage, Markdown, domain, indexing, and
-compile work; the full commands also build the bridge and run offscreen CTest.
+> Read when selecting validation for a change or adding regression coverage.
 
-```sh
-just bootstrap       # print toolchain versions
-just format-check    # rustfmt and CMake configure probe
-just lint            # Clippy and generated QML lint
-just test-rust       # all Qt-free workspace tests
-just test             # Rust tests, Qt build, and CTest
-just smoke            # offscreen smoke tests
-just bench-spikes     # enforced release-mode performance budgets
-```
+## Command router
 
-For the deterministic stress manifests:
+| Change | Minimum command |
+|---|---|
+| Rust formatting | `just format-check` |
+| Qt-free Rust behavior | `just test-rust` |
+| Rust lint/API changes | `just lint` |
+| QML, C++, bridge, lifecycle | `just test` |
+| Smoke/startup behavior | `just smoke` |
+| Release-scale performance | `just bench-spikes` |
+| Packaging rules | `just package-smoke` |
 
-```sh
-cargo test -p parchmint-test-support
-cargo run -p parchmint-test-support --bin generate-corpus -- \
-  --seed 20260720 --nodes 10000 --words 1000
-```
+Run the narrow check while iterating, then the broad gate for the affected
+boundary. Always run `git diff --check`.
 
-Do not commit generated 10,000-node corpora. Commit the seed, configuration,
-and measured result instead. `git diff --check` is part of handoff review.
-The scheduled 10M-word gate and its trend artifact are described in
-[`performance-budgets.md`](performance-budgets.md).
+## Test placement
+
+- Rust unit and integration tests stay beside owning behavior.
+- Compatibility inputs live under `tests/fixtures/` by contract area.
+- Qt adapter/model tests live under `tests/qt/`.
+- End-to-end startup and lifecycle paths run through CTest.
+- Large corpora are generated from committed seeds; never commit generated scale data.
+
+For documentation moves, search the repository for every old path and validate
+all changed local links. For format changes, add a named compatibility fixture
+and verify deterministic reopen/round-trip behavior.
+
+Performance commands and corpora are defined in [performance](performance.md).
+Physical platform checks are defined in
+[release validation](../release/platform-validation.md).

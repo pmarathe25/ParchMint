@@ -4,7 +4,7 @@
   <name>ParchMint</name>
   <summary>Local-first planning and writing for long-form works</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>LicenseRef-ParchMint-Undecided</project_license>
+  <project_license>GPL-3.0-or-later</project_license>
   <description><p>ParchMint stores projects as ordinary Markdown and TOML files and works offline.</p></description>
   <url type="homepage">https://github.com/pmarathe25/ParchMint</url>
   <developer id="org.parchmint"><name>ParchMint contributors</name></developer>

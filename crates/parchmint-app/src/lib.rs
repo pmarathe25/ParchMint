@@ -49,7 +49,7 @@ pub struct LazyTreeSnapshot {
 }
 
 impl LazyTreeSnapshot {
-    /// Generates the deterministic 10,000-node Stage 01 stress tree.
+    /// Generates the deterministic 10,000-node stress tree.
     pub fn stress_fixture(count: u32) -> Self {
         let rows = (0..count)
             .map(|id| {
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 performance gate")]
+    #[cfg_attr(debug_assertions, ignore = "release-mode performance gate")]
     fn records_tree_stress_measurement() {
         for nodes in [100, 1_000, 10_000] {
             let start = Instant::now();
@@ -252,7 +252,7 @@ mod tests {
             }
             let scroll = scroll_start.elapsed();
             eprintln!(
-                "stage14 nodes={nodes} tree-build={build:?}; simulated-scroll={scroll:?}; observed={observed}"
+                "scale nodes={nodes} tree-build={build:?}; simulated-scroll={scroll:?}; observed={observed}"
             );
             if nodes == 10_000 {
                 assert!(

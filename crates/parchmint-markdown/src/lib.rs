@@ -169,7 +169,7 @@ impl BlockNode {
     }
 }
 
-/// Compatibility classification retained from the Stage 01 public boundary.
+/// Compatibility classification retained from the original public boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BlockKind {
     Supported,
@@ -2425,6 +2425,31 @@ mod tests {
         assert!(codes.contains("duplicate-id"));
         assert!(codes.contains("missing-style-id"));
         assert!(codes.contains("unknown-style-id"));
+    }
+
+    #[test]
+    fn unknown_style_fixture_warns_and_round_trips() {
+        let source = include_str!("../../../tests/fixtures/markdown/unknown-style.md");
+        let options = ParseOptions {
+            known_style_ids: BTreeSet::from(["body".into()]),
+            ..ParseOptions::default()
+        };
+        let document = Document::parse_with_options(source, &options).unwrap();
+        assert!(
+            document
+                .diagnostics()
+                .iter()
+                .any(|item| item.code == "unknown-style-id"
+                    && item.message.contains("style-that-is-not-in-the-catalog"))
+        );
+        // The codec normalizes front-matter separation; resaving is a fixed
+        // point and the styled text survives verbatim.
+        let saved = document.serialize();
+        assert!(saved.contains(
+            "[Visible styled text]{.parchmint-style style-id=\"style-that-is-not-in-the-catalog\"}"
+        ));
+        let reparsed = Document::parse_with_options(&saved, &options).unwrap();
+        assert_eq!(reparsed.serialize(), saved);
     }
 
     #[test]

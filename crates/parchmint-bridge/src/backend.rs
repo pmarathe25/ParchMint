@@ -1011,13 +1011,13 @@ impl ParchMintBackend {
     }
 
     pub fn compile_preset_id(&self, row: i32) -> QString {
-        if row < 0 {
+        let Ok(row_index) = usize::try_from(row) else {
             return QString::default();
-        }
+        };
         self.rust()
             .workspace
             .as_ref()
-            .and_then(|workspace| workspace.compile_presets().get(row as usize).copied())
+            .and_then(|workspace| workspace.compile_presets().get(row_index).copied())
             .map_or_else(
                 || {
                     if row == 0 {
@@ -1031,13 +1031,13 @@ impl ParchMintBackend {
     }
 
     pub fn compile_preset_name(&self, row: i32) -> QString {
-        if row < 0 {
+        let Ok(row_index) = usize::try_from(row) else {
             return QString::default();
-        }
+        };
         self.rust()
             .workspace
             .as_ref()
-            .and_then(|workspace| workspace.compile_presets().get(row as usize).copied())
+            .and_then(|workspace| workspace.compile_presets().get(row_index).copied())
             .map_or_else(
                 || {
                     if row == 0 {
@@ -1897,7 +1897,6 @@ impl ParchMintBackend {
         let first = usize::try_from(first_block.max(0)).unwrap_or(0);
         let last = usize::try_from(last_block.max(first_block + 1)).unwrap_or(first + 1);
         let inserted = inserted.to_string();
-        self.as_mut().record_ffi_bytes(inserted.len());
         let result = self
             .as_mut()
             .rust_mut()
@@ -1919,6 +1918,7 @@ impl ParchMintBackend {
             });
         match result {
             Ok(stamp) => {
+                self.as_mut().record_ffi_bytes(inserted.len());
                 if let Err(error) = self.as_mut().publish_document_stamp(stamp, pane) {
                     return self.as_mut().fail(error);
                 }
@@ -1928,7 +1928,14 @@ impl ParchMintBackend {
                 let _ = self.as_mut().publish_outline_state();
                 true
             }
-            Err(error) => self.as_mut().fail(error),
+            Err(error) => {
+                // A rejected delta (for example UTF-16 misalignment) desyncs the
+                // editor from the live document. QML performs a full-body
+                // resync on a false return and shows one non-modal notice; a
+                // modal popup per keystroke would be hostile.
+                tracing::warn!("rejected editor text delta: {error}");
+                false
+            }
         }
     }
     pub fn pane_word_count(mut self: Pin<&mut Self>, pane: i32) -> u64 {

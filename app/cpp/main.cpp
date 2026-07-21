@@ -9,12 +9,16 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLibraryInfo>
+#include <QLocale>
 #include <QQmlApplicationEngine>
 #include <QMetaObject>
 #include <QQuickStyle>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTimer>
+#ifdef PARCHMINT_HAS_TRANSLATIONS
+#include <QTranslator>
+#endif
 
 #include <cstdio>
 #include <exception>
@@ -53,6 +57,15 @@ int main(int argc, char* argv[])
   });
 
   QGuiApplication application(argc, argv);
+#ifdef PARCHMINT_HAS_TRANSLATIONS
+  // English is the source language; the compiled catalog proves the pipeline
+  // and is where future locale catalogs are installed. Missing/untranslated
+  // entries fall back to the qsTr source strings.
+  QTranslator appTranslator;
+  if (appTranslator.load(QLocale(), QStringLiteral("ParchMint"), QStringLiteral("_"),
+                         QStringLiteral(":/i18n")))
+    QCoreApplication::installTranslator(&appTranslator);
+#endif
   QGuiApplication::setWindowIcon(
     QIcon(QStringLiteral(":/org.parchmint.ParchMint.svg")));
   QCommandLineParser parser;
@@ -158,7 +171,9 @@ int main(int argc, char* argv[])
         QStringLiteral("paneEditor0"));
       const QString liveText = QStringLiteral("Typed without focus loss — 本#%.\n");
       const auto ffiBytesBeforeTyping = backend->property("ffi_bytes").toULongLong();
-      if (!editor || !editor->setProperty("text", liveText)) {
+      if (!editor
+          || !QMetaObject::invokeMethod(editor, "insert", Qt::DirectConnection,
+                                        Q_ARG(int, 0), Q_ARG(QString, liveText))) {
         fail("QML editor text injection failed");
         return;
       }
@@ -168,6 +183,11 @@ int main(int argc, char* argv[])
             backend, "paneDocumentBody", Qt::DirectConnection,
             Q_RETURN_ARG(QString, authoritativeBody), Q_ARG(int, 0))
           || authoritativeBody != liveText) {
+        std::fprintf(stderr,
+                     "lifecycle smoke: expected %lld UTF-16 units, received %lld (%s)\n",
+                     static_cast<long long>(liveText.size()),
+                     static_cast<long long>(authoritativeBody.size()),
+                     authoritativeBody.toUtf8().toHex().constData());
         fail("QML text did not reach the authoritative live session");
         return;
       }

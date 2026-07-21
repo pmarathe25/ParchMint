@@ -1,5 +1,8 @@
 # ParchMint project format 1
 
+> Read when changing canonical project files, manifests, graph structure,
+> styles, presets, assets, trash, or migration behavior.
+
 Format version 1 is an ordinary UTF-8 directory. `parchmint.toml`,
 `outline.toml`, `styles.toml`, Markdown documents, assets, and `trash/` are
 canonical. `.parchmint/` is disposable local state.

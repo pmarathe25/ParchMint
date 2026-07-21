@@ -1,5 +1,8 @@
 # Version 1 threat model
 
+> Read when changing paths, parsers, attachments, writes, exports, diagnostics,
+> network dependencies, or external-process boundaries.
+
 ## Protected assets and trust boundaries
 
 The primary asset is complete, readable canonical project data. Project files,
@@ -32,5 +35,5 @@ Other applications used to open attachments or exports are outside the process
 boundary. Local administrators, compromised operating systems, hostile storage
 drivers, and physical attackers are out of scope. Change fingerprints detect
 conflicts but are not cryptographic authenticity checks. Screen-reader,
-installer, signer, and consumer-format behavior must still be validated on each
+installer, signer, and consumer-format behavior requires validation on each
 physical release platform.

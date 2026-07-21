@@ -1,12 +1,19 @@
-# ParchMint user guide
+# User guide
 
-ParchMint stores projects as readable directories. The canonical files can be
-inspected or backed up without the application; `.parchmint/` is disposable
-local state.
+> Choose the task you want to complete; each page stands alone.
 
-- [Binder and summaries](binder.md)
-- [Editor and styles](editor-styles.md)
-- [Research and split panes](research-split.md)
-- [Search and statistics](search.md)
-- [Compile and export](compile-export.md)
-- [Backups and recovery](backup-recovery.md)
+| Task | Guide |
+|---|---|
+| Install or build ParchMint | [Install](install.md) |
+| Create a first project | [Quick start](quick-start.md) |
+| Organize manuscript and research | [Projects](projects.md) |
+| Write and format content | [Editing](editing.md) |
+| Compile and export | [Export](export.md) |
+| Understand saves, backups, and recovery | [Recovery](recovery.md) |
+| Open prepared projects | [Examples](examples.md) |
+
+ParchMint projects are readable directories. Canonical files remain usable
+without the application; `.parchmint/` contains local state only.
+
+Commands shared by menus and the command palette are listed in the
+[keyboard reference](../reference/keyboard-shortcuts.md).

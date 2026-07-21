@@ -21,6 +21,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("project.new", "New Project…", "Ctrl+N", false, false),
     command("project.open", "Open Project…", "Ctrl+O", false, false),
     command("project.close", "Close Project", "Ctrl+W", true, false),
+    command("project.save", "Save all documents", "Ctrl+S", true, false),
     command(
         "project.export",
         "Export manuscript…",

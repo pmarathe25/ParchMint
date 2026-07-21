@@ -1,8 +1,13 @@
 # Third-party notices
 
-This checked-in notice is the reviewed dependency policy summary. Each release
-candidate must also include the machine-generated transitive notice and CycloneDX
-SBOM produced from its exact `Cargo.lock` and Qt deployment.
+> Read when adding dependencies, changing Qt linkage/modules, packaging notices,
+> or generating release evidence.
+
+ParchMint itself is licensed under GPL-3.0-or-later (see `LICENSE` and
+ADR-0013). This checked-in notice is the reviewed dependency policy summary.
+Each distributed release must also include the machine-generated transitive
+notice and CycloneDX SBOM produced from its exact `Cargo.lock` and Qt
+deployment.
 
 - Qt 6.8.3 is dynamically deployed under the license selected by the distributor;
   open-source use must satisfy the applicable LGPL/GPL module terms and include

@@ -10,6 +10,10 @@ unknown-registry = "deny"
 unknown-git = "deny"
 
 [licenses]
+# The workspace itself is GPL-3.0-or-later (ADR-0013); the allow-list below
+# constrains third-party dependencies only, so private workspace crates are
+# exempt from it.
+private = { ignore = true }
 allow = [
   "Apache-2.0",
   "BSD-2-Clause",

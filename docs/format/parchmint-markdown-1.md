@@ -1,6 +1,7 @@
 # ParchMint Markdown 1.0 grammar
 
-Status: codec implemented by Stage 03; persisted spelling remains version 1.
+> Read when changing Markdown parsing, semantic editing, serialization,
+> diagnostics, or exporter interpretation.
 
 Documents are UTF-8 CommonMark with selected GFM tables, task lists,
 strikethrough, and footnotes. A YAML mapping delimited by `---` at byte zero

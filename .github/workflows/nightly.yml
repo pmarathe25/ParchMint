@@ -16,14 +16,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Parser fuzz smoke
         run: cargo run --locked -p parchmint-test-support --release --bin fuzz-smoke -- 25000
-      - name: Enforced Stage 14 performance budgets
-        run: cargo test --locked -p parchmint-app -p parchmint-markdown -p parchmint-index -p parchmint-compile -p parchmint-storage --release -- --nocapture 2>&1 | tee stage14-performance.txt
+      - name: Enforced performance budgets
+        run: cargo test --locked -p parchmint-app -p parchmint-markdown -p parchmint-index -p parchmint-compile -p parchmint-storage --release -- --nocapture 2>&1 | tee performance.txt
       - name: Upload performance trend artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stage14-performance-linux-${{ github.run_id }}
-          path: stage14-performance.txt
+          name: performance-linux-${{ github.run_id }}
+          path: performance.txt
           retention-days: 90
 
   native-benchmark:
@@ -40,11 +40,11 @@ jobs:
           cache: true
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Enforced native editor budgets
-        run: cmake --build build --target editor-benchmark --parallel 2>&1 | tee stage14-native-performance.txt
+        run: cmake --build build --target editor-benchmark --parallel 2>&1 | tee native-performance.txt
       - name: Upload native performance trend artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stage14-performance-native-${{ github.run_id }}
-          path: stage14-native-performance.txt
+          name: performance-native-${{ github.run_id }}
+          path: native-performance.txt
           retention-days: 90

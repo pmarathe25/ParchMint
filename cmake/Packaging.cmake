@@ -1,5 +1,6 @@
-# Engineering packages are produced for validation only. Publication remains
-# disabled until the distribution-license ADR and release environment approve it.
+# Engineering packages are produced for validation only. The application is
+# GPL-3.0-or-later (ADR-0013); publication additionally requires the protected
+# release environment to authorize it.
 set(CPACK_PACKAGE_NAME "ParchMint")
 set(CPACK_PACKAGE_VENDOR "ParchMint")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Local-first long-form writing application")

@@ -1,5 +1,8 @@
 # ParchMint privacy statement
 
+> Read when changing data collection, diagnostics, external application launch,
+> storage location, deletion, or network behavior.
+
 ParchMint version 1 is local-first and has no account, telemetry, analytics,
 advertising, crash-upload, update-check, or other network feature. Project text,
 metadata, research, attachments, search indexes, backups, recovery records,

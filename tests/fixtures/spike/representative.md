@@ -1,6 +1,6 @@
 ---
 title: The Glass Orchard
-synopsis: A representative Stage 01 fidelity fixture.
+synopsis: A representative Markdown fidelity fixture.
 style: 018f0be2-a8ea-7d2d-89ea-45aa663708d4
 future-plugin:
   preserved: true

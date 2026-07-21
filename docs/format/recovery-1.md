@@ -1,7 +1,9 @@
 # ParchMint recovery record 1
 
-Status: implemented by Stage 03. Recovery is local derived state, not canonical
-project format.
+> Read when changing autosave journals, recovery discovery, preview, restore,
+> discard, save-copy, or save acknowledgement.
+
+Recovery is local derived state, not canonical project format.
 
 Each dirty open document has at most one atomic record at
 `.parchmint/recovery/<document-id>.toml`. The record is replaced after the
@@ -9,7 +11,7 @@ Each dirty open document has at most one atomic record at
 
 | Field | Meaning |
 |---|---|
-| `format_version` | Recovery schema version, currently `1` |
+| `format_version` | Recovery schema version; value is `1` |
 | `project_generation` | Open-project incarnation captured with the edit |
 | `document_id` | Stable canonical document identity |
 | `revision` | Monotonic document revision represented by `body` |
