@@ -59,4 +59,4 @@ fuzz-smoke:
     cargo run -p parchmint-test-support --release --bin fuzz-smoke -- 10000
 
 bench-spikes:
-    cargo test -p parchmint-app -p parchmint-markdown -p parchmint-index --release -- --ignored --nocapture
+    cargo test --locked -p parchmint-app -p parchmint-markdown -p parchmint-index -p parchmint-compile -p parchmint-storage --release -- --nocapture

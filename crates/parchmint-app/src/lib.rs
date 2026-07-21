@@ -237,19 +237,33 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual release-mode Stage 01 measurement"]
+    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 performance gate")]
     fn records_tree_stress_measurement() {
-        let start = Instant::now();
-        let tree = LazyTreeSnapshot::stress_fixture(10_000);
-        let build = start.elapsed();
-        let scroll_start = Instant::now();
-        let mut observed = 0;
-        for start in (0..10_000).step_by(12) {
-            observed += tree.visible_rows(start, 40).len();
+        for nodes in [100, 1_000, 10_000] {
+            let start = Instant::now();
+            let tree = LazyTreeSnapshot::stress_fixture(nodes);
+            let build = start.elapsed();
+            let scroll_start = Instant::now();
+            let mut observed = 0;
+            for start in (0..nodes).step_by(12) {
+                observed += tree
+                    .visible_rows(usize::try_from(start).unwrap_or(usize::MAX), 40)
+                    .len();
+            }
+            let scroll = scroll_start.elapsed();
+            eprintln!(
+                "stage14 nodes={nodes} tree-build={build:?}; simulated-scroll={scroll:?}; observed={observed}"
+            );
+            if nodes == 10_000 {
+                assert!(
+                    build < Duration::from_millis(100),
+                    "tree build took {build:?}"
+                );
+                assert!(
+                    scroll < Duration::from_millis(100),
+                    "consumer projection exceeded 100 ms"
+                );
+            }
         }
-        eprintln!(
-            "tree build={build:?}; simulated scroll={:?}; observed={observed}",
-            scroll_start.elapsed()
-        );
     }
 }

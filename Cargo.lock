@@ -561,6 +561,7 @@ dependencies = [
  "parchmint-app",
  "parchmint-domain",
  "parchmint-markdown",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

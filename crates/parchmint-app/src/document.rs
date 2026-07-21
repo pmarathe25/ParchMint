@@ -17,7 +17,54 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::search::text_statistics;
+
 pub const RECOVERY_FORMAT_VERSION: u32 = 1;
+
+fn utf16_offset_to_byte(value: &str, target: usize) -> Option<usize> {
+    if target == 0 {
+        return Some(0);
+    }
+    let mut utf16 = 0usize;
+    for (byte, character) in value.char_indices() {
+        if utf16 == target {
+            return Some(byte);
+        }
+        utf16 = utf16.checked_add(character.len_utf16())?;
+        if utf16 > target {
+            return None;
+        }
+    }
+    (utf16 == target).then_some(value.len())
+}
+
+fn previous_char_boundary(value: &str, mut byte: usize, count: usize) -> usize {
+    for _ in 0..count {
+        let Some((index, _)) = value[..byte].char_indices().next_back() else {
+            return 0;
+        };
+        byte = index;
+    }
+    byte
+}
+
+fn next_char_boundary(value: &str, mut byte: usize, count: usize) -> usize {
+    for _ in 0..count {
+        let Some(character) = value[byte..].chars().next() else {
+            return value.len();
+        };
+        byte = byte.saturating_add(character.len_utf8());
+    }
+    byte
+}
+
+fn signed_difference(after: u64, before: u64) -> i64 {
+    if after >= before {
+        i64::try_from(after - before).unwrap_or(i64::MAX)
+    } else {
+        -i64::try_from(before - after).unwrap_or(i64::MAX)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct DocumentLifecycleConfig {
@@ -47,6 +94,20 @@ pub enum SaveState {
     Journaling,
     Saving,
     Error(String),
+}
+
+/// Aggregate adjustment produced from a bounded editor text replacement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextCountDelta {
+    pub words: i64,
+    pub characters: i64,
+}
+
+/// Result of applying one Qt `contentsChange` payload to the Rust session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppliedTextDelta {
+    pub revision: Revision,
+    pub counts: TextCountDelta,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -115,6 +176,7 @@ pub struct DocumentSession {
     saved_revision: Revision,
     journaled_revision: Revision,
     semantic: Document,
+    semantic_dirty: bool,
     body: String,
     parse_options: ParseOptions,
     mode: EditorMode,
@@ -155,6 +217,7 @@ impl DocumentSession {
             saved_revision: Revision::INITIAL,
             journaled_revision: Revision::INITIAL,
             semantic,
+            semantic_dirty: false,
             body: body.to_owned(),
             parse_options,
             mode: EditorMode::Wysiwyg,
@@ -244,6 +307,7 @@ impl DocumentSession {
             Ok(document) => {
                 let status = source_parse_status(&document);
                 self.semantic = document;
+                self.semantic_dirty = false;
                 self.raw_status = match status {
                     SourceParseStatus::Invalid { message } => {
                         SourceParseStatus::Invalid { message }
@@ -259,10 +323,61 @@ impl DocumentSession {
                 self.raw_status = SourceParseStatus::Invalid {
                     message: error.to_string(),
                 };
+                self.semantic_dirty = true;
             }
         }
         self.body = body;
         self.record_edit(first_block..last_block_exclusive.max(first_block + 1), now)
+    }
+
+    /// Applies a bounded UTF-16 Qt text delta without transporting or parsing
+    /// the complete document. Semantic parsing is deferred to the journal/save
+    /// boundary; the full live string remains owned by this session.
+    pub fn apply_text_delta(
+        &mut self,
+        position_utf16: usize,
+        removed_utf16: usize,
+        inserted: &str,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<AppliedTextDelta, DocumentLifecycleError> {
+        self.require_wysiwyg()?;
+        let start = utf16_offset_to_byte(&self.body, position_utf16)
+            .ok_or(DocumentLifecycleError::InvalidTextDelta)?;
+        let end_utf16 = position_utf16
+            .checked_add(removed_utf16)
+            .ok_or(DocumentLifecycleError::InvalidTextDelta)?;
+        let end = utf16_offset_to_byte(&self.body, end_utf16)
+            .ok_or(DocumentLifecycleError::InvalidTextDelta)?;
+
+        let context_start = previous_char_boundary(&self.body, start, 2);
+        let context_end = next_char_boundary(&self.body, end, 2);
+        let old_words = text_statistics(&self.body[context_start..context_end]).words;
+        let removed_characters = self.body[start..end].chars().count();
+        let suffix_bytes = context_end.saturating_sub(end);
+        self.body.replace_range(start..end, inserted);
+        let inserted_end = start.saturating_add(inserted.len());
+        let new_context_end = inserted_end
+            .saturating_add(suffix_bytes)
+            .min(self.body.len());
+        let new_words = text_statistics(&self.body[context_start..new_context_end]).words;
+        self.semantic_dirty = true;
+        self.raw_status = SourceParseStatus::NotInSourceMode;
+        let revision = self.record_edit(
+            first_block..last_block_exclusive.max(first_block.saturating_add(1)),
+            now,
+        )?;
+        Ok(AppliedTextDelta {
+            revision,
+            counts: TextCountDelta {
+                words: signed_difference(new_words, old_words),
+                characters: signed_difference(
+                    u64::try_from(inserted.chars().count()).unwrap_or(u64::MAX),
+                    u64::try_from(removed_characters).unwrap_or(u64::MAX),
+                ),
+            },
+        })
     }
 
     pub fn replace_block(
@@ -271,9 +386,10 @@ impl DocumentSession {
         node: BlockNode,
         now: Instant,
     ) -> Result<Revision, DocumentLifecycleError> {
-        self.require_wysiwyg()?;
+        self.require_current_semantic()?;
         self.semantic.replace_block(index, node)?;
         self.body = self.semantic.serialize_body();
+        self.semantic_dirty = false;
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -283,9 +399,10 @@ impl DocumentSession {
         node: BlockNode,
         now: Instant,
     ) -> Result<Revision, DocumentLifecycleError> {
-        self.require_wysiwyg()?;
+        self.require_current_semantic()?;
         self.semantic.insert_block(index, node)?;
         self.body = self.semantic.serialize_body();
+        self.semantic_dirty = false;
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -294,9 +411,10 @@ impl DocumentSession {
         index: usize,
         now: Instant,
     ) -> Result<Revision, DocumentLifecycleError> {
-        self.require_wysiwyg()?;
+        self.require_current_semantic()?;
         self.semantic.remove_block(index)?;
         self.body = self.semantic.serialize_body();
+        self.semantic_dirty = false;
         self.record_edit(index..index.saturating_add(1), now)
     }
 
@@ -389,6 +507,7 @@ impl DocumentSession {
         if !self.is_dirty() {
             return Ok(None);
         }
+        self.refresh_semantic()?;
         if let SourceParseStatus::Invalid { message } = &self.raw_status {
             let message = message.clone();
             self.save_state = SaveState::Error(format!(
@@ -445,22 +564,21 @@ impl DocumentSession {
         let Some(journal) = self.prepare_journal(now, true)? else {
             return Ok(None);
         };
+        let semantic_valid = self.refresh_semantic().is_ok();
         // The caller must execute and acknowledge the journal before executing
         // the save. Capturing the save payload here avoids touching Qt later.
-        let save = (!matches!(self.raw_status, SourceParseStatus::Invalid { .. })).then(|| {
-            CanonicalSaveRequest {
-                stamp: journal.stamp,
-                document_id: self.document_id,
-                body: self.current_body_owned(),
-                expected_disk_fingerprint: self.disk_fingerprint,
-                rotating_backups: self.config.rotating_backups,
-            }
+        let save = semantic_valid.then(|| CanonicalSaveRequest {
+            stamp: journal.stamp,
+            document_id: self.document_id,
+            body: self.current_body_owned(),
+            expected_disk_fingerprint: self.disk_fingerprint,
+            rotating_backups: self.config.rotating_backups,
         });
         Ok(Some((journal, save)))
     }
 
     pub fn enter_source_mode(&mut self) -> Result<&str, DocumentLifecycleError> {
-        self.require_wysiwyg()?;
+        self.require_current_semantic()?;
         self.raw_buffer = Some(self.semantic.serialize_body());
         self.raw_status = SourceParseStatus::Valid(self.semantic.diagnostics().to_vec());
         self.mode = EditorMode::Source;
@@ -483,6 +601,7 @@ impl DocumentSession {
             },
         };
         self.body.clone_from(&raw);
+        self.semantic_dirty = true;
         self.raw_buffer = Some(raw);
         self.revision = self.revision.next()?;
         self.dirty_blocks
@@ -510,11 +629,13 @@ impl DocumentSession {
             return Err(DocumentLifecycleError::InvalidRawSource(message));
         }
         self.semantic = document;
+        self.semantic_dirty = false;
         self.body = raw.to_owned();
         self.raw_buffer = None;
         self.raw_status = SourceParseStatus::NotInSourceMode;
         self.mode = EditorMode::Wysiwyg;
         self.body = self.semantic.serialize_body();
+        self.semantic_dirty = false;
         self.undo_epoch = self.undo_epoch.saturating_add(1);
         Ok(())
     }
@@ -527,6 +648,7 @@ impl DocumentSession {
         self.raw_status = SourceParseStatus::NotInSourceMode;
         self.mode = EditorMode::Wysiwyg;
         self.body = self.semantic.serialize_body();
+        self.semantic_dirty = false;
         self.undo_epoch = self.undo_epoch.saturating_add(1);
         Ok(())
     }
@@ -559,6 +681,7 @@ impl DocumentSession {
             }));
         }
         self.semantic = Document::parse_body(&external, &self.parse_options)?;
+        self.semantic_dirty = false;
         self.body = external;
         self.revision = self.revision.next()?;
         self.saved_revision = self.revision;
@@ -576,6 +699,7 @@ impl DocumentSession {
     ) -> Result<(), DocumentLifecycleError> {
         self.check_conflict(conflict)?;
         self.semantic = Document::parse_body(&conflict.external_body, &self.parse_options)?;
+        self.semantic_dirty = false;
         self.body.clone_from(&conflict.external_body);
         self.revision = self.revision.next()?;
         self.saved_revision = self.revision;
@@ -626,6 +750,31 @@ impl DocumentSession {
         } else {
             Err(DocumentLifecycleError::WrongMode)
         }
+    }
+
+    fn require_current_semantic(&mut self) -> Result<(), DocumentLifecycleError> {
+        self.require_wysiwyg()?;
+        self.refresh_semantic()
+    }
+
+    fn refresh_semantic(&mut self) -> Result<(), DocumentLifecycleError> {
+        if !self.semantic_dirty {
+            return Ok(());
+        }
+        let document = Document::parse_body(&self.body, &self.parse_options).map_err(|error| {
+            let message = error.to_string();
+            self.raw_status = SourceParseStatus::Invalid {
+                message: message.clone(),
+            };
+            self.save_state = SaveState::Error(format!(
+                "The current text is safely journaled but cannot replace the document yet: {message}"
+            ));
+            DocumentLifecycleError::InvalidRawSource(message)
+        })?;
+        self.raw_status = source_parse_status(&document);
+        self.semantic = document;
+        self.semantic_dirty = false;
+        Ok(())
     }
 
     fn recovery_path(&self) -> PathBuf {
@@ -1370,6 +1519,7 @@ impl RecoveryStore {
             return Err(DocumentLifecycleError::ConflictDocument);
         }
         session.semantic = Document::parse_body(&candidate.record.body, &session.parse_options)?;
+        session.semantic_dirty = false;
         session.body.clone_from(&candidate.record.body);
         session.mode = EditorMode::Wysiwyg;
         session.raw_buffer = None;
@@ -1413,6 +1563,8 @@ pub enum DocumentLifecycleError {
     Revision(#[from] parchmint_domain::RevisionError),
     #[error("operation is not valid in the current editor mode")]
     WrongMode,
+    #[error("editor text delta does not align with the current UTF-16 document")]
+    InvalidTextDelta,
     #[error("raw source is invalid and remains open: {0}")]
     InvalidRawSource(String),
     #[error("revision {0:?} must be journaled before canonical save")]
@@ -1774,6 +1926,25 @@ mod tests {
     }
 
     #[test]
+    fn utf16_text_delta_updates_only_the_changed_range_and_exact_counts() {
+        let (_directory, opened, id) = project_with_document();
+        let mut session = DocumentSession::open(
+            &opened,
+            id,
+            ProjectGeneration::new(3).unwrap(),
+            DocumentLifecycleConfig::default(),
+        )
+        .unwrap();
+        let applied = session
+            .apply_text_delta(0, 8, "雪 and river", 0, 1, Instant::now())
+            .unwrap();
+        assert_eq!(session.body(), "雪 and river.\n");
+        assert_eq!(applied.counts.words, 2);
+        assert_eq!(applied.counts.characters, 3);
+        assert!(session.is_dirty());
+    }
+
+    #[test]
     fn invalid_live_wysiwyg_text_is_journaled_and_vetoes_canonical_save() {
         let (_directory, opened, id) = project_with_document();
         let mut session = DocumentSession::open(
@@ -2019,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual release-mode Stage 03 lifecycle measurement"]
+    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 performance gate")]
     fn records_large_document_journal_and_save_latency() {
         let (_directory, mut opened, id) = project_with_document();
         let mut large = String::with_capacity(1_500_000);
@@ -2065,7 +2236,16 @@ mod tests {
         eprintln!(
             "lifecycle words=250000 load={load:?} ui_dirty={ui_dirty:?} journal={journal_time:?} canonical_save={save_time:?}"
         );
+        assert!(load < Duration::from_secs(1), "document load took {load:?}");
         assert!(ui_dirty < Duration::from_millis(8));
+        assert!(
+            journal_time < Duration::from_secs(1),
+            "journal write took {journal_time:?}"
+        );
+        assert!(
+            save_time < Duration::from_secs(1),
+            "canonical save took {save_time:?}"
+        );
         assert!(!session.is_dirty());
     }
 }

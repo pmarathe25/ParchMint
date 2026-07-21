@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
 #include <QMimeData>
 #include <QPointer>
 #include <qqmlintegration.h>
@@ -47,10 +48,26 @@ signals:
   void modelError(const QString& message) const;
 
 private slots:
-  void refresh();
+  void applyDelta(const QString& kind, int first, int destination, int count);
 
 private:
-  QVariant invoke(const char* method, int row) const;
+  struct CachedRow
+  {
+    QString title;
+    QString id;
+    int depth = 0;
+    int parent = -1;
+    QString synopsis;
+    QString status;
+    QString label;
+    bool group = false;
+    bool root = false;
+    int words = 0;
+    bool include = false;
+  };
+  const CachedRow* cachedRow(int row) const;
   QPointer<QObject> m_source;
   QMetaObject::Connection m_revisionConnection;
+  mutable QHash<int, CachedRow> m_rows;
+  int m_rowCount = 0;
 };

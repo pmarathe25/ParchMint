@@ -15,6 +15,8 @@
 #include <QUrl>
 #include <QVariantMap>
 
+#include <utility>
+
 namespace {
 constexpr int ParchMintPageBreakObject = QTextFormat::UserObject + 1;
 constexpr int ParchMintOpaqueObject = QTextFormat::UserObject + 2;
@@ -148,6 +150,7 @@ void EditorAdapter::setTextDocument(QObject* object)
   m_document = document ? document->textDocument() : nullptr;
   m_cursorPosition = m_selectionStart = m_selectionEnd = 0;
   m_revision = 0;
+  m_pendingChanges.clear();
   connectDocumentSignals();
   emit textDocumentChanged();
   emit cursorPositionChanged();
@@ -164,6 +167,7 @@ void EditorAdapter::setDocumentForTesting(QTextDocument* document)
   m_document = document;
   m_cursorPosition = m_selectionStart = m_selectionEnd = 0;
   m_revision = 0;
+  m_pendingChanges.clear();
   connectDocumentSignals();
   emit textDocumentChanged();
   emit cursorPositionChanged();
@@ -312,6 +316,8 @@ void EditorAdapter::setFocused(bool focused)
 {
   if (m_focused == focused)
     return;
+  if (!focused)
+    flushPendingChanges();
   m_focused = focused;
   emit focusedChanged();
   emit undoAvailabilityChanged();
@@ -321,6 +327,8 @@ void EditorAdapter::setFocused(bool focused)
 }
 
 qulonglong EditorAdapter::revision() const { return m_revision; }
+
+void EditorAdapter::flushPendingChanges() { onContentsChanged(); }
 
 QTextCursor EditorAdapter::cursor() const
 {
@@ -963,11 +971,43 @@ void EditorAdapter::onContentsChange(int position, int removed, int added)
 {
   if (m_loading || !m_document)
     return;
-  ++m_revision;
-  const auto first = m_document->findBlock(qMax(0, position)).blockNumber();
-  const auto last = m_document->findBlock(qMax(0, position + added)).blockNumber() + 1;
-  emit revisionChanged();
-  emit incrementalDirty(m_revision, position, removed, added, qMax(0, first), qMax(first + 1, last));
+  m_pendingChanges.push_back({ position, removed, added });
+  if (!m_changeDeliveryScheduled) {
+    m_changeDeliveryScheduled = true;
+    QMetaObject::invokeMethod(this, &EditorAdapter::onContentsChanged, Qt::QueuedConnection);
+  }
+}
+
+void EditorAdapter::onContentsChanged()
+{
+  m_changeDeliveryScheduled = false;
+  if (m_loading || !m_document || m_pendingChanges.isEmpty()) {
+    m_pendingChanges.clear();
+    return;
+  }
+  const auto changes = std::exchange(m_pendingChanges, {});
+  const auto maximum = qMax(0, m_document->characterCount() - 1);
+  for (const auto& change : changes) {
+    ++m_revision;
+    const auto position = qBound(0, change.position, maximum);
+    const auto end = qBound(position, change.position + change.added, maximum);
+    const auto first = m_document->findBlock(position).blockNumber();
+    const auto last = m_document->findBlock(end).blockNumber() + 1;
+    QTextCursor changed(m_document);
+    changed.setPosition(position);
+    changed.setPosition(end, QTextCursor::KeepAnchor);
+    auto inserted = changed.selectedText();
+    inserted.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+    inserted.replace(QChar::LineSeparator, QLatin1Char('\n'));
+    emit revisionChanged();
+    emit incrementalDirty(m_revision,
+                          change.position,
+                          change.removed,
+                          change.added,
+                          inserted,
+                          qMax(0, first),
+                          qMax(first + 1, last));
+  }
 }
 
 int EditorAdapter::clampPosition(const QTextDocument* document, int position)

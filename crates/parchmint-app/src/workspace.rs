@@ -9,7 +9,8 @@ use crate::{
     CanonicalSaveRequest, CompletionDisposition, ContentFingerprint, DocumentLifecycleConfig,
     DocumentLifecycleError, DocumentSession, ExternalChange, ExternalConflict, IndexStatus,
     JournalRequest, ProjectSearch, RecoveryCandidate, RecoveryIssue, RecoveryScan, RecoveryStore,
-    SaveState, SearchServiceError, text_statistics,
+    SaveState, SearchIndexWorker, SearchRebuildProgress, SearchServiceError, TextStatistics,
+    text_statistics,
 };
 use parchmint_compile::{
     self, CancellationToken, CompileError, CompileInput, CompileIr, CompilePreview, ExportError,
@@ -22,13 +23,15 @@ use parchmint_domain::{
 };
 use parchmint_index::{CountTotals, SearchQuery, SearchResult};
 use parchmint_storage::{
-    AttachmentPreview, AttachmentRecord, OpenMode, OpenProject, ProjectStorage, StorageError,
-    atomic_write,
+    AttachmentPreview, AttachmentRecord, OpenMode, OpenProject, ProjectSavePlan, ProjectStorage,
+    SaveMetrics, ScheduledCommandRollback, StorageError, atomic_write,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread::{self, JoinHandle};
 use std::time::Instant;
 use thiserror::Error;
 
@@ -77,6 +80,16 @@ pub struct BinderRow {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BinderSnapshot {
     rows: Vec<BinderRow>,
+    positions: BTreeMap<NodeId, usize>,
+}
+
+/// Independent invalidation domains used by UI models and background jobs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkspaceRevisions {
+    pub content: u64,
+    pub structure: u64,
+    pub selection: u64,
+    pub presentation: u64,
 }
 
 impl BinderSnapshot {
@@ -97,6 +110,54 @@ impl BinderSnapshot {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
+    /// Constant-logarithmic stable-ID lookup used to encode parent rows once
+    /// per cached FFI payload.
+    pub fn row_for_node(&self, node: NodeId) -> Option<usize> {
+        self.positions.get(&node).copied()
+    }
+
+    fn rebuild_positions(&mut self) {
+        self.positions = self
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+    }
+
+    fn subtree_range(&self, node: NodeId) -> Option<std::ops::Range<usize>> {
+        let start = *self.positions.get(&node)?;
+        let depth = self.rows[start].depth;
+        let end = self.rows[start + 1..]
+            .iter()
+            .position(|row| row.depth <= depth)
+            .map_or(self.rows.len(), |offset| start + 1 + offset);
+        Some(start..end)
+    }
+}
+
+/// Typed, stable-ID-derived changes consumed by the Qt outline model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OutlineDelta {
+    Insert {
+        first: usize,
+        count: usize,
+    },
+    Remove {
+        first: usize,
+        count: usize,
+    },
+    Move {
+        first: usize,
+        destination: usize,
+        count: usize,
+    },
+    Data {
+        first: usize,
+        count: usize,
+    },
+    Reset,
 }
 
 /// The independently versioned, disposable workspace format.
@@ -335,6 +396,70 @@ struct ProjectReplaceUndo {
     expected: Vec<(NodeId, ContentFingerprint)>,
 }
 
+struct PendingStructuralSave {
+    sequence: u64,
+    rollback: ScheduledCommandRollback,
+}
+
+struct StructuralSaveCompletion {
+    sequence: u64,
+    outcome: Result<SaveMetrics, String>,
+}
+
+struct StructuralSaveWorker {
+    jobs: Option<mpsc::Sender<(u64, ProjectSavePlan)>>,
+    completions: mpsc::Receiver<StructuralSaveCompletion>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl StructuralSaveWorker {
+    fn start() -> Result<Self, std::io::Error> {
+        let (jobs, receiver) = mpsc::channel::<(u64, ProjectSavePlan)>();
+        let (sender, completions) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name("parchmint-project-save".into())
+            .spawn(move || {
+                let mut failed = None::<String>;
+                while let Ok((sequence, plan)) = receiver.recv() {
+                    let outcome = failed
+                        .clone()
+                        .map_or_else(|| plan.execute().map_err(|error| error.to_string()), Err);
+                    if let Err(error) = &outcome {
+                        failed = Some(error.clone());
+                    }
+                    if sender
+                        .send(StructuralSaveCompletion { sequence, outcome })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            jobs: Some(jobs),
+            completions,
+            worker: Some(worker),
+        })
+    }
+
+    fn submit(&self, sequence: u64, plan: ProjectSavePlan) -> Result<(), WorkspaceError> {
+        self.jobs
+            .as_ref()
+            .ok_or_else(|| WorkspaceError::StructuralPersistence("save worker is closed".into()))?
+            .send((sequence, plan))
+            .map_err(|_| WorkspaceError::StructuralPersistence("save worker is closed".into()))
+    }
+}
+
+impl Drop for StructuralSaveWorker {
+    fn drop(&mut self) {
+        drop(self.jobs.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 /// One project incarnation and all Stage 04 structural/metadata use cases.
 pub struct ProjectWorkspace {
     opened: OpenProject,
@@ -351,6 +476,27 @@ pub struct ProjectWorkspace {
     search: ProjectSearch,
     index_diagnostic: Option<String>,
     replace_undo: Option<ProjectReplaceUndo>,
+    document_counts: BTreeMap<DocumentId, TextStatistics>,
+    subtree_counts: BTreeMap<NodeId, TextStatistics>,
+    counts_complete: bool,
+    index_worker: Option<SearchIndexWorker>,
+    index_revision: u64,
+    revisions: WorkspaceRevisions,
+    outline_deltas: Vec<OutlineDelta>,
+    snapshot_filter: String,
+    snapshot_sort: OutlineSort,
+    structural_save_worker: Option<StructuralSaveWorker>,
+    pending_structural_saves: VecDeque<PendingStructuralSave>,
+    next_structural_save: u64,
+    structural_save_error: Option<String>,
+}
+
+impl Drop for ProjectWorkspace {
+    fn drop(&mut self) {
+        // Keep the advisory project lock alive until every already-published
+        // structural write set has either committed or recovered.
+        self.structural_save_worker.take();
+    }
 }
 
 impl ProjectWorkspace {
@@ -381,7 +527,26 @@ impl ProjectWorkspace {
             .filter(|id| opened.project.nodes.contains_key(id) && !opened.project.is_trashed(*id))
             .collect();
         let snapshot = build_snapshot(&opened.project, None, "", OutlineSort::Binder);
-        let search = ProjectSearch::open(opened.root());
+        let mut search = ProjectSearch::open(opened.root());
+        let index_revision = 1;
+        let index_worker = match SearchIndexWorker::start_canonical(
+            search.path().to_owned(),
+            opened.root().to_owned(),
+            index_revision,
+        ) {
+            Ok(worker) => {
+                search.set_indexing(
+                    index_revision,
+                    0,
+                    u64::try_from(opened.project.documents.len()).unwrap_or(u64::MAX),
+                );
+                Some(worker)
+            }
+            Err(error) => {
+                search.set_unavailable(error.to_string());
+                None
+            }
+        };
         Self {
             opened,
             generation: ProjectGeneration::new(1).expect("one is a valid generation"),
@@ -397,11 +562,37 @@ impl ProjectWorkspace {
             search,
             index_diagnostic: None,
             replace_undo: None,
+            document_counts: BTreeMap::new(),
+            subtree_counts: BTreeMap::new(),
+            counts_complete: false,
+            index_worker,
+            index_revision,
+            revisions: WorkspaceRevisions {
+                content: 1,
+                structure: 1,
+                selection: 1,
+                presentation: 1,
+            },
+            outline_deltas: Vec::new(),
+            snapshot_filter: String::new(),
+            snapshot_sort: OutlineSort::Binder,
+            structural_save_worker: None,
+            pending_structural_saves: VecDeque::new(),
+            next_structural_save: 1,
+            structural_save_error: None,
         }
     }
 
     pub fn project(&self) -> &Project {
         &self.opened.project
+    }
+
+    pub const fn revisions(&self) -> WorkspaceRevisions {
+        self.revisions
+    }
+
+    pub fn take_outline_deltas(&mut self) -> Vec<OutlineDelta> {
+        std::mem::take(&mut self.outline_deltas)
     }
 
     pub fn project_root(&self) -> &Path {
@@ -410,6 +601,95 @@ impl ProjectWorkspace {
 
     pub fn is_read_only(&self) -> bool {
         self.opened.mode() == OpenMode::ReadOnly
+    }
+
+    /// Moves structural transaction I/O to the project save worker. Preparing
+    /// the bounded dirty set and publishing model deltas remain owner-thread work.
+    pub fn enable_deferred_structural_saves(&mut self) -> Result<(), WorkspaceError> {
+        if self.is_read_only() || self.structural_save_worker.is_some() {
+            return Ok(());
+        }
+        self.structural_save_worker = Some(
+            StructuralSaveWorker::start()
+                .map_err(|error| WorkspaceError::StructuralPersistence(error.to_string()))?,
+        );
+        Ok(())
+    }
+
+    pub fn has_pending_structural_saves(&self) -> bool {
+        !self.pending_structural_saves.is_empty()
+    }
+
+    pub fn structural_save_error(&self) -> Option<&str> {
+        self.structural_save_error.as_deref()
+    }
+
+    /// Applies all completed persistence acknowledgements without blocking.
+    /// A failed transaction rolls back that command and every later queued
+    /// optimistic command, then publishes one authoritative model reset.
+    pub fn poll_structural_saves(&mut self) -> Result<(), WorkspaceError> {
+        loop {
+            let completion = match self
+                .structural_save_worker
+                .as_ref()
+                .map(|worker| worker.completions.try_recv())
+            {
+                None | Some(Err(mpsc::TryRecvError::Empty)) => break,
+                Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                    return Err(WorkspaceError::StructuralPersistence(
+                        "save worker disconnected".into(),
+                    ));
+                }
+                Some(Ok(completion)) => completion,
+            };
+            let Some(front) = self.pending_structural_saves.front() else {
+                return Err(WorkspaceError::Invariant(
+                    "structural save completed without a pending command",
+                ));
+            };
+            if front.sequence != completion.sequence {
+                return Err(WorkspaceError::Invariant(
+                    "structural save completions arrived out of order",
+                ));
+            }
+            match completion.outcome {
+                Ok(metrics) => {
+                    self.pending_structural_saves.pop_front();
+                    ProjectStorage::acknowledge_scheduled_command(&mut self.opened, metrics);
+                    if self.pending_structural_saves.is_empty()
+                        && self.search.status() == &IndexStatus::RebuildNeeded
+                    {
+                        self.restart_background_index();
+                    }
+                }
+                Err(error) => {
+                    self.structural_save_worker.take();
+                    let pending = std::mem::take(&mut self.pending_structural_saves);
+                    for command in pending.into_iter().rev() {
+                        ProjectStorage::rollback_scheduled_command(
+                            &mut self.opened,
+                            command.rollback,
+                        )?;
+                    }
+                    self.undo.clear();
+                    self.redo.clear();
+                    self.snapshot = build_snapshot(
+                        &self.opened.project,
+                        None,
+                        &self.snapshot_filter,
+                        self.snapshot_sort,
+                    );
+                    self.outline_deltas.clear();
+                    self.outline_deltas.push(OutlineDelta::Reset);
+                    self.revisions.structure = self.revisions.structure.saturating_add(1);
+                    self.revisions.content = self.revisions.content.saturating_add(1);
+                    self.restart_background_index();
+                    self.structural_save_error = Some(error.clone());
+                    return Err(WorkspaceError::StructuralPersistence(error));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn set_project_generation(
@@ -447,7 +727,9 @@ impl ProjectWorkspace {
                 self.generation,
                 self.lifecycle_config.clone(),
             )?;
+            let counts = text_statistics(session.body());
             self.sessions.insert(document, session);
+            self.set_document_counts(document, counts)?;
         }
         Ok(())
     }
@@ -476,12 +758,135 @@ impl ProjectWorkspace {
     ) -> Result<WorkStamp, WorkspaceError> {
         let document = self.pane_document_id(pane)?;
         self.ensure_session(document)?;
+        let new_counts = text_statistics(&body);
         let session = self
             .sessions
             .get_mut(&document)
             .expect("session was just initialized");
         session.replace_body(body, first_block, last_block_exclusive, now)?;
-        Ok(session.stamp())
+        let stamp = session.stamp();
+        self.set_document_counts(document, new_counts)?;
+        self.revisions.content = self.revisions.content.saturating_add(1);
+        Ok(stamp)
+    }
+
+    /// Applies one bounded Qt text delta and propagates its count adjustment to
+    /// the document and all cached ancestors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_pane_text_delta(
+        &mut self,
+        pane: usize,
+        position_utf16: usize,
+        removed_utf16: usize,
+        inserted: &str,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<WorkStamp, WorkspaceError> {
+        let document = self.pane_document_id(pane)?;
+        self.ensure_session(document)?;
+        let applied = self
+            .sessions
+            .get_mut(&document)
+            .expect("session was just initialized")
+            .apply_text_delta(
+                position_utf16,
+                removed_utf16,
+                inserted,
+                first_block,
+                last_block_exclusive,
+                now,
+            )?;
+        self.apply_document_count_delta(document, applied.counts)?;
+        let mut count_node = self
+            .opened
+            .project
+            .documents
+            .get(&document)
+            .map(|record| record.node_id);
+        while let Some(node) = count_node {
+            self.refresh_snapshot_node(node);
+            count_node = self
+                .opened
+                .project
+                .nodes
+                .get(&node)
+                .and_then(|entry| entry.parent);
+        }
+        self.revisions.content = self.revisions.content.saturating_add(1);
+        Ok(WorkStamp {
+            generation: self.generation,
+            revision: applied.revision,
+        })
+    }
+
+    pub fn pane_text_statistics(&mut self, pane: usize) -> Result<TextStatistics, WorkspaceError> {
+        let document = self.pane_document_id(pane)?;
+        self.ensure_session(document)?;
+        Ok(self.document_counts[&document])
+    }
+
+    pub const fn counts_complete(&self) -> bool {
+        self.counts_complete
+    }
+
+    fn set_document_counts(
+        &mut self,
+        document: DocumentId,
+        counts: TextStatistics,
+    ) -> Result<(), WorkspaceError> {
+        let previous = self
+            .document_counts
+            .insert(document, counts)
+            .unwrap_or_default();
+        self.propagate_count_delta(
+            document,
+            signed_count_delta(counts.words, previous.words),
+            signed_count_delta(counts.characters, previous.characters),
+        )
+    }
+
+    fn apply_document_count_delta(
+        &mut self,
+        document: DocumentId,
+        delta: crate::TextCountDelta,
+    ) -> Result<(), WorkspaceError> {
+        let counts = self.document_counts.entry(document).or_default();
+        counts.words = apply_signed_count(counts.words, delta.words);
+        counts.characters = apply_signed_count(counts.characters, delta.characters);
+        self.propagate_count_delta(document, delta.words, delta.characters)
+    }
+
+    fn propagate_count_delta(
+        &mut self,
+        document: DocumentId,
+        words: i64,
+        characters: i64,
+    ) -> Result<(), WorkspaceError> {
+        let mut current = Some(
+            self.opened
+                .project
+                .documents
+                .get(&document)
+                .ok_or(WorkspaceError::Invariant("count document is absent"))?
+                .node_id,
+        );
+        let mut seen = BTreeSet::new();
+        while let Some(node) = current {
+            if !seen.insert(node) {
+                return Err(WorkspaceError::Invariant("count ancestry contains a cycle"));
+            }
+            let aggregate = self.subtree_counts.entry(node).or_default();
+            aggregate.words = apply_signed_count(aggregate.words, words);
+            aggregate.characters = apply_signed_count(aggregate.characters, characters);
+            current = self
+                .opened
+                .project
+                .nodes
+                .get(&node)
+                .and_then(|entry| entry.parent);
+        }
+        Ok(())
     }
 
     pub fn open_session_ids(&self) -> Vec<DocumentId> {
@@ -611,7 +1016,12 @@ impl ProjectWorkspace {
                 if disposition == CompletionDisposition::Applied
                     && let Some(record) = self.opened.project.documents.get(&document)
                 {
-                    self.update_index_node(record.node_id);
+                    let node = record.node_id;
+                    if self.index_worker.is_some() {
+                        self.restart_background_index();
+                    } else {
+                        self.update_index_node(node);
+                    }
                 }
                 disposition
             }
@@ -789,6 +1199,10 @@ impl ProjectWorkspace {
 
     /// Explicitly (re)builds the derived cache from current canonical project state.
     pub fn rebuild_search_index(&mut self) -> Result<(), WorkspaceError> {
+        if let Some(worker) = self.index_worker.take() {
+            worker.cancel();
+            drop(worker);
+        }
         self.search
             .rebuild(&self.opened)
             .map_err(WorkspaceError::Search)?;
@@ -796,9 +1210,100 @@ impl ProjectWorkspace {
         Ok(())
     }
 
-    /// Searches active documents. The first query may initialize a missing cache;
-    /// callers that require no synchronous work can invoke `rebuild_search_index`
-    /// on their Rust worker first.
+    /// Publishes bounded index/count worker deltas. The UI timer may call this
+    /// frequently; it never waits for disk or body scanning.
+    pub fn poll_search_index(&mut self) {
+        loop {
+            let progress = match self
+                .index_worker
+                .as_ref()
+                .map(SearchIndexWorker::try_progress)
+            {
+                Some(Ok(Some(progress))) => progress,
+                Some(Ok(None)) | None => break,
+                Some(Err(error)) => {
+                    self.search.set_unavailable(error.to_string());
+                    self.index_worker = None;
+                    break;
+                }
+            };
+            match progress {
+                SearchRebuildProgress::Batch {
+                    revision,
+                    completed,
+                    total,
+                } if revision == self.index_revision => {
+                    self.search.set_indexing(revision, completed, total);
+                }
+                SearchRebuildProgress::Counts { revision, rows }
+                    if revision == self.index_revision =>
+                {
+                    let mut changed_rows = Vec::new();
+                    for row in rows {
+                        if let Some(document) = row.document {
+                            self.document_counts.insert(
+                                document,
+                                TextStatistics {
+                                    words: row.document_words,
+                                    characters: row.document_characters,
+                                },
+                            );
+                        }
+                        self.subtree_counts.insert(
+                            row.node,
+                            TextStatistics {
+                                words: row.subtree_words,
+                                characters: row.subtree_characters,
+                            },
+                        );
+                        if let Some(&position) = self.snapshot.positions.get(&row.node) {
+                            let depth = self.snapshot.rows[position].depth;
+                            let words = usize::try_from(row.subtree_words).unwrap_or(usize::MAX);
+                            self.snapshot.rows[position] =
+                                binder_row(&self.opened.project, row.node, depth, words);
+                            changed_rows.push(position);
+                        }
+                    }
+                    changed_rows.sort_unstable();
+                    let mut ranges = changed_rows.into_iter().peekable();
+                    while let Some(first) = ranges.next() {
+                        let mut count = 1usize;
+                        while ranges.peek().is_some_and(|next| *next == first + count) {
+                            ranges.next();
+                            count += 1;
+                        }
+                        self.outline_deltas
+                            .push(OutlineDelta::Data { first, count });
+                    }
+                }
+                SearchRebuildProgress::Complete { revision, .. }
+                    if revision == self.index_revision =>
+                {
+                    self.search.set_ready();
+                    self.counts_complete = true;
+                    self.index_worker = None;
+                    break;
+                }
+                SearchRebuildProgress::Cancelled { revision }
+                    if revision == self.index_revision =>
+                {
+                    self.index_worker = None;
+                    break;
+                }
+                SearchRebuildProgress::Failed { revision, message }
+                    if revision == self.index_revision =>
+                {
+                    self.search.set_unavailable(message);
+                    self.index_worker = None;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Searches the stable cache prefix currently published by the background
+    /// worker. This call never scans canonical document bodies synchronously.
     pub fn search_project(
         &mut self,
         query: &SearchQuery<'_>,
@@ -1166,12 +1671,19 @@ impl ProjectWorkspace {
             &parchmint_markdown::ParseOptions::default(),
         )
         .map_err(|error| WorkspaceError::InvalidDocument(error.to_string()))?;
+        let counts = text_statistics(&body);
         self.opened
             .set_body(document, body)
             .map_err(WorkspaceError::Storage)?;
         ProjectStorage::save_document(&mut self.opened, document)
             .map_err(WorkspaceError::Storage)?;
-        self.update_index_node(node);
+        self.set_document_counts(document, counts)?;
+        self.revisions.content = self.revisions.content.saturating_add(1);
+        if self.index_worker.is_some() {
+            self.restart_background_index();
+        } else {
+            self.update_index_node(node);
+        }
         Ok(())
     }
 
@@ -1388,12 +1900,16 @@ impl ProjectWorkspace {
     /// Changes selection only after removing stale, trashed, and duplicate IDs.
     pub fn select(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
         let mut seen = BTreeSet::new();
-        self.selection = nodes
+        let selection = nodes
             .into_iter()
             .filter(|id| self.opened.project.nodes.contains_key(id))
             .filter(|id| !self.opened.project.is_trashed(*id))
             .filter(|id| seen.insert(*id))
             .collect();
+        if self.selection != selection {
+            self.revisions.selection = self.revisions.selection.saturating_add(1);
+        }
+        self.selection = selection;
         self.preferences.selected_nodes = self.selection.clone();
         let _ = self.save_preferences();
     }
@@ -1402,12 +1918,11 @@ impl ProjectWorkspace {
     /// ancestors of a matching row, and sorting is never a structural mutation.
     pub fn project_snapshot(&mut self, focus: Option<NodeId>, filter: &str, sort: OutlineSort) {
         let mut snapshot = build_snapshot(&self.opened.project, focus, filter, sort);
-        // Counts are projected once with a structural/selection refresh rather
-        // than through a QML-to-Rust full-text call on every keystroke. Open
-        // sessions win over canonical bytes so a planning view immediately
-        // reflects unsaved live text when it next becomes visible.
+        // Derived totals are never rebuilt synchronously by a projection. Rows
+        // whose canonical bodies have not been indexed/opened remain explicitly
+        // zero while `counts_complete` is false.
         for row in &mut snapshot.rows {
-            let Some(document) = self
+            let Some(_document) = self
                 .opened
                 .project
                 .nodes
@@ -1416,16 +1931,17 @@ impl ProjectWorkspace {
             else {
                 continue;
             };
-            let body = self
-                .sessions
-                .get(&document)
-                .map(|session| session.body())
-                .or_else(|| self.opened.body(document).ok());
-            row.word_count = body.map_or(0, |body| {
-                usize::try_from(text_statistics(body).words).unwrap_or(usize::MAX)
-            });
+            row.word_count = self
+                .subtree_counts
+                .get(&row.id)
+                .and_then(|counts| usize::try_from(counts.words).ok())
+                .unwrap_or(0);
         }
         self.snapshot = snapshot;
+        filter.clone_into(&mut self.snapshot_filter);
+        self.snapshot_sort = sort;
+        self.outline_deltas.push(OutlineDelta::Reset);
+        self.revisions.presentation = self.revisions.presentation.saturating_add(1);
     }
 
     pub fn create_node(
@@ -1695,7 +2211,6 @@ impl ProjectWorkspace {
         };
         let inverse = self.execute_persisted(command)?;
         self.redo.push(inverse);
-        self.project_snapshot(None, "", OutlineSort::Binder);
         Ok(true)
     }
 
@@ -1705,7 +2220,6 @@ impl ProjectWorkspace {
         };
         let inverse = self.execute_persisted(command)?;
         self.undo.push(inverse);
-        self.project_snapshot(None, "", OutlineSort::Binder);
         Ok(true)
     }
 
@@ -1729,7 +2243,6 @@ impl ProjectWorkspace {
         let inverse = self.execute_persisted(command)?;
         self.undo.push(inverse);
         self.redo.clear();
-        self.project_snapshot(None, "", OutlineSort::Binder);
         Ok(())
     }
 
@@ -1740,13 +2253,266 @@ impl ProjectWorkspace {
         if self.is_read_only() {
             return Err(StorageError::ReadOnly.into());
         }
-        let outcome = self
-            .opened
-            .execute(command)
-            .map_err(WorkspaceError::Storage)?;
-        ProjectStorage::save(&mut self.opened).map_err(WorkspaceError::Storage)?;
-        self.update_index_events(&outcome.events);
+        let outcome = if let Some(worker) = self.structural_save_worker.as_ref() {
+            let scheduled = ProjectStorage::schedule_command(&mut self.opened, command)
+                .map_err(WorkspaceError::Storage)?;
+            let sequence = self.next_structural_save;
+            self.next_structural_save = self.next_structural_save.saturating_add(1);
+            if let Err(error) = worker.submit(sequence, scheduled.plan) {
+                ProjectStorage::rollback_scheduled_command(&mut self.opened, scheduled.rollback)?;
+                return Err(error);
+            }
+            self.pending_structural_saves
+                .push_back(PendingStructuralSave {
+                    sequence,
+                    rollback: scheduled.rollback,
+                });
+            scheduled.outcome
+        } else {
+            ProjectStorage::execute_command(&mut self.opened, command)
+                .map_err(WorkspaceError::Storage)?
+        };
+        for event in &outcome.events {
+            match event {
+                ProjectEvent::NodeCreated(_)
+                | ProjectEvent::NodeReordered(_)
+                | ProjectEvent::NodeReparented { .. }
+                | ProjectEvent::NodeDuplicated { .. }
+                | ProjectEvent::NodeTrashed(_)
+                | ProjectEvent::NodeRestored(_) => {
+                    self.revisions.structure = self.revisions.structure.saturating_add(1);
+                }
+                ProjectEvent::NodeRenamed(_) | ProjectEvent::MetadataEdited(_) => {
+                    self.revisions.content = self.revisions.content.saturating_add(1);
+                }
+                ProjectEvent::StyleMutated(_)
+                | ProjectEvent::StyleReplaced { .. }
+                | ProjectEvent::CompilePresetSaved(_)
+                | ProjectEvent::CompilePresetRemoved(_) => {
+                    self.revisions.presentation = self.revisions.presentation.saturating_add(1);
+                }
+            }
+        }
+        self.apply_outline_events(&outcome.events)?;
+        if self.index_worker.is_some() {
+            if self.has_pending_structural_saves() {
+                if let Some(worker) = self.index_worker.take() {
+                    worker.cancel();
+                    drop(worker);
+                }
+                self.counts_complete = false;
+                self.search.set_rebuild_needed();
+            } else {
+                self.restart_background_index();
+            }
+        } else {
+            self.update_index_events(&outcome.events);
+        }
         Ok(outcome.undo.inverse)
+    }
+
+    fn apply_outline_events(&mut self, events: &[ProjectEvent]) -> Result<(), WorkspaceError> {
+        if !self.snapshot_filter.is_empty() || self.snapshot_sort != OutlineSort::Binder {
+            let filter = self.snapshot_filter.clone();
+            let sort = self.snapshot_sort;
+            self.project_snapshot(None, &filter, sort);
+            return Ok(());
+        }
+        for event in events {
+            match *event {
+                ProjectEvent::NodeCreated(node)
+                | ProjectEvent::NodeDuplicated { copy: node, .. }
+                | ProjectEvent::NodeRestored(node) => self.insert_snapshot_subtree(node)?,
+                ProjectEvent::NodeTrashed(node) => self.remove_snapshot_subtree(node)?,
+                ProjectEvent::NodeReordered(node) | ProjectEvent::NodeReparented { node, .. } => {
+                    self.move_snapshot_subtree(node)?;
+                }
+                ProjectEvent::NodeRenamed(node) => self.refresh_snapshot_node(node),
+                ProjectEvent::MetadataEdited(document) => {
+                    if let Some(node) = self
+                        .opened
+                        .project
+                        .documents
+                        .get(&document)
+                        .map(|record| record.node_id)
+                    {
+                        self.refresh_snapshot_node(node);
+                    }
+                }
+                ProjectEvent::StyleMutated(_)
+                | ProjectEvent::StyleReplaced { .. }
+                | ProjectEvent::CompilePresetSaved(_)
+                | ProjectEvent::CompilePresetRemoved(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn insertion_row(&self, node: NodeId) -> Result<usize, WorkspaceError> {
+        let entry = self
+            .opened
+            .project
+            .nodes
+            .get(&node)
+            .ok_or(WorkspaceError::Invariant("inserted outline node is absent"))?;
+        let parent = entry
+            .parent
+            .ok_or(WorkspaceError::Invariant("inserted outline node is a root"))?;
+        let siblings = &self.opened.project.nodes[&parent].children;
+        let sibling = siblings
+            .iter()
+            .position(|candidate| *candidate == node)
+            .ok_or(WorkspaceError::Invariant(
+                "inserted node is absent from parent",
+            ))?;
+        if sibling == 0 {
+            return self
+                .snapshot
+                .positions
+                .get(&parent)
+                .map(|row| row.saturating_add(1))
+                .ok_or(WorkspaceError::Invariant("outline parent row is absent"));
+        }
+        let previous = siblings[sibling - 1];
+        self.snapshot
+            .subtree_range(previous)
+            .map(|range| range.end)
+            .ok_or(WorkspaceError::Invariant("previous sibling row is absent"))
+    }
+
+    fn snapshot_subtree_rows(
+        &self,
+        root: NodeId,
+        depth: u16,
+    ) -> Result<Vec<BinderRow>, WorkspaceError> {
+        let mut rows = Vec::new();
+        let mut pending = vec![(root, depth)];
+        while let Some((node, node_depth)) = pending.pop() {
+            let entry = self
+                .opened
+                .project
+                .nodes
+                .get(&node)
+                .ok_or(WorkspaceError::Invariant("outline subtree node is absent"))?;
+            rows.push(binder_row(
+                &self.opened.project,
+                node,
+                node_depth,
+                self.subtree_counts
+                    .get(&node)
+                    .and_then(|counts| usize::try_from(counts.words).ok())
+                    .unwrap_or(0),
+            ));
+            pending.extend(
+                entry
+                    .children
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, node_depth.saturating_add(1))),
+            );
+        }
+        Ok(rows)
+    }
+
+    fn insert_snapshot_subtree(&mut self, node: NodeId) -> Result<(), WorkspaceError> {
+        let destination = self.insertion_row(node)?;
+        let parent = self.opened.project.nodes[&node]
+            .parent
+            .ok_or(WorkspaceError::Invariant("inserted node is a root"))?;
+        let depth = self.snapshot.rows[*self
+            .snapshot
+            .positions
+            .get(&parent)
+            .ok_or(WorkspaceError::Invariant("outline parent row is absent"))?]
+        .depth
+        .saturating_add(1);
+        let rows = self.snapshot_subtree_rows(node, depth)?;
+        let count = rows.len();
+        self.snapshot.rows.splice(destination..destination, rows);
+        self.snapshot.rebuild_positions();
+        self.outline_deltas.push(OutlineDelta::Insert {
+            first: destination,
+            count,
+        });
+        self.refresh_snapshot_node(parent);
+        Ok(())
+    }
+
+    fn remove_snapshot_subtree(&mut self, node: NodeId) -> Result<(), WorkspaceError> {
+        let parent = self.opened.project.nodes[&node].parent;
+        let range = self
+            .snapshot
+            .subtree_range(node)
+            .ok_or(WorkspaceError::Invariant("removed outline row is absent"))?;
+        let first = range.start;
+        let count = range.len();
+        self.snapshot.rows.drain(range);
+        self.snapshot.rebuild_positions();
+        self.outline_deltas
+            .push(OutlineDelta::Remove { first, count });
+        if let Some(parent) = parent {
+            self.refresh_snapshot_node(parent);
+        }
+        Ok(())
+    }
+
+    fn move_snapshot_subtree(&mut self, node: NodeId) -> Result<(), WorkspaceError> {
+        let range = self
+            .snapshot
+            .subtree_range(node)
+            .ok_or(WorkspaceError::Invariant("moved outline row is absent"))?;
+        let first = range.start;
+        let mut rows = self.snapshot.rows.drain(range).collect::<Vec<_>>();
+        let old_parent = rows.first().and_then(|row| row.parent);
+        let count = rows.len();
+        self.snapshot.rebuild_positions();
+        let destination = self.insertion_row(node)?;
+        let parent = self.opened.project.nodes[&node]
+            .parent
+            .ok_or(WorkspaceError::Invariant("moved node is a root"))?;
+        let target_depth = self.snapshot.rows[self.snapshot.positions[&parent]]
+            .depth
+            .saturating_add(1);
+        let source_depth = rows[0].depth;
+        rows[0].parent = Some(parent);
+        for row in &mut rows {
+            row.depth = if target_depth >= source_depth {
+                row.depth.saturating_add(target_depth - source_depth)
+            } else {
+                row.depth.saturating_sub(source_depth - target_depth)
+            };
+        }
+        self.snapshot.rows.splice(destination..destination, rows);
+        self.snapshot.rebuild_positions();
+        self.outline_deltas.push(OutlineDelta::Move {
+            first,
+            destination,
+            count,
+        });
+        self.refresh_snapshot_node(parent);
+        if old_parent != Some(parent)
+            && let Some(old_parent) = old_parent
+        {
+            self.refresh_snapshot_node(old_parent);
+        }
+        Ok(())
+    }
+
+    fn refresh_snapshot_node(&mut self, node: NodeId) {
+        let Some(&row) = self.snapshot.positions.get(&node) else {
+            return;
+        };
+        let depth = self.snapshot.rows[row].depth;
+        let words = self
+            .subtree_counts
+            .get(&node)
+            .and_then(|counts| usize::try_from(counts.words).ok())
+            .unwrap_or(0);
+        self.snapshot.rows[row] = binder_row(&self.opened.project, node, depth, words);
+        self.outline_deltas.push(OutlineDelta::Data {
+            first: row,
+            count: 1,
+        });
     }
 
     fn update_index_node(&mut self, node: NodeId) {
@@ -1790,6 +2556,37 @@ impl ProjectWorkspace {
                 | ProjectEvent::StyleReplaced { .. }
                 | ProjectEvent::CompilePresetSaved(_)
                 | ProjectEvent::CompilePresetRemoved(_) => {}
+            }
+        }
+    }
+
+    /// Restarts an open-time build by reopening canonical headers and lazy body
+    /// handles on the worker. The cancelled revision can never publish into the
+    /// replacement revision, so a slow scan cannot overwrite newer state.
+    fn restart_background_index(&mut self) {
+        if let Some(worker) = self.index_worker.take() {
+            worker.cancel();
+            drop(worker);
+        }
+        self.index_revision = self.index_revision.saturating_add(1);
+        self.counts_complete = false;
+        match SearchIndexWorker::start_canonical(
+            self.search.path().to_owned(),
+            self.opened.root().to_owned(),
+            self.index_revision,
+        ) {
+            Ok(worker) => {
+                self.search.set_indexing(
+                    self.index_revision,
+                    0,
+                    u64::try_from(self.opened.project.documents.len()).unwrap_or(u64::MAX),
+                );
+                self.index_worker = Some(worker);
+                self.index_diagnostic = None;
+            }
+            Err(error) => {
+                self.search.set_unavailable(error.to_string());
+                self.index_diagnostic = Some(error.to_string());
             }
         }
     }
@@ -1932,24 +2729,57 @@ fn build_snapshot(
     let roots = focus
         .filter(|id| project.nodes.contains_key(id) && !project.is_trashed(*id))
         .map_or_else(|| project.roots.to_vec(), |id| vec![id]);
+    let mut active = BTreeSet::new();
+    let mut active_pending = project.roots.to_vec();
+    while let Some(node) = active_pending.pop() {
+        if !active.insert(node) {
+            continue;
+        }
+        if let Some(entry) = project.nodes.get(&node) {
+            active_pending.extend(entry.children.iter().copied());
+        }
+    }
     let mut matching = BTreeSet::new();
     if !query.is_empty() {
-        for (id, node) in &project.nodes {
-            if project.is_trashed(*id) || !matches_row(project, node, &query) {
+        for id in &active {
+            let node = &project.nodes[id];
+            if !matches_row(project, node, &query) {
                 continue;
             }
             let mut current = Some(*id);
             while let Some(value) = current {
-                matching.insert(value);
+                if !matching.insert(value) {
+                    break;
+                }
                 current = project.nodes.get(&value).and_then(|entry| entry.parent);
             }
         }
     }
     let mut rows = Vec::new();
     for root in roots {
-        append_rows(project, root, 0, &query, &matching, sort, &mut rows);
+        let mut pending = vec![(root, 0u16)];
+        while let Some((id, depth)) = pending.pop() {
+            if !query.is_empty() && !matching.contains(&id) {
+                continue;
+            }
+            let node = &project.nodes[&id];
+            rows.push(binder_row(project, id, depth, 0));
+            let mut children = node.children.clone();
+            sort_children(project, &mut children, sort);
+            pending.extend(
+                children
+                    .into_iter()
+                    .rev()
+                    .map(|child| (child, depth.saturating_add(1))),
+            );
+        }
     }
-    BinderSnapshot { rows }
+    let positions = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id, index))
+        .collect();
+    BinderSnapshot { rows, positions }
 }
 
 fn matches_row(project: &Project, node: &Node, query: &str) -> bool {
@@ -1976,24 +2806,15 @@ fn matches_row(project: &Project, node: &Node, query: &str) -> bool {
             .any(|label| label.to_lowercase().contains(query))
 }
 
-fn append_rows(
-    project: &Project,
-    id: NodeId,
-    depth: u16,
-    query: &str,
-    matching: &BTreeSet<NodeId>,
-    sort: OutlineSort,
-    rows: &mut Vec<BinderRow>,
-) {
-    if project.is_trashed(id) || (!query.is_empty() && !matching.contains(&id)) {
-        return;
-    }
+fn binder_row(project: &Project, id: NodeId, depth: u16, word_count: usize) -> BinderRow {
     let node = &project.nodes[&id];
-    let metadata = node
-        .kind
-        .document_id()
-        .and_then(|id| project.documents.get(&id).map(|record| &record.metadata));
-    rows.push(BinderRow {
+    let metadata = node.kind.document_id().and_then(|document| {
+        project
+            .documents
+            .get(&document)
+            .map(|record| &record.metadata)
+    });
+    BinderRow {
         id,
         parent: node.parent,
         depth,
@@ -2011,12 +2832,14 @@ fn append_rows(
         label: metadata
             .and_then(|entry| entry.labels.first().cloned())
             .unwrap_or_default(),
-        word_count: 0,
+        word_count,
         include_in_compile: metadata
             .and_then(|entry| entry.flags.get("include-in-compile").copied())
             .unwrap_or(false),
-    });
-    let mut children = node.children.clone();
+    }
+}
+
+fn sort_children(project: &Project, children: &mut [NodeId], sort: OutlineSort) {
     if sort != OutlineSort::Binder {
         children.sort_by(|left, right| {
             let left_meta = project.nodes[left]
@@ -2043,16 +2866,21 @@ fn append_rows(
             key(left_meta).cmp(&key(right_meta))
         });
     }
-    for child in children {
-        append_rows(
-            project,
-            child,
-            depth.saturating_add(1),
-            query,
-            matching,
-            sort,
-            rows,
-        );
+}
+
+fn signed_count_delta(after: u64, before: u64) -> i64 {
+    if after >= before {
+        i64::try_from(after - before).unwrap_or(i64::MAX)
+    } else {
+        -i64::try_from(before - after).unwrap_or(i64::MAX)
+    }
+}
+
+fn apply_signed_count(value: u64, delta: i64) -> u64 {
+    if delta >= 0 {
+        value.saturating_add(delta.cast_unsigned())
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
     }
 }
 
@@ -2085,6 +2913,8 @@ pub enum WorkspaceError {
     CreateReplaceBackup(std::io::Error),
     #[error("project replacement backup could not be written: {0}")]
     WriteReplaceBackup(parchmint_storage::AtomicWriteError),
+    #[error("project metadata could not be saved: {0}")]
+    StructuralPersistence(String),
     #[error(transparent)]
     Search(#[from] SearchServiceError),
     #[error(transparent)]
@@ -2168,6 +2998,33 @@ mod tests {
         drop(workspace);
         let reopened = ProjectWorkspace::open(directory.path()).unwrap();
         assert_eq!(reopened.snapshot().rows().len(), 5);
+    }
+
+    #[test]
+    fn deferred_structural_save_publishes_before_disk_and_flushes_in_order() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Deferred").unwrap();
+        workspace.enable_deferred_structural_saves().unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let started = Instant::now();
+        let scene = workspace
+            .create_node(manuscript, "Immediate scene", false)
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(100));
+        workspace.rename(scene, "Queued rename").unwrap();
+        assert!(workspace.has_pending_structural_saves());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while workspace.has_pending_structural_saves() && Instant::now() < deadline {
+            workspace.poll_structural_saves().unwrap();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!workspace.has_pending_structural_saves());
+        assert_eq!(workspace.project().documents.len(), 1);
+        drop(workspace);
+        let reopened = ProjectWorkspace::open(directory.path()).unwrap();
+        assert_eq!(reopened.project().documents.len(), 1);
+        let row = reopened.snapshot().row_for_node(scene).unwrap();
+        assert_eq!(reopened.snapshot().rows()[row].title, "Queued rename");
     }
 
     #[test]
@@ -2272,6 +3129,99 @@ mod tests {
             "projection took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn deeply_nested_projection_uses_no_user_depth_stack() {
+        let mut project = Project::new("Deep");
+        let mut parent = project.manuscript_root();
+        for index in 0..20_000 {
+            let node_id = NodeId::new();
+            let document_id = DocumentId::new();
+            project
+                .nodes
+                .get_mut(&parent)
+                .unwrap()
+                .children
+                .push(node_id);
+            project.nodes.insert(
+                node_id,
+                Node {
+                    id: node_id,
+                    kind: NodeKind::Group { document_id },
+                    parent: Some(parent),
+                    children: Vec::new(),
+                },
+            );
+            project.documents.insert(
+                document_id,
+                DocumentRecord {
+                    id: document_id,
+                    node_id,
+                    path: RelativeProjectPath::new(format!("manuscript/deep-{index}.md")).unwrap(),
+                    metadata: DocumentMetadata {
+                        title: format!("Depth {index}"),
+                        ..DocumentMetadata::default()
+                    },
+                },
+            );
+            parent = node_id;
+        }
+        let snapshot = build_snapshot(&project, None, "", OutlineSort::Binder);
+        assert_eq!(snapshot.len(), 20_002);
+        assert_eq!(
+            snapshot.rows().iter().map(|row| row.depth).max(),
+            Some(20_000)
+        );
+    }
+
+    #[test]
+    fn structural_commands_publish_typed_deltas_and_independent_revisions() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Deltas").unwrap();
+        let root = workspace.project().manuscript_root();
+        let initial = workspace.revisions();
+
+        let first = workspace.create_node(root, "First", false).unwrap();
+        let create_deltas = workspace.take_outline_deltas();
+        assert!(
+            create_deltas
+                .iter()
+                .any(|delta| matches!(delta, OutlineDelta::Insert { count: 1, .. }))
+        );
+        assert!(!create_deltas.contains(&OutlineDelta::Reset));
+        assert!(workspace.revisions().structure > initial.structure);
+
+        let after_create = workspace.revisions();
+        workspace.rename(first, "Renamed").unwrap();
+        let rename_deltas = workspace.take_outline_deltas();
+        assert!(
+            rename_deltas
+                .iter()
+                .any(|delta| matches!(delta, OutlineDelta::Data { count: 1, .. }))
+        );
+        assert!(!rename_deltas.contains(&OutlineDelta::Reset));
+        assert_eq!(workspace.revisions().structure, after_create.structure);
+        assert!(workspace.revisions().content > after_create.content);
+
+        let second = workspace.create_node(root, "Second", false).unwrap();
+        workspace.take_outline_deltas();
+        workspace.move_up(second).unwrap();
+        assert!(
+            workspace
+                .take_outline_deltas()
+                .iter()
+                .any(|delta| matches!(delta, OutlineDelta::Move { count: 1, .. }))
+        );
+
+        let before_selection = workspace.revisions();
+        workspace.select([first]);
+        assert!(workspace.revisions().selection > before_selection.selection);
+        assert_eq!(workspace.revisions().content, before_selection.content);
+        assert_eq!(workspace.revisions().structure, before_selection.structure);
+
+        let reference = build_snapshot(workspace.project(), None, "", OutlineSort::Binder);
+        assert_eq!(workspace.snapshot(), &reference);
     }
 
     #[test]
@@ -2414,7 +3364,7 @@ mod tests {
 
         flush_live_document(&mut workspace, document);
         let compile = workspace.compile_input(stamp).unwrap();
-        assert_eq!(compile.bodies[&document], latest);
+        assert_eq!(compile.bodies[&document].load().unwrap().as_ref(), latest);
 
         workspace.swap_panes().unwrap();
         assert_eq!(workspace.pane_live_body(1).unwrap(), latest);

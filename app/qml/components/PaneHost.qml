@@ -25,6 +25,8 @@ Pane {
     property bool sourceMode: false
     property string sourceBuffer: ""
     property string sourceError: ""
+    property int liveWords: 0
+    property int liveCharacters: 0
     readonly property var paragraphStyles: [
         { "id": "body", "name": qsTr("Body") },
         { "id": "heading-1", "name": qsTr("Heading 1") },
@@ -36,9 +38,21 @@ Pane {
         findVisible = true
         findField.forceActiveFocus()
     }
-    function localStatistics(value) {
-        const words = value.trim().length ? value.trim().split(/\s+/).length : 0
-        return qsTr("%1 words · %2 characters").arg(words).arg(value.length)
+    function refreshStatistics() {
+        if (nodeId.length > 0) {
+            liveWords = backend.paneWordCount(paneIndex)
+            liveCharacters = backend.paneCharacterCount(paneIndex)
+        } else {
+            liveWords = 0
+            liveCharacters = 0
+        }
+    }
+    function statisticsText(selection) {
+        if (selection.length) {
+            const words = selection.trim().length ? selection.trim().split(/\s+/).length : 0
+            return qsTr("%1 words · %2 characters").arg(words).arg(selection.length)
+        }
+        return qsTr("%1 words · %2 characters").arg(liveWords).arg(liveCharacters)
     }
 
     function reloadBody(force) {
@@ -53,12 +67,14 @@ Pane {
             }
             loadedNode = nodeId
             loadedRevision = liveRevision
+            refreshStatistics()
         } else if (!nodeId.length) {
             loadingBody = true
             editor.clear()
             loadingBody = false
             loadedNode = ""
             loadedRevision = 0
+            refreshStatistics()
         }
     }
     function syncLiveBody() {
@@ -227,15 +243,11 @@ Pane {
                     onActiveFocusChanged: {
                         if (activeFocus)
                             root.backend.focusPane(root.paneIndex)
-                        else if (root.loadedNode === root.nodeId && root.nodeId.length > 0)
+                        else if (root.loadedNode === root.nodeId && root.nodeId.length > 0) {
+                            editorAdapter.flushPendingChanges()
                             root.backend.flushPane(root.paneIndex, text)
+                        }
                     }
-                    onTextChanged: {
-                        liveCounts.text = root.localStatistics(selectedText.length ? selectedText : text)
-                        if (!root.loadingBody && root.loadedNode === root.nodeId && root.nodeId.length > 0)
-                            root.backend.updatePaneBody(root.paneIndex, text, 0, Math.max(1, lineCount))
-                    }
-                    onSelectedTextChanged: liveCounts.text = root.localStatistics(selectedText.length ? selectedText : text)
                     Keys.priority: Keys.BeforeItem
                     Keys.onPressed: function(event) {
                         if (event.key === Qt.Key_Backspace) {
@@ -264,8 +276,12 @@ Pane {
                     textDocument: editor.textDocument
                     focused: editor.activeFocus
                     onAdapterError: function(message) { console.warn("ParchMint editor:", message) }
-                    onIncrementalDirty: function(revision, position, removed, added, firstBlock, lastBlockExclusive) {
-                        root.backend.noteEditorDelta(revision, firstBlock, lastBlockExclusive)
+                    onIncrementalDirty: function(revision, position, removed, added, insertedText, firstBlock, lastBlockExclusive) {
+                        if (!root.loadingBody && root.loadedNode === root.nodeId && root.nodeId.length > 0
+                                && root.backend.applyPaneTextDelta(root.paneIndex, position, removed,
+                                                                  insertedText, firstBlock,
+                                                                  lastBlockExclusive))
+                            root.refreshStatistics()
                     }
                 }
                 Connections {
@@ -276,7 +292,7 @@ Pane {
                 }
                 Label {
                     id: liveCounts
-                    text: root.localStatistics(editor.selectedText.length ? editor.selectedText : editor.text)
+                    text: root.statisticsText(editor.selectedText)
                     Accessible.name: qsTr("Live document statistics") + ": " + text
                     anchors.right: parent.right
                     anchors.bottom: parent.bottom

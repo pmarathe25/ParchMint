@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QHash>
+#include <QList>
 #include <QPointer>
 #include <QQuickTextDocument>
 #include <QTextCursor>
@@ -84,6 +85,7 @@ public:
   Q_INVOKABLE void redo();
   Q_INVOKABLE void beginGroupedEdit();
   Q_INVOKABLE void endGroupedEdit();
+  Q_INVOKABLE void flushPendingChanges();
   Q_INVOKABLE QString selectedPlainText() const;
 
 signals:
@@ -99,12 +101,20 @@ signals:
                         int position,
                         int removed,
                         int added,
+                        const QString& insertedText,
                         int firstBlock,
                         int lastBlockExclusive);
   void focusLostFlushRequested(qulonglong revision);
   void adapterError(const QString& message);
 
 private:
+  struct PendingChange
+  {
+    int position;
+    int removed;
+    int added;
+  };
+
   QTextCursor cursor() const;
   void mergeCharacterFormat(const QTextCharFormat& format);
   bool canReplaceSelection(const QTextCursor& cursor, const QString& action);
@@ -113,6 +123,7 @@ private:
   bool selectionContainsProtectedObject(const QTextCursor& cursor) const;
   void connectDocumentSignals();
   void onContentsChange(int position, int removed, int added);
+  void onContentsChanged();
   static int clampPosition(const QTextDocument* document, int position);
 
   QPointer<QQuickTextDocument> m_textDocument;
@@ -123,6 +134,8 @@ private:
   bool m_groupedEdit = false;
   bool m_loading = false;
   bool m_focused = false;
+  bool m_changeDeliveryScheduled = false;
+  QList<PendingChange> m_pendingChanges;
   qulonglong m_revision = 0;
   QObject* m_objectRenderer = nullptr;
   QHash<QString, QVariantMap> m_styleDefinitions;

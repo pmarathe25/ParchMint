@@ -9,6 +9,10 @@ use noyalib::compat::serde_yaml::{self as yaml, Mapping, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use thiserror::Error;
 
 pub const PAGE_BREAK_MARKER: &str = "<!-- parchmint:page-break -->";
@@ -30,6 +34,9 @@ pub struct ParseOptions {
     pub max_delimiter_scans: usize,
     /// Maximum diagnostics retained for one document.
     pub max_diagnostics: usize,
+    /// Optional cooperative worker cancellation. Checks occur during line,
+    /// block, delimiter, validation, and diagnostic traversal.
+    pub cancellation: Option<Arc<AtomicBool>>,
 }
 
 impl Default for ParseOptions {
@@ -39,8 +46,9 @@ impl Default for ParseOptions {
             max_document_bytes: 16 * 1024 * 1024,
             max_blocks: 100_000,
             max_inline_depth: 64,
-            max_delimiter_scans: 1_000_000,
+            max_delimiter_scans: 64 * 1024 * 1024,
             max_diagnostics: 1_024,
+            cancellation: None,
         }
     }
 }
@@ -343,6 +351,8 @@ pub enum MarkdownError {
     InvalidFrontMatter(String),
     #[error("Markdown exceeds the configured {kind} limit ({limit})")]
     ResourceLimit { kind: &'static str, limit: usize },
+    #[error("Markdown parsing cancelled")]
+    Cancelled,
     #[error("block index {index} is outside document with {count} blocks")]
     BlockIndex { index: usize, count: usize },
 }
@@ -364,14 +374,30 @@ impl<'a> ParseBudget<'a> {
                 limit: options.max_document_bytes,
             });
         }
-        Ok(Self {
+        let budget = Self {
             options,
             blocks: 0,
             delimiter_scans: 0,
-        })
+        };
+        budget.check_cancelled()?;
+        Ok(budget)
+    }
+
+    fn check_cancelled(&self) -> Result<(), MarkdownError> {
+        if self
+            .options
+            .cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::Acquire))
+        {
+            Err(MarkdownError::Cancelled)
+        } else {
+            Ok(())
+        }
     }
 
     fn block(&mut self) -> Result<(), MarkdownError> {
+        self.check_cancelled()?;
         self.blocks += 1;
         if self.blocks > self.options.max_blocks {
             return Err(MarkdownError::ResourceLimit {
@@ -383,6 +409,7 @@ impl<'a> ParseBudget<'a> {
     }
 
     fn depth(&self, depth: usize) -> Result<(), MarkdownError> {
+        self.check_cancelled()?;
         if depth > self.options.max_inline_depth {
             return Err(MarkdownError::ResourceLimit {
                 kind: "inline-depth",
@@ -394,6 +421,9 @@ impl<'a> ParseBudget<'a> {
 
     fn delimiter_scan(&mut self) -> Result<(), MarkdownError> {
         self.delimiter_scans += 1;
+        if self.delimiter_scans.is_multiple_of(4_096) {
+            self.check_cancelled()?;
+        }
         if self.delimiter_scans > self.options.max_delimiter_scans {
             return Err(MarkdownError::ResourceLimit {
                 kind: "delimiter-scan",
@@ -404,6 +434,7 @@ impl<'a> ParseBudget<'a> {
     }
 
     fn diagnostic(&self, count: usize) -> Result<(), MarkdownError> {
+        self.check_cancelled()?;
         if count >= self.options.max_diagnostics {
             return Err(MarkdownError::ResourceLimit {
                 kind: "diagnostic-count",
@@ -444,7 +475,10 @@ fn parse_front_matter<'a>(
     let tail = &source[opening_len..];
     let mut line_start = 0;
     let mut closing = None;
-    for line in tail.split_inclusive('\n') {
+    for (index, line) in tail.split_inclusive('\n').enumerate() {
+        if index % 4_096 == 0 {
+            budget.check_cancelled()?;
+        }
         let line_end = line_start + line.len();
         if line.trim_end_matches(['\r', '\n']) == "---" {
             closing = Some((line_start, line_end));
@@ -507,7 +541,7 @@ fn scan_blocks(
     depth: usize,
 ) -> Result<Vec<Block>, MarkdownError> {
     budget.depth(depth)?;
-    let lines = line_ranges(body);
+    let lines = line_ranges(body, budget)?;
     let mut result = Vec::new();
     let mut line = 0;
     while line < lines.len() {
@@ -653,17 +687,22 @@ fn scan_blocks(
     Ok(result)
 }
 
-fn line_ranges(source: &str) -> Vec<Range<usize>> {
+fn line_ranges(source: &str, budget: &ParseBudget<'_>) -> Result<Vec<Range<usize>>, MarkdownError> {
     let mut result = Vec::new();
     let mut start = 0;
-    for line in source.split_inclusive('\n') {
-        result.push(start..start + line.len());
-        start += line.len();
+    for (index, byte) in source.as_bytes().iter().enumerate() {
+        if index % (64 * 1024) == 0 {
+            budget.check_cancelled()?;
+        }
+        if *byte == b'\n' {
+            result.push(start..index + 1);
+            start = index + 1;
+        }
     }
     if start < source.len() {
         result.push(start..source.len());
     }
-    result
+    Ok(result)
 }
 
 fn slice_lines<'a>(source: &'a str, lines: &[Range<usize>], first: usize, last: usize) -> &'a str {
@@ -1653,6 +1692,7 @@ fn validate_extensions(
 ) -> Result<(), MarkdownError> {
     let mut ids = BTreeMap::<String, Range<usize>>::new();
     for block in blocks {
+        budget.check_cancelled()?;
         let attributes = match &block.node {
             BlockNode::Paragraph { attributes, .. }
             | BlockNode::Heading { attributes, .. }
@@ -2582,6 +2622,19 @@ mod tests {
                 kind: "delimiter-scan",
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn parser_cancellation_is_typed_and_checked_inside_scans() {
+        let cancellation = Arc::new(AtomicBool::new(true));
+        let options = ParseOptions {
+            cancellation: Some(cancellation),
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            Document::parse_body(&"word ".repeat(100_000), &options),
+            Err(MarkdownError::Cancelled)
         ));
     }
 }

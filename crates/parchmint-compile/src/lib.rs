@@ -22,13 +22,14 @@ use parchmint_domain::{
     ProjectTitleBehavior, ResearchInclusion, StyleId, StyleKind, WorkStamp,
 };
 use parchmint_markdown::{
-    Alignment, Attributes, Block, BlockNode, Document, Inline, ListItem, ParseOptions,
+    Alignment, Attributes, Block, BlockNode, Document, Inline, ListItem, MarkdownError,
+    ParseOptions,
 };
-use parchmint_storage::{AttachmentRecord, OpenProject};
+use parchmint_storage::{AttachmentRecord, DocumentBodySnapshot, OpenProject};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as IoWrite;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -52,6 +53,10 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
+
+    fn shared_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
 }
 
 /// Immutable, worker-safe attachment reference used by exporters.
@@ -72,17 +77,13 @@ pub struct CompileAsset {
 #[derive(Clone, Debug)]
 pub struct CompileInput {
     pub project: Project,
-    pub bodies: BTreeMap<DocumentId, String>,
+    pub bodies: BTreeMap<DocumentId, DocumentBodySnapshot>,
     pub assets: BTreeMap<parchmint_domain::AssetId, CompileAsset>,
     pub stamp: WorkStamp,
 }
 
 impl CompileInput {
     pub fn from_open_project(opened: &OpenProject, stamp: WorkStamp) -> Result<Self, CompileError> {
-        let mut bodies = BTreeMap::new();
-        for id in opened.project.documents.keys().copied() {
-            bodies.insert(id, opened.body(id)?.to_owned());
-        }
         let assets = opened
             .attachments()
             .values()
@@ -90,7 +91,7 @@ impl CompileInput {
             .collect();
         Ok(Self {
             project: opened.project.clone(),
-            bodies,
+            bodies: opened.body_snapshot(),
             assets,
             stamp,
         })
@@ -402,7 +403,7 @@ pub fn compile_with_progress(
             PreviewNode {
                 node_id: entry.node_id,
                 title,
-                is_research: is_research_node(&input.project, entry.node_id),
+                is_research: entry.is_research,
                 included: entry.reason.is_none(),
                 reason: entry.reason.clone(),
             }
@@ -454,7 +455,8 @@ pub fn compile_with_progress(
         let body = input
             .bodies
             .get(&document_id)
-            .ok_or(CompileError::MissingBody(document_id))?;
+            .ok_or(CompileError::MissingBody(document_id))?
+            .load()?;
 
         if preset.inclusion.respect_include_flag
             && record.metadata.flags.get("include-in-compile") == Some(&false)
@@ -463,15 +465,19 @@ pub fn compile_with_progress(
             continue;
         }
         let document = Document::parse_body(
-            body,
+            &body,
             &ParseOptions {
                 known_style_ids: known_style_ids.clone(),
+                cancellation: Some(cancellation.shared_flag()),
                 ..ParseOptions::default()
             },
         )
-        .map_err(|error| CompileError::Markdown {
-            document: document_id,
-            message: error.to_string(),
+        .map_err(|error| match error {
+            MarkdownError::Cancelled => CompileError::Cancelled,
+            error => CompileError::Markdown {
+                document: document_id,
+                message: error.to_string(),
+            },
         })?;
         if !preset.inclusion.include_empty_documents && document.blocks().is_empty() {
             set_preview_excluded(&mut preview_nodes, node_id, "empty document");
@@ -522,6 +528,9 @@ pub fn compile_with_progress(
             });
         }
         for (block_index, block) in document.blocks().iter().enumerate() {
+            if cancellation.is_cancelled() {
+                return Err(CompileError::Cancelled);
+            }
             blocks.push(convert_block(
                 input,
                 preset,
@@ -586,6 +595,7 @@ fn set_preview_included(nodes: &mut [PreviewNode], node_id: NodeId) {
 #[derive(Clone, Debug)]
 struct SelectionPlanNode {
     node_id: NodeId,
+    is_research: bool,
     reason: Option<String>,
 }
 
@@ -610,9 +620,6 @@ fn compile_selection_plan(
             return Err(CompileError::MissingRoot(*node));
         }
     }
-    let selected_research = selected
-        .iter()
-        .any(|node| is_research_node(&input.project, *node));
     let mut preorder = Vec::new();
     append_preorder(
         &input.project,
@@ -620,13 +627,32 @@ fn compile_selection_plan(
         &mut preorder,
     );
     append_preorder(&input.project, input.project.research_root(), &mut preorder);
+    let mut covered = BTreeSet::new();
+    for node in &preorder {
+        if selected.contains(node)
+            || input.project.nodes[node]
+                .parent
+                .is_some_and(|parent| covered.contains(&parent))
+        {
+            covered.insert(*node);
+        }
+    }
+    let mut research_nodes = BTreeSet::new();
+    let mut research_pending = vec![input.project.research_root()];
+    while let Some(node) = research_pending.pop() {
+        if !research_nodes.insert(node) {
+            continue;
+        }
+        research_pending.extend(input.project.nodes[&node].children.iter().rev().copied());
+    }
+    let selected_research = selected.iter().any(|node| research_nodes.contains(node));
     Ok(preorder
         .into_iter()
         .filter(|node| input.project.nodes[node].kind.document_id().is_some())
         .map(|node| {
-            let selected_here =
-                selected.contains(&node) || has_selected_ancestor(&input.project, node, &selected);
-            let reason = if is_research_node(&input.project, node) {
+            let selected_here = covered.contains(&node);
+            let is_research = research_nodes.contains(&node);
+            let reason = if is_research {
                 match preset.inclusion.research {
                     ResearchInclusion::Exclude => {
                         Some("research is disabled by this preset".into())
@@ -644,6 +670,7 @@ fn compile_selection_plan(
             };
             SelectionPlanNode {
                 node_id: node,
+                is_research,
                 reason,
             }
         })
@@ -651,35 +678,13 @@ fn compile_selection_plan(
 }
 
 fn append_preorder(project: &Project, node: NodeId, out: &mut Vec<NodeId>) {
-    if project.is_trashed(node) {
-        return;
-    }
-    out.push(node);
-    for child in &project.nodes[&node].children {
-        append_preorder(project, *child, out);
-    }
-}
-
-fn has_selected_ancestor(project: &Project, node: NodeId, selected: &BTreeSet<NodeId>) -> bool {
-    let mut current = project.nodes[&node].parent;
-    while let Some(id) = current {
-        if selected.contains(&id) {
-            return true;
+    let mut pending = vec![node];
+    while let Some(current) = pending.pop() {
+        out.push(current);
+        if let Some(entry) = project.nodes.get(&current) {
+            pending.extend(entry.children.iter().rev().copied());
         }
-        current = project.nodes[&id].parent;
     }
-    false
-}
-
-fn is_research_node(project: &Project, node: NodeId) -> bool {
-    let mut current = Some(node);
-    while let Some(id) = current {
-        if id == project.research_root() {
-            return true;
-        }
-        current = project.nodes.get(&id).and_then(|entry| entry.parent);
-    }
-    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1138,15 +1143,15 @@ fn count_blocks(blocks: &[CompileBlock]) -> CompileCounts {
 }
 
 fn count_block_total(blocks: &[CompileBlock]) -> usize {
-    blocks
-        .iter()
-        .map(|block| {
-            1 + match &block.kind {
-                CompileBlockKind::Alignment { children, .. } => count_block_total(children),
-                _ => 0,
-            }
-        })
-        .sum()
+    let mut count = 0usize;
+    let mut pending = blocks.iter().collect::<Vec<_>>();
+    while let Some(block) = pending.pop() {
+        count = count.saturating_add(1);
+        if let CompileBlockKind::Alignment { children, .. } = &block.kind {
+            pending.extend(children);
+        }
+    }
+    count
 }
 
 fn count_words(text: &str) -> usize {
@@ -1292,7 +1297,7 @@ pub enum ExportError {
     DirectoryReplacement(PathBuf),
     #[error("export output failed structural validation: {0}")]
     Validation(String),
-    #[error("export archive exceeds the supported non-ZIP64 limit: {0}")]
+    #[error("export archive exceeds a checked ZIP/ZIP64 limit: {0}")]
     ArchiveLimit(String),
     #[error("could not prepare export destination {path}: {error}")]
     PrepareDestination {
@@ -1350,8 +1355,97 @@ pub fn prepare_export(
     {
         return Err(ExportError::InvalidDestination(options.destination.clone()));
     }
-    let (bytes, warnings) = render_export_bytes(ir, options)?;
+    if matches!(
+        options.format,
+        ExportFormat::Markdown | ExportFormat::PlainText
+    ) {
+        return prepare_streaming_text_export(ir, options, cancellation);
+    }
+    let (bytes, warnings) = render_export_bytes(ir, options, cancellation)?;
     prepare_export_bytes(options, &bytes, warnings, cancellation)
+}
+
+/// Writes the two potentially largest text formats directly to the
+/// destination-adjacent temporary file. Only one rendered block is resident
+/// at a time, so output construction does not duplicate the whole manuscript.
+fn prepare_streaming_text_export(
+    ir: &CompileIr,
+    options: &ExportOptions,
+    cancellation: &CancellationToken,
+) -> Result<PreparedExport, ExportError> {
+    let parent = validate_file_destination(options)?;
+    let mut artifact = TempBuilder::new()
+        .prefix(".parchmint-export-")
+        .tempfile_in(&parent)
+        .map_err(|error| ExportError::PrepareDestination {
+            path: parent,
+            error,
+        })?;
+    let mut bytes = 0u64;
+    let separator = if options.text_separator.is_empty() {
+        "\n\n"
+    } else {
+        &options.text_separator
+    };
+    let mut wrote_plain = false;
+    let mut plain_ends_page = false;
+    for block in &ir.blocks {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        let chunk = match options.format {
+            ExportFormat::Markdown => markdown_block(block),
+            ExportFormat::PlainText => {
+                let value = plain_block(block);
+                if value.is_empty() {
+                    continue;
+                }
+                let mut chunk = String::new();
+                if wrote_plain && !plain_ends_page && !value.starts_with('\u{c}') {
+                    chunk.push_str(separator);
+                }
+                plain_ends_page = value.ends_with('\u{c}');
+                wrote_plain = true;
+                chunk.push_str(&value);
+                chunk
+            }
+            _ => unreachable!("streaming text exporter is format-gated"),
+        };
+        artifact
+            .write_all(chunk.as_bytes())
+            .map_err(|error| ExportError::Write {
+                path: artifact.path().to_owned(),
+                error,
+            })?;
+        bytes = bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
+    }
+    if options.format == ExportFormat::PlainText && !plain_ends_page {
+        artifact
+            .write_all(b"\n")
+            .map_err(|error| ExportError::Write {
+                path: artifact.path().to_owned(),
+                error,
+            })?;
+        bytes = bytes.saturating_add(1);
+    }
+    if cancellation.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
+    artifact
+        .as_file()
+        .sync_all()
+        .map_err(|error| ExportError::Write {
+            path: artifact.path().to_owned(),
+            error,
+        })?;
+    Ok(PreparedExport {
+        format: options.format,
+        destination: options.destination.clone(),
+        collision: options.collision,
+        bytes,
+        warnings: Vec::new(),
+        artifact,
+    })
 }
 
 /// Validates already-rendered bytes into the normal destination-adjacent
@@ -1399,20 +1493,28 @@ pub fn prepare_export_bytes(
 fn render_export_bytes(
     ir: &CompileIr,
     options: &ExportOptions,
+    cancellation: &CancellationToken,
 ) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
+    if cancellation.is_cancelled() {
+        return Err(ExportError::Cancelled);
+    }
     let (bytes, warnings) = match options.format {
-        ExportFormat::Markdown => (render_markdown(ir).into_bytes(), Vec::new()),
+        ExportFormat::Markdown => (
+            render_markdown_cancellable(ir, cancellation)?.into_bytes(),
+            Vec::new(),
+        ),
         ExportFormat::PlainText => (
-            render_plain_text(ir, &options.text_separator).into_bytes(),
+            render_plain_text_cancellable(ir, &options.text_separator, cancellation)?.into_bytes(),
             Vec::new(),
         ),
         ExportFormat::Html => {
-            let (html, warnings) = render_html(ir, options.html_asset_mode);
+            let (html, warnings) =
+                render_html_cancellable(ir, options.html_asset_mode, cancellation)?;
             (html.into_bytes(), warnings)
         }
-        ExportFormat::Pdf => render_pdf(ir),
-        ExportFormat::Epub => render_epub(ir)?,
-        ExportFormat::Docx => render_docx(ir)?,
+        ExportFormat::Pdf => render_pdf_cancellable(ir, cancellation)?,
+        ExportFormat::Epub => render_epub_cancellable(ir, cancellation)?,
+        ExportFormat::Docx => render_docx_cancellable(ir, cancellation)?,
     };
     Ok((bytes, warnings))
 }
@@ -1563,6 +1665,20 @@ fn export_markdown_directory(
 /// opaque source rather than guessing at a semantic conversion.
 pub fn render_markdown(ir: &CompileIr) -> String {
     ir.blocks.iter().map(markdown_block).collect()
+}
+
+fn render_markdown_cancellable(
+    ir: &CompileIr,
+    cancellation: &CancellationToken,
+) -> Result<String, ExportError> {
+    let mut output = String::new();
+    for block in &ir.blocks {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        output.push_str(&markdown_block(block));
+    }
+    Ok(output)
 }
 
 fn markdown_block(block: &CompileBlock) -> String {
@@ -1833,6 +1949,15 @@ fn markdown_attributes(attributes: &CompileAttributes, leading_space: bool) -> S
 /// Plain text normalization uses Unicode text, two newlines between blocks, a
 /// line containing `***` for scene breaks, and U+000C for semantic page breaks.
 pub fn render_plain_text(ir: &CompileIr, separator: &str) -> String {
+    render_plain_text_cancellable(ir, separator, &CancellationToken::default())
+        .expect("a fresh token cannot be cancelled")
+}
+
+fn render_plain_text_cancellable(
+    ir: &CompileIr,
+    separator: &str,
+    cancellation: &CancellationToken,
+) -> Result<String, ExportError> {
     let separator = if separator.is_empty() {
         "\n\n"
     } else {
@@ -1840,6 +1965,9 @@ pub fn render_plain_text(ir: &CompileIr, separator: &str) -> String {
     };
     let mut output = String::new();
     for block in &ir.blocks {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let value = plain_block(block);
         if value.is_empty() {
             continue;
@@ -1852,7 +1980,7 @@ pub fn render_plain_text(ir: &CompileIr, separator: &str) -> String {
     if !output.ends_with('\n') {
         output.push('\n');
     }
-    output
+    Ok(output)
 }
 
 fn plain_block(block: &CompileBlock) -> String {
@@ -1921,10 +2049,32 @@ fn plain_inlines(inlines: &[CompileInline]) -> String {
 /// fragments, and project asset references become links; unsafe schemes are
 /// displayed as text with an actionable warning.
 pub fn render_html(ir: &CompileIr, asset_mode: HtmlAssetMode) -> (String, Vec<ExportWarning>) {
+    render_html_cancellable(ir, asset_mode, &CancellationToken::default())
+        .expect("a fresh token cannot be cancelled")
+}
+
+fn render_html_cancellable(
+    ir: &CompileIr,
+    asset_mode: HtmlAssetMode,
+    cancellation: &CancellationToken,
+) -> Result<(String, Vec<ExportWarning>), ExportError> {
     let mut warnings = Vec::new();
     let mut body = String::new();
     for block in &ir.blocks {
-        html_block(&mut body, block, ir, asset_mode, &mut warnings);
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        html_block(
+            &mut body,
+            block,
+            ir,
+            asset_mode,
+            &mut warnings,
+            cancellation,
+        );
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
     }
     let language = if ir.metadata.language.trim().is_empty() {
         "en"
@@ -1957,7 +2107,7 @@ pub fn render_html(ir: &CompileIr, asset_mode: HtmlAssetMode) -> (String, Vec<Ex
     output.push_str("</style>\n</head>\n<body>\n");
     output.push_str(&body);
     output.push_str("</body>\n</html>\n");
-    (output, warnings)
+    Ok((output, warnings))
 }
 
 fn html_css(ir: &CompileIr) -> String {
@@ -2012,6 +2162,7 @@ fn html_block(
     ir: &CompileIr,
     asset_mode: HtmlAssetMode,
     warnings: &mut Vec<ExportWarning>,
+    cancellation: &CancellationToken,
 ) {
     let class = block
         .style
@@ -2039,7 +2190,7 @@ fn html_block(
             let level = (*level).clamp(1, 6);
             let id = html_id(attributes);
             let _ = write!(output, "<h{level}{id}{class}>");
-            html_inlines(output, content, ir, asset_mode, warnings);
+            html_inlines(output, content, ir, asset_mode, warnings, cancellation);
             let _ = writeln!(output, "</h{level}>");
         }
         CompileBlockKind::Paragraph {
@@ -2048,7 +2199,7 @@ fn html_block(
         } => {
             let id = html_id(attributes);
             let _ = write!(output, "<p{id}{class}>");
-            html_inlines(output, content, ir, asset_mode, warnings);
+            html_inlines(output, content, ir, asset_mode, warnings, cancellation);
             output.push_str("</p>\n");
         }
         CompileBlockKind::BlockQuote { source } => {
@@ -2087,9 +2238,16 @@ fn html_block(
                         if checked { " checked" } else { "" }
                     );
                 }
-                html_inlines(output, &item.content, ir, asset_mode, warnings);
+                html_inlines(
+                    output,
+                    &item.content,
+                    ir,
+                    asset_mode,
+                    warnings,
+                    cancellation,
+                );
                 for child in &item.children {
-                    html_block(output, child, ir, asset_mode, warnings);
+                    html_block(output, child, ir, asset_mode, warnings, cancellation);
                 }
                 output.push_str("</li>\n");
             }
@@ -2127,7 +2285,7 @@ fn html_block(
                 alignment_name(*alignment)
             );
             for child in children {
-                html_block(output, child, ir, asset_mode, warnings);
+                html_block(output, child, ir, asset_mode, warnings, cancellation);
             }
             output.push_str("</section>\n");
         }
@@ -2160,23 +2318,27 @@ fn html_inlines(
     ir: &CompileIr,
     asset_mode: HtmlAssetMode,
     warnings: &mut Vec<ExportWarning>,
+    cancellation: &CancellationToken,
 ) {
     for inline in inlines {
+        if cancellation.is_cancelled() {
+            return;
+        }
         match inline {
             CompileInline::Text(text) => output.push_str(&html_escape(text)),
             CompileInline::Emphasis(children) => {
                 output.push_str("<em>");
-                html_inlines(output, children, ir, asset_mode, warnings);
+                html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 output.push_str("</em>");
             }
             CompileInline::Strong(children) => {
                 output.push_str("<strong>");
-                html_inlines(output, children, ir, asset_mode, warnings);
+                html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 output.push_str("</strong>");
             }
             CompileInline::Strikethrough(children) => {
                 output.push_str("<s>");
-                html_inlines(output, children, ir, asset_mode, warnings);
+                html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 output.push_str("</s>");
             }
             CompileInline::Code(text) => {
@@ -2193,10 +2355,10 @@ fn html_inlines(
                         let _ = write!(output, " title=\"{}\"", html_escape(title));
                     }
                     output.push('>');
-                    html_inlines(output, label, ir, asset_mode, warnings);
+                    html_inlines(output, label, ir, asset_mode, warnings, cancellation);
                     output.push_str("</a>");
                 } else {
-                    html_inlines(output, label, ir, asset_mode, warnings);
+                    html_inlines(output, label, ir, asset_mode, warnings, cancellation);
                     warnings.push(ExportWarning {
                         code: "unsafe-link-suppressed",
                         message: format!("Unsafe link scheme was rendered as text: {destination}"),
@@ -2215,8 +2377,12 @@ fn html_inlines(
                         if asset.source_path.is_file()
                             && asset.media_type.starts_with("image/") =>
                     {
-                        fs::read(&asset.source_path).ok().map(|bytes| {
-                            format!("data:{};base64,{}", asset.media_type, base64(&bytes))
+                        read_asset_bytes(&asset.source_path, cancellation).map(|bytes| {
+                            format!(
+                                "data:{};base64,{}",
+                                asset.media_type,
+                                base64(&bytes, cancellation)
+                            )
                         })
                     }
                     (Some(asset), HtmlAssetMode::Relative) => {
@@ -2252,12 +2418,12 @@ fn html_inlines(
             }
             CompileInline::Superscript(children) => {
                 output.push_str("<sup>");
-                html_inlines(output, children, ir, asset_mode, warnings);
+                html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 output.push_str("</sup>");
             }
             CompileInline::Subscript(children) => {
                 output.push_str("<sub>");
-                html_inlines(output, children, ir, asset_mode, warnings);
+                html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 output.push_str("</sub>");
             }
             CompileInline::Styled {
@@ -2269,10 +2435,10 @@ fn html_inlines(
                         "<span class=\"{}\">",
                         html_escape(&sanitize_class(&style.class_name))
                     );
-                    html_inlines(output, children, ir, asset_mode, warnings);
+                    html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                     output.push_str("</span>");
                 } else {
-                    html_inlines(output, children, ir, asset_mode, warnings);
+                    html_inlines(output, children, ir, asset_mode, warnings, cancellation);
                 }
             }
             CompileInline::SoftBreak => output.push('\n'),
@@ -2326,10 +2492,34 @@ fn spaced(value: &str) -> String {
     output
 }
 
-fn base64(input: &[u8]) -> String {
+fn read_asset_bytes(path: &Path, cancellation: &CancellationToken) -> Option<Vec<u8>> {
+    let mut file = fs::File::open(path).ok()?;
+    let capacity = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or(0);
+    let mut output = Vec::with_capacity(capacity);
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            return Some(output);
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn base64(input: &[u8], cancellation: &CancellationToken) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
+    for (index, chunk) in input.chunks(3).enumerate() {
+        if index % (64 * 1024 / 3) == 0 && cancellation.is_cancelled() {
+            break;
+        }
         let first = u32::from(chunk[0]);
         let second = u32::from(*chunk.get(1).unwrap_or(&0));
         let third = u32::from(*chunk.get(2).unwrap_or(&0));
@@ -2355,10 +2545,19 @@ fn base64(input: &[u8]) -> String {
 /// `QTextDocument`/`QPdfWriter` adapter. This fallback has deliberately
 /// documented degradation for non-Latin glyph shaping rather than dropping it
 /// silently.
+#[cfg(test)]
 fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
+    render_pdf_cancellable(ir, &CancellationToken::default())
+        .expect("a fresh token cannot be cancelled")
+}
+
+fn render_pdf_cancellable(
+    ir: &CompileIr,
+    cancellation: &CancellationToken,
+) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
     let mut warnings = Vec::new();
     let mut warned_unicode = false;
-    let plain = render_plain_text(ir, "\n\n");
+    let plain = render_plain_text_cancellable(ir, "\n\n", cancellation)?;
     let width = micrometres_to_points(ir.page.width_micrometres);
     let height = micrometres_to_points(ir.page.height_micrometres);
     let margin_left = micrometres_to_points(ir.page.margin_left_micrometres);
@@ -2370,6 +2569,9 @@ fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
             .max(1.0) as usize;
     for paragraph in plain.split('\u{c}') {
         for line in wrap_pdf_text(paragraph, 90) {
+            if cancellation.is_cancelled() {
+                return Err(ExportError::Cancelled);
+            }
             if page.len() == max_lines {
                 pages.push(std::mem::take(&mut page));
             }
@@ -2408,6 +2610,9 @@ fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
     );
     for (index, lines) in pages.iter().enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let page_id = first_page_id + index * 2;
         let content_id = page_id + 1;
         objects.insert(page_id, format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width:.2} {height:.2}] /Resources << /Font << /F1 {font_id} 0 R >> >> /Contents {content_id} 0 R >>").into_bytes());
@@ -2429,7 +2634,7 @@ fn render_pdf(ir: &CompileIr) -> (Vec<u8>, Vec<ExportWarning>) {
         );
         objects.insert(content_id, stream.into_bytes());
     }
-    (pdf_document(objects), dedupe_warnings(warnings))
+    Ok((pdf_document(objects), dedupe_warnings(warnings)))
 }
 
 fn micrometres_to_points(value: u32) -> f64 {
@@ -2502,11 +2707,29 @@ fn dedupe_warnings(mut warnings: Vec<ExportWarning>) -> Vec<ExportWarning> {
     warnings
 }
 
+#[cfg(test)]
 fn render_epub(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
+    render_epub_cancellable(ir, &CancellationToken::default())
+}
+
+fn render_epub_cancellable(
+    ir: &CompileIr,
+    cancellation: &CancellationToken,
+) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
     let mut warnings = Vec::new();
     let mut body = String::new();
     for block in &ir.blocks {
-        html_block(&mut body, block, ir, HtmlAssetMode::Relative, &mut warnings);
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        html_block(
+            &mut body,
+            block,
+            ir,
+            HtmlAssetMode::Relative,
+            &mut warnings,
+            cancellation,
+        );
     }
     body = body.replace("src=\"assets/", "src=\"../assets/");
     warnings.retain(|warning| warning.code != "html-relative-asset");
@@ -2538,11 +2761,17 @@ fn render_epub(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportEr
         ("OEBPS/text/book.xhtml".into(), content.into_bytes()),
     ];
     for asset in ir.assets.values() {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         if !asset.media_type.starts_with("image/") || !asset.source_path.is_file() {
             continue;
         }
-        match fs::read(&asset.source_path) {
-            Ok(bytes) => {
+        match read_asset_bytes(&asset.source_path, cancellation) {
+            Some(bytes) => {
+                if cancellation.is_cancelled() {
+                    return Err(ExportError::Cancelled);
+                }
                 let id = format!("asset-{}", asset.id);
                 let _ = write!(
                     manifest,
@@ -2553,7 +2782,8 @@ fn render_epub(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportEr
                 );
                 files.push((format!("OEBPS/assets/{}", asset.safe_name), bytes));
             }
-            Err(_) => warnings.push(ExportWarning {
+            None if cancellation.is_cancelled() => return Err(ExportError::Cancelled),
+            None => warnings.push(ExportWarning {
                 code: "epub-missing-asset",
                 message: format!("Image asset could not be packaged: {}", asset.safe_name),
             }),
@@ -2582,7 +2812,10 @@ fn render_epub(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportEr
         manifest
     );
     files.push(("OEBPS/content.opf".into(), opf.into_bytes()));
-    Ok((zip_store(files)?, dedupe_warnings(warnings)))
+    Ok((
+        zip_store_cancellable(files, cancellation)?,
+        dedupe_warnings(warnings),
+    ))
 }
 
 fn epub_nav(ir: &CompileIr) -> String {
@@ -2685,101 +2918,160 @@ fn xml_escape(value: &str) -> String {
     html_escape(value)
 }
 
-/// Uncompressed deterministic ZIP writer. EPUB requires `mimetype` to be the
-/// first entry and uncompressed; using store mode for every entry makes both
-/// EPUB and golden DOCX output deterministic without a platform zlib binding.
-fn zip_store(files: Vec<(String, Vec<u8>)>) -> Result<Vec<u8>, ExportError> {
+/// Uncompressed deterministic ZIP/ZIP64 writer. EPUB requires `mimetype` to be
+/// first and uncompressed; store mode also keeps DOCX golden output stable.
+fn zip_store_cancellable(
+    files: Vec<(String, Vec<u8>)>,
+    cancellation: &CancellationToken,
+) -> Result<Vec<u8>, ExportError> {
     let mut output = Vec::new();
     let mut entries = Vec::new();
     for (name, data) in files {
-        if entries.len() >= usize::from(u16::MAX) {
-            return Err(ExportError::ArchiveLimit(
-                "more than 65,535 entries requires ZIP64".into(),
-            ));
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
         }
         if name.len() > usize::from(u16::MAX) {
             return Err(ExportError::ArchiveLimit(format!(
                 "entry name exceeds 65,535 bytes: {name}"
             )));
         }
-        if data.len() > usize::try_from(u32::MAX).unwrap_or(usize::MAX) {
-            return Err(ExportError::ArchiveLimit(format!(
-                "entry exceeds 4 GiB: {name}"
-            )));
-        }
-        let offset = u32::try_from(output.len()).map_err(|_| {
-            ExportError::ArchiveLimit("archive offset exceeds 4 GiB; ZIP64 is required".into())
-        })?;
-        let crc = crc32(&data);
+        let offset = u64::try_from(output.len())
+            .map_err(|_| ExportError::ArchiveLimit("archive offset exceeds u64".into()))?;
+        let size = u64::try_from(data.len())
+            .map_err(|_| ExportError::ArchiveLimit(format!("entry size exceeds u64: {name}")))?;
+        let crc = crc32_cancellable(&data, cancellation)?;
         let name_bytes = name.as_bytes();
+        let large_size = size > u64::from(u32::MAX);
+        let mut local_extra = Vec::new();
+        if large_size {
+            push_u16(&mut local_extra, 0x0001);
+            push_u16(&mut local_extra, 16);
+            push_u64(&mut local_extra, size);
+            push_u64(&mut local_extra, size);
+        }
         push_u32(&mut output, 0x0403_4b50);
-        push_u16(&mut output, 20);
+        push_u16(&mut output, if large_size { 45 } else { 20 });
         push_u16(&mut output, 0x0800);
         push_u16(&mut output, 0);
         push_u16(&mut output, 0);
         push_u16(&mut output, 33);
         push_u32(&mut output, crc);
-        let size = u32::try_from(data.len())
-            .map_err(|_| ExportError::ArchiveLimit(format!("entry exceeds 4 GiB: {name}")))?;
-        push_u32(&mut output, size);
-        push_u32(&mut output, size);
+        let classic_size = u32::try_from(size).unwrap_or(u32::MAX);
+        push_u32(&mut output, classic_size);
+        push_u32(&mut output, classic_size);
         push_u16(
             &mut output,
             u16::try_from(name_bytes.len()).map_err(|_| {
                 ExportError::ArchiveLimit(format!("entry name exceeds 65,535 bytes: {name}"))
             })?,
         );
-        push_u16(&mut output, 0);
+        push_u16(
+            &mut output,
+            u16::try_from(local_extra.len())
+                .map_err(|_| ExportError::ArchiveLimit("ZIP64 extra field too large".into()))?,
+        );
         output.extend_from_slice(name_bytes);
+        output.extend_from_slice(&local_extra);
         output.extend_from_slice(&data);
-        entries.push((name, crc, data.len(), offset));
+        entries.push((name, crc, size, offset));
     }
-    let central_offset = u32::try_from(output.len()).map_err(|_| {
-        ExportError::ArchiveLimit("archive offset exceeds 4 GiB; ZIP64 is required".into())
-    })?;
+    let central_offset = u64::try_from(output.len())
+        .map_err(|_| ExportError::ArchiveLimit("central offset exceeds u64".into()))?;
     for (name, crc, size, offset) in &entries {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         let name_bytes = name.as_bytes();
+        let large_size = *size > u64::from(u32::MAX);
+        let large_offset = *offset > u64::from(u32::MAX);
+        let zip64 = large_size || large_offset;
+        let mut central_extra = Vec::new();
+        if zip64 {
+            let mut values = Vec::new();
+            if large_size {
+                push_u64(&mut values, *size);
+                push_u64(&mut values, *size);
+            }
+            if large_offset {
+                push_u64(&mut values, *offset);
+            }
+            push_u16(&mut central_extra, 0x0001);
+            push_u16(
+                &mut central_extra,
+                u16::try_from(values.len())
+                    .map_err(|_| ExportError::ArchiveLimit("ZIP64 extra field too large".into()))?,
+            );
+            central_extra.extend_from_slice(&values);
+        }
         push_u32(&mut output, 0x0201_4b50);
-        push_u16(&mut output, 20);
-        push_u16(&mut output, 20);
+        push_u16(&mut output, if zip64 { 45 } else { 20 });
+        push_u16(&mut output, if zip64 { 45 } else { 20 });
         push_u16(&mut output, 0x0800);
         push_u16(&mut output, 0);
         push_u16(&mut output, 0);
         push_u16(&mut output, 33);
         push_u32(&mut output, *crc);
-        let size = u32::try_from(*size)
-            .map_err(|_| ExportError::ArchiveLimit(format!("entry exceeds 4 GiB: {name}")))?;
-        push_u32(&mut output, size);
-        push_u32(&mut output, size);
+        let classic_size = u32::try_from(*size).unwrap_or(u32::MAX);
+        push_u32(&mut output, classic_size);
+        push_u32(&mut output, classic_size);
         push_u16(
             &mut output,
             u16::try_from(name_bytes.len()).map_err(|_| {
                 ExportError::ArchiveLimit(format!("entry name exceeds 65,535 bytes: {name}"))
             })?,
         );
-        push_u16(&mut output, 0);
+        push_u16(
+            &mut output,
+            u16::try_from(central_extra.len())
+                .map_err(|_| ExportError::ArchiveLimit("ZIP64 extra field too large".into()))?,
+        );
         push_u16(&mut output, 0);
         push_u16(&mut output, 0);
         push_u16(&mut output, 0);
         push_u32(&mut output, 0);
-        push_u32(&mut output, *offset);
+        push_u32(&mut output, u32::try_from(*offset).unwrap_or(u32::MAX));
         output.extend_from_slice(name_bytes);
+        output.extend_from_slice(&central_extra);
     }
-    let central_end = u32::try_from(output.len()).map_err(|_| {
-        ExportError::ArchiveLimit("central directory exceeds 4 GiB; ZIP64 is required".into())
-    })?;
+    let central_end = u64::try_from(output.len())
+        .map_err(|_| ExportError::ArchiveLimit("central directory exceeds u64".into()))?;
     let central_size = central_end
         .checked_sub(central_offset)
         .ok_or_else(|| ExportError::ArchiveLimit("invalid central directory size".into()))?;
+    let zip64 = entries.len() > usize::from(u16::MAX)
+        || central_size > u64::from(u32::MAX)
+        || central_offset > u64::from(u32::MAX);
+    if zip64 {
+        let zip64_offset = u64::try_from(output.len())
+            .map_err(|_| ExportError::ArchiveLimit("ZIP64 record offset exceeds u64".into()))?;
+        push_u32(&mut output, 0x0606_4b50);
+        push_u64(&mut output, 44);
+        push_u16(&mut output, 45);
+        push_u16(&mut output, 45);
+        push_u32(&mut output, 0);
+        push_u32(&mut output, 0);
+        let count = u64::try_from(entries.len())
+            .map_err(|_| ExportError::ArchiveLimit("entry count exceeds u64".into()))?;
+        push_u64(&mut output, count);
+        push_u64(&mut output, count);
+        push_u64(&mut output, central_size);
+        push_u64(&mut output, central_offset);
+        push_u32(&mut output, 0x0706_4b50);
+        push_u32(&mut output, 0);
+        push_u64(&mut output, zip64_offset);
+        push_u32(&mut output, 1);
+    }
     push_u32(&mut output, 0x0605_4b50);
     push_u16(&mut output, 0);
     push_u16(&mut output, 0);
-    let count = u16::try_from(entries.len())
-        .map_err(|_| ExportError::ArchiveLimit("more than 65,535 entries requires ZIP64".into()))?;
+    let count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
     push_u16(&mut output, count);
     push_u16(&mut output, count);
-    push_u32(&mut output, central_size);
-    push_u32(&mut output, central_offset);
+    push_u32(&mut output, u32::try_from(central_size).unwrap_or(u32::MAX));
+    push_u32(
+        &mut output,
+        u32::try_from(central_offset).unwrap_or(u32::MAX),
+    );
     push_u16(&mut output, 0);
     Ok(output)
 }
@@ -2791,25 +3083,67 @@ fn push_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_le_bytes());
 }
 
-fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xedb8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
+fn push_u64(output: &mut Vec<u8>, value: u64) {
+    output.extend_from_slice(&value.to_le_bytes());
 }
 
+fn crc32(bytes: &[u8]) -> u32 {
+    crc32_cancellable(bytes, &CancellationToken::default())
+        .expect("a fresh token cannot be cancelled")
+}
+
+const fn crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut index = 0usize;
+    while index < table.len() {
+        let mut value = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = if value & 1 == 1 {
+                (value >> 1) ^ 0xedb8_8320
+            } else {
+                value >> 1
+            };
+            bit += 1;
+        }
+        table[index] = value;
+        index += 1;
+    }
+    table
+}
+
+const CRC32_TABLE: [u32; 256] = crc32_table();
+
+fn crc32_cancellable(bytes: &[u8], cancellation: &CancellationToken) -> Result<u32, ExportError> {
+    let mut crc = 0xffff_ffffu32;
+    for (index, byte) in bytes.iter().enumerate() {
+        if index % (64 * 1024) == 0 && cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
+        let table_index = usize::try_from((crc ^ u32::from(*byte)) & 0xff).unwrap_or(0);
+        crc = (crc >> 8) ^ CRC32_TABLE[table_index];
+    }
+    Ok(!crc)
+}
+
+#[cfg(test)]
 fn render_docx(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
-    let mut renderer = DocxRenderer::new(ir);
+    render_docx_cancellable(ir, &CancellationToken::default())
+}
+
+fn render_docx_cancellable(
+    ir: &CompileIr,
+    cancellation: &CancellationToken,
+) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportError> {
+    let mut renderer = DocxRenderer::new(ir, cancellation);
     for block in &ir.blocks {
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
         renderer.block(block);
+        if cancellation.is_cancelled() {
+            return Err(ExportError::Cancelled);
+        }
     }
     let document = renderer.finish_document();
     let styles = docx_styles(ir);
@@ -2827,7 +3161,10 @@ fn render_docx(ir: &CompileIr) -> Result<(Vec<u8>, Vec<ExportWarning>), ExportEr
     for image in &renderer.images {
         files.push((format!("word/media/{}", image.name), image.bytes.clone()));
     }
-    Ok((zip_store(files)?, dedupe_warnings(renderer.warnings)))
+    Ok((
+        zip_store_cancellable(files, cancellation)?,
+        dedupe_warnings(renderer.warnings),
+    ))
 }
 
 #[derive(Clone, Debug)]
@@ -2839,6 +3176,7 @@ struct DocxImage {
 
 struct DocxRenderer<'a> {
     ir: &'a CompileIr,
+    cancellation: &'a CancellationToken,
     body: String,
     relationships: Vec<(String, String, String, bool)>,
     images: Vec<DocxImage>,
@@ -2850,9 +3188,10 @@ struct DocxRenderer<'a> {
 }
 
 impl<'a> DocxRenderer<'a> {
-    fn new(ir: &'a CompileIr) -> Self {
+    fn new(ir: &'a CompileIr, cancellation: &'a CancellationToken) -> Self {
         Self {
             ir,
+            cancellation,
             body: String::new(),
             relationships: vec![(
                 "rId1".into(),
@@ -3217,7 +3556,7 @@ impl<'a> DocxRenderer<'a> {
                 });
                 return;
             };
-            let Ok(bytes) = fs::read(&asset.source_path) else {
+            let Some(bytes) = read_asset_bytes(&asset.source_path, self.cancellation) else {
                 self.run(alt, None, false, false, false, false, false);
                 self.warnings.push(ExportWarning {
                     code: "docx-missing-asset",
@@ -3901,7 +4240,10 @@ mod tests {
         let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
         input.bodies.insert(
             document_id,
-            "```{=parchmint-opaque source-format=\"future\"}\nretain\n```\n".into(),
+            DocumentBodySnapshot::from_body(
+                document_id,
+                "```{=parchmint-opaque source-format=\"future\"}\nretain\n```\n",
+            ),
         );
         let (_, warnings) = compile(
             &input,
@@ -3957,8 +4299,10 @@ mod tests {
         let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
         input.bodies.insert(
             document_id,
-            "```rust\nfn main() {}\n```\n\n::: {.parchmint-align align=\"center\"}\nCentered.\n:::\n"
-                .into(),
+            DocumentBodySnapshot::from_body(
+                document_id,
+                "```rust\nfn main() {}\n```\n\n::: {.parchmint-align align=\"center\"}\nCentered.\n:::\n",
+            ),
         );
         let (mut ir, _) = compile(
             &input,
@@ -4000,7 +4344,10 @@ mod tests {
         let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
         input.bodies.insert(
             document_id,
-            "3. parent\n   - child\n   - second\n4. sibling\n".into(),
+            DocumentBodySnapshot::from_body(
+                document_id,
+                "3. parent\n   - child\n   - second\n4. sibling\n",
+            ),
         );
         let (ir, _) = compile(
             &input,
@@ -4032,7 +4379,10 @@ mod tests {
         let document_id = input.project.nodes[&scene].kind.document_id().unwrap();
         input.bodies.insert(
             document_id,
-            "1. *outer **inner***\n\n1. second list\n".into(),
+            DocumentBodySnapshot::from_body(
+                document_id,
+                "1. *outer **inner***\n\n1. second list\n",
+            ),
         );
         let (ir, _) = compile(
             &input,
@@ -4189,5 +4539,75 @@ mod tests {
             fs::read_to_string(&destination).unwrap(),
             "appeared after preparation"
         );
+    }
+
+    #[test]
+    fn crc_hot_path_is_standard_and_cooperatively_cancellable() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        let cancellation = CancellationToken::default();
+        cancellation.cancel();
+        assert!(matches!(
+            crc32_cancellable(&vec![0; 1024 * 1024], &cancellation),
+            Err(ExportError::Cancelled)
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10M-word gate")]
+    fn ten_million_word_compile_cancels_within_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut opened = ProjectStorage::create(directory.path(), "Cancellation").unwrap();
+        let root = opened.project.manuscript_root();
+        for index in 0..100 {
+            add_document(
+                &mut opened,
+                root,
+                &format!("Scene {index}"),
+                "",
+                false,
+                false,
+            );
+        }
+        let mut input = CompileInput::from_open_project(&opened, stamp()).unwrap();
+        let shared: Arc<str> = Arc::from("winter orchard harbor river ".repeat(25_000));
+        for (document, body) in &mut input.bodies {
+            *body = DocumentBodySnapshot::from_body(*document, Arc::clone(&shared));
+        }
+        let cancellation = CancellationToken::default();
+        let worker_token = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            compile(
+                &input,
+                &CompilePreset::manuscript("Manuscript"),
+                &worker_token,
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let started = std::time::Instant::now();
+        cancellation.cancel();
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(CompileError::Cancelled)
+        ));
+        let elapsed = started.elapsed();
+        eprintln!("stage14 compile-words=10000000 cancellation={elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "compile cancellation took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn archive_writer_emits_zip64_records_for_large_entry_counts() {
+        let files = (0..=u16::MAX)
+            .map(|index| (format!("entry-{index:05}"), Vec::new()))
+            .collect();
+        let archive = zip_store_cancellable(files, &CancellationToken::default()).unwrap();
+        assert!(archive.windows(4).any(|bytes| bytes == b"PK\x06\x06"));
+        assert!(archive.windows(4).any(|bytes| bytes == b"PK\x06\x07"));
+        let eocd = archive.len() - 22;
+        assert_eq!(&archive[eocd..eocd + 4], b"PK\x05\x06");
+        assert_eq!(&archive[eocd + 8..eocd + 12], &[0xff; 4]);
+        assert_eq!(&archive[archive.len() - 2..], &[0, 0]);
     }
 }

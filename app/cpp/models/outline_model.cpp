@@ -1,5 +1,7 @@
 #include "outline_model.h"
 
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 
 namespace {
@@ -23,55 +25,88 @@ void OutlineModel::setSource(QObject* source)
     disconnect(m_revisionConnection);
   beginResetModel();
   m_source = source;
+  m_rows.clear();
+  m_rowCount = m_source ? m_source->property("node_count").toInt() : 0;
   endResetModel();
   if (m_source) {
-    m_revisionConnection = connect(m_source, &QObject::destroyed, this, [this] { setSource(nullptr); });
-    connect(m_source, SIGNAL(revisionChanged()), this, SLOT(refresh()));
+    connect(m_source, &QObject::destroyed, this, [this] { setSource(nullptr); });
+    m_revisionConnection = connect(m_source,
+                                   SIGNAL(outlineModelDelta(QString,int,int,int)),
+                                   this,
+                                   SLOT(applyDelta(QString,int,int,int)));
   }
   emit sourceChanged();
 }
 
-void OutlineModel::refresh()
+void OutlineModel::applyDelta(const QString& kind, int first, int destination, int count)
 {
-  beginResetModel();
-  endResetModel();
+  count = qMax(0, count);
+  if (kind == QStringLiteral("insert") && count > 0) {
+    beginInsertRows({}, first, first + count - 1);
+    m_rowCount += count;
+    m_rows.clear();
+    endInsertRows();
+  } else if (kind == QStringLiteral("remove") && count > 0) {
+    beginRemoveRows({}, first, first + count - 1);
+    m_rowCount = qMax(0, m_rowCount - count);
+    m_rows.clear();
+    endRemoveRows();
+  } else if (kind == QStringLiteral("move") && count > 0 && first != destination) {
+    const int destinationChild = destination > first ? destination + count : destination;
+    if (beginMoveRows({}, first, first + count - 1, {}, destinationChild)) {
+      m_rows.clear();
+      endMoveRows();
+    }
+  } else if (kind == QStringLiteral("data") && count > 0) {
+    for (int row = first; row < first + count; ++row)
+      m_rows.remove(row);
+    emit dataChanged(index(first), index(qMin(m_rowCount - 1, first + count - 1)));
+  } else if (kind == QStringLiteral("reset")) {
+    beginResetModel();
+    m_rows.clear();
+    m_rowCount = m_source ? m_source->property("node_count").toInt() : 0;
+    endResetModel();
+  }
 }
 
 int OutlineModel::rowCount(const QModelIndex& parent) const
 {
   if (parent.isValid() || !m_source)
     return 0;
-  return m_source->property("node_count").toInt();
+  return m_rowCount;
 }
 
 QVariant OutlineModel::data(const QModelIndex& index, int role) const
 {
   if (!index.isValid() || index.row() < 0 || index.row() >= rowCount())
     return {};
+  const auto* row = cachedRow(index.row());
+  if (!row)
+    return {};
   switch (role) {
     case Qt::DisplayRole:
     case TitleRole:
-      return invoke("nodeTitle", index.row());
+      return row->title;
     case IdRole:
-      return invoke("nodeId", index.row());
+      return row->id;
     case DepthRole:
-      return invoke("nodeDepth", index.row());
+      return row->depth;
     case ParentIdRole:
-      return invoke("nodeParent", index.row());
+      return row->parent;
     case SynopsisRole:
-      return invoke("nodeSynopsis", index.row());
+      return row->synopsis;
     case StatusRole:
-      return invoke("nodeStatus", index.row());
+      return row->status;
     case LabelRole:
-      return invoke("nodeLabel", index.row());
+      return row->label;
     case GroupRole:
-      return invoke("nodeIsGroup", index.row());
+      return row->group;
     case RootRole:
-      return invoke("nodeIsRoot", index.row());
+      return row->root;
     case WordCountRole:
-      return invoke("nodeWordCount", index.row());
+      return row->words;
     case IncludeInCompileRole:
-      return invoke("nodeIncludeInCompile", index.row());
+      return row->include;
     default:
       return {};
   }
@@ -146,28 +181,38 @@ bool OutlineModel::dropMimeData(const QMimeData* mime,
     && moved;
 }
 
-QVariant OutlineModel::invoke(const char* method, int row) const
+const OutlineModel::CachedRow* OutlineModel::cachedRow(int row) const
 {
   if (!m_source)
-    return {};
-  if (qstrcmp(method, "nodeTitle") == 0 || qstrcmp(method, "nodeId") == 0
-      || qstrcmp(method, "nodeSynopsis") == 0 || qstrcmp(method, "nodeStatus") == 0
-      || qstrcmp(method, "nodeLabel") == 0) {
-    QString value;
-    if (QMetaObject::invokeMethod(m_source, method, Qt::DirectConnection,
-                                  Q_RETURN_ARG(QString, value), Q_ARG(qint32, row)))
-      return value;
-  } else if (qstrcmp(method, "nodeIsGroup") == 0 || qstrcmp(method, "nodeIsRoot") == 0) {
-    bool value = false;
-    if (QMetaObject::invokeMethod(m_source, method, Qt::DirectConnection,
-                                  Q_RETURN_ARG(bool, value), Q_ARG(qint32, row)))
-      return value;
-  } else {
-    qint32 value = 0;
-    if (QMetaObject::invokeMethod(m_source, method, Qt::DirectConnection,
-                                  Q_RETURN_ARG(qint32, value), Q_ARG(qint32, row)))
-      return value;
+    return nullptr;
+  const auto existing = m_rows.constFind(row);
+  if (existing != m_rows.cend())
+    return &existing.value();
+  QString payload;
+  if (!QMetaObject::invokeMethod(m_source,
+                                 "nodeRowJson",
+                                 Qt::DirectConnection,
+                                 Q_RETURN_ARG(QString, payload),
+                                 Q_ARG(qint32, row))) {
+    emit modelError(tr("Rust outline row bridge failed."));
+    return nullptr;
   }
-  emit modelError(tr("Rust outline bridge method %1 failed.").arg(QString::fromLatin1(method)));
-  return {};
+  const auto object = QJsonDocument::fromJson(payload.toUtf8()).object();
+  if (object.isEmpty()) {
+    emit modelError(tr("Rust outline row payload is invalid."));
+    return nullptr;
+  }
+  CachedRow value;
+  value.title = object.value(QStringLiteral("title")).toString();
+  value.id = object.value(QStringLiteral("nodeId")).toString();
+  value.depth = object.value(QStringLiteral("depth")).toInt();
+  value.parent = object.value(QStringLiteral("parentId")).toInt(-1);
+  value.synopsis = object.value(QStringLiteral("synopsis")).toString();
+  value.status = object.value(QStringLiteral("status")).toString();
+  value.label = object.value(QStringLiteral("label")).toString();
+  value.group = object.value(QStringLiteral("isGroup")).toBool();
+  value.root = object.value(QStringLiteral("isRoot")).toBool();
+  value.words = object.value(QStringLiteral("wordCount")).toInt();
+  value.include = object.value(QStringLiteral("includeInCompile")).toBool();
+  return &m_rows.insert(row, value).value();
 }

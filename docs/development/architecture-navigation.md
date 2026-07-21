@@ -16,6 +16,8 @@ Start with these documents when changing an area:
 | Editor bridge | [`ADR-0002`](../architecture/0002-qml-text-editor-host.md) | Qt adapter |
 | Threading | [`ADR-0003`](../architecture/0003-cxx-qt-boundaries-and-threading.md) | Stamped workers |
 | Compile/export | [`Stage 07 handoff`](../handoffs/07-compile-and-export.md) | Immutable compile IR |
+| Incremental scale | [`ADR-0014`](../architecture/0014-incremental-transactions-and-revisions.md) | Dirty sets, revisions, model deltas |
+| Performance gates | [`performance-budgets.md`](performance-budgets.md) | Reference corpus budgets |
 
 The stage index and handoffs explain why a boundary exists. If an edit would
 change a persisted schema, ownership rule, recovery guarantee, or public API,

@@ -76,6 +76,7 @@ private slots:
     for (int index = 0; index < 500; ++index) {
       timer.restart();
       cursor.insertText(QStringLiteral("x"));
+      QCoreApplication::processEvents();
       samples.push_back(timer.nsecsElapsed() / 1'000);
     }
     std::ranges::sort(samples);

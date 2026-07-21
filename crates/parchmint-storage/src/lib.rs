@@ -14,10 +14,12 @@ use parchmint_domain::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use tempfile::NamedTempFile;
 use thiserror::Error;
+use uuid::Uuid;
 
 /// The only supported canonical project version.
 pub const FORMAT_VERSION: u32 = 1;
@@ -63,13 +65,180 @@ pub struct OpenProject {
     root: PathBuf,
     mode: OpenMode,
     _lock: Option<AdvisoryLock>,
-    bodies: BTreeMap<DocumentId, String>,
+    bodies: BTreeMap<DocumentId, DocumentBodySnapshot>,
     unknown_front_matter: BTreeMap<DocumentId, Mapping>,
     locations: BTreeMap<DocumentId, RelativeProjectPath>,
+    pending_locations: BTreeMap<DocumentId, RelativeProjectPath>,
     manifest_extra: BTreeMap<String, toml::Value>,
     outline_extra: BTreeMap<String, toml::Value>,
     styles_extra: BTreeMap<String, toml::Value>,
     attachments: BTreeMap<parchmint_domain::AssetId, AttachmentRecord>,
+    dirty: DirtySet,
+    last_save_metrics: SaveMetrics,
+}
+
+/// Canonical resources changed since the last acknowledged save. The set is
+/// deliberately resource-shaped: a metadata edit can dirty one Markdown file
+/// without implying that every document body changed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct DirtySet {
+    pub manifest: bool,
+    pub outline: bool,
+    pub styles: bool,
+    pub attachments: bool,
+    pub documents: BTreeSet<DocumentId>,
+    pub tombstones: BTreeSet<NodeId>,
+}
+
+impl DirtySet {
+    pub fn is_empty(&self) -> bool {
+        !self.manifest
+            && !self.outline
+            && !self.styles
+            && !self.attachments
+            && self.documents.is_empty()
+            && self.tombstones.is_empty()
+    }
+}
+
+/// Observable canonical I/O from the last acknowledged save operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SaveMetrics {
+    pub files_written: usize,
+    pub files_removed: usize,
+    pub bytes_written: u64,
+}
+
+/// Immutable canonical write set prepared on the project owner and executed by
+/// the serial persistence worker. It contains only dirty resources.
+pub struct ProjectSavePlan {
+    root: PathBuf,
+    mutations: BTreeMap<String, Option<PlannedContents>>,
+    location_updates: Vec<(DocumentId, RelativeProjectPath)>,
+}
+
+enum PlannedContents {
+    Bytes(Vec<u8>),
+    Outline(Outline),
+}
+
+impl ProjectSavePlan {
+    /// Commits the prepared write set with the project recovery protocol.
+    pub fn execute(self) -> Result<SaveMetrics, StorageError> {
+        self.execute_with_fault(None)
+    }
+
+    fn execute_with_fault(
+        self,
+        fault: Option<TransactionFault>,
+    ) -> Result<SaveMetrics, StorageError> {
+        let mutations = self
+            .mutations
+            .into_iter()
+            .map(|(path, contents)| {
+                let contents = contents
+                    .map(|contents| match contents {
+                        PlannedContents::Bytes(bytes) => Ok(bytes),
+                        PlannedContents::Outline(outline) => toml_bytes(&outline),
+                    })
+                    .transpose()?;
+                Ok((path, contents))
+            })
+            .collect::<Result<BTreeMap<_, _>, StorageError>>()?;
+        transactional_write_set(&self.root, &mutations, fault)
+    }
+}
+
+/// Opaque owner-thread state needed to reverse a scheduled command if its
+/// worker transaction fails. Only affected document locations are retained.
+pub struct ScheduledCommandRollback {
+    outcome: CommandOutcome,
+    prior_locations: Vec<(DocumentId, Option<RelativeProjectPath>)>,
+    prior_metrics: SaveMetrics,
+}
+
+impl ScheduledCommandRollback {
+    /// Events published optimistically for this scheduled command.
+    pub fn outcome(&self) -> &CommandOutcome {
+        &self.outcome
+    }
+}
+
+/// Owner-thread command result plus the disk plan that may be moved to a
+/// worker. The project has already advanced when this value is returned.
+pub struct ScheduledProjectCommand {
+    pub outcome: CommandOutcome,
+    pub plan: ProjectSavePlan,
+    pub rollback: ScheduledCommandRollback,
+}
+
+/// Cheap, thread-safe handle to one immutable canonical body revision. Open
+/// stores deferred file handles; editors replace them with loaded snapshots.
+/// A cloned handle always observes the revision captured when it was cloned.
+#[derive(Clone, Debug)]
+pub struct DocumentBodySnapshot(Arc<DocumentBodySource>);
+
+#[derive(Debug)]
+struct DocumentBodySource {
+    document: DocumentId,
+    path: Option<PathBuf>,
+    loaded: OnceLock<Arc<str>>,
+}
+
+impl DocumentBodySnapshot {
+    fn deferred(document: DocumentId, path: PathBuf) -> Self {
+        Self(Arc::new(DocumentBodySource {
+            document,
+            path: Some(path),
+            loaded: OnceLock::new(),
+        }))
+    }
+
+    fn loaded(document: DocumentId, body: Arc<str>) -> Self {
+        let loaded = OnceLock::new();
+        let _ = loaded.set(body);
+        Self(Arc::new(DocumentBodySource {
+            document,
+            path: None,
+            loaded,
+        }))
+    }
+
+    /// Creates an already-loaded snapshot for an immutable worker fixture or
+    /// caller-owned canonical revision.
+    pub fn from_body(document: DocumentId, body: impl Into<Arc<str>>) -> Self {
+        Self::loaded(document, body.into())
+    }
+
+    /// Loads at most this body and returns a shared immutable buffer.
+    pub fn load(&self) -> Result<Arc<str>, StorageError> {
+        self.load_ref().map(Arc::clone)
+    }
+
+    fn load_ref(&self) -> Result<&Arc<str>, StorageError> {
+        if self.0.loaded.get().is_none() {
+            let path = self
+                .0
+                .path
+                .as_ref()
+                .ok_or(StorageError::MissingBody(self.0.document))?;
+            let source = read_bounded(path, MAX_DOCUMENT_BYTES, "document")?;
+            let (_, body, _) = parse_document(&source, self.0.document)?;
+            let _ = self.0.loaded.set(Arc::from(body));
+        }
+        self.0
+            .loaded
+            .get()
+            .ok_or(StorageError::MissingBody(self.0.document))
+    }
+}
+
+/// Deterministic structural-save failure injection used by slow-disk and
+/// partial-commit tests. Production calls always use `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransactionFault {
+    AfterMutation(usize),
 }
 
 /// Immutable canonical write payload prepared on the Rust owner thread and
@@ -119,12 +288,33 @@ impl OpenProject {
     pub const fn mode(&self) -> OpenMode {
         self.mode
     }
+    /// Pending resource set, exposed for diagnostics and performance tests.
+    pub fn dirty_set(&self) -> &DirtySet {
+        &self.dirty
+    }
+    /// Files and bytes touched by the last acknowledged canonical operation.
+    pub const fn last_save_metrics(&self) -> SaveMetrics {
+        self.last_save_metrics
+    }
     /// Returns a document body without its YAML front matter.
     pub fn body(&self, id: DocumentId) -> Result<&str, StorageError> {
         self.bodies
             .get(&id)
-            .map(String::as_str)
-            .ok_or(StorageError::MissingBody(id))
+            .ok_or(StorageError::MissingBody(id))?
+            .load_ref()
+            .map(AsRef::as_ref)
+    }
+    /// Cheap immutable body handles suitable for a derived-state worker.
+    pub fn body_snapshot(&self) -> BTreeMap<DocumentId, DocumentBodySnapshot> {
+        self.bodies.clone()
+    }
+    /// Number of body buffers resident in memory, for profiling and open-time
+    /// regression tests.
+    pub fn loaded_body_count(&self) -> usize {
+        self.bodies
+            .values()
+            .filter(|body| body.0.loaded.get().is_some())
+            .count()
     }
     /// Reads the current canonical body from disk, bypassing the in-memory copy.
     /// This is used by external-change detection and never mutates open state.
@@ -144,31 +334,146 @@ impl OpenProject {
         if body.len() as u64 > MAX_DOCUMENT_BYTES {
             return Err(StorageError::SizeLimit("document", MAX_DOCUMENT_BYTES));
         }
-        let entry = self
-            .bodies
-            .get_mut(&id)
-            .ok_or(StorageError::MissingBody(id))?;
-        *entry = body;
+        if !self.bodies.contains_key(&id) {
+            return Err(StorageError::MissingBody(id));
+        }
+        self.bodies
+            .insert(id, DocumentBodySnapshot::loaded(id, Arc::from(body)));
+        self.dirty.documents.insert(id);
         Ok(())
     }
     /// Applies a graph command and initializes source-preserving Markdown state
     /// for newly created or duplicated documents. Call [`ProjectStorage::save`]
     /// after a batch to acknowledge it durably.
     pub fn execute(&mut self, command: ProjectCommand) -> Result<CommandOutcome, StorageError> {
+        let prior_dirty = self.dirty.clone();
+        let prior_pending_locations = self.pending_locations.clone();
         let outcome = self
             .project
             .execute(command)
             .map_err(StorageError::Domain)?;
-        for event in &outcome.events {
-            match *event {
-                ProjectEvent::NodeCreated(node) => self.initialize_new_document(node, None)?,
-                ProjectEvent::NodeDuplicated { source, copy } => {
-                    self.copy_subtree_bodies(source, copy)?;
+        let result = (|| {
+            for event in &outcome.events {
+                match *event {
+                    ProjectEvent::NodeCreated(node) => self.initialize_new_document(node, None)?,
+                    ProjectEvent::NodeDuplicated { source, copy } => {
+                        self.copy_subtree_bodies(source, copy)?;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.rollback_command_state(&outcome)?;
+            return Err(error);
+        }
+        if let Err(error) = self.mark_dirty(&outcome.events) {
+            self.rollback_command_state(&outcome)?;
+            self.dirty = prior_dirty;
+            self.pending_locations = prior_pending_locations;
+            return Err(error);
         }
         Ok(outcome)
+    }
+    fn mark_dirty(&mut self, events: &[ProjectEvent]) -> Result<(), StorageError> {
+        for event in events {
+            match *event {
+                ProjectEvent::NodeCreated(node) => {
+                    self.dirty.outline = true;
+                    self.mark_subtree_documents(node, false)?;
+                }
+                ProjectEvent::NodeDuplicated { copy, .. } => {
+                    self.dirty.outline = true;
+                    self.mark_subtree_documents(copy, false)?;
+                }
+                ProjectEvent::NodeReparented { node, .. } | ProjectEvent::NodeRestored(node) => {
+                    self.dirty.outline = true;
+                    self.mark_subtree_documents(node, false)?;
+                    self.dirty.tombstones.insert(node);
+                }
+                ProjectEvent::NodeTrashed(node) => {
+                    self.dirty.outline = true;
+                    self.mark_subtree_documents(node, true)?;
+                    self.dirty.tombstones.insert(node);
+                }
+                ProjectEvent::NodeReordered(_) => self.dirty.outline = true,
+                ProjectEvent::NodeRenamed(node) => {
+                    let document = self
+                        .project
+                        .nodes
+                        .get(&node)
+                        .and_then(|entry| entry.kind.document_id())
+                        .ok_or(StorageError::InvalidSchema("renamed node lacks document"))?;
+                    self.dirty.documents.insert(document);
+                }
+                ProjectEvent::MetadataEdited(document) => {
+                    self.dirty.documents.insert(document);
+                }
+                ProjectEvent::StyleMutated(_)
+                | ProjectEvent::StyleReplaced { .. }
+                | ProjectEvent::CompilePresetSaved(_)
+                | ProjectEvent::CompilePresetRemoved(_) => {
+                    self.dirty.styles = true;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn mark_subtree_documents(&mut self, root: NodeId, trash: bool) -> Result<(), StorageError> {
+        let folder = if trash {
+            "trash"
+        } else {
+            root_folder(&self.project, root)?
+        };
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            let entry = self
+                .project
+                .nodes
+                .get(&node)
+                .ok_or(StorageError::InvalidSchema("changed subtree node vanished"))?;
+            pending.extend(entry.children.iter().copied());
+            if let Some(document) = entry.kind.document_id() {
+                self.dirty.documents.insert(document);
+                self.pending_locations.insert(
+                    document,
+                    RelativeProjectPath::new(format!("{folder}/{node}.md"))?,
+                );
+            }
+        }
+        Ok(())
+    }
+    fn rollback_command_state(&mut self, outcome: &CommandOutcome) -> Result<(), StorageError> {
+        let created_documents = match outcome.events.as_slice() {
+            [ProjectEvent::NodeCreated(node)] => self.subtree_documents(*node),
+            [ProjectEvent::NodeDuplicated { copy, .. }] => self.subtree_documents(*copy),
+            _ => Vec::new(),
+        };
+        self.project
+            .rollback(outcome)
+            .map_err(StorageError::Domain)?;
+        for document in created_documents {
+            self.bodies.remove(&document);
+            self.unknown_front_matter.remove(&document);
+            self.locations.remove(&document);
+            self.pending_locations.remove(&document);
+        }
+        Ok(())
+    }
+    fn subtree_documents(&self, root: NodeId) -> Vec<DocumentId> {
+        let mut result = Vec::new();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            let Some(entry) = self.project.nodes.get(&node) else {
+                continue;
+            };
+            pending.extend(entry.children.iter().copied());
+            if let Some(document) = entry.kind.document_id() {
+                result.push(document);
+            }
+        }
+        result
     }
     fn initialize_new_document(
         &mut self,
@@ -189,7 +494,7 @@ impl OpenProject {
         });
         let body = source_id
             .and_then(|source| self.bodies.get(&source).cloned())
-            .unwrap_or_default();
+            .unwrap_or_else(|| DocumentBodySnapshot::loaded(id, Arc::from("")));
         let extra = source_id
             .and_then(|source| self.unknown_front_matter.get(&source).cloned())
             .unwrap_or_default();
@@ -218,8 +523,32 @@ impl OpenProject {
                 "duplicate subtree shape differs",
             ));
         }
-        for (source_child, copy_child) in source_children.into_iter().zip(copy_children) {
-            self.copy_subtree_bodies(source_child, copy_child)?;
+        let mut pending = source_children
+            .into_iter()
+            .zip(copy_children)
+            .collect::<Vec<_>>();
+        while let Some((source_child, copy_child)) = pending.pop() {
+            self.initialize_new_document(copy_child, Some(source_child))?;
+            let source_grandchildren = self
+                .project
+                .nodes
+                .get(&source_child)
+                .ok_or(StorageError::InvalidSchema("duplicate source vanished"))?
+                .children
+                .clone();
+            let copy_grandchildren = self
+                .project
+                .nodes
+                .get(&copy_child)
+                .ok_or(StorageError::InvalidSchema("duplicate copy vanished"))?
+                .children
+                .clone();
+            if source_grandchildren.len() != copy_grandchildren.len() {
+                return Err(StorageError::InvalidSchema(
+                    "duplicate subtree shape differs",
+                ));
+            }
+            pending.extend(source_grandchildren.into_iter().zip(copy_grandchildren));
         }
         Ok(())
     }
@@ -252,10 +581,19 @@ impl ProjectStorage {
             bodies: BTreeMap::new(),
             unknown_front_matter: BTreeMap::new(),
             locations: BTreeMap::new(),
+            pending_locations: BTreeMap::new(),
             manifest_extra: BTreeMap::new(),
             outline_extra: BTreeMap::new(),
             styles_extra: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            dirty: DirtySet {
+                manifest: true,
+                outline: true,
+                styles: true,
+                attachments: true,
+                ..DirtySet::default()
+            },
+            last_save_metrics: SaveMetrics::default(),
         };
         Self::save(&mut opened)?;
         Ok(opened)
@@ -267,6 +605,9 @@ impl ProjectStorage {
         let lock = (mode == OpenMode::ReadWrite)
             .then(|| AdvisoryLock::acquire(&canonical))
             .transpose()?;
+        if mode == OpenMode::ReadWrite {
+            recover_pending_transaction(&canonical)?;
+        }
         let manifest: Manifest = parse_toml(&canonical.join("parchmint.toml"), "parchmint.toml")?;
         migrate_if_needed(&canonical, manifest.format_version)?;
         if manifest.format_version != FORMAT_VERSION {
@@ -322,16 +663,10 @@ impl ProjectStorage {
         let mut bodies = BTreeMap::new();
         let mut extras = BTreeMap::new();
         let mut locations = BTreeMap::new();
-        let document_nodes = project
-            .nodes
-            .values()
-            .filter_map(|node| node.kind.document_id().map(|id| (node.id, id)))
-            .collect::<Vec<_>>();
-        for (node_id, document_id) in document_nodes {
-            let path = canonical_document_path(&project, node_id)?;
+        let document_paths = canonical_document_paths(&project)?;
+        for (node_id, document_id, path) in document_paths {
             let disk = resolve_project_path(&canonical, &path)?;
-            let source = read_bounded(&disk, MAX_DOCUMENT_BYTES, "document")?;
-            let (metadata, body, unknown) = parse_document(&source, document_id)?;
+            let (metadata, unknown) = parse_document_header(&disk, document_id)?;
             project.documents.insert(
                 document_id,
                 DocumentRecord {
@@ -341,7 +676,10 @@ impl ProjectStorage {
                     metadata,
                 },
             );
-            bodies.insert(document_id, body);
+            bodies.insert(
+                document_id,
+                DocumentBodySnapshot::deferred(document_id, disk),
+            );
             extras.insert(document_id, unknown);
             locations.insert(document_id, path);
         }
@@ -354,65 +692,272 @@ impl ProjectStorage {
             bodies,
             unknown_front_matter: extras,
             locations,
+            pending_locations: BTreeMap::new(),
             manifest_extra: manifest.extra,
             outline_extra: outline.extra,
             styles_extra: styles.extra,
             attachments,
+            dirty: DirtySet::default(),
+            last_save_metrics: SaveMetrics::default(),
         })
     }
-    /// Persists all canonical files deterministically. A read-only handle is never modified.
+    /// Persists only canonical resources in the dirty set. The explicit full
+    /// validator remains here for support/debug callers; normal structural
+    /// commands use [`ProjectStorage::execute_command`] and command-local
+    /// validation before entering this writer.
     pub fn save(opened: &mut OpenProject) -> Result<(), StorageError> {
         if opened.mode == OpenMode::ReadOnly {
             return Err(StorageError::ReadOnly);
         }
         opened.project.validate().map_err(StorageError::Domain)?;
-        let manifest = Manifest {
-            format_version: FORMAT_VERSION,
-            project_id: opened.project.id,
-            name: opened.project.name.clone(),
-            extra: opened.manifest_extra.clone(),
+        Self::save_dirty_with_fault(opened, None)
+    }
+
+    /// Applies, validates, and durably commits one command. A failed canonical
+    /// transaction restores both disk and the in-memory project before the
+    /// error is returned to the UI.
+    pub fn execute_command(
+        opened: &mut OpenProject,
+        command: ProjectCommand,
+    ) -> Result<CommandOutcome, StorageError> {
+        Self::execute_command_with_fault(opened, command, None)
+    }
+
+    /// Failure-injectable form used by deterministic partial-save tests.
+    pub fn execute_command_with_fault(
+        opened: &mut OpenProject,
+        command: ProjectCommand,
+        fault: Option<TransactionFault>,
+    ) -> Result<CommandOutcome, StorageError> {
+        if opened.mode == OpenMode::ReadOnly {
+            return Err(StorageError::ReadOnly);
+        }
+        let prior_dirty = opened.dirty.clone();
+        let prior_pending_locations = opened.pending_locations.clone();
+        let outcome = opened.execute(command)?;
+        if let Err(error) = Self::save_dirty_with_fault(opened, fault) {
+            opened.rollback_command_state(&outcome)?;
+            opened.dirty = prior_dirty;
+            opened.pending_locations = prior_pending_locations;
+            return Err(error);
+        }
+        Ok(outcome)
+    }
+
+    /// Applies one command, freezes its small canonical write set, and advances
+    /// owner-thread location bookkeeping without touching disk. The returned
+    /// plan is safe to send to the serial persistence worker.
+    pub fn schedule_command(
+        opened: &mut OpenProject,
+        command: ProjectCommand,
+    ) -> Result<ScheduledProjectCommand, StorageError> {
+        if opened.mode == OpenMode::ReadOnly {
+            return Err(StorageError::ReadOnly);
+        }
+        if !opened.dirty.is_empty() {
+            return Err(StorageError::InvalidSchema(
+                "a prior dirty set must be scheduled before another command",
+            ));
+        }
+        let outcome = opened.execute(command)?;
+        let plan = match Self::prepare_dirty_plan(opened) {
+            Ok(plan) => plan,
+            Err(error) => {
+                opened.rollback_command_state(&outcome)?;
+                opened.dirty = DirtySet::default();
+                opened.pending_locations.clear();
+                return Err(error);
+            }
         };
-        let outline = Outline {
-            format_version: FORMAT_VERSION,
-            roots: opened.project.roots.to_vec(),
-            nodes: opened
+        let prior_locations = plan
+            .location_updates
+            .iter()
+            .map(|(document, _)| (*document, opened.locations.get(document).cloned()))
+            .collect();
+        let rollback = ScheduledCommandRollback {
+            outcome: outcome.clone(),
+            prior_locations,
+            prior_metrics: opened.last_save_metrics,
+        };
+        Self::acknowledge_scheduled_owner(opened, &plan);
+        Ok(ScheduledProjectCommand {
+            outcome,
+            plan,
+            rollback,
+        })
+    }
+
+    /// Records worker success. Canonical location state was advanced when the
+    /// plan was scheduled so this acknowledgement performs no graph work.
+    pub fn acknowledge_scheduled_command(opened: &mut OpenProject, metrics: SaveMetrics) {
+        opened.last_save_metrics = metrics;
+    }
+
+    /// Reverses an optimistically published command after its worker write set
+    /// failed. Callers roll back queued commands in reverse submission order.
+    pub fn rollback_scheduled_command(
+        opened: &mut OpenProject,
+        rollback: ScheduledCommandRollback,
+    ) -> Result<(), StorageError> {
+        opened.rollback_command_state(&rollback.outcome)?;
+        for (document, prior) in rollback.prior_locations {
+            match prior {
+                Some(location) => {
+                    opened.locations.insert(document, location.clone());
+                    if let Some(record) = opened.project.documents.get_mut(&document) {
+                        record.path = location;
+                    }
+                }
+                None => {
+                    opened.locations.remove(&document);
+                }
+            }
+            opened.pending_locations.remove(&document);
+        }
+        opened.dirty = DirtySet::default();
+        opened.last_save_metrics = rollback.prior_metrics;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn prepare_dirty_plan(opened: &OpenProject) -> Result<ProjectSavePlan, StorageError> {
+        let mut mutations = BTreeMap::<String, Option<PlannedContents>>::new();
+        if opened.dirty.manifest {
+            mutations.insert(
+                "parchmint.toml".into(),
+                Some(PlannedContents::Bytes(toml_bytes(&Manifest {
+                    format_version: FORMAT_VERSION,
+                    project_id: opened.project.id,
+                    name: opened.project.name.clone(),
+                    extra: opened.manifest_extra.clone(),
+                })?)),
+            );
+        }
+        if opened.dirty.outline {
+            mutations.insert(
+                "outline.toml".into(),
+                Some(PlannedContents::Outline(Outline {
+                    format_version: FORMAT_VERSION,
+                    roots: opened.project.roots.to_vec(),
+                    nodes: opened
+                        .project
+                        .nodes
+                        .values()
+                        .map(|node| NodeWire {
+                            id: node.id,
+                            kind: node.kind.clone(),
+                            parent: node.parent,
+                            children: node.children.clone(),
+                        })
+                        .collect(),
+                    trash: opened.project.trash.values().cloned().collect(),
+                    extra: opened.outline_extra.clone(),
+                })),
+            );
+        }
+        if opened.dirty.styles {
+            mutations.insert(
+                "styles.toml".into(),
+                Some(PlannedContents::Bytes(toml_bytes(&Styles {
+                    format_version: FORMAT_VERSION,
+                    definitions: opened.project.styles.values().cloned().collect(),
+                    compile_presets: opened.project.compile_presets.values().cloned().collect(),
+                    extra: opened.styles_extra.clone(),
+                })?)),
+            );
+        }
+        if opened.dirty.attachments {
+            mutations.insert(
+                "assets.toml".into(),
+                Some(PlannedContents::Bytes(toml_bytes(&AttachmentCatalog {
+                    version: ASSET_CATALOG_VERSION,
+                    attachments: opened.attachments.values().cloned().collect(),
+                })?)),
+            );
+        }
+        let mut location_updates = Vec::new();
+        for id in &opened.dirty.documents {
+            let record = opened
                 .project
-                .nodes
-                .values()
-                .map(|node| NodeWire {
-                    id: node.id,
-                    kind: node.kind.clone(),
-                    parent: node.parent,
-                    children: node.children.clone(),
-                })
-                .collect(),
-            trash: opened.project.trash.values().cloned().collect(),
-            extra: opened.outline_extra.clone(),
-        };
-        let styles = Styles {
-            format_version: FORMAT_VERSION,
-            definitions: opened.project.styles.values().cloned().collect(),
-            compile_presets: opened.project.compile_presets.values().cloned().collect(),
-            extra: opened.styles_extra.clone(),
-        };
-        write_toml(&opened.root.join("parchmint.toml"), &manifest)?;
-        write_toml(&opened.root.join("outline.toml"), &outline)?;
-        write_toml(&opened.root.join("styles.toml"), &styles)?;
-        save_attachment_catalog(&opened.root, &opened.attachments)?;
-        let records = opened.project.documents.keys().copied().collect::<Vec<_>>();
-        for id in records {
-            Self::save_document(opened, id)?;
+                .documents
+                .get(id)
+                .ok_or(StorageError::MissingBody(*id))?;
+            let desired = opened
+                .pending_locations
+                .get(id)
+                .or_else(|| opened.locations.get(id))
+                .cloned()
+                .ok_or(StorageError::MissingBody(*id))?;
+            let body = opened
+                .bodies
+                .get(id)
+                .ok_or(StorageError::MissingBody(*id))?
+                .load()?;
+            let unknown = opened
+                .unknown_front_matter
+                .get(id)
+                .cloned()
+                .unwrap_or_default();
+            let bytes = serialize_document(*id, &record.metadata, &unknown, &body)?.into_bytes();
+            mutations.insert(desired.as_str().into(), Some(PlannedContents::Bytes(bytes)));
+            if let Some(previous) = opened.locations.get(id)
+                && previous != &desired
+            {
+                mutations.insert(previous.as_str().into(), None);
+            }
+            location_updates.push((*id, desired));
         }
-        for tombstone in opened.project.trash.values() {
-            write_toml(
-                &resolve_project_path(
-                    &opened.root,
-                    &RelativeProjectPath::new(format!("trash/{}.toml", tombstone.node_id))
-                        .map_err(StorageError::Domain)?,
-                )?,
-                tombstone,
-            )?;
+        for node in &opened.dirty.tombstones {
+            let path = format!("trash/{node}.toml");
+            mutations.insert(
+                path,
+                opened
+                    .project
+                    .trash
+                    .get(node)
+                    .map(toml_bytes)
+                    .transpose()?
+                    .map(PlannedContents::Bytes),
+            );
         }
+        Ok(ProjectSavePlan {
+            root: opened.root.clone(),
+            mutations,
+            location_updates,
+        })
+    }
+
+    fn acknowledge_scheduled_owner(opened: &mut OpenProject, plan: &ProjectSavePlan) {
+        for (document, location) in &plan.location_updates {
+            opened.locations.insert(*document, location.clone());
+            opened.pending_locations.remove(document);
+            if let Some(record) = opened.project.documents.get_mut(document) {
+                record.path.clone_from(location);
+            }
+        }
+        opened.dirty = DirtySet::default();
+    }
+
+    fn save_dirty_with_fault(
+        opened: &mut OpenProject,
+        fault: Option<TransactionFault>,
+    ) -> Result<(), StorageError> {
+        if opened.dirty.is_empty() {
+            opened.last_save_metrics = SaveMetrics::default();
+            return Ok(());
+        }
+        let plan = Self::prepare_dirty_plan(opened)?;
+        let location_updates = plan.location_updates.clone();
+        let metrics = plan.execute_with_fault(fault)?;
+        for (document, location) in location_updates {
+            opened.locations.insert(document, location.clone());
+            opened.pending_locations.remove(&document);
+            if let Some(record) = opened.project.documents.get_mut(&document) {
+                record.path = location;
+            }
+        }
+        opened.dirty = DirtySet::default();
+        opened.last_save_metrics = metrics;
         Ok(())
     }
     /// Atomically persists one canonical Markdown document without rewriting
@@ -422,34 +967,43 @@ impl ProjectStorage {
         if opened.mode == OpenMode::ReadOnly {
             return Err(StorageError::ReadOnly);
         }
-        opened.project.validate().map_err(StorageError::Domain)?;
         let record = opened
             .project
             .documents
             .get(&id)
             .cloned()
             .ok_or(StorageError::MissingBody(id))?;
-        let desired = canonical_document_path(&opened.project, record.node_id)?;
+        let desired = opened
+            .pending_locations
+            .get(&id)
+            .or_else(|| opened.locations.get(&id))
+            .cloned()
+            .ok_or(StorageError::MissingBody(id))?;
         let body = opened
             .bodies
             .get(&record.id)
-            .ok_or(StorageError::MissingBody(record.id))?;
+            .ok_or(StorageError::MissingBody(record.id))?
+            .load()?;
         let unknown = opened
             .unknown_front_matter
             .get(&record.id)
             .cloned()
             .unwrap_or_default();
-        let bytes = serialize_document(record.id, &record.metadata, &unknown, body)?;
-        let target = resolve_project_path(&opened.root, &desired)?;
-        atomic_write(&target, bytes.as_bytes())?;
-        if let Some(previous) = opened.locations.insert(record.id, desired.clone())
-            && previous != desired
+        let bytes = serialize_document(record.id, &record.metadata, &unknown, &body)?;
+        let mut mutations =
+            BTreeMap::from([(desired.as_str().to_owned(), Some(bytes.into_bytes()))]);
+        if let Some(previous) = opened.locations.get(&record.id)
+            && previous != &desired
         {
-            let old = resolve_project_path(&opened.root, &previous)?;
-            if old.is_file() {
-                fs::remove_file(old).map_err(StorageError::RemoveOldDocument)?;
-            }
+            mutations.insert(previous.as_str().to_owned(), None);
         }
+        opened.last_save_metrics = transactional_write_set(&opened.root, &mutations, None)?;
+        opened.locations.insert(record.id, desired.clone());
+        opened.pending_locations.remove(&record.id);
+        if let Some(record) = opened.project.documents.get_mut(&record.id) {
+            record.path = desired;
+        }
+        opened.dirty.documents.remove(&id);
         Ok(())
     }
 
@@ -471,7 +1025,12 @@ impl ProjectStorage {
             .documents
             .get(&id)
             .ok_or(StorageError::MissingBody(id))?;
-        let desired = canonical_document_path(&opened.project, record.node_id)?;
+        let desired = opened
+            .pending_locations
+            .get(&id)
+            .or_else(|| opened.locations.get(&id))
+            .cloned()
+            .ok_or(StorageError::MissingBody(id))?;
         let unknown = opened
             .unknown_front_matter
             .get(&id)
@@ -494,7 +1053,9 @@ impl ProjectStorage {
         opened: &mut OpenProject,
         plan: &DocumentSavePlan,
     ) -> Result<(), StorageError> {
-        opened.set_body(plan.document_id, plan.body.clone())
+        opened.set_body(plan.document_id, plan.body.clone())?;
+        opened.dirty.documents.remove(&plan.document_id);
+        Ok(())
     }
     /// Saves and releases any advisory writer lock.
     pub fn close(mut opened: OpenProject) -> Result<(), StorageError> {
@@ -762,10 +1323,215 @@ fn parse_toml<T: for<'de> Deserialize<'de>>(
     })
 }
 fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<(), StorageError> {
-    let text = toml::to_string_pretty(value)
-        .map_err(|error| StorageError::SerializeToml(error.to_string()))?;
-    atomic_write(path, text.as_bytes())?;
+    atomic_write(path, &toml_bytes(value)?)?;
     Ok(())
+}
+
+fn toml_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
+    toml::to_string_pretty(value)
+        .map(String::into_bytes)
+        .map_err(|error| StorageError::SerializeToml(error.to_string()))
+}
+
+const PENDING_TRANSACTION: &str = ".parchmint/pending-save-v1";
+
+#[derive(Deserialize, Serialize)]
+struct TransactionRecord {
+    version: u32,
+    entries: Vec<TransactionEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TransactionEntry {
+    path: String,
+    existed: bool,
+    backup: Option<String>,
+}
+
+/// Commits a small deterministic set of canonical file replacements/deletions.
+/// A durable old-byte record is published before the first canonical mutation;
+/// open-time recovery rolls it back unless the whole operation was acknowledged.
+fn transactional_write_set(
+    root: &Path,
+    mutations: &BTreeMap<String, Option<Vec<u8>>>,
+    fault: Option<TransactionFault>,
+) -> Result<SaveMetrics, StorageError> {
+    if mutations.is_empty() {
+        return Ok(SaveMetrics::default());
+    }
+    recover_pending_transaction(root)?;
+    let state_root = root.join(".parchmint");
+    fs::create_dir_all(&state_root).map_err(StorageError::CreateDirectory)?;
+    let staging = state_root.join(format!("save-stage-{}", Uuid::new_v4()));
+    fs::create_dir(&staging).map_err(StorageError::CreateDirectory)?;
+    let mut entries = Vec::with_capacity(mutations.len());
+    for (index, relative) in mutations.keys().enumerate() {
+        let relative_path = RelativeProjectPath::new(relative.clone())?;
+        let target = resolve_project_path(root, &relative_path)?;
+        let existed = target.is_file();
+        let backup = existed.then(|| format!("{index:06}.bak"));
+        if let Some(backup) = &backup {
+            let bytes = fs::read(&target).map_err(|error| StorageError::Read {
+                path: target.clone(),
+                error,
+            })?;
+            atomic_write(&staging.join(backup), &bytes)?;
+        }
+        entries.push(TransactionEntry {
+            path: relative.clone(),
+            existed,
+            backup,
+        });
+    }
+    write_toml(
+        &staging.join("transaction.toml"),
+        &TransactionRecord {
+            version: 1,
+            entries,
+        },
+    )?;
+    sync_parent(&staging)?;
+    let pending = root.join(PENDING_TRANSACTION);
+    fs::rename(&staging, &pending).map_err(StorageError::PublishTransaction)?;
+    sync_parent(&state_root)?;
+
+    let mut metrics = SaveMetrics::default();
+    let commit = (|| {
+        for (relative, contents) in mutations {
+            let target = resolve_project_path(root, &RelativeProjectPath::new(relative.clone())?)?;
+            match contents {
+                Some(contents) => {
+                    atomic_write(&target, contents)?;
+                    metrics.files_written = metrics.files_written.saturating_add(1);
+                    metrics.bytes_written = metrics
+                        .bytes_written
+                        .saturating_add(u64::try_from(contents.len()).unwrap_or(u64::MAX));
+                }
+                None if target.is_file() => {
+                    fs::remove_file(&target).map_err(StorageError::RemoveOldDocument)?;
+                    if let Some(parent) = target.parent() {
+                        sync_parent(parent)?;
+                    }
+                    metrics.files_removed = metrics.files_removed.saturating_add(1);
+                }
+                None => {}
+            }
+            let completed = metrics.files_written.saturating_add(metrics.files_removed);
+            if fault == Some(TransactionFault::AfterMutation(completed)) {
+                return Err(StorageError::InjectedTransactionFault(completed));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = commit {
+        recover_pending_transaction(root)?;
+        return Err(error);
+    }
+    fs::remove_dir_all(&pending).map_err(StorageError::RemoveTransaction)?;
+    sync_parent(&state_root)?;
+    Ok(metrics)
+}
+
+fn recover_pending_transaction(root: &Path) -> Result<(), StorageError> {
+    let pending = root.join(PENDING_TRANSACTION);
+    if !pending.is_dir() {
+        return Ok(());
+    }
+    let record: TransactionRecord = parse_toml(
+        &pending.join("transaction.toml"),
+        "pending transaction record",
+    )?;
+    if record.version != 1 {
+        return Err(StorageError::InvalidSchema(
+            "unsupported pending transaction version",
+        ));
+    }
+    for entry in record.entries {
+        let target = resolve_project_path(root, &RelativeProjectPath::new(entry.path)?)?;
+        if entry.existed {
+            let backup = entry.backup.ok_or(StorageError::InvalidSchema(
+                "pending transaction backup is missing",
+            ))?;
+            let backup_path = pending.join(backup);
+            let bytes = fs::read(&backup_path).map_err(|error| StorageError::Read {
+                path: backup_path,
+                error,
+            })?;
+            atomic_write(&target, &bytes)?;
+        } else if target.is_file() {
+            fs::remove_file(&target).map_err(StorageError::RemoveOldDocument)?;
+            if let Some(parent) = target.parent() {
+                sync_parent(parent)?;
+            }
+        }
+    }
+    fs::remove_dir_all(&pending).map_err(StorageError::RemoveTransaction)?;
+    if let Some(parent) = pending.parent() {
+        sync_parent(parent)?;
+    }
+    Ok(())
+}
+
+/// Reads only the bounded YAML prefix needed to make the binder usable. The
+/// Markdown body remains behind `DocumentBodySnapshot` until an editor,
+/// compile, or index worker requests that document.
+fn parse_document_header(
+    path: &Path,
+    document_id: DocumentId,
+) -> Result<(DocumentMetadata, Mapping), StorageError> {
+    let metadata = fs::metadata(path).map_err(|error| StorageError::Read {
+        path: path.to_owned(),
+        error,
+    })?;
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(StorageError::SizeLimit("document", MAX_DOCUMENT_BYTES));
+    }
+    let file = File::open(path).map_err(|error| StorageError::Read {
+        path: path.to_owned(),
+        error,
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut header = String::new();
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| StorageError::Read {
+            path: path.to_owned(),
+            error,
+        })?;
+    if line != "---\n" {
+        return Err(StorageError::InvalidSchema(
+            "document lacks YAML front matter",
+        ));
+    }
+    header.push_str(&line);
+    loop {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .map_err(|error| StorageError::Read {
+                path: path.to_owned(),
+                error,
+            })?
+            == 0
+        {
+            return Err(StorageError::InvalidSchema(
+                "document front matter is unclosed",
+            ));
+        }
+        header.push_str(&line);
+        if header.len() > MAX_FRONT_MATTER_BYTES {
+            return Err(StorageError::SizeLimit(
+                "front matter",
+                MAX_FRONT_MATTER_BYTES as u64,
+            ));
+        }
+        if line == "---\n" {
+            break;
+        }
+    }
+    let (metadata, _, unknown) = parse_document(&header, document_id)?;
+    Ok((metadata, unknown))
 }
 
 fn parse_document(
@@ -936,17 +1702,58 @@ pub fn read_document_bytes_bounded(path: &Path) -> Result<Vec<u8>, StorageError>
     })
 }
 
-fn canonical_document_path(
+fn canonical_document_paths(
     project: &Project,
-    node: NodeId,
-) -> Result<RelativeProjectPath, StorageError> {
-    let folder = root_folder(project, node)?;
-    let name = if project.is_trashed(node) {
-        format!("trash/{node}.md")
-    } else {
-        format!("{folder}/{node}.md")
-    };
-    RelativeProjectPath::new(name).map_err(StorageError::Domain)
+) -> Result<Vec<(NodeId, DocumentId, RelativeProjectPath)>, StorageError> {
+    let mut result = Vec::with_capacity(project.documents.len());
+    let mut visited = BTreeSet::new();
+    for (root, folder) in [
+        (project.manuscript_root(), "manuscript"),
+        (project.research_root(), "research"),
+    ] {
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node) {
+                return Err(StorageError::InvalidSchema("node graph contains a cycle"));
+            }
+            let entry = project.nodes.get(&node).ok_or(StorageError::InvalidSchema(
+                "outline references a missing node",
+            ))?;
+            pending.extend(entry.children.iter().rev().copied());
+            if let Some(document) = entry.kind.document_id() {
+                result.push((
+                    node,
+                    document,
+                    RelativeProjectPath::new(format!("{folder}/{node}.md"))?,
+                ));
+            }
+        }
+    }
+    let mut pending = project.trash.keys().copied().collect::<Vec<_>>();
+    while let Some(node) = pending.pop() {
+        if !visited.insert(node) {
+            return Err(StorageError::InvalidSchema(
+                "active and trash graphs overlap or contain a cycle",
+            ));
+        }
+        let entry = project.nodes.get(&node).ok_or(StorageError::InvalidSchema(
+            "trash references a missing node",
+        ))?;
+        pending.extend(entry.children.iter().rev().copied());
+        if let Some(document) = entry.kind.document_id() {
+            result.push((
+                node,
+                document,
+                RelativeProjectPath::new(format!("trash/{node}.md"))?,
+            ));
+        }
+    }
+    if visited.len() != project.nodes.len() {
+        return Err(StorageError::InvalidSchema(
+            "outline contains unreachable nodes",
+        ));
+    }
+    Ok(result)
 }
 fn root_folder(project: &Project, node: NodeId) -> Result<&'static str, StorageError> {
     let mut current = node;
@@ -1237,6 +2044,15 @@ pub enum StorageError {
     /// Previous location cleanup failed after durable replacement at the new location.
     #[error("could not remove previous document location: {0}")]
     RemoveOldDocument(io::Error),
+    /// Durable recovery record could not be published before canonical mutation.
+    #[error("could not publish canonical transaction: {0}")]
+    PublishTransaction(io::Error),
+    /// A completed/recovered local transaction directory could not be removed.
+    #[error("could not remove canonical transaction state: {0}")]
+    RemoveTransaction(io::Error),
+    /// Deterministic test-only failure after the given canonical mutation count.
+    #[error("injected canonical transaction fault after mutation {0}")]
+    InjectedTransactionFault(usize),
     /// Backup copy failed.
     #[error("could not create migration backup: {0}")]
     CopyBackup(io::Error),
@@ -1282,6 +2098,196 @@ mod tests {
         fs::remove_dir_all(root.join(".parchmint")).unwrap();
         let reopened = ProjectStorage::reopen(&root, OpenMode::ReadWrite).unwrap();
         assert_eq!(reopened.project.name, "Novel");
+    }
+
+    #[test]
+    fn open_defers_markdown_bodies_until_a_consumer_requests_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Lazy");
+        let mut opened = ProjectStorage::create(&root, "Lazy").unwrap();
+        let node = NodeId::new();
+        let document = DocumentId::new();
+        opened
+            .execute(ProjectCommand::Create {
+                parent: opened.project.manuscript_root(),
+                node: Node {
+                    id: node,
+                    kind: NodeKind::Document {
+                        document_id: document,
+                    },
+                    parent: Some(opened.project.manuscript_root()),
+                    children: Vec::new(),
+                },
+                document: DocumentRecord {
+                    id: document,
+                    node_id: node,
+                    path: RelativeProjectPath::new(format!("manuscript/{node}.md")).unwrap(),
+                    metadata: DocumentMetadata {
+                        title: "Deferred".into(),
+                        ..DocumentMetadata::default()
+                    },
+                },
+                index: 0,
+            })
+            .unwrap();
+        opened
+            .set_body(document, "winter orchard\n".into())
+            .unwrap();
+        ProjectStorage::save(&mut opened).unwrap();
+        drop(opened);
+
+        let reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
+        assert_eq!(reopened.loaded_body_count(), 0);
+        let snapshots = reopened.body_snapshot();
+        assert_eq!(reopened.loaded_body_count(), 0);
+        assert_eq!(
+            snapshots[&document].load().unwrap().as_ref(),
+            "winter orchard\n"
+        );
+        assert_eq!(reopened.loaded_body_count(), 1);
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10k/10M open gate")]
+    #[allow(clippy::too_many_lines)]
+    fn ten_thousand_node_ten_million_word_project_opens_with_bodies_deferred() {
+        use std::fmt::Write as _;
+
+        fn schedule_and_commit(
+            opened: &mut OpenProject,
+            command: ProjectCommand,
+        ) -> (std::time::Duration, std::time::Duration, SaveMetrics) {
+            let started = std::time::Instant::now();
+            let scheduled = ProjectStorage::schedule_command(opened, command).unwrap();
+            let owner = started.elapsed();
+            let started = std::time::Instant::now();
+            let metrics = scheduled.plan.execute().unwrap();
+            let worker = started.elapsed();
+            ProjectStorage::acknowledge_scheduled_command(opened, metrics);
+            (owner, worker, metrics)
+        }
+
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let directory = tempfile::tempdir_in(target).unwrap();
+        let root = directory.path().join("Canonical-scale");
+        let opened = ProjectStorage::create(&root, "Canonical scale").unwrap();
+        let manuscript = opened.project.manuscript_root();
+        let research = opened.project.research_root();
+        drop(opened);
+
+        let mut outline = format!(
+            "format_version = 1\nroots = [\"{manuscript}\", \"{research}\"]\n\n[[nodes]]\nid = \"{manuscript}\"\nkind = \"manuscript_root\"\nchildren = ["
+        );
+        let identities = (0..10_000)
+            .map(|_| (NodeId::new(), DocumentId::new()))
+            .collect::<Vec<_>>();
+        for (index, (node, _)) in identities.iter().enumerate() {
+            if index > 0 {
+                outline.push_str(", ");
+            }
+            let _ = write!(outline, "\"{node}\"");
+        }
+        let _ = write!(
+            outline,
+            "]\n\n[[nodes]]\nid = \"{research}\"\nkind = \"research_root\"\nchildren = []\n"
+        );
+        for (node, document) in &identities {
+            let _ = write!(
+                outline,
+                "\n[[nodes]]\nid = \"{node}\"\nkind = \"document\"\ndocument_id = \"{document}\"\nparent = \"{manuscript}\"\nchildren = []\n"
+            );
+        }
+        fs::write(root.join("outline.toml"), outline).unwrap();
+        fs::create_dir_all(root.join("manuscript")).unwrap();
+        let body = "orchard β 雪 ".repeat(334);
+        for (index, (node, document)) in identities.iter().enumerate() {
+            fs::write(
+                root.join(format!("manuscript/{node}.md")),
+                format!("---\ndocument_id: {document}\ntitle: Scene {index}\n---\n{body}\n"),
+            )
+            .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let mut reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "stage14 canonical-nodes=10000 canonical-words=10020000 open={elapsed:?} loaded-bodies={}",
+            reopened.loaded_body_count()
+        );
+        assert_eq!(reopened.project.documents.len(), 10_000);
+        assert_eq!(reopened.loaded_body_count(), 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "canonical scale open took {elapsed:?}"
+        );
+
+        let (first_node, first_document) = identities[0];
+        let (rename_owner, rename_worker, rename_metrics) = schedule_and_commit(
+            &mut reopened,
+            ProjectCommand::Rename {
+                node: first_node,
+                title: "Bounded rename".into(),
+            },
+        );
+        assert_eq!(rename_metrics.files_written, 1);
+        assert_eq!(rename_metrics.files_removed, 0);
+
+        let mut metadata = reopened.project.documents[&first_document].metadata.clone();
+        metadata.summary = "A bounded synopsis".into();
+        metadata.flags.insert("include-in-compile".into(), false);
+        let (metadata_owner, metadata_worker, metadata_metrics) = schedule_and_commit(
+            &mut reopened,
+            ProjectCommand::EditMetadata {
+                document: first_document,
+                metadata,
+            },
+        );
+        assert_eq!(metadata_metrics.files_written, 1);
+        assert_eq!(metadata_metrics.files_removed, 0);
+
+        let (reorder_owner, reorder_worker, reorder_metrics) = schedule_and_commit(
+            &mut reopened,
+            ProjectCommand::Reorder {
+                node: first_node,
+                index: 9_999,
+            },
+        );
+        assert_eq!(reorder_metrics.files_written, 1);
+        assert_eq!(reorder_metrics.files_removed, 0);
+
+        let started = std::time::Instant::now();
+        reopened
+            .set_body(first_document, format!("{body}bounded edit\n"))
+            .unwrap();
+        ProjectStorage::save(&mut reopened).unwrap();
+        let body_save = started.elapsed();
+        let body_metrics = reopened.last_save_metrics();
+        assert_eq!(body_metrics.files_written, 1);
+        assert_eq!(body_metrics.files_removed, 0);
+        eprintln!(
+            "stage14 rename-owner={rename_owner:?} rename-worker={rename_worker:?}/{rename_metrics:?} metadata-owner={metadata_owner:?} metadata-worker={metadata_worker:?}/{metadata_metrics:?} reorder-owner={reorder_owner:?} reorder-worker={reorder_worker:?}/{reorder_metrics:?} body-save={body_save:?}/{body_metrics:?}"
+        );
+        for (operation, duration) in [
+            ("rename owner", rename_owner),
+            ("metadata owner", metadata_owner),
+            ("reorder owner", reorder_owner),
+        ] {
+            assert!(
+                duration < std::time::Duration::from_millis(100),
+                "{operation} took {duration:?}"
+            );
+        }
+        for (operation, duration) in [
+            ("rename worker", rename_worker),
+            ("metadata worker", metadata_worker),
+            ("reorder worker", reorder_worker),
+            ("body save", body_save),
+        ] {
+            assert!(
+                duration < std::time::Duration::from_secs(1),
+                "{operation} took {duration:?}"
+            );
+        }
     }
     #[test]
     fn read_only_access_survives_writer_lock_and_traversal_symlink_is_rejected() {
@@ -1467,6 +2473,120 @@ mod tests {
         let reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
         assert_eq!(reopened.project.documents.len(), 2);
         assert!(reopened.project.nodes.contains_key(&copied));
+    }
+    #[test]
+    fn metadata_and_order_saves_touch_only_their_canonical_resources() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut opened = ProjectStorage::create(&root, "Novel").unwrap();
+        let manuscript = opened.project.manuscript_root();
+        let mut nodes = Vec::new();
+        for index in 0..128 {
+            let node_id = NodeId::new();
+            let document_id = DocumentId::new();
+            opened
+                .execute(ProjectCommand::Create {
+                    parent: manuscript,
+                    node: Node {
+                        id: node_id,
+                        kind: NodeKind::Document { document_id },
+                        parent: Some(manuscript),
+                        children: Vec::new(),
+                    },
+                    document: DocumentRecord {
+                        id: document_id,
+                        node_id,
+                        path: RelativeProjectPath::new(format!("manuscript/{node_id}.md")).unwrap(),
+                        metadata: DocumentMetadata {
+                            title: format!("Scene {index}"),
+                            ..DocumentMetadata::default()
+                        },
+                    },
+                    index,
+                })
+                .unwrap();
+            opened
+                .set_body(document_id, format!("body {index}\n"))
+                .unwrap();
+            nodes.push((node_id, document_id));
+        }
+        ProjectStorage::save(&mut opened).unwrap();
+        let unrelated = root.join(format!("manuscript/{}.md", nodes[64].0));
+        let unrelated_before = fs::read(&unrelated).unwrap();
+
+        ProjectStorage::execute_command(
+            &mut opened,
+            ProjectCommand::Rename {
+                node: nodes[0].0,
+                title: "Bounded rename".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            opened.last_save_metrics(),
+            SaveMetrics {
+                files_written: 1,
+                files_removed: 0,
+                bytes_written: opened.last_save_metrics().bytes_written,
+            }
+        );
+        assert_eq!(fs::read(&unrelated).unwrap(), unrelated_before);
+
+        ProjectStorage::execute_command(
+            &mut opened,
+            ProjectCommand::Reorder {
+                node: nodes[0].0,
+                index: 127,
+            },
+        )
+        .unwrap();
+        assert_eq!(opened.last_save_metrics().files_written, 1);
+        assert_eq!(opened.last_save_metrics().files_removed, 0);
+        assert_eq!(fs::read(&unrelated).unwrap(), unrelated_before);
+    }
+
+    #[test]
+    fn partial_structural_commit_restores_disk_and_in_memory_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut opened = ProjectStorage::create(&root, "Novel").unwrap();
+        let manuscript = opened.project.manuscript_root();
+        let node_id = NodeId::new();
+        let document_id = DocumentId::new();
+        let result = ProjectStorage::execute_command_with_fault(
+            &mut opened,
+            ProjectCommand::Create {
+                parent: manuscript,
+                node: Node {
+                    id: node_id,
+                    kind: NodeKind::Document { document_id },
+                    parent: Some(manuscript),
+                    children: Vec::new(),
+                },
+                document: DocumentRecord {
+                    id: document_id,
+                    node_id,
+                    path: RelativeProjectPath::new(format!("manuscript/{node_id}.md")).unwrap(),
+                    metadata: DocumentMetadata {
+                        title: "Never acknowledged".into(),
+                        ..DocumentMetadata::default()
+                    },
+                },
+                index: 0,
+            },
+            Some(TransactionFault::AfterMutation(1)),
+        );
+        assert!(matches!(
+            result,
+            Err(StorageError::InjectedTransactionFault(1))
+        ));
+        assert!(!opened.project.nodes.contains_key(&node_id));
+        assert!(!opened.project.documents.contains_key(&document_id));
+        assert!(!root.join(PENDING_TRANSACTION).exists());
+        drop(opened);
+        let reopened = ProjectStorage::open(&root, OpenMode::ReadWrite).unwrap();
+        assert!(!reopened.project.nodes.contains_key(&node_id));
+        reopened.project.validate().unwrap();
     }
     #[test]
     fn hand_authored_example_opens_without_local_state() {

@@ -18,6 +18,7 @@ parchmint-domain = { path = "../parchmint-domain" }
 parchmint-markdown = { path = "../parchmint-markdown" }
 tracing.workspace = true
 tempfile.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 cxx-qt-build.workspace = true

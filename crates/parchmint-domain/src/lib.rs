@@ -569,11 +569,28 @@ impl Project {
     }
     /// Applies a validated command and returns an explicit event plus structural inverse.
     pub fn execute(&mut self, command: ProjectCommand) -> Result<CommandOutcome, ProjectError> {
-        let mut candidate = self.clone();
-        let outcome = candidate.apply(command)?;
-        candidate.validate()?;
-        *self = candidate;
+        self.validate_command(&command)?;
+        let outcome = self.apply(command)?;
+        if let Err(error) = self.validate_events(&outcome.events) {
+            // Command-local rollback is intentionally exact.  The user-facing
+            // undo for create/duplicate is "move to trash", while a failed
+            // transaction must remove the newly allocated records entirely.
+            self.rollback(&outcome)?;
+            return Err(error);
+        }
         Ok(outcome)
+    }
+
+    /// Reverts an unacknowledged command without creating a user-visible trash
+    /// entry. Persistence uses this when a canonical transaction cannot commit.
+    pub fn rollback(&mut self, outcome: &CommandOutcome) -> Result<(), ProjectError> {
+        match outcome.events.as_slice() {
+            [ProjectEvent::NodeCreated(node)] => self.remove_unacknowledged_subtree(*node),
+            [ProjectEvent::NodeDuplicated { copy, .. }] => {
+                self.remove_unacknowledged_subtree(*copy)
+            }
+            _ => self.apply(outcome.undo.inverse.clone()).map(|_| ()),
+        }
     }
 
     /// Resolves inherited properties without Qt or mutable display names.
@@ -865,10 +882,13 @@ impl Project {
                 })
             }
             StyleMutation::Update(style) => {
+                if !self.styles.contains_key(&style.id) {
+                    return Err(ProjectError::MissingStyle(style.id));
+                }
                 let old = self
                     .styles
                     .insert(style.id, style.clone())
-                    .ok_or(ProjectError::MissingStyle(style.id))?;
+                    .expect("style existence was checked before mutation");
                 Ok(CommandOutcome {
                     events: vec![ProjectEvent::StyleMutated(style.id)],
                     undo: StructuralUndo {
@@ -981,65 +1001,330 @@ impl Project {
         parent: NodeId,
         out: &mut Vec<(Node, DocumentRecord)>,
     ) -> Result<(), ProjectError> {
-        let source_node = self.active_node(source)?.clone();
+        let source_node = self.active_node(source)?;
         if source_node.kind.is_builtin_root() {
             return Err(ProjectError::RootMutation(source));
         }
-        let new_node = NodeId::new();
-        let old_document = self
-            .documents
-            .get(
-                &source_node
-                    .kind
-                    .document_id()
-                    .ok_or(ProjectError::MissingDocumentForNode(source))?,
-            )
-            .ok_or(ProjectError::MissingDocumentForNode(source))?;
-        let new_document = DocumentId::new();
-        let folder =
-            old_document
-                .path
-                .as_str()
-                .split('/')
-                .next()
-                .ok_or(ProjectError::InvalidInvariant(
-                    "document path has no top-level folder",
-                ))?;
-        let path = RelativeProjectPath::new(format!("{folder}/{new_node}.md"))?;
-        let mut node = Node {
-            id: new_node,
-            kind: match source_node.kind {
-                NodeKind::Group { .. } => NodeKind::Group {
-                    document_id: new_document,
+        // `(source, copied parent, copied-parent output index)`. Children are
+        // pushed in reverse so output remains canonical preorder without using
+        // user-controlled depth on the Rust stack.
+        let mut pending: Vec<(NodeId, NodeId, Option<usize>)> = vec![(source, parent, None)];
+        while let Some((source_id, copied_parent, parent_output)) = pending.pop() {
+            let source_node = self
+                .nodes
+                .get(&source_id)
+                .ok_or(ProjectError::MissingNode(source_id))?;
+            let old_document = self
+                .documents
+                .get(
+                    &source_node
+                        .kind
+                        .document_id()
+                        .ok_or(ProjectError::MissingDocumentForNode(source_id))?,
+                )
+                .ok_or(ProjectError::MissingDocumentForNode(source_id))?;
+            let new_node = NodeId::new();
+            let new_document = DocumentId::new();
+            let folder = old_document.path.as_str().split('/').next().ok_or(
+                ProjectError::InvalidInvariant("document path has no top-level folder"),
+            )?;
+            let path = RelativeProjectPath::new(format!("{folder}/{new_node}.md"))?;
+            let node = Node {
+                id: new_node,
+                kind: match source_node.kind {
+                    NodeKind::Group { .. } => NodeKind::Group {
+                        document_id: new_document,
+                    },
+                    NodeKind::Document { .. } => NodeKind::Document {
+                        document_id: new_document,
+                    },
+                    _ => return Err(ProjectError::RootMutation(source_id)),
                 },
-                NodeKind::Document { .. } => NodeKind::Document {
-                    document_id: new_document,
-                },
-                _ => unreachable!(),
-            },
-            parent: Some(parent),
-            children: Vec::new(),
-        };
-        let record = DocumentRecord {
-            id: new_document,
-            node_id: new_node,
-            path,
-            metadata: old_document.metadata.clone(),
-        };
-        let child_ids = source_node.children;
-        out.push((node.clone(), record));
-        for child in child_ids {
-            let before = out.len();
-            self.clone_subtree(child, new_node, out)?;
-            let child_id = out[before].0.id;
-            node.children.push(child_id);
+                parent: Some(copied_parent),
+                children: Vec::new(),
+            };
+            let record = DocumentRecord {
+                id: new_document,
+                node_id: new_node,
+                path,
+                metadata: old_document.metadata.clone(),
+            };
+            let output_index = out.len();
+            out.push((node, record));
+            if let Some(parent_output) = parent_output {
+                out[parent_output].0.children.push(new_node);
+            }
+            pending.extend(
+                source_node
+                    .children
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, new_node, Some(output_index))),
+            );
         }
-        // The parent copy was stored before recursive work; replace it with final children.
-        let position = out
-            .iter()
-            .position(|(candidate, _)| candidate.id == new_node)
-            .ok_or(ProjectError::MissingNode(new_node))?;
-        out[position].0 = node;
+        Ok(())
+    }
+    #[allow(clippy::too_many_lines)]
+    fn validate_command(&self, command: &ProjectCommand) -> Result<(), ProjectError> {
+        match command {
+            ProjectCommand::Create {
+                parent,
+                node,
+                document,
+                index,
+            } => {
+                self.active_parent(*parent)?;
+                if *index > self.nodes[parent].children.len() {
+                    return Err(ProjectError::SiblingIndex(*index));
+                }
+                if self.nodes.contains_key(&node.id)
+                    || self.documents.contains_key(&document.id)
+                    || document.node_id != node.id
+                    || node.parent != Some(*parent)
+                    || node.kind.document_id() != Some(document.id)
+                    || node.kind.is_builtin_root()
+                    || !node.children.is_empty()
+                {
+                    return Err(ProjectError::InvalidCommand(
+                        "create node/document identities do not agree",
+                    ));
+                }
+                let _ = RelativeProjectPath::new(document.path.as_str())?;
+            }
+            ProjectCommand::Rename { node, .. } => {
+                self.document_for_node(*node)?;
+            }
+            ProjectCommand::Reorder { node, index } => {
+                let parent = self
+                    .active_node(*node)?
+                    .parent
+                    .ok_or(ProjectError::RootMutation(*node))?;
+                let siblings = &self.nodes[&parent].children;
+                if !siblings.contains(node) {
+                    return Err(ProjectError::InvalidCommand("node is absent from parent"));
+                }
+                if *index >= siblings.len() {
+                    return Err(ProjectError::SiblingIndex(*index));
+                }
+            }
+            ProjectCommand::Reparent {
+                node,
+                parent,
+                index,
+            } => {
+                if node == parent || self.is_descendant(*parent, *node)? {
+                    return Err(ProjectError::Cycle);
+                }
+                let old_parent = self
+                    .active_node(*node)?
+                    .parent
+                    .ok_or(ProjectError::RootMutation(*node))?;
+                self.active_parent(*parent)?;
+                let available =
+                    self.nodes[parent].children.len() - usize::from(old_parent == *parent);
+                if *index > available {
+                    return Err(ProjectError::SiblingIndex(*index));
+                }
+            }
+            ProjectCommand::Duplicate {
+                node,
+                parent,
+                index,
+            } => {
+                let source = self.active_node(*node)?;
+                if source.kind.is_builtin_root() {
+                    return Err(ProjectError::RootMutation(*node));
+                }
+                self.active_parent(*parent)?;
+                if *index > self.nodes[parent].children.len() {
+                    return Err(ProjectError::SiblingIndex(*index));
+                }
+            }
+            ProjectCommand::Trash { node } => {
+                if self.active_node(*node)?.parent.is_none() {
+                    return Err(ProjectError::RootMutation(*node));
+                }
+            }
+            ProjectCommand::Restore {
+                node,
+                parent,
+                index,
+            } => {
+                if !self.trash.contains_key(node) {
+                    return Err(ProjectError::NotTrashed(*node));
+                }
+                self.active_parent(*parent)?;
+                if !self.nodes.contains_key(node) {
+                    return Err(ProjectError::MissingNode(*node));
+                }
+                if *index > self.nodes[parent].children.len() {
+                    return Err(ProjectError::SiblingIndex(*index));
+                }
+            }
+            ProjectCommand::TrashAt { node, parent, .. } => {
+                self.active_parent(*parent)?;
+                if !self.nodes[parent].children.contains(node) {
+                    return Err(ProjectError::InvalidCommand("node is absent from parent"));
+                }
+            }
+            ProjectCommand::EditMetadata { document, .. } => {
+                if !self.documents.contains_key(document) {
+                    return Err(ProjectError::MissingDocument(*document));
+                }
+            }
+            ProjectCommand::MutateStyle { mutation } => match mutation {
+                StyleMutation::Create(style) | StyleMutation::RestoreDeleted { style, .. } => {
+                    if self.styles.contains_key(&style.id) {
+                        return Err(ProjectError::DuplicateStyle(style.id));
+                    }
+                }
+                StyleMutation::Update(style) => {
+                    if !self.styles.contains_key(&style.id) {
+                        return Err(ProjectError::MissingStyle(style.id));
+                    }
+                }
+                StyleMutation::Delete(id) | StyleMutation::DeleteAndReplace { id, .. } => {
+                    if !self.styles.contains_key(id) {
+                        return Err(ProjectError::MissingStyle(*id));
+                    }
+                }
+            },
+            ProjectCommand::UpsertCompilePreset { .. } => {}
+            ProjectCommand::RemoveCompilePreset { id } => {
+                if !self.compile_presets.contains_key(id) {
+                    return Err(ProjectError::MissingCompilePreset(*id));
+                }
+            }
+        }
+        Ok(())
+    }
+    fn validate_events(&self, events: &[ProjectEvent]) -> Result<(), ProjectError> {
+        for event in events {
+            match *event {
+                ProjectEvent::NodeCreated(node)
+                | ProjectEvent::NodeRenamed(node)
+                | ProjectEvent::NodeReordered(node)
+                | ProjectEvent::NodeReparented { node, .. }
+                | ProjectEvent::NodeRestored(node) => self.validate_node_record(node)?,
+                ProjectEvent::NodeDuplicated { copy, .. } => self.validate_subtree(copy)?,
+                ProjectEvent::NodeTrashed(node) => {
+                    let tombstone = self
+                        .trash
+                        .get(&node)
+                        .ok_or(ProjectError::NotTrashed(node))?;
+                    if self.nodes[&tombstone.parent].children.contains(&node) {
+                        return Err(ProjectError::InvalidInvariant(
+                            "trashed root remains in active parent",
+                        ));
+                    }
+                }
+                ProjectEvent::MetadataEdited(document) => {
+                    let record = self
+                        .documents
+                        .get(&document)
+                        .ok_or(ProjectError::MissingDocument(document))?;
+                    if self
+                        .nodes
+                        .get(&record.node_id)
+                        .and_then(|node| node.kind.document_id())
+                        != Some(document)
+                    {
+                        return Err(ProjectError::InvalidInvariant("document owner disagrees"));
+                    }
+                    let _ = RelativeProjectPath::new(record.path.as_str())?;
+                }
+                ProjectEvent::StyleMutated(_) | ProjectEvent::StyleReplaced { .. } => {
+                    self.validate_styles()?;
+                }
+                ProjectEvent::CompilePresetSaved(_) | ProjectEvent::CompilePresetRemoved(_) => {
+                    self.validate_compile_presets()?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn validate_node_record(&self, id: NodeId) -> Result<(), ProjectError> {
+        let node = self.nodes.get(&id).ok_or(ProjectError::MissingNode(id))?;
+        if node.id != id {
+            return Err(ProjectError::InvalidInvariant(
+                "node map key differs from node id",
+            ));
+        }
+        if let Some(parent) = node.parent {
+            let parent = self
+                .nodes
+                .get(&parent)
+                .ok_or(ProjectError::MissingNode(parent))?;
+            if !self.trash.contains_key(&id) && !parent.children.contains(&id) {
+                return Err(ProjectError::InvalidInvariant(
+                    "node is absent from its active parent",
+                ));
+            }
+        }
+        if let Some(document) = node.kind.document_id() {
+            let record = self
+                .documents
+                .get(&document)
+                .ok_or(ProjectError::MissingDocument(document))?;
+            if record.node_id != id {
+                return Err(ProjectError::InvalidInvariant("document owner disagrees"));
+            }
+            let _ = RelativeProjectPath::new(record.path.as_str())?;
+        }
+        Ok(())
+    }
+    fn validate_subtree(&self, root: NodeId) -> Result<(), ProjectError> {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                return Err(ProjectError::Cycle);
+            }
+            self.validate_node_record(id)?;
+            let node = self.nodes.get(&id).ok_or(ProjectError::MissingNode(id))?;
+            for child in &node.children {
+                let child_node = self
+                    .nodes
+                    .get(child)
+                    .ok_or(ProjectError::MissingNode(*child))?;
+                if child_node.parent != Some(id) {
+                    return Err(ProjectError::InvalidInvariant("child parent disagrees"));
+                }
+                pending.push(*child);
+            }
+        }
+        // A parent-chain walk is bounded by user depth but never consumes the
+        // call stack. It catches a reparent cycle without scanning the project.
+        let mut ancestry = BTreeSet::new();
+        let mut current = Some(root);
+        while let Some(id) = current {
+            if !ancestry.insert(id) {
+                return Err(ProjectError::Cycle);
+            }
+            current = self.nodes.get(&id).and_then(|node| node.parent);
+        }
+        Ok(())
+    }
+    fn remove_unacknowledged_subtree(&mut self, root: NodeId) -> Result<(), ProjectError> {
+        let parent = self
+            .nodes
+            .get(&root)
+            .ok_or(ProjectError::MissingNode(root))?
+            .parent
+            .ok_or(ProjectError::RootMutation(root))?;
+        self.remove_child(parent, root)?;
+        let mut pending = vec![root];
+        while let Some(id) = pending.pop() {
+            let node = self
+                .nodes
+                .remove(&id)
+                .ok_or(ProjectError::MissingNode(id))?;
+            pending.extend(node.children);
+            if let Some(document) = node.kind.document_id() {
+                self.documents.remove(&document);
+            }
+            self.trash.remove(&id);
+        }
         Ok(())
     }
     fn active_node(&self, id: NodeId) -> Result<&Node, ProjectError> {
@@ -1098,6 +1383,7 @@ impl Project {
         Ok(false)
     }
     /// Checks graph, path, document, and style invariants without changing state.
+    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ProjectError> {
         if self.roots[0] == self.roots[1] {
             return Err(ProjectError::InvalidInvariant("roots must differ"));
@@ -1117,36 +1403,63 @@ impl Project {
                 ));
             }
         }
-        let mut membership = BTreeSet::new();
+        let mut trashed = BTreeSet::new();
+        for (id, tombstone) in &self.trash {
+            if tombstone.node_id != *id
+                || !self.nodes.contains_key(id)
+                || !self.nodes.contains_key(&tombstone.parent)
+            {
+                return Err(ProjectError::InvalidInvariant(
+                    "tombstone references missing node",
+                ));
+            }
+            if self.nodes[&tombstone.parent].children.contains(id) {
+                return Err(ProjectError::InvalidInvariant(
+                    "trashed root remains in active parent",
+                ));
+            }
+            let mut pending = vec![*id];
+            while let Some(node_id) = pending.pop() {
+                if !trashed.insert(node_id) {
+                    return Err(ProjectError::InvalidInvariant(
+                        "trashed subtrees overlap or contain a cycle",
+                    ));
+                }
+                let node = self
+                    .nodes
+                    .get(&node_id)
+                    .ok_or(ProjectError::MissingNode(node_id))?;
+                for child in &node.children {
+                    let child_node = self
+                        .nodes
+                        .get(child)
+                        .ok_or(ProjectError::MissingNode(*child))?;
+                    if child_node.parent != Some(node_id) {
+                        return Err(ProjectError::InvalidInvariant("child parent disagrees"));
+                    }
+                    pending.push(*child);
+                }
+            }
+        }
+        if self.roots.iter().any(|root| trashed.contains(root)) {
+            return Err(ProjectError::InvalidInvariant("required root is trashed"));
+        }
+        let mut referenced_documents = BTreeSet::new();
         for (id, node) in &self.nodes {
             if node.id != *id {
                 return Err(ProjectError::InvalidInvariant(
                     "node map key differs from node id",
                 ));
             }
-            if self.is_trashed(*id) {
-                continue;
-            }
             if !node.kind.is_builtin_root() && node.parent.is_none() {
-                return Err(ProjectError::InvalidInvariant(
-                    "active non-root lacks parent",
-                ));
-            }
-            for child in &node.children {
-                if self.is_trashed(*child) || !membership.insert(*child) {
-                    return Err(ProjectError::InvalidInvariant(
-                        "child has duplicate/trashed membership",
-                    ));
-                }
-                let child_node = self
-                    .nodes
-                    .get(child)
-                    .ok_or(ProjectError::MissingNode(*child))?;
-                if child_node.parent != Some(*id) {
-                    return Err(ProjectError::InvalidInvariant("child parent disagrees"));
-                }
+                return Err(ProjectError::InvalidInvariant("non-root lacks parent"));
             }
             if let Some(doc) = node.kind.document_id() {
+                if !referenced_documents.insert(doc) {
+                    return Err(ProjectError::InvalidInvariant(
+                        "document is referenced by more than one node",
+                    ));
+                }
                 let record = self
                     .documents
                     .get(&doc)
@@ -1157,39 +1470,44 @@ impl Project {
                 let _ = RelativeProjectPath::new(record.path.as_str())?;
             }
         }
-        for root in self.roots {
-            if membership.contains(&root) {
-                return Err(ProjectError::InvalidInvariant("root appears as child"));
-            }
-            self.walk_active(root, &mut BTreeSet::new())?;
+        if referenced_documents.len() != self.documents.len() {
+            return Err(ProjectError::InvalidInvariant(
+                "document record is not referenced exactly once",
+            ));
         }
-        for tombstone in self.trash.values() {
-            if !self.nodes.contains_key(&tombstone.node_id)
-                || !self.nodes.contains_key(&tombstone.parent)
-            {
-                return Err(ProjectError::InvalidInvariant(
-                    "tombstone references missing node",
-                ));
+        let mut active = BTreeSet::new();
+        let mut pending = self.roots.to_vec();
+        while let Some(id) = pending.pop() {
+            if trashed.contains(&id) || !active.insert(id) {
+                return Err(ProjectError::Cycle);
             }
+            let node = self.nodes.get(&id).ok_or(ProjectError::MissingNode(id))?;
+            for child in &node.children {
+                if trashed.contains(child) {
+                    return Err(ProjectError::InvalidInvariant(
+                        "active parent contains trashed child",
+                    ));
+                }
+                let child_node = self
+                    .nodes
+                    .get(child)
+                    .ok_or(ProjectError::MissingNode(*child))?;
+                if child_node.parent != Some(id) {
+                    return Err(ProjectError::InvalidInvariant("child parent disagrees"));
+                }
+                pending.push(*child);
+            }
+        }
+        if active.len().saturating_add(trashed.len()) != self.nodes.len() {
+            return Err(ProjectError::InvalidInvariant(
+                "node is unreachable from active or trash roots",
+            ));
         }
         self.validate_styles()?;
         self.validate_compile_presets()
     }
-    fn walk_active(
-        &self,
-        node: NodeId,
-        visiting: &mut BTreeSet<NodeId>,
-    ) -> Result<(), ProjectError> {
-        if !visiting.insert(node) {
-            return Err(ProjectError::Cycle);
-        }
-        for child in &self.active_node(node)?.children {
-            self.walk_active(*child, visiting)?;
-        }
-        visiting.remove(&node);
-        Ok(())
-    }
     fn validate_styles(&self) -> Result<(), ProjectError> {
+        let mut resolved = BTreeSet::new();
         for style in self.styles.values() {
             if style.name.trim().is_empty() || style.name.chars().count() > 128 {
                 return Err(ProjectError::InvalidStyle(
@@ -1197,9 +1515,13 @@ impl Project {
                 ));
             }
             validate_style_properties(&style.properties)?;
+            let mut path = Vec::new();
             let mut seen = BTreeSet::new();
             let mut current = Some(style.id);
             while let Some(id) = current {
+                if resolved.contains(&id) {
+                    break;
+                }
                 if !seen.insert(id) {
                     return Err(ProjectError::StyleCycle);
                 }
@@ -1207,8 +1529,10 @@ impl Project {
                 if parent.kind != style.kind {
                     return Err(ProjectError::StyleKindMismatch);
                 }
+                path.push(id);
                 current = parent.based_on;
             }
+            resolved.extend(path);
             if let Some(next) = style.next_style {
                 let next = self
                     .styles
@@ -1851,5 +2175,105 @@ mod tests {
             }
             project.validate().unwrap();
         }
+    }
+
+    #[test]
+    fn deep_graph_validation_and_duplicate_are_iterative() {
+        let mut project = Project::new("Deep");
+        let root = project.manuscript_root();
+        let mut parent = root;
+        let mut first = None;
+        for depth in 0..20_000 {
+            let node_id = NodeId::new();
+            let document_id = DocumentId::new();
+            project
+                .nodes
+                .get_mut(&parent)
+                .unwrap()
+                .children
+                .push(node_id);
+            project.nodes.insert(
+                node_id,
+                Node {
+                    id: node_id,
+                    kind: NodeKind::Group { document_id },
+                    parent: Some(parent),
+                    children: Vec::new(),
+                },
+            );
+            project.documents.insert(
+                document_id,
+                DocumentRecord {
+                    id: document_id,
+                    node_id,
+                    path: RelativeProjectPath::new(format!("manuscript/{node_id}.md")).unwrap(),
+                    metadata: DocumentMetadata {
+                        title: format!("Depth {depth}"),
+                        ..DocumentMetadata::default()
+                    },
+                },
+            );
+            first.get_or_insert(node_id);
+            parent = node_id;
+        }
+        project.validate().unwrap();
+
+        let outcome = project
+            .execute(ProjectCommand::Duplicate {
+                node: first.unwrap(),
+                parent: root,
+                index: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome.events.as_slice(),
+            [ProjectEvent::NodeDuplicated { .. }]
+        ));
+        project.validate().unwrap();
+    }
+
+    #[test]
+    fn deep_invalid_graph_fails_without_recursive_stack_use() {
+        let mut project = Project::new("Deep invalid");
+        let root = project.manuscript_root();
+        let mut parent = root;
+        let mut first = None;
+        for _ in 0..30_000 {
+            let node_id = NodeId::new();
+            let document_id = DocumentId::new();
+            project
+                .nodes
+                .get_mut(&parent)
+                .unwrap()
+                .children
+                .push(node_id);
+            project.nodes.insert(
+                node_id,
+                Node {
+                    id: node_id,
+                    kind: NodeKind::Document { document_id },
+                    parent: Some(parent),
+                    children: Vec::new(),
+                },
+            );
+            project.documents.insert(
+                document_id,
+                DocumentRecord {
+                    id: document_id,
+                    node_id,
+                    path: RelativeProjectPath::new(format!("manuscript/{node_id}.md")).unwrap(),
+                    metadata: DocumentMetadata::default(),
+                },
+            );
+            first.get_or_insert(node_id);
+            parent = node_id;
+        }
+        project
+            .nodes
+            .get_mut(&parent)
+            .unwrap()
+            .children
+            .push(first.unwrap());
+        assert!(project.validate().is_err());
     }
 }

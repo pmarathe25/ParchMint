@@ -157,6 +157,7 @@ int main(int argc, char* argv[])
       auto* editor = engine.rootObjects().constFirst()->findChild<QObject*>(
         QStringLiteral("paneEditor0"));
       const QString liveText = QStringLiteral("Typed without focus loss — 本#%.\n");
+      const auto ffiBytesBeforeTyping = backend->property("ffi_bytes").toULongLong();
       if (!editor || !editor->setProperty("text", liveText)) {
         fail("QML editor text injection failed");
         return;
@@ -170,6 +171,13 @@ int main(int argc, char* argv[])
         fail("QML text did not reach the authoritative live session");
         return;
       }
+      const auto ffiTypingBytes = backend->property("ffi_bytes").toULongLong()
+                                  - ffiBytesBeforeTyping;
+      if (ffiTypingBytes > 4'096) {
+        fail("one editor change crossed an unbounded FFI payload");
+        return;
+      }
+      std::fprintf(stdout, "lifecycle ffi_typing_bytes=%llu\n", ffiTypingBytes);
       succeeded = false;
       if (!QMetaObject::invokeMethod(
             backend, "emergencyJournal", Qt::DirectConnection, Q_RETURN_ARG(bool, succeeded))

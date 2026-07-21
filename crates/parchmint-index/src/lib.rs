@@ -118,7 +118,7 @@ pub struct SearchQuery<'a> {
     pub tag: Option<&'a str>,
 }
 
-/// Stable ranked search row suitable for batched UI delivery.
+/// Stable relevance-ranked search row suitable for batched UI delivery.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SearchResult {
     /// Stable node identity.
@@ -150,6 +150,19 @@ pub struct CountTotals {
     pub characters: u64,
     /// Number of matching documents.
     pub documents: u64,
+}
+
+/// Revisioned cache-build state published without consulting canonical files.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RebuildProgress {
+    /// Canonical/derived revision being built.
+    pub revision: u64,
+    /// Rows durably available to readers.
+    pub completed: u64,
+    /// Total rows expected for this revision.
+    pub total: u64,
+    /// Whether the revision is fully published.
+    pub complete: bool,
 }
 
 /// SQLite cache that can always be rebuilt from canonical documents.
@@ -303,6 +316,114 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Clears derived rows and publishes a revision before background batches
+    /// begin. Readers may query the stable partial prefix while `complete` is
+    /// false.
+    pub fn begin_rebuild(&mut self, revision: u64, total: u64) -> Result<(), IndexError> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM document_fts", [])?;
+        transaction.execute("DELETE FROM document_meta", [])?;
+        for (key, value) in [
+            ("rebuild_revision", revision.to_string()),
+            ("rebuild_completed", "0".into()),
+            ("rebuild_total", total.to_string()),
+            ("rebuild_complete", "0".into()),
+        ] {
+            transaction.execute(
+                "INSERT OR REPLACE INTO index_meta(key, value) VALUES(?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Commits a bounded cache batch and advances revisioned progress in the
+    /// same SQLite transaction as its rows.
+    pub fn upsert_documents_batch<'a>(
+        &mut self,
+        documents: impl IntoIterator<Item = IndexDocument<'a>>,
+        revision: u64,
+        completed: u64,
+    ) -> Result<(), IndexError> {
+        let transaction = self.connection.transaction()?;
+        for document in documents {
+            transaction.execute(
+                "DELETE FROM document_fts WHERE node_id = ?1",
+                [document.node_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM document_meta WHERE node_id = ?1",
+                [document.node_id],
+            )?;
+            transaction.execute(
+                "INSERT INTO document_meta(node_id, document_id, scope, title, synopsis, path, fingerprint_bytes, fingerprint_hash, status, labels, tags, hierarchy, word_count, character_count)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![document.node_id, document.document_id, document.scope, document.title, document.synopsis, document.path,
+                    document.fingerprint_bytes.cast_signed(), document.fingerprint_hash, document.status, document.labels, document.tags,
+                    document.hierarchy, document.word_count.cast_signed(), document.character_count.cast_signed()],
+            )?;
+            transaction.execute(
+                "INSERT INTO document_fts(node_id, title, synopsis, body, labels, tags, status) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![document.node_id, document.title, document.synopsis, document.body, document.labels, document.tags, document.status],
+            )?;
+        }
+        transaction.execute(
+            "INSERT OR REPLACE INTO index_meta(key, value) VALUES('rebuild_revision', ?1)",
+            [revision.to_string()],
+        )?;
+        transaction.execute(
+            "INSERT OR REPLACE INTO index_meta(key, value) VALUES('rebuild_completed', ?1)",
+            [completed.to_string()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically marks a revision complete after its last batch.
+    pub fn finish_rebuild(&mut self, revision: u64, total: u64) -> Result<(), IndexError> {
+        let transaction = self.connection.transaction()?;
+        for (key, value) in [
+            ("rebuild_revision", revision.to_string()),
+            ("rebuild_completed", total.to_string()),
+            ("rebuild_total", total.to_string()),
+            ("rebuild_complete", "1".into()),
+        ] {
+            transaction.execute(
+                "INSERT OR REPLACE INTO index_meta(key, value) VALUES(?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Reads revisioned progress without opening or scanning canonical files.
+    pub fn rebuild_progress(&self) -> Result<Option<RebuildProgress>, IndexError> {
+        let value = |key: &str| -> Result<Option<String>, rusqlite::Error> {
+            self.connection
+                .query_row(
+                    "SELECT value FROM index_meta WHERE key = ?1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()
+        };
+        let Some(revision) = value("rebuild_revision")? else {
+            return Ok(None);
+        };
+        Ok(Some(RebuildProgress {
+            revision: revision.parse().unwrap_or(0),
+            completed: value("rebuild_completed")?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            total: value("rebuild_total")?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            complete: value("rebuild_complete")?.as_deref() == Some("1"),
+        }))
+    }
+
     /// Stage 01 compatibility wrapper.
     pub fn rebuild<'a>(
         &mut self,
@@ -326,25 +447,35 @@ impl SearchIndex {
             .collect())
     }
 
-    /// Searches derived rows. The caller can page with an increasing limit;
-    /// ordering is rank then stable node id, avoiding visual reshuffles.
+    /// Searches derived rows. The caller can page with an increasing limit.
+    /// Relevance is stable within a fixed candidate window, avoiding a global
+    /// FTS rank sort that would score every dense match before returning the
+    /// first bounded result from a 10-million-word corpus.
     pub fn search_detailed(
         &self,
         query: &SearchQuery<'_>,
         limit: u32,
     ) -> Result<Vec<SearchResult>, IndexError> {
         let match_query = fts_query(query.text, query.fields)?;
+        let rank_window = limit.max(4_096);
         let mut statement = self.connection.prepare(
-            "SELECT m.node_id, m.scope, m.title, m.synopsis, m.path, m.hierarchy,
+            "WITH candidates AS MATERIALIZED (
+                 SELECT document_fts.rowid AS fts_rowid, document_fts.node_id, document_fts.rank
+                 FROM document_fts JOIN document_meta candidate_meta USING(node_id)
+                 WHERE document_fts MATCH ?1
+                   AND (?2 IS NULL OR candidate_meta.scope = ?2)
+                   AND (?3 IS NULL OR instr('|' || candidate_meta.hierarchy || '|', '|' || ?3 || '|') > 0)
+                   AND (?4 IS NULL OR candidate_meta.status = ?4)
+                   AND (?5 IS NULL OR instr(' ' || candidate_meta.labels || ' ', ' ' || ?5 || ' ') > 0)
+                   AND (?6 IS NULL OR instr(' ' || candidate_meta.tags || ' ', ' ' || ?6 || ' ') > 0)
+                 LIMIT ?8
+             )
+             SELECT m.node_id, m.scope, m.title, m.synopsis, m.path, m.hierarchy,
                     snippet(document_fts, 3, char(1), char(2), '…', 18), m.word_count, m.character_count
-             FROM document_fts JOIN document_meta m USING(node_id)
-             WHERE document_fts MATCH ?1
-               AND (?2 IS NULL OR m.scope = ?2)
-               AND (?3 IS NULL OR instr('|' || m.hierarchy || '|', '|' || ?3 || '|') > 0)
-               AND (?4 IS NULL OR m.status = ?4)
-               AND (?5 IS NULL OR instr(' ' || m.labels || ' ', ' ' || ?5 || ' ') > 0)
-               AND (?6 IS NULL OR instr(' ' || m.tags || ' ', ' ' || ?6 || ' ') > 0)
-             ORDER BY rank, m.node_id LIMIT ?7"
+             FROM candidates
+             JOIN document_fts ON document_fts.rowid = candidates.fts_rowid
+             JOIN document_meta m USING(node_id)
+             ORDER BY candidates.rank, m.node_id LIMIT ?7"
         )?;
         let rows = statement.query_map(
             params![
@@ -354,7 +485,8 @@ impl SearchIndex {
                 query.status,
                 query.label,
                 query.tag,
-                limit
+                limit,
+                rank_window
             ],
             |row| {
                 Ok(SearchResult {
@@ -600,16 +732,19 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual Stage 06 stress timing"]
+    #[cfg_attr(debug_assertions, ignore = "release-mode Stage 14 10M-word gate")]
     fn records_stress_corpus_rebuild_and_first_result_timing() {
-        let directory = tempfile::tempdir().unwrap();
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let directory = tempfile::tempdir_in(target).unwrap();
         let mut index = SearchIndex::open(&directory.path().join("index.sqlite")).unwrap();
         let rows = (0..10_000)
             .map(|number| {
                 (
                     format!("node-{number}"),
                     format!("Chapter {number}"),
-                    "harbor winter orchard ".repeat(50),
+                    // 1,002 words per row: slightly over the canonical
+                    // 10-million-word contract across 10,000 rows.
+                    "orchard β 雪 ".repeat(334),
                 )
             })
             .collect::<Vec<_>>();
@@ -623,10 +758,30 @@ mod tests {
         let rebuild = start.elapsed();
         let start = std::time::Instant::now();
         let results = index.search("orch", 50).unwrap();
+        let first_results = start.elapsed();
         eprintln!(
-            "stage06 index rebuild={rebuild:?}; first-results={:?}",
-            start.elapsed()
+            "stage14 words=10020000 index-rebuild={rebuild:?}; first-results={first_results:?}"
+        );
+        assert!(
+            rebuild < std::time::Duration::from_mins(1),
+            "10M-word index rebuild took {rebuild:?}"
+        );
+        assert!(
+            first_results < std::time::Duration::from_millis(300),
+            "first search took {first_results:?}"
         );
         assert_eq!(results.len(), 50);
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").unwrap();
+            let peak_kib = status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmHWM:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap();
+            eprintln!("stage14 peak-rss-kib={peak_kib}");
+            assert!(peak_kib < 500 * 1024, "peak RSS was {peak_kib} KiB");
+        }
     }
 }

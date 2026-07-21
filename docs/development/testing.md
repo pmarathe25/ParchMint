@@ -11,7 +11,7 @@ just lint            # Clippy and generated QML lint
 just test-rust       # all Qt-free workspace tests
 just test             # Rust tests, Qt build, and CTest
 just smoke            # offscreen smoke tests
-just bench-spikes     # ignored release-mode measurements
+just bench-spikes     # enforced release-mode performance budgets
 ```
 
 For the deterministic stress manifests:
@@ -24,3 +24,5 @@ cargo run -p parchmint-test-support --bin generate-corpus -- \
 
 Do not commit generated 10,000-node corpora. Commit the seed, configuration,
 and measured result instead. `git diff --check` is part of handoff review.
+The scheduled 10M-word gate and its trend artifact are described in
+[`performance-budgets.md`](performance-budgets.md).

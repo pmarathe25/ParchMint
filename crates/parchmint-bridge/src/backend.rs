@@ -12,7 +12,7 @@ use parchmint_app::{
     CancellationToken, CollisionPolicy, CommandSpec, CompileExportJob, CompileExportOutput,
     CompileExportWorker, CompileIr, DiagnosticsSnapshot, DocumentLifecycleWorker, DocumentWorkKind,
     DocumentWorkPayload, DropPlacement, ExportFormat, ExportOptions, ExternalChange, HtmlAssetMode,
-    OutlineSort, PaneView, PathInputError, PreparedExport, ProjectPathIntent,
+    IndexStatus, OutlineSort, PaneView, PathInputError, PreparedExport, ProjectPathIntent,
     ProjectReplacePreview, ProjectWorkspace, RecoveryCandidate, RecoveryIssue, SaveState,
     SearchQuery, SearchResult, SplitOrientation, commit_prepared_export, export_diagnostics,
     matching_commands, normalize_path_input, prepare_export_bytes, render_html, text_statistics,
@@ -37,6 +37,11 @@ pub struct ParchMintBackendRust {
     status: QString,
     node_count: i32,
     revision: u64,
+    content_revision: u64,
+    structure_revision: u64,
+    selection_revision: u64,
+    presentation_revision: u64,
+    ffi_bytes: u64,
     document_revision: u64,
     save_status: QString,
     source_mode: bool,
@@ -101,6 +106,11 @@ impl Default for ParchMintBackendRust {
             status: QString::from("Create or open a project"),
             node_count: 0,
             revision: 0,
+            content_revision: 0,
+            structure_revision: 0,
+            selection_revision: 0,
+            presentation_revision: 0,
+            ffi_bytes: 0,
             document_revision: 0,
             save_status: QString::from("No project"),
             source_mode: false,
@@ -189,6 +199,11 @@ pub mod qobject {
         #[qproperty(QString, status)]
         #[qproperty(i32, node_count, READ, NOTIFY)]
         #[qproperty(u64, revision, READ, NOTIFY)]
+        #[qproperty(u64, content_revision, READ, NOTIFY)]
+        #[qproperty(u64, structure_revision, READ, NOTIFY)]
+        #[qproperty(u64, selection_revision, READ, NOTIFY)]
+        #[qproperty(u64, presentation_revision, READ, NOTIFY)]
+        #[qproperty(u64, ffi_bytes, READ, NOTIFY)]
         #[qproperty(u64, document_revision)]
         #[qproperty(QString, save_status)]
         #[qproperty(bool, source_mode)]
@@ -309,6 +324,9 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "nodeIncludeInCompile"]
         fn node_include_in_compile(self: &ParchMintBackend, row: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "nodeRowJson"]
+        fn node_row_json(self: Pin<&mut ParchMintBackend>, row: i32) -> QString;
         #[qinvokable]
         #[cxx_name = "projectSearch"]
         fn project_search(self: Pin<&mut ParchMintBackend>, query: &QString);
@@ -534,6 +552,23 @@ pub mod qobject {
             last_block: i32,
         ) -> bool;
         #[qinvokable]
+        #[cxx_name = "applyPaneTextDelta"]
+        fn apply_pane_text_delta(
+            self: Pin<&mut ParchMintBackend>,
+            pane: i32,
+            position_utf16: i32,
+            removed_utf16: i32,
+            inserted: &QString,
+            first_block: i32,
+            last_block: i32,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "paneWordCount"]
+        fn pane_word_count(self: Pin<&mut ParchMintBackend>, pane: i32) -> u64;
+        #[qinvokable]
+        #[cxx_name = "paneCharacterCount"]
+        fn pane_character_count(self: Pin<&mut ParchMintBackend>, pane: i32) -> u64;
+        #[qinvokable]
         #[cxx_name = "flushPane"]
         fn flush_pane(self: Pin<&mut ParchMintBackend>, pane: i32, body: &QString) -> bool;
         #[qinvokable]
@@ -597,10 +632,29 @@ pub mod qobject {
         #[qsignal]
         #[cxx_name = "commandRequested"]
         fn command_requested(self: Pin<&mut ParchMintBackend>, id: QString);
+        #[qsignal]
+        #[cxx_name = "outlineModelDelta"]
+        fn outline_model_delta(
+            self: Pin<&mut ParchMintBackend>,
+            kind: QString,
+            first: i32,
+            destination: i32,
+            count: i32,
+        );
     }
 }
 
 impl ParchMintBackend {
+    fn record_ffi_bytes(mut self: Pin<&mut Self>, bytes: usize) {
+        let total = self
+            .ffi_bytes()
+            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        if total != *self.ffi_bytes() {
+            self.as_mut().rust_mut().ffi_bytes = total;
+            self.as_mut().ffi_bytes_changed();
+        }
+    }
+
     pub fn filter_commands(mut self: Pin<&mut Self>, query: &QString) {
         self.as_mut().rust_mut().command_query = query.to_string();
         self.as_mut().refresh_commands();
@@ -821,13 +875,7 @@ impl ParchMintBackend {
         self.rust()
             .workspace
             .as_ref()
-            .and_then(|workspace| {
-                workspace
-                    .snapshot()
-                    .rows()
-                    .iter()
-                    .position(|value| value.id == parent)
-            })
+            .and_then(|workspace| workspace.snapshot().row_for_node(parent))
             .and_then(|index| i32::try_from(index).ok())
             .unwrap_or(-1)
     }
@@ -844,6 +892,29 @@ impl ParchMintBackend {
     }
     pub fn node_include_in_compile(&self, row: i32) -> bool {
         self.row(row).is_some_and(|value| value.include_in_compile)
+    }
+    pub fn node_row_json(mut self: Pin<&mut Self>, row: i32) -> QString {
+        let payload = self.as_ref().row(row).map(|value| {
+            serde_json::json!({
+                "title": value.title,
+                "nodeId": value.id.to_string(),
+                "depth": value.depth,
+                "parentId": self.node_parent(row),
+                "synopsis": value.synopsis,
+                "status": value.status,
+                "label": value.label,
+                "isGroup": value.is_group,
+                "isRoot": value.is_root,
+                "wordCount": value.word_count,
+                "includeInCompile": value.include_in_compile,
+            })
+            .to_string()
+        });
+        let Some(payload) = payload else {
+            return QString::default();
+        };
+        self.as_mut().record_ffi_bytes(payload.len());
+        QString::from(payload)
     }
     pub fn project_search(mut self: Pin<&mut Self>, query: &QString) {
         let query_text = query.to_string();
@@ -1421,6 +1492,14 @@ impl ParchMintBackend {
     }
     pub fn set_filter(mut self: Pin<&mut Self>, filter: &QString) {
         self.as_mut().rust_mut().filter = filter.to_string();
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let filter = rust.filter.clone();
+            let sort = rust.sort;
+            if let Some(workspace) = rust.workspace.as_mut() {
+                workspace.project_snapshot(None, &filter, sort);
+            }
+        }
         self.as_mut().refresh_projection("Filter outline");
     }
     pub fn set_outline_sort(mut self: Pin<&mut Self>, sort: &QString) {
@@ -1429,6 +1508,14 @@ impl ParchMintBackend {
             "status" => OutlineSort::Status,
             _ => OutlineSort::Binder,
         };
+        {
+            let mut rust = self.as_mut().rust_mut();
+            let filter = rust.filter.clone();
+            let sort = rust.sort;
+            if let Some(workspace) = rust.workspace.as_mut() {
+                workspace.project_snapshot(None, &filter, sort);
+            }
+        }
         self.as_mut().refresh_projection("Sort outline");
     }
     pub fn create_child(
@@ -1786,12 +1873,93 @@ impl ParchMintBackend {
             Err(error) => self.as_mut().fail(error),
         }
     }
-    pub fn flush_pane(mut self: Pin<&mut Self>, pane: i32, body: &QString) -> bool {
+    pub fn apply_pane_text_delta(
+        mut self: Pin<&mut Self>,
+        pane: i32,
+        position_utf16: i32,
+        removed_utf16: i32,
+        inserted: &QString,
+        first_block: i32,
+        last_block: i32,
+    ) -> bool {
+        if *self.project_read_only() {
+            return self.as_mut().fail("This project is open read-only");
+        }
+        let (Ok(pane), Ok(position), Ok(removed)) = (
+            usize::try_from(pane),
+            usize::try_from(position_utf16),
+            usize::try_from(removed_utf16),
+        ) else {
+            return self
+                .as_mut()
+                .fail("The editor supplied an invalid text delta");
+        };
+        let first = usize::try_from(first_block.max(0)).unwrap_or(0);
+        let last = usize::try_from(last_block.max(first_block + 1)).unwrap_or(first + 1);
+        let inserted = inserted.to_string();
+        self.as_mut().record_ffi_bytes(inserted.len());
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .apply_pane_text_delta(
+                        pane,
+                        position,
+                        removed,
+                        &inserted,
+                        first,
+                        last,
+                        Instant::now(),
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(stamp) => {
+                if let Err(error) = self.as_mut().publish_document_stamp(stamp, pane) {
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut().cancel_export();
+                self.as_mut().set_document_revision(stamp.revision.get());
+                self.as_mut().sync_document_status();
+                let _ = self.as_mut().publish_outline_state();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+    pub fn pane_word_count(mut self: Pin<&mut Self>, pane: i32) -> u64 {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| {
+                self.as_mut()
+                    .rust_mut()
+                    .workspace
+                    .as_mut()?
+                    .pane_text_statistics(pane)
+                    .ok()
+            })
+            .map_or(0, |counts| counts.words)
+    }
+    pub fn pane_character_count(mut self: Pin<&mut Self>, pane: i32) -> u64 {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| {
+                self.as_mut()
+                    .rust_mut()
+                    .workspace
+                    .as_mut()?
+                    .pane_text_statistics(pane)
+                    .ok()
+            })
+            .map_or(0, |counts| counts.characters)
+    }
+    pub fn flush_pane(mut self: Pin<&mut Self>, pane: i32, _body: &QString) -> bool {
         if *self.project_read_only() {
             return true;
-        }
-        if !self.as_mut().update_pane_body(pane, body, 0, i32::MAX) {
-            return false;
         }
         let document = {
             let backend = self.as_ref();
@@ -2010,6 +2178,15 @@ impl ParchMintBackend {
             .rust()
             .document_inflight
             .contains_key(&document)
+        {
+            return true;
+        }
+        if self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .is_some_and(ProjectWorkspace::has_pending_structural_saves)
         {
             return true;
         }
@@ -2241,6 +2418,37 @@ impl ParchMintBackend {
         self.as_mut().process_document_results();
         self.as_mut().schedule_due_documents();
         self.as_mut().schedule_external_polls();
+        let structural = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .map(ProjectWorkspace::poll_structural_saves);
+        if let Some(Err(error)) = structural {
+            self.as_mut().fail(error);
+            self.as_mut().refresh_projection("Save rollback");
+        }
+        let status = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .map(|workspace| {
+                workspace.poll_search_index();
+                workspace.index_status().clone()
+            });
+        if let Some(status) = status {
+            let message = match status {
+                IndexStatus::RebuildNeeded => "Search index queued".to_owned(),
+                IndexStatus::Indexing {
+                    completed, total, ..
+                } => format!("Indexing {completed} of {total} documents"),
+                IndexStatus::Ready => "Search index ready".to_owned(),
+                IndexStatus::Unavailable(error) => format!("Search unavailable: {error}"),
+            };
+            self.as_mut().set_search_status(QString::from(message));
+        }
+        self.as_mut().sync_document_status();
     }
 
     fn flush_for_transition(
@@ -2270,6 +2478,16 @@ impl ParchMintBackend {
         let deadline = Instant::now() + timeout;
         loop {
             self.as_mut().process_document_results();
+            let structural = self
+                .as_mut()
+                .rust_mut()
+                .workspace
+                .as_mut()
+                .map(ProjectWorkspace::poll_structural_saves);
+            if let Some(Err(error)) = structural {
+                self.as_mut().refresh_projection("Save rollback");
+                return self.as_mut().fail(error);
+            }
             let (saved, journaled, error) =
                 self.as_ref()
                     .rust()
@@ -2277,9 +2495,12 @@ impl ParchMintBackend {
                     .as_ref()
                     .map_or((true, true, None), |workspace| {
                         (
-                            workspace.all_sessions_saved(),
+                            workspace.all_sessions_saved()
+                                && !workspace.has_pending_structural_saves(),
                             workspace.all_dirty_sessions_journaled(),
-                            workspace.first_session_error(),
+                            workspace
+                                .first_session_error()
+                                .or_else(|| workspace.structural_save_error().map(str::to_owned)),
                         )
                     });
             if saved {
@@ -2576,6 +2797,10 @@ impl ParchMintBackend {
             self.as_mut().fail(error);
             return;
         }
+        if let Err(error) = workspace.enable_deferred_structural_saves() {
+            self.as_mut().fail(error);
+            return;
+        }
         // A read-only fallback may coexist with the live writer that owns
         // these journals. It must neither offer to consume nor discard that
         // writer's recovery state.
@@ -2606,6 +2831,10 @@ impl ParchMintBackend {
         }
         self.as_mut().rust_mut().recovery_entries = recovery_entries;
         self.as_mut().rust_mut().workspace = Some(workspace);
+        if *self.ffi_bytes() != 0 {
+            self.as_mut().rust_mut().ffi_bytes = 0;
+            self.as_mut().ffi_bytes_changed();
+        }
         self.as_mut().set_project_name(name);
         self.as_mut().set_project_path(path);
         self.as_mut().set_project_open(true);
@@ -2629,11 +2858,18 @@ impl ParchMintBackend {
             .workspace
             .as_ref()
             .map_or("No project", |workspace| {
+                if workspace.structural_save_error().is_some() {
+                    return "Save error";
+                }
                 let states = workspace
                     .open_session_ids()
                     .into_iter()
                     .filter_map(|id| workspace.session_save_state(id));
-                let mut value = "Saved";
+                let mut value = if workspace.has_pending_structural_saves() {
+                    "Saving…"
+                } else {
+                    "Saved"
+                };
                 for state in states {
                     match state {
                         SaveState::Error(_) => return "Save error",
@@ -2732,18 +2968,9 @@ impl ParchMintBackend {
         }
     }
     fn refresh_projection(mut self: Pin<&mut Self>, command: &str) {
-        let (count, selected) = {
-            let mut rust = self.as_mut().rust_mut();
-            let filter = rust.filter.clone();
-            let sort = rust.sort;
-            let Some(workspace) = rust.workspace.as_mut() else {
-                return;
-            };
-            workspace.project_snapshot(None, &filter, sort);
-            (workspace.snapshot().len(), workspace.selected().len())
+        let Some(selected) = self.as_mut().publish_outline_state() else {
+            return;
         };
-        self.as_mut().rust_mut().node_count = i32::try_from(count).unwrap_or(i32::MAX);
-        self.as_mut().node_count_changed();
         self.as_mut().rust_mut().selected_count = i32::try_from(selected).unwrap_or(i32::MAX);
         self.as_mut().selected_count_changed();
         self.as_mut().sync_selected();
@@ -2751,6 +2978,56 @@ impl ParchMintBackend {
         self.as_mut().sync_compile_presets();
         self.as_mut().refresh_commands();
         self.as_mut().bump(command);
+    }
+    fn publish_outline_state(mut self: Pin<&mut Self>) -> Option<usize> {
+        let (count, selected, revisions, deltas) = {
+            let mut rust = self.as_mut().rust_mut();
+            let workspace = rust.workspace.as_mut()?;
+            (
+                workspace.snapshot().len(),
+                workspace.selected().len(),
+                workspace.revisions(),
+                workspace.take_outline_deltas(),
+            )
+        };
+        self.as_mut().rust_mut().node_count = i32::try_from(count).unwrap_or(i32::MAX);
+        self.as_mut().node_count_changed();
+        for delta in deltas {
+            let (kind, first, destination, count) = match delta {
+                parchmint_app::OutlineDelta::Insert { first, count } => ("insert", first, 0, count),
+                parchmint_app::OutlineDelta::Remove { first, count } => ("remove", first, 0, count),
+                parchmint_app::OutlineDelta::Move {
+                    first,
+                    destination,
+                    count,
+                } => ("move", first, destination, count),
+                parchmint_app::OutlineDelta::Data { first, count } => ("data", first, 0, count),
+                parchmint_app::OutlineDelta::Reset => ("reset", 0, 0, count),
+            };
+            self.as_mut().outline_model_delta(
+                QString::from(kind),
+                i32::try_from(first).unwrap_or(i32::MAX),
+                i32::try_from(destination).unwrap_or(i32::MAX),
+                i32::try_from(count).unwrap_or(i32::MAX),
+            );
+        }
+        if *self.content_revision() != revisions.content {
+            self.as_mut().rust_mut().content_revision = revisions.content;
+            self.as_mut().content_revision_changed();
+        }
+        if *self.structure_revision() != revisions.structure {
+            self.as_mut().rust_mut().structure_revision = revisions.structure;
+            self.as_mut().structure_revision_changed();
+        }
+        if *self.selection_revision() != revisions.selection {
+            self.as_mut().rust_mut().selection_revision = revisions.selection;
+            self.as_mut().selection_revision_changed();
+        }
+        if *self.presentation_revision() != revisions.presentation {
+            self.as_mut().rust_mut().presentation_revision = revisions.presentation;
+            self.as_mut().presentation_revision_changed();
+        }
+        Some(selected)
     }
     fn refresh_commands(mut self: Pin<&mut Self>) {
         let project_open = *self.project_open();
@@ -2882,6 +3159,7 @@ impl ParchMintBackend {
         match result {
             Ok(()) => {
                 self.as_mut().refresh_projection(label);
+                self.as_mut().sync_document_status();
                 true
             }
             Err(error) => self.as_mut().fail(error),

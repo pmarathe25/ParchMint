@@ -60,12 +60,25 @@ private slots:
     adapter.setFocused(true);
     adapter.setCursorPosition(3);
     adapter.insertSceneBreak();
+    QCoreApplication::processEvents();
     QVERIFY(adapter.revision() > 0);
     QVERIFY(!dirty.isEmpty());
     const auto arguments = dirty.last();
     QCOMPARE(arguments[0].toULongLong(), adapter.revision());
-    QVERIFY(arguments[5].toInt() > arguments[4].toInt());
+    QVERIFY(!arguments[4].toString().isNull());
+    QVERIFY(arguments[6].toInt() > arguments[5].toInt());
+    dirty.clear();
+    const auto replacement = QStringLiteral("Typed without focus loss — 本#%.\n");
+    document.setPlainText(replacement);
+    QCoreApplication::processEvents();
+    QCOMPARE(dirty.size(), 2);
+    QCOMPARE(dirty.last()[4].toString(), replacement);
+    dirty.clear();
+    QTextCursor tail(&document);
+    tail.movePosition(QTextCursor::End);
+    tail.insertText(QStringLiteral("x"));
     adapter.setFocused(false);
+    QCOMPARE(dirty.size(), 1);
     QCOMPARE(flush.size(), 1);
     QCOMPARE(flush[0][0].toULongLong(), adapter.revision());
   }
