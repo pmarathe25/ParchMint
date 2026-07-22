@@ -27,17 +27,32 @@ append_bind() {
     "        read_only: $read_only" >>"$temporary"
 }
 
+path_is_within() {
+  local path=$1
+  local directory=${2%/}
+
+  [[ -n $directory && $path == "$directory"/* ]]
+}
+
 host_system=$(uname -s)
 host_runtime=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 wayland_display=${WAYLAND_DISPLAY:-}
 xauthority=${XAUTHORITY:-$HOME/.Xauthority}
+dbus_address=${DBUS_SESSION_BUS_ADDRESS:-}
+ssh_auth_sock=${SSH_AUTH_SOCK:-}
 share_host_state=${PARCHMINT_SHARE_HOST_STATE:-1}
 force_software=${PARCHMINT_FORCE_SOFTWARE_RENDERING:-0}
 
+has_runtime=false
 has_wayland=false
 has_x11=false
 has_nvidia=false
+has_xauthority=false
+has_ssh_agent=false
 device_groups=()
+if [[ $host_system == Linux && -d $host_runtime ]]; then
+  has_runtime=true
+fi
 if [[ $host_system == Linux && -n $wayland_display && -S $host_runtime/$wayland_display ]]; then
   has_wayland=true
 fi
@@ -49,6 +64,12 @@ if [[ $host_system == Linux ]] && command -v nvidia-smi >/dev/null 2>&1 && nvidi
 fi
 if [[ $host_system == Linux && $force_software != 1 && -d /dev/dri ]]; then
   mapfile -t device_groups < <(find /dev/dri -maxdepth 1 -type c -printf '%G\n' | sort -un)
+fi
+if $has_x11 && [[ -f $xauthority ]]; then
+  has_xauthority=true
+fi
+if [[ -n $ssh_auth_sock && -S $ssh_auth_sock ]]; then
+  has_ssh_agent=true
 fi
 
 qpa_platform=offscreen
@@ -78,20 +99,25 @@ cat >>"$temporary" <<EOF
       QT_QPA_PLATFORM: $(yaml_quote "$qpa_platform")
 EOF
 
+if $has_runtime; then
+  printf '%s\n' \
+    "      XDG_RUNTIME_DIR: $(yaml_quote "$host_runtime")" >>"$temporary"
+fi
+
 if $has_wayland; then
   printf '%s\n' \
-    "      WAYLAND_DISPLAY: $(yaml_quote "$wayland_display")" \
-    "      XDG_RUNTIME_DIR: '/tmp/parchmint-runtime'" >>"$temporary"
-  if [[ -S $host_runtime/bus ]]; then
-    printf '%s\n' \
-      "      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/tmp/parchmint-runtime/bus'" >>"$temporary"
-  fi
+    "      WAYLAND_DISPLAY: $(yaml_quote "$wayland_display")" >>"$temporary"
+fi
+
+if [[ -n $dbus_address ]]; then
+  printf '%s\n' \
+    "      DBUS_SESSION_BUS_ADDRESS: $(yaml_quote "$dbus_address")" >>"$temporary"
 fi
 
 if $has_x11; then
   printf '%s\n' "      DISPLAY: $(yaml_quote "$DISPLAY")" >>"$temporary"
-  if [[ -f $xauthority ]]; then
-    printf '%s\n' "      XAUTHORITY: '/tmp/parchmint-xauthority'" >>"$temporary"
+  if $has_xauthority; then
+    printf '%s\n' "      XAUTHORITY: $(yaml_quote "$xauthority")" >>"$temporary"
   else
     printf '%s\n' \
       "Warning: X11 is available but no Xauthority file was found at $xauthority." \
@@ -99,9 +125,9 @@ if $has_x11; then
   fi
 fi
 
-if [[ -n ${SSH_AUTH_SOCK:-} && -S $SSH_AUTH_SOCK ]]; then
+if $has_ssh_agent; then
   printf '%s\n' \
-    "      SSH_AUTH_SOCK: '/tmp/parchmint-ssh-agent'" >>"$temporary"
+    "      SSH_AUTH_SOCK: $(yaml_quote "$ssh_auth_sock")" >>"$temporary"
 fi
 
 if [[ $force_software == 1 ]] || [[ $host_system != Linux ]] || { [[ ! -d /dev/dri ]] && ! $has_nvidia; }; then
@@ -112,13 +138,17 @@ fi
 
 printf '%s\n' '    volumes:' >>"$temporary"
 
-if $has_wayland; then
-  append_bind "$host_runtime" /tmp/parchmint-runtime true
+if $has_runtime; then
+  # Keep the host path unchanged so attach-time remoteEnv values point directly
+  # at the current Wayland, D-Bus, Xauthority, and SSH-agent endpoints.
+  append_bind "$host_runtime" "$host_runtime" true
 fi
 if $has_x11; then
   append_bind /tmp/.X11-unix /tmp/.X11-unix true
-  if [[ -f $xauthority ]]; then
-    append_bind "$xauthority" /tmp/parchmint-xauthority true
+  if $has_xauthority && ! path_is_within "$xauthority" "$host_runtime"; then
+    # Traditional Xorg normally uses the stable $HOME/.Xauthority path. Keep
+    # that live file available without copying its cookie.
+    append_bind "$xauthority" "$xauthority" true
   fi
 fi
 
@@ -130,8 +160,8 @@ if [[ $share_host_state == 1 ]]; then
   [[ -d $HOME/.ssh ]] && append_bind "$HOME/.ssh" /home/vscode/.ssh false
 fi
 
-if [[ -n ${SSH_AUTH_SOCK:-} && -S $SSH_AUTH_SOCK ]]; then
-  append_bind "$SSH_AUTH_SOCK" /tmp/parchmint-ssh-agent false
+if $has_ssh_agent && ! path_is_within "$ssh_auth_sock" "$host_runtime"; then
+  append_bind "$ssh_auth_sock" "$ssh_auth_sock" false
 fi
 
 if [[ $host_system == Linux && $force_software != 1 ]]; then

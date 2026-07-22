@@ -34,12 +34,19 @@ devcontainer exec --workspace-folder . zsh
 The host-side `scripts/detect-gpu.sh` initialization step generates the ignored
 `.devcontainer/docker-compose.override.yml`. On Linux it:
 
-- forwards Wayland with X11/XWayland fallback and the current Xauthority cookie;
-- forwards the desktop session bus and SSH agent when available;
+- mounts the live host runtime directory for Wayland, Xauthority, the desktop
+  session bus, and the SSH agent, with X11/XWayland socket fallback;
+- applies the current host session paths to Zed, VS Code, and `devcontainer`
+  processes through attach-time environment variables;
 - passes `/dev/dri` and its numeric device groups, or requests an NVIDIA GPU;
 - selects Qt Quick software rendering when no usable GPU device is detected;
 - mounts existing Git, SSH, Codex, and OpenCode state into their correct
   container locations.
+
+The runtime directory is mounted at the same absolute path inside the container,
+so GNOME can rotate its session-specific Xwayland authority file without leaving
+Docker with a stale file bind. The cookie is read directly from the live host
+file and is never copied into the repository.
 
 The base Compose file uses persistent named volumes when host Codex/OpenCode
 directories do not exist. Codex keyring credentials cannot be forwarded as

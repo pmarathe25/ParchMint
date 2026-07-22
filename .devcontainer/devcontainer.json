@@ -14,6 +14,14 @@
   "updateRemoteUserUID": true,
   "overrideCommand": false,
   "shutdownAction": "stopCompose",
+  "remoteEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+    "XDG_RUNTIME_DIR": "${localEnv:XDG_RUNTIME_DIR}",
+    "XAUTHORITY": "${localEnv:XAUTHORITY}",
+    "DBUS_SESSION_BUS_ADDRESS": "${localEnv:DBUS_SESSION_BUS_ADDRESS}",
+    "SSH_AUTH_SOCK": "${localEnv:SSH_AUTH_SOCK}"
+  },
   "hostRequirements": {
     "gpu": "optional"
   },
