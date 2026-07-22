@@ -65,6 +65,8 @@ pub struct ParchMintBackendRust {
     pane_two_pinned: bool,
     focused_pane: i32,
     split_enabled: bool,
+    pane_count: i32,
+    panes_revision: u64,
     search_result_count: i32,
     search_status: QString,
     export_status: QString,
@@ -134,6 +136,8 @@ impl Default for ParchMintBackendRust {
             pane_two_pinned: false,
             focused_pane: 0,
             split_enabled: false,
+            pane_count: 0,
+            panes_revision: 0,
             search_result_count: 0,
             search_status: QString::from("Index ready when you search"),
             export_status: QString::from("No export in progress"),
@@ -227,6 +231,8 @@ pub mod qobject {
         #[qproperty(bool, pane_two_pinned)]
         #[qproperty(i32, focused_pane)]
         #[qproperty(bool, split_enabled)]
+        #[qproperty(i32, pane_count, READ, NOTIFY)]
+        #[qproperty(u64, panes_revision, READ, NOTIFY)]
         #[qproperty(i32, search_result_count, READ, NOTIFY)]
         #[qproperty(QString, search_status)]
         #[qproperty(QString, export_status)]
@@ -536,6 +542,24 @@ pub mod qobject {
         #[qinvokable]
         #[cxx_name = "focusPane"]
         fn focus_pane(self: Pin<&mut ParchMintBackend>, pane: i32);
+        #[qinvokable]
+        #[cxx_name = "paneId"]
+        fn pane_id(self: &ParchMintBackend, pane: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "paneView"]
+        fn pane_view(self: &ParchMintBackend, pane: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "panePinned"]
+        fn pane_pinned(self: &ParchMintBackend, pane: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "addPane"]
+        fn add_pane(self: Pin<&mut ParchMintBackend>, node: &QString) -> i32;
+        #[qinvokable]
+        #[cxx_name = "openNodeInPane"]
+        fn open_node_in_pane(self: Pin<&mut ParchMintBackend>, pane: i32, id: &QString) -> bool;
+        #[qinvokable]
+        #[cxx_name = "removePane"]
+        fn remove_pane(self: Pin<&mut ParchMintBackend>, pane: i32) -> bool;
         #[qinvokable]
         #[cxx_name = "paneDocumentBody"]
         fn pane_document_body(self: Pin<&mut ParchMintBackend>, pane: i32) -> QString;
@@ -894,17 +918,33 @@ impl ParchMintBackend {
         self.row(row).is_some_and(|value| value.include_in_compile)
     }
     pub fn node_row_json(mut self: Pin<&mut Self>, row: i32) -> QString {
+        let root_key = self
+            .as_ref()
+            .row(row)
+            .map(|value| {
+                self.as_ref()
+                    .rust()
+                    .workspace
+                    .as_ref()
+                    .map_or_else(String::new, |workspace| {
+                        binder_root_key(workspace.project(), value.id)
+                    })
+            })
+            .unwrap_or_default();
         let payload = self.as_ref().row(row).map(|value| {
             serde_json::json!({
                 "title": value.title,
                 "nodeId": value.id.to_string(),
                 "depth": value.depth,
                 "parentId": self.node_parent(row),
+                "parentNodeId": value.parent.map_or_else(String::new, |id| id.to_string()),
+                "rootKey": root_key,
                 "synopsis": value.synopsis,
                 "status": value.status,
                 "label": value.label,
                 "isGroup": value.is_group,
                 "isRoot": value.is_root,
+                "hasChildren": value.has_children,
                 "wordCount": value.word_count,
                 "includeInCompile": value.include_in_compile,
             })
@@ -986,20 +1026,14 @@ impl ParchMintBackend {
             .and_then(|result| NodeId::parse(&result.node_id).ok());
         self.as_mut().perform("Open search result", |workspace| {
             let node = node.ok_or("Choose a valid search result")?;
-            workspace.select([node]);
             if other_pane {
-                let other = 1 - usize::from(workspace.preferences().focused_pane.min(1));
-                workspace
-                    .set_split(
-                        true,
-                        workspace.preferences().split_orientation,
-                        workspace.preferences().split_ratio_milli,
-                    )
-                    .and_then(|()| workspace.open_node_in_pane(other, node))
+                workspace.add_pane(Some(node)).map(|_| ())
             } else {
                 workspace.navigate_focused_pane(node).map(|_| ())
             }
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+            workspace.select([node]);
+            Ok(())
         })
     }
     pub fn text_statistics(&self, text: &QString) -> QString {
@@ -1333,31 +1367,31 @@ impl ParchMintBackend {
             Ok(path) => path,
             Err(error) => return self.as_mut().fail(error),
         };
-        let root = match validate_project_creation(&parent, "ParchMint Tour") {
+        let root = match validate_project_creation(&parent, "ParchMint Sample") {
             Ok(root) => root,
             Err(error) => return self.as_mut().fail(error),
         };
-        let result = ProjectWorkspace::create(root, "ParchMint Tour").and_then(
-            |mut workspace| {
+        let result =
+            ProjectWorkspace::create(root, "ParchMint Sample").and_then(|mut workspace| {
                 let manuscript = workspace.project().manuscript_root();
                 let research = workspace.project().research_root();
                 let chapter = workspace.create_node(manuscript, "Chapter One", true)?;
                 let scene = workspace.create_node(chapter, "A Place to Begin", false)?;
                 workspace.save_document_body(
                     scene,
-                    "Welcome to **ParchMint**. Use the binder to plan, then write here.\n\n<!-- parchmint:page-break -->\n".into(),
+                    "Draft here.
+
+<!-- parchmint:page-break -->
+"
+                    .into(),
                 )?;
-                let note = workspace.create_research_node(research, "Tour Notes", false)?;
-                workspace.save_document_body(
-                    note,
-                    "Keep research visible in the second pane while you write.\n".into(),
-                )?;
+                let note = workspace.create_research_node(research, "Notes", false)?;
+                workspace.save_document_body(note, String::new())?;
                 workspace.open_in_pane(0, Some(scene), PaneView::Editor)?;
                 workspace.open_in_pane(1, Some(note), PaneView::Editor)?;
                 workspace.set_split(true, SplitOrientation::Horizontal, 600)?;
                 Ok(workspace)
-            },
-        );
+            });
         match result {
             Ok(workspace) => {
                 self.as_mut().install_workspace(workspace);
@@ -1446,6 +1480,13 @@ impl ParchMintBackend {
         self.as_mut().set_pane_one_id(QString::default());
         self.as_mut().set_pane_two_id(QString::default());
         self.as_mut().set_split_enabled(false);
+        if self.as_ref().rust().pane_count != 0 {
+            self.as_mut().rust_mut().pane_count = 0;
+            self.as_mut().pane_count_changed();
+        }
+        let panes_revision = self.as_ref().rust().panes_revision.saturating_add(1);
+        self.as_mut().rust_mut().panes_revision = panes_revision;
+        self.as_mut().panes_revision_changed();
         self.as_mut().set_save_status(QString::from("No project"));
         self.as_mut().set_status(QString::from("Project closed"));
         self.as_mut().rust_mut().replace_preview = None;
@@ -1712,14 +1753,9 @@ impl ParchMintBackend {
         let id = parse_node(id);
         self.as_mut().perform("Open in other pane", |workspace| {
             let node = id.ok_or("Select a valid node")?;
-            let other = 1 - usize::from(workspace.preferences().focused_pane.min(1));
             workspace
-                .set_split(
-                    true,
-                    workspace.preferences().split_orientation,
-                    workspace.preferences().split_ratio_milli,
-                )
-                .and_then(|()| workspace.open_node_in_pane(other, node))
+                .add_pane(Some(node))
+                .map(|_| ())
                 .map_err(|error| error.to_string())
         })
     }
@@ -1802,6 +1838,88 @@ impl ParchMintBackend {
             let _ = workspace.focus_pane(pane);
         }
         self.as_mut().refresh_projection("Focus pane");
+    }
+    pub fn pane_id(&self, pane: i32) -> QString {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane)?.node)
+            .map_or_else(QString::default, |node| QString::from(node.to_string()))
+    }
+    pub fn pane_view(&self, pane: i32) -> QString {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane))
+            .map_or_else(QString::default, |state| {
+                QString::from(pane_view_name(state.view))
+            })
+    }
+    pub fn pane_pinned(&self, pane: i32) -> bool {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane))
+            .is_some_and(|state| state.pinned)
+    }
+    pub fn add_pane(mut self: Pin<&mut Self>, node: &QString) -> i32 {
+        let node = if node.is_empty() {
+            None
+        } else if let Some(node) = parse_node(node) {
+            Some(node)
+        } else {
+            self.as_mut().fail("Choose a valid node");
+            return -1;
+        };
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| workspace.add_pane(node).map_err(|error| error.to_string()));
+        match result {
+            Ok(index) => {
+                self.as_mut().refresh_projection("Add pane");
+                self.as_mut().sync_document_status();
+                i32::try_from(index).unwrap_or(-1)
+            }
+            Err(error) => {
+                self.as_mut().fail(error);
+                -1
+            }
+        }
+    }
+    pub fn open_node_in_pane(mut self: Pin<&mut Self>, pane: i32, id: &QString) -> bool {
+        self.as_mut().perform("Open node in pane", |workspace| {
+            let pane = usize::try_from(pane).map_err(|_| "Choose a valid pane".to_owned())?;
+            let node = parse_node(id).ok_or("Choose a valid node")?;
+            workspace
+                .open_node_in_pane(pane, node)
+                .map_err(|error| error.to_string())
+        })
+    }
+    pub fn remove_pane(mut self: Pin<&mut Self>, pane: i32) -> bool {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                usize::try_from(pane)
+                    .map_err(|_| "Choose a valid pane".to_owned())
+                    .and_then(|pane| {
+                        workspace
+                            .remove_pane(pane)
+                            .map_err(|error| error.to_string())
+                    })
+            });
+        match result {
+            Ok(_) => {
+                self.as_mut().refresh_projection("Remove pane");
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
     }
     pub fn pane_document_body(mut self: Pin<&mut Self>, pane: i32) -> QString {
         let body = usize::try_from(pane).ok().and_then(|pane| {
@@ -3094,9 +3212,15 @@ impl ParchMintBackend {
     fn sync_panes(mut self: Pin<&mut Self>) {
         let values = self.as_ref().rust().workspace.as_ref().map(|workspace| {
             let value = |index| workspace.pane(index).cloned().unwrap_or_default();
-            (value(0), value(1), workspace.preferences().focused_pane)
+            (
+                value(0),
+                value(1),
+                workspace.preferences().focused_pane,
+                workspace.pane_count(),
+                workspace.preferences().split_enabled,
+            )
         });
-        let (first, second, focused) = values.unwrap_or_default();
+        let (first, second, focused, count, split) = values.unwrap_or_default();
         self.as_mut().set_pane_one_id(QString::from(
             first.node.map_or_else(String::new, |id| id.to_string()),
         ));
@@ -3110,13 +3234,15 @@ impl ParchMintBackend {
         self.as_mut().set_pane_one_pinned(first.pinned);
         self.as_mut().set_pane_two_pinned(second.pinned);
         self.as_mut().set_focused_pane(i32::from(focused));
-        let split = self
-            .as_ref()
-            .rust()
-            .workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.preferences().split_enabled);
+        let count = i32::try_from(count).unwrap_or(i32::MAX);
+        if self.as_ref().rust().pane_count != count {
+            self.as_mut().rust_mut().pane_count = count;
+            self.as_mut().pane_count_changed();
+        }
         self.as_mut().set_split_enabled(split);
+        let revision = self.as_ref().rust().panes_revision.saturating_add(1);
+        self.as_mut().rust_mut().panes_revision = revision;
+        self.as_mut().panes_revision_changed();
     }
     fn sync_compile_presets(mut self: Pin<&mut Self>) {
         let preset_ids =
@@ -3272,6 +3398,22 @@ impl ParchMintBackend {
         prepare_export_bytes(options, &bytes, warnings, cancellation)
             .map_err(|error| error.to_string())
     }
+}
+
+fn binder_root_key(project: &parchmint_domain::Project, node: NodeId) -> String {
+    let mut current = Some(node);
+    let mut remaining = project.nodes.len();
+    while let Some(id) = current {
+        if let Some(key) = project.builtin_root_key(id) {
+            return key.to_owned();
+        }
+        if remaining == 0 {
+            break;
+        }
+        remaining -= 1;
+        current = project.nodes.get(&id).and_then(|entry| entry.parent);
+    }
+    String::new()
 }
 
 fn parse_node(value: &QString) -> Option<NodeId> {

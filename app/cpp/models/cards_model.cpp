@@ -25,6 +25,28 @@ bool CardsModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent
   const auto* source = sourceModel();
   if (!source)
     return false;
-  const auto row = source->index(sourceRow, 0, sourceParent);
-  return !source->data(row, OutlineModel::RootRole).toBool();
+  auto row = source->index(sourceRow, 0, sourceParent);
+  if (!row.isValid() || source->data(row, OutlineModel::RootRole).toBool())
+    return false;
+
+  return source->data(row, OutlineModel::RootKeyRole).toString()
+    == QStringLiteral("manuscript");
+}
+
+bool CardsModel::ancestorsExpanded(int row, const QVariantMap& collapsedNodes) const
+{
+  const auto* source = sourceModel();
+  auto current = mapToSource(index(row, 0));
+  if (!source || !current.isValid())
+    return false;
+  int parentRow = source->data(current, OutlineModel::ParentIdRole).toInt();
+  while (parentRow >= 0) {
+    current = source->index(parentRow, 0);
+    if (!current.isValid())
+      return false;
+    if (collapsedNodes.value(source->data(current, OutlineModel::IdRole).toString()).toBool())
+      return false;
+    parentRow = source->data(current, OutlineModel::ParentIdRole).toInt();
+  }
+  return true;
 }

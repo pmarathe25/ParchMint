@@ -4,9 +4,8 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import org.parchmint.adapters 1.0
 
-// One host is instantiated twice by Main.qml. It intentionally owns its
-// TextArea for its whole lifetime: replacing the other pane cannot discard its
-// Qt undo stack, cursor, or scroll position.
+// Each host owns its TextArea for its whole lifetime so split layout changes
+// cannot discard the Qt undo stack, cursor, or scroll position.
 Pane {
     id: root
     objectName: "paneHost" + paneIndex
@@ -16,6 +15,8 @@ Pane {
     required property string nodeId
     required property string viewName
     required property bool pinned
+    required property var splitRequestHandler
+    signal closeRequested()
     property bool focused: backend.focused_pane === paneIndex
     property string loadedNode: ""
     property int loadedRevision: 0
@@ -27,6 +28,9 @@ Pane {
     property string sourceError: ""
     property int liveWords: 0
     property int liveCharacters: 0
+    property bool dropActive: false
+    property string dropDirection: "center"
+    property bool retiring: false
     readonly property var paragraphStyles: [
         { "id": "body", "name": qsTr("Body") },
         { "id": "heading-1", "name": qsTr("Heading 1") },
@@ -34,6 +38,10 @@ Pane {
     ]
     padding: 0
 
+    function requestSplit(direction, nodeId) {
+        return typeof splitRequestHandler === "function"
+                && splitRequestHandler(direction, nodeId) === true
+    }
     function showFind() {
         findVisible = true
         findField.forceActiveFocus()
@@ -54,9 +62,26 @@ Pane {
         }
         return qsTr("%1 words · %2 characters").arg(liveWords).arg(liveCharacters)
     }
+    function dropDirectionAt(x, y) {
+        const threshold = Math.min(72, Math.max(32, Math.min(width, height) * .2))
+        const left = x
+        const right = width - x
+        const up = y
+        const down = height - y
+        const nearest = Math.min(left, right, up, down)
+        if (nearest >= threshold)
+            return "center"
+        if (nearest === left)
+            return "left"
+        if (nearest === right)
+            return "right"
+        if (nearest === up)
+            return "up"
+        return "down"
+    }
 
     function reloadBody(force) {
-        if (!sourceMode && viewName === "editor" && nodeId.length > 0
+        if (!sourceMode && viewName !== "attachment" && nodeId.length > 0
                 && (force || loadedNode !== nodeId)) {
             const liveBody = backend.paneDocumentBody(paneIndex)
             const liveRevision = backend.paneDocumentRevision(paneIndex)
@@ -78,10 +103,15 @@ Pane {
         }
     }
     function syncLiveBody() {
-        if (!sourceMode && viewName === "editor" && loadedNode === nodeId && nodeId.length)
+        if (!sourceMode && viewName !== "attachment" && loadedNode === nodeId && nodeId.length)
             return backend.updatePaneBody(paneIndex, editor.text, 0, Math.max(1, editor.lineCount))
         return true
     }
+    function prepareToClose() {
+        editorAdapter.flushPendingChanges()
+        return !sourceMode && syncLiveBody()
+    }
+
     function beginSource() {
         if (!syncLiveBody())
             return
@@ -198,22 +228,20 @@ Pane {
                 anchors.fill: parent
                 ToolButton { checkable: true; checked: root.pinned; Accessible.name: root.pinned ? qsTr("Unpin pane") : qsTr("Pin pane"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.backend.setPanePinned(root.paneIndex, checked); contentItem: Image { source: "qrc:/icons/pin.svg"; width: 18; height: 18; anchors.centerIn: parent } }
                 Label { text: root.viewName === "attachment" ? qsTr("Attachment") : (root.backend.paneTitle(root.paneIndex).length ? root.backend.paneTitle(root.paneIndex) : qsTr("No document")); Layout.fillWidth: true; elide: Text.ElideRight; font.bold: true }
-                ButtonGroup { id: viewGroup }
-                ToolButton { text: qsTr("Editor"); checkable: true; checked: root.viewName === "editor"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "editor"); Accessible.name: qsTr("Show editor") }
-                ToolButton { text: qsTr("Outline"); checkable: true; checked: root.viewName === "outline"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "outline"); Accessible.name: qsTr("Show outline") }
-                ToolButton { text: qsTr("Cards"); checkable: true; checked: root.viewName === "cards"; ButtonGroup.group: viewGroup; onClicked: root.backend.setPaneView(root.paneIndex, "cards"); Accessible.name: qsTr("Show cards") }
+                ToolButton { Layout.preferredWidth: 32; Layout.preferredHeight: 32; text: "→"; Accessible.name: qsTr("Split editor right"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.requestSplit("right", "") }
+                ToolButton { Layout.preferredWidth: 32; Layout.preferredHeight: 32; text: "↓"; Accessible.name: qsTr("Split editor down"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.requestSplit("down", "") }
                 Label {
-                    visible: root.viewName === "editor" && root.nodeId.length > 0
+                    visible: root.width >= 420 && root.viewName !== "attachment" && root.nodeId.length > 0
                     text: root.backend.document_revision >= 0 ? root.backend.paneSaveStatus(root.paneIndex) : ""
                     opacity: .7
                     Accessible.name: qsTr("Pane save status") + ": " + text
                 }
                 ToolButton { Accessible.name: qsTr("Find and replace in document"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.findVisible = !root.findVisible; contentItem: Image { source: "qrc:/icons/search.svg"; width: 18; height: 18; anchors.centerIn: parent } }
-                ToolButton { Accessible.name: qsTr("Close pane"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.backend.closePane(root.paneIndex); contentItem: Image { source: "qrc:/icons/close.svg"; width: 18; height: 18; anchors.centerIn: parent } }
+                ToolButton { visible: root.backend.pane_count > 1; Accessible.name: qsTr("Close pane"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: root.closeRequested(); contentItem: Image { source: "qrc:/icons/close.svg"; width: 18; height: 18; anchors.centerIn: parent } }
             }
         }
         RowLayout {
-            visible: root.findVisible && root.viewName === "editor"
+            visible: root.findVisible && root.viewName !== "attachment"
             Layout.fillWidth: true
             Layout.margins: 6
             TextField { id: findField; Layout.fillWidth: true; placeholderText: qsTr("Find"); onAccepted: root.findNext() }
@@ -227,7 +255,7 @@ Pane {
         StackLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            currentIndex: root.viewName === "outline" ? 1 : root.viewName === "cards" ? 2 : root.viewName === "attachment" ? 3 : 0
+            currentIndex: root.viewName === "attachment" ? 1 : 0
             Item {
                 ColumnLayout {
                     anchors.fill: parent
@@ -261,12 +289,12 @@ Pane {
                     selectByMouse: true
                     persistentSelection: true
                     readOnly: root.backend.project_read_only
-                    placeholderText: root.nodeId.length ? qsTr("Markdown research or manuscript note") : qsTr("Select a document")
+                    placeholderText: qsTr("Select a document")
                     Accessible.name: qsTr("Document editor")
                     onActiveFocusChanged: {
                         if (activeFocus)
                             root.backend.focusPane(root.paneIndex)
-                        else if (root.loadedNode === root.nodeId && root.nodeId.length > 0) {
+                        else if (!root.retiring && root.loadedNode === root.nodeId && root.nodeId.length > 0) {
                             editorAdapter.flushPendingChanges()
                             root.backend.flushPane(root.paneIndex, text)
                         }
@@ -351,13 +379,10 @@ Pane {
                     }
                 }
             }
-            OutlineView { backend: root.backend; model: root.model }
-            CardsView { backend: root.backend; model: root.model }
             ColumnLayout {
                 spacing: 12
-                Label { text: qsTr("Safe attachment preview"); font.bold: true; font.pixelSize: 20 }
+                Label { text: qsTr("Attachment"); font.bold: true; font.pixelSize: DesignTokens.typeTitle }
                 Label { text: root.backend.paneAttachmentDescription(root.paneIndex); wrapMode: Text.Wrap; Layout.fillWidth: true }
-                Label { text: qsTr("Images, PDFs where the platform supports them, and plain text are previewed passively. Other files require an explicit system-open action."); wrapMode: Text.Wrap; Layout.fillWidth: true; opacity: .7 }
                 Button {
                     text: qsTr("Open in system application…")
                     enabled: root.backend.paneAttachmentUrl(root.paneIndex).length > 0
@@ -367,6 +392,65 @@ Pane {
                     }
                 }
             }
+        }
+    }
+
+    Rectangle {
+        id: dropAffordance
+        z: 20
+        visible: root.dropActive
+        x: root.dropDirection === "right" ? root.width / 2
+           : root.dropDirection === "center" ? 24 : 0
+        y: root.dropDirection === "down" ? root.height / 2
+           : root.dropDirection === "center" ? 24 : 0
+        width: root.dropDirection === "left" || root.dropDirection === "right"
+               ? root.width / 2
+               : root.dropDirection === "center" ? Math.max(0, root.width - 48) : root.width
+        height: root.dropDirection === "up" || root.dropDirection === "down"
+                ? root.height / 2
+                : root.dropDirection === "center" ? Math.max(0, root.height - 48) : root.height
+        color: DesignTokens.accentContainer
+        opacity: .72
+        border.width: 2
+        border.color: DesignTokens.accent
+        radius: DesignTokens.radiusMedium
+        Label {
+            anchors.centerIn: parent
+            text: root.dropDirection === "center" ? qsTr("Open here")
+                  : root.dropDirection === "left" ? qsTr("Split left")
+                  : root.dropDirection === "right" ? qsTr("Split right")
+                  : root.dropDirection === "up" ? qsTr("Split up") : qsTr("Split down")
+            font.bold: true
+            color: DesignTokens.text
+        }
+    }
+
+    DropArea {
+        z: 21
+        anchors.fill: parent
+        keys: ["application/x-parchmint-node-id"]
+        onEntered: function(drag) {
+            root.dropActive = true
+            root.dropDirection = root.dropDirectionAt(drag.x, drag.y)
+        }
+        onPositionChanged: function(drag) {
+            root.dropDirection = root.dropDirectionAt(drag.x, drag.y)
+        }
+        onExited: {
+            root.dropActive = false
+            root.dropDirection = "center"
+        }
+        onDropped: function(drop) {
+            const id = drop.getDataAsString("application/x-parchmint-node-id")
+            if (id.length) {
+                if (root.dropDirection === "center")
+                    drop.accepted = root.backend.openNodeInPane(root.paneIndex, id)
+                else {
+                    drop.accepted = root.requestSplit(root.dropDirection, id)
+                }
+            }
+            root.dropActive = false
+            root.dropDirection = "center"
         }
     }
 

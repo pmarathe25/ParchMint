@@ -2,10 +2,10 @@
 
 #include <QPointer>
 #include <QSortFilterProxyModel>
+#include <QVariantMap>
 #include <qqmlintegration.h>
 
-// The card grid must filter built-in roots in the model, not by hiding a
-// delegate. Hidden delegates still reserve GridView cells and create gaps.
+// Cards expose the manuscript hierarchy while mutations remain Rust commands.
 class CardsModel : public QSortFilterProxyModel
 {
   Q_OBJECT
@@ -16,6 +16,8 @@ public:
   explicit CardsModel(QObject* parent = nullptr);
   QObject* source() const;
   void setSource(QObject* source);
+  Q_INVOKABLE bool ancestorsExpanded(int row,
+                                     const QVariantMap& collapsedNodes) const;
 
 signals:
   void sourceChanged();

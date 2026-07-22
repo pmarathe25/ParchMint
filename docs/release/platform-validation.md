@@ -17,7 +17,8 @@ screen reader, filesystem, and result. Offscreen tests do not replace physical v
 ## Editor fidelity
 
 - Exercise plain/rich clipboard fixtures; reject active/remote content.
-- Verify two panes retain independent selection, scroll, and undo state.
+- Create nested horizontal and vertical splits; verify panes retain independent
+  selection, scroll, and undo state while documents are dragged between them.
 - Navigate and delete protected page breaks, images, and opaque blocks as units.
 - Trigger autosave during IME composition; only committed text becomes canonical.
 - Introduce invalid source and recover without losing the buffer.

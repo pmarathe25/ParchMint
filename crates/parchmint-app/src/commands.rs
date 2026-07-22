@@ -1,4 +1,4 @@
-//! Central product command catalog used by menus and the command palette.
+//! Central product command catalog used by shortcuts and the command palette.
 
 /// Stable command metadata. Identifiers are intentionally not translated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +21,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("project.new", "New Project…", "Ctrl+N", false, false),
     command("project.open", "Open Project…", "Ctrl+O", false, false),
     command("project.close", "Close Project", "Ctrl+W", true, false),
-    command("project.save", "Save all documents", "Ctrl+S", true, false),
+    command("project.save", "Save", "Ctrl+S", true, false),
     command(
         "project.export",
         "Export manuscript…",
@@ -36,14 +36,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
         false,
     ),
-    command("edit.undo", "Undo structural change", "Ctrl+Z", true, false),
-    command(
-        "edit.redo",
-        "Redo structural change",
-        "Ctrl+Shift+Z",
-        true,
-        false,
-    ),
+    command("edit.undo", "Undo binder change", "", true, false),
+    command("edit.redo", "Redo binder change", "", true, false),
     command("edit.find", "Find in document", "Ctrl+F", true, false),
     command(
         "edit.replace_project",
@@ -52,8 +46,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         true,
         false,
     ),
-    command("structure.new_group", "New Group", "", true, true),
-    command("structure.new_scene", "New Scene", "", true, true),
+    command("structure.new_group", "New Section", "", true, true),
+    command("structure.new_scene", "New Document", "", true, true),
     command("structure.move_up", "Move Up", "Ctrl+Shift+Up", true, true),
     command(
         "structure.move_down",
@@ -66,14 +60,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     command("structure.outdent", "Outdent", "Ctrl+[", true, true),
     command("structure.duplicate", "Duplicate", "", true, true),
     command("structure.trash", "Move to Trash", "Delete", true, true),
-    command("view.binder", "Toggle binder", "", false, false),
-    command("view.inspector", "Toggle inspector", "", false, false),
-    command("view.split", "Split workspace", "", true, false),
+    command("view.binder", "Toggle binder", "", true, false),
+    command("view.split", "Split editor right", "", true, false),
     command("view.next_pane", "Focus next pane", "Ctrl+Tab", true, false),
-    command("view.swap_panes", "Swap panes", "", true, false),
     command("view.editor", "Show Editor", "Ctrl+1", true, false),
-    command("view.outline", "Show Outline", "Ctrl+2", true, false),
-    command("view.cards", "Show Cards", "Ctrl+3", true, false),
+    command("view.cards", "Show Cards", "Ctrl+2", true, false),
     command("view.settings", "Settings…", "Ctrl+,", false, false),
     command(
         "help.keyboard",
@@ -82,7 +73,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         false,
         false,
     ),
-    command("help.onboarding", "ParchMint tour", "", false, false),
+    command(
+        "help.onboarding",
+        "Create sample project…",
+        "",
+        false,
+        false,
+    ),
 ];
 
 const fn command(

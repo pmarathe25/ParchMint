@@ -20,12 +20,17 @@ ApplicationWindow {
     Material.accent: DesignTokens.accent
     Material.primary: DesignTokens.accent
     Material.theme: appSettings.theme === "dark" ? Material.Dark : appSettings.theme === "light" ? Material.Light : Material.System
+    Material.containerStyle: Material.Dense
 
     property string transientMessage: ""
     property bool binderVisible: true
-    property bool inspectorVisible: true
     property bool quitApproved: false
-    property bool startViewVisible: !backend.project_open
+    property int workspaceMode: 0
+    onWorkspaceModeChanged: {
+        if (backend.project_open)
+            backend.setFilter(workspaceMode === 1 ? "" : binderPane.filterText)
+    }
+
     function rememberProject(path) {
         const normalized = path.trim()
         if (!normalized.length)
@@ -45,10 +50,10 @@ ApplicationWindow {
         case "project.diagnostics": diagnosticsDialog.open(); break
         case "edit.undo": backend.undoStructural(); break
         case "edit.redo": backend.redoStructural(); break
-        case "edit.find": (backend.focused_pane === 1 ? paneTwo : paneOne).showFind(); break
+        case "edit.find": editorWorkspace.showFindFocused(); break
         case "edit.replace_project": replaceProjectDialog.open(); break
-        case "structure.new_group": backend.createChild(backend.selected_id, qsTr("Untitled Group"), true); break
-        case "structure.new_scene": backend.createChild(backend.selected_id, qsTr("Untitled Scene"), false); break
+        case "structure.new_group": backend.createChild(backend.selected_id, qsTr("Untitled Section"), true); break
+        case "structure.new_scene": backend.createChild(backend.selected_id, qsTr("Untitled Document"), false); break
         case "structure.move_up": backend.moveUp(backend.selected_id); break
         case "structure.move_down": backend.moveDown(backend.selected_id); break
         case "structure.indent": backend.indentNode(backend.selected_id); break
@@ -56,16 +61,13 @@ ApplicationWindow {
         case "structure.duplicate": backend.duplicateNode(backend.selected_id); break
         case "structure.trash": trashConfirm.open(); break
         case "view.binder": window.binderVisible = !window.binderVisible; break
-        case "view.inspector": window.inspectorVisible = !window.inspectorVisible; break
-        case "view.split": backend.setSplit(!backend.split_enabled, "horizontal", 500); break
+        case "view.split": editorWorkspace.splitFocused("right"); break
         case "view.next_pane": backend.focusNextPane(); break
-        case "view.swap_panes": backend.swapPanes(); break
-        case "view.editor": backend.setPaneView(backend.focused_pane, "editor"); break
-        case "view.outline": backend.setPaneView(backend.focused_pane, "outline"); break
-        case "view.cards": backend.setPaneView(backend.focused_pane, "cards"); break
+        case "view.editor": window.workspaceMode = 0; break
+        case "view.cards": window.workspaceMode = 1; break
         case "view.settings": settingsDialog.open(); break
         case "help.keyboard": keyboardDialog.open(); break
-        case "help.onboarding": window.startViewVisible = true; break
+        case "help.onboarding": sampleProjectParentDialog.open(); break
         }
     }
 
@@ -73,13 +75,17 @@ ApplicationWindow {
         id: appSettings
         category: "version1"
         property string theme: "system"
-        property bool onboardingComplete: false
         property var recentProjects: []
     }
 
     Connections {
         target: backend
-        function onProjectOpenChanged() { window.startViewVisible = !backend.project_open }
+        function onProject_openChanged() {
+            if (backend.project_open) {
+                binderPane.filterText = ""
+                window.workspaceMode = 0
+            }
+        }
     }
 
     onClosing: function(close) {
@@ -87,8 +93,7 @@ ApplicationWindow {
             close.accepted = true
             return
         }
-        paneOne.syncLiveBody()
-        paneTwo.syncLiveBody()
+        editorWorkspace.syncLiveBodies()
         close.accepted = backend.prepareQuit()
         quitApproved = close.accepted
     }
@@ -147,9 +152,9 @@ ApplicationWindow {
 
     Popup {
         id: searchPopup
-        x: Math.max(DesignTokens.space3, projectSearchField.x)
-        y: window.header.height + DesignTokens.space1
-        width: 620
+        x: Math.max(DesignTokens.space3, window.width - width - DesignTokens.space3)
+        y: projectToolbar.height + DesignTokens.space1
+        width: Math.min(520, window.width - DesignTokens.space3 * 2)
         height: 410
         padding: DesignTokens.space3
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -196,9 +201,7 @@ ApplicationWindow {
         id: backend
         objectName: "parchmintBackend"
         onCommandRequested: function(id) { window.dispatchCommand(id) }
-        onCommandCompleted: function(command, revision) {
-            window.transientMessage = qsTr("%1 at revision %2").arg(command).arg(revision)
-        }
+        onCommandCompleted: function(command, revision) { window.transientMessage = command }
         onOperationFailed: function(message) {
             window.transientMessage = message
             errorPopup.open()
@@ -238,7 +241,7 @@ ApplicationWindow {
         standardButtons: Dialog.Cancel
         onRejected: backend.dismissReadOnlyOffer()
         contentItem: ColumnLayout {
-            Label { text: qsTr("Another live process owns this project's writer lock. ParchMint will not break that lock or allow a second writer."); wrapMode: Text.Wrap; Layout.preferredWidth: 460 }
+            Label { text: qsTr("This project is open elsewhere. You can open it read-only."); wrapMode: Text.Wrap; Layout.preferredWidth: 460 }
             Button { text: qsTr("Open Read-Only"); highlighted: true; Layout.alignment: Qt.AlignRight; onClicked: backend.openProjectReadOnly() }
         }
     }
@@ -255,7 +258,6 @@ ApplicationWindow {
         contentItem: ColumnLayout {
             Label { text: qsTr("Project name") }
             TextField { id: nameField; text: qsTr("Untitled Novel"); Layout.preferredWidth: 440; selectByMouse: true }
-            Label { text: qsTr("After continuing, choose the parent folder in the native folder picker."); wrapMode: Text.Wrap; Layout.fillWidth: true; opacity: .7 }
         }
     }
 
@@ -346,13 +348,6 @@ ApplicationWindow {
                     }
                 }
             }
-            Label {
-                Layout.columnSpan: 2
-                Layout.fillWidth: true
-                text: qsTr("Existing files are left untouched unless a completed export safely replaces them.")
-                wrapMode: Text.Wrap
-                opacity: .7
-            }
         }
     }
 
@@ -409,7 +404,7 @@ ApplicationWindow {
         contentItem: Label {
             width: 420
             wrapMode: Text.Wrap
-            text: qsTr("The existing file will remain unchanged until the new export validates. Replace it only if you are sure.")
+            text: qsTr("A file already exists at this location. Replace it?")
         }
     }
 
@@ -452,12 +447,6 @@ ApplicationWindow {
                     }
                 }
             }
-            Label {
-                text: qsTr("ParchMint checks every source again, writes recovery backups, and stops on conflicts. The completed replacement can be undone until those documents change.")
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
-                opacity: .75
-            }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
                 Button { text: qsTr("Undo last project replacement"); onClicked: backend.undoProjectReplace() }
@@ -497,8 +486,6 @@ ApplicationWindow {
                 onActivated: appSettings.theme = currentValue
                 Accessible.name: qsTr("Application theme")
             }
-            Label { text: qsTr("Motion") }
-            Label { text: qsTr("ParchMint uses no nonessential animation and follows the platform focus behavior."); wrapMode: Text.Wrap; Layout.preferredWidth: 360 }
         }
     }
 
@@ -530,7 +517,7 @@ ApplicationWindow {
         title: qsTr("Recent projects")
         modal: true
         anchors.centerIn: Overlay.overlay
-        width: 620
+        width: Math.min(520, window.width - DesignTokens.space3 * 2)
         height: 440
         standardButtons: Dialog.Close
         contentItem: ListView {
@@ -546,34 +533,14 @@ ApplicationWindow {
         }
     }
 
-    Dialog {
-        id: onboardingDialog
-        title: qsTr("Welcome to ParchMint")
-        modal: true
-        anchors.centerIn: Overlay.overlay
-        closePolicy: Popup.NoAutoClose
-        standardButtons: Dialog.Close
-        onClosed: appSettings.onboardingComplete = true
-        contentItem: ColumnLayout {
-            spacing: DesignTokens.space3
-            Label { text: qsTr("Plan, write, research, and export—locally."); font.pixelSize: 22; font.bold: true; Accessible.role: Accessible.Heading }
-            Label { text: qsTr("Projects are ordinary folders of Markdown and TOML. ParchMint does not need an account or network connection."); wrapMode: Text.Wrap; Layout.preferredWidth: 520 }
-            Button {
-                text: qsTr("Choose a folder and create the sample…")
-                onClicked: sampleProjectParentDialog.open()
-            }
-        }
-    }
 
     FolderDialog {
         id: sampleProjectParentDialog
-        title: qsTr("Choose the parent folder for ParchMint Tour")
+        title: qsTr("Choose the parent folder for the sample project")
         currentFolder: StandardPaths.writableLocation(StandardPaths.DocumentsLocation)
         onAccepted: {
-            if (backend.createSampleProject(selectedFolder.toString())) {
+            if (backend.createSampleProject(selectedFolder.toString()))
                 window.rememberProject(backend.project_path)
-                onboardingDialog.close()
-            }
         }
     }
 
@@ -594,9 +561,8 @@ ApplicationWindow {
                 TextArea { text: backend.recovery_preview; readOnly: true; wrapMode: TextEdit.Wrap; Accessible.name: qsTr("Recovery preview") }
             }
             Label {
-                text: backend.recovery_corrupt
-                    ? qsTr("This record is isolated. Discarding it does not affect other recovery records or canonical documents.")
-                    : qsTr("Restore returns this text to its live document session. Save a copy preserves it separately; discard removes only this recovery record.")
+                text: backend.recovery_corrupt ? qsTr("This recovery record cannot be read.")
+                                               : qsTr("Restore, save a copy, or discard this version.")
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
@@ -641,7 +607,7 @@ ApplicationWindow {
                     ScrollView { Layout.fillWidth: true; Layout.fillHeight: true; TextArea { text: backend.external_disk_preview; readOnly: true; wrapMode: TextEdit.Wrap } }
                 }
             }
-            Label { text: qsTr("Reload uses the disk version. Overwrite explicitly replaces it with your live version after journaling. Save Copy preserves your version separately, then reloads the disk version."); wrapMode: Text.Wrap; Layout.fillWidth: true }
+            Label { text: qsTr("Choose which version to keep, or save a copy first."); wrapMode: Text.Wrap; Layout.fillWidth: true }
             RowLayout {
                 Layout.alignment: Qt.AlignRight
                 Button { text: qsTr("Save Copy…"); onClicked: externalCopyDialog.open() }
@@ -667,7 +633,7 @@ ApplicationWindow {
         anchors.centerIn: Overlay.overlay
         standardButtons: Dialog.Yes | Dialog.Cancel
         onAccepted: backend.trashNode(backend.selected_id)
-        Label { text: qsTr("The document remains recoverable in the project's canonical trash until you explicitly empty it."); wrapMode: Text.Wrap; width: 440 }
+        Label { text: qsTr("You can restore it later from project trash."); wrapMode: Text.Wrap; width: 440 }
     }
 
     Timer {
@@ -684,66 +650,6 @@ ApplicationWindow {
         onTriggered: backend.pollDocumentLifecycle()
     }
 
-    menuBar: MenuBar {
-        Menu {
-            title: qsTr("Project")
-            Action { text: qsTr("New Project…"); onTriggered: backend.requestCommand("project.new") }
-            Action { text: qsTr("Open Project…"); onTriggered: backend.requestCommand("project.open") }
-            Action { text: qsTr("Recent Projects…"); enabled: appSettings.recentProjects.length > 0; onTriggered: recentDialog.open() }
-            Action { text: qsTr("Close Project"); enabled: backend.project_open; onTriggered: backend.requestCommand("project.close") }
-            MenuSeparator {}
-            Action { text: qsTr("Export manuscript…"); enabled: backend.project_open && !backend.export_in_progress; onTriggered: backend.requestCommand("project.export") }
-            Action { text: qsTr("Cancel export"); enabled: backend.export_in_progress; onTriggered: backend.cancelExport() }
-            MenuSeparator {}
-            Action { text: qsTr("Export diagnostics…"); onTriggered: backend.requestCommand("project.diagnostics") }
-        }
-        Menu {
-            title: qsTr("Edit")
-            Action { text: qsTr("Undo structural change"); enabled: backend.project_open; onTriggered: backend.requestCommand("edit.undo") }
-            Action { text: qsTr("Redo structural change"); enabled: backend.project_open; onTriggered: backend.requestCommand("edit.redo") }
-            MenuSeparator {}
-            Action { text: qsTr("Find in document"); enabled: backend.project_open; onTriggered: backend.requestCommand("edit.find") }
-            Action { text: qsTr("Replace across project…"); enabled: backend.project_open; onTriggered: backend.requestCommand("edit.replace_project") }
-        }
-        Menu {
-            title: qsTr("Structure")
-            Action { text: qsTr("New Group"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.new_group") }
-            Action { text: qsTr("New Scene"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.new_scene") }
-            MenuSeparator {}
-            Action { text: qsTr("Move Up"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.move_up") }
-            Action { text: qsTr("Move Down"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.move_down") }
-            Action { text: qsTr("Indent"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.indent") }
-            Action { text: qsTr("Outdent"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.outdent") }
-            Action { text: qsTr("Duplicate"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.duplicate") }
-            Action { text: qsTr("Move to Trash"); enabled: backend.selected_id.length > 0; onTriggered: backend.requestCommand("structure.trash") }
-        }
-        Menu {
-            title: qsTr("Research")
-            Action { text: qsTr("New research group"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Group"), true) }
-            Action { text: qsTr("New research note"); enabled: backend.selected_id.length > 0; onTriggered: backend.createResearchChild(backend.selected_id, qsTr("Untitled Research Note"), false) }
-            Action { text: qsTr("Import attachment…"); enabled: backend.selected_id.length > 0; onTriggered: attachmentFileDialog.open() }
-        }
-        Menu {
-            title: qsTr("View")
-            Action { text: qsTr("Binder"); checkable: true; checked: window.binderVisible; onTriggered: backend.requestCommand("view.binder") }
-            Action { text: qsTr("Inspector"); checkable: true; checked: window.inspectorVisible; onTriggered: backend.requestCommand("view.inspector") }
-            MenuSeparator {}
-            Action { text: qsTr("Split workspace"); checkable: true; checked: backend.split_enabled; enabled: backend.project_open; onTriggered: backend.requestCommand("view.split") }
-            Action { text: qsTr("Focus next pane"); enabled: backend.split_enabled; onTriggered: backend.requestCommand("view.next_pane") }
-            Action { text: qsTr("Swap panes"); enabled: backend.split_enabled; onTriggered: backend.requestCommand("view.swap_panes") }
-            MenuSeparator {}
-            Action { text: qsTr("Settings…"); onTriggered: backend.requestCommand("view.settings") }
-        }
-        Menu {
-            title: qsTr("Help")
-            Action { text: qsTr("Command palette…"); onTriggered: commandPalette.open() }
-            Action { text: qsTr("Keyboard shortcuts"); onTriggered: backend.requestCommand("help.keyboard") }
-            Action { text: qsTr("ParchMint tour"); onTriggered: backend.requestCommand("help.onboarding") }
-        }
-    }
-
-    Shortcut { sequences: [StandardKey.Undo]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.undo") }
-    Shortcut { sequences: [StandardKey.Redo]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.redo") }
     Shortcut { sequences: [StandardKey.New]; onActivated: backend.requestCommand("project.new") }
     Shortcut { sequences: [StandardKey.Open]; onActivated: backend.requestCommand("project.open") }
     Shortcut { sequences: [StandardKey.Close]; enabled: backend.project_open; onActivated: backend.requestCommand("project.close") }
@@ -754,80 +660,189 @@ ApplicationWindow {
     Shortcut { sequences: ["Ctrl+]", "Meta+]"]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.indent") }
     Shortcut { sequences: ["Ctrl+[", "Meta+["]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.outdent") }
     Shortcut { sequences: [StandardKey.Delete]; enabled: backend.selected_id.length > 0; onActivated: backend.requestCommand("structure.trash") }
-    Shortcut { sequence: "Ctrl+Tab"; enabled: backend.split_enabled; onActivated: backend.requestCommand("view.next_pane") }
+    Shortcut { sequence: "Ctrl+Tab"; enabled: backend.pane_count > 1; onActivated: backend.requestCommand("view.next_pane") }
     Shortcut { sequences: [StandardKey.Find]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.find") }
     Shortcut { sequences: ["Ctrl+Alt+F", "Meta+Alt+F"]; enabled: backend.project_open; onActivated: backend.requestCommand("edit.replace_project") }
     Shortcut { sequences: [StandardKey.Preferences]; onActivated: backend.requestCommand("view.settings") }
     Shortcut { sequences: ["Ctrl+Shift+F", "Meta+Shift+F"]; enabled: backend.project_open; onActivated: projectSearchField.forceActiveFocus() }
     Shortcut { sequences: ["Ctrl+?", "Meta+?"]; onActivated: backend.requestCommand("help.keyboard") }
     Shortcut { sequences: ["Ctrl+1", "Meta+1"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.editor") }
-    Shortcut { sequences: ["Ctrl+2", "Meta+2"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.outline") }
-    Shortcut { sequences: ["Ctrl+3", "Meta+3"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.cards") }
+    Shortcut { sequences: ["Ctrl+2", "Meta+2"]; enabled: backend.project_open; onActivated: backend.requestCommand("view.cards") }
 
-    header: ToolBar {
-        RowLayout {
+    Item {
+        id: projectShell
+        anchors.fill: parent
+        visible: backend.project_open
+
+        ColumnLayout {
             anchors.fill: parent
-            anchors.margins: DesignTokens.space2
-            ToolButton { Accessible.name: qsTr("Toggle binder"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: window.binderVisible = !window.binderVisible; contentItem: Image { source: "qrc:/icons/binder.svg"; width: 18; height: 18; anchors.centerIn: parent } }
-            ToolButton { Accessible.name: qsTr("Toggle inspector"); ToolTip.visible: hovered; ToolTip.text: Accessible.name; onClicked: window.inspectorVisible = !window.inspectorVisible; contentItem: Image { source: "qrc:/icons/inspector.svg"; width: 18; height: 18; anchors.centerIn: parent } }
-            TextField {
-                id: projectSearchField
-                Layout.preferredWidth: 300
-                placeholderText: qsTr("Search project…")
-                enabled: backend.project_open
-                onTextChanged: {
-                    if (text.trim().length) {
-                        backend.projectSearch(text)
-                        searchPopup.open()
+            spacing: 0
+
+            ToolBar {
+                id: projectToolbar
+                Layout.fillWidth: true
+                Layout.preferredHeight: 34
+                contentItem: RowLayout {
+                    spacing: DesignTokens.space1
+                    ToolButton {
+                        text: qsTr("New")
+                        font.pixelSize: DesignTokens.typeCaption
+                        Accessible.name: qsTr("Create new project")
+                        onClicked: newProjectDialog.open()
+                    }
+                    ToolButton {
+                        text: qsTr("Open")
+                        font.pixelSize: DesignTokens.typeCaption
+                        Accessible.name: qsTr("Open project")
+                        onClicked: openProjectFolderDialog.open()
+                    }
+                    ToolButton {
+                        text: qsTr("Close")
+                        font.pixelSize: DesignTokens.typeCaption
+                        Accessible.name: qsTr("Close project")
+                        onClicked: backend.closeProject()
+                    }
+                    ToolButton {
+                        text: qsTr("Save")
+                        font.pixelSize: DesignTokens.typeCaption
+                        Accessible.name: qsTr("Save project")
+                        onClicked: backend.flushAllDocuments()
+                    }
+                    ToolButton {
+                        text: qsTr("Export")
+                        font.pixelSize: DesignTokens.typeCaption
+                        Accessible.name: qsTr("Export manuscript")
+                        enabled: !backend.export_in_progress
+                        onClicked: exportDialog.open()
+                    }
+                    ToolButton {
+                        visible: window.workspaceMode === 0
+                        checked: window.binderVisible
+                        checkable: true
+                        font.pixelSize: DesignTokens.typeCaption
+                        text: qsTr("Files")
+                        Accessible.name: checked ? qsTr("Hide file tree") : qsTr("Show file tree")
+                        onClicked: window.binderVisible = checked
+                    }
+                    ButtonGroup { id: workspaceModeGroup }
+                    Item { Layout.preferredWidth: DesignTokens.space1 }
+                    ToolButton {
+                        text: qsTr("Editor")
+                        font.pixelSize: DesignTokens.typeCaption
+                        checkable: true
+                        checked: window.workspaceMode === 0
+                        ButtonGroup.group: workspaceModeGroup
+                        onClicked: window.workspaceMode = 0
+                    }
+                    ToolButton {
+                        text: qsTr("Cards")
+                        font.pixelSize: DesignTokens.typeCaption
+                        checkable: true
+                        checked: window.workspaceMode === 1
+                        ButtonGroup.group: workspaceModeGroup
+                        onClicked: window.workspaceMode = 1
+                    }
+                    Item { Layout.fillWidth: true }
+                    TextField {
+                        id: projectSearchField
+                        Layout.fillWidth: true
+                        Layout.maximumWidth: 280
+                        Layout.preferredHeight: 28
+                        font.pixelSize: DesignTokens.typeCaption
+                        placeholderText: qsTr("Search project…")
+                        selectByMouse: true
+                        onTextChanged: {
+                            if (text.trim().length) {
+                                backend.projectSearch(text)
+                                searchPopup.open()
+                            } else {
+                                searchPopup.close()
+                            }
+                        }
+                        onAccepted: {
+                            if (text.trim().length) {
+                                backend.projectSearch(text)
+                                searchPopup.open()
+                            }
+                        }
+                        Accessible.name: qsTr("Search project")
                     }
                 }
-                onAccepted: { if (text.trim().length) { backend.projectSearch(text); searchPopup.open() } }
-                Accessible.name: qsTr("Search project; quote an exact phrase")
             }
-            Item { Layout.fillWidth: true }
-            Label { text: backend.project_open ? backend.project_name : qsTr("No project open"); font.bold: true }
+
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: window.workspaceMode
+
+                Item {
+                    RowLayout {
+                        anchors.fill: parent
+                        spacing: 0
+                        BinderPane {
+                            id: binderPane
+                            Layout.preferredWidth: window.binderVisible ? 268 : 0
+                            Layout.fillHeight: true
+                            visible: window.binderVisible
+                            backend: backend
+                            onOpenInSplitRequested: function(nodeId) { editorWorkspace.splitPane(backend.focused_pane, "right", nodeId) }
+                            model: outlineModel
+                        }
+                        Rectangle {
+                            Layout.preferredWidth: window.binderVisible ? 1 : 0
+                            Layout.fillHeight: true
+                            color: DesignTokens.outline
+                        }
+                        EditorWorkspace {
+                            id: editorWorkspace
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            backend: backend
+                            model: outlineModel
+                        }
+                    }
+                }
+
+                CardsView {
+                    backend: backend
+                    model: outlineModel
+                    onOpenRequested: function(nodeId) {
+                        backend.selectNode(nodeId, false)
+                        window.workspaceMode = 0
+                    }
+                }
+            }
         }
-    }
-
-    RowLayout {
-        anchors.fill: parent
-        spacing: 0
-        BinderPane { Layout.preferredWidth: 276; Layout.fillHeight: true; visible: window.binderVisible; backend: backend; model: outlineModel }
-        Rectangle { Layout.preferredWidth: window.binderVisible ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
-
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 0
-            PaneHost { id: paneOne; Layout.fillWidth: true; Layout.fillHeight: true; backend: backend; model: outlineModel; paneIndex: 0; nodeId: backend.pane_one_id; viewName: backend.pane_one_view; pinned: backend.pane_one_pinned }
-            Rectangle { Layout.preferredWidth: backend.split_enabled ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
-            PaneHost { id: paneTwo; Layout.preferredWidth: backend.split_enabled ? 520 : 0; Layout.fillHeight: true; visible: backend.split_enabled; backend: backend; model: outlineModel; paneIndex: 1; nodeId: backend.pane_two_id; viewName: backend.pane_two_view; pinned: backend.pane_two_pinned }
-        }
-
-        Rectangle { Layout.preferredWidth: window.inspectorVisible ? 1 : 0; Layout.fillHeight: true; color: DesignTokens.outline; opacity: .35 }
-        InspectorPane { Layout.preferredWidth: 310; Layout.fillHeight: true; visible: window.inspectorVisible; backend: backend }
     }
 
     Rectangle {
         id: startView
         anchors.fill: parent
-        z: 10
-        visible: window.startViewVisible
+        visible: !backend.project_open
         color: DesignTokens.base
         Accessible.name: qsTr("ParchMint start view")
         ColumnLayout {
             anchors.centerIn: parent
-            width: Math.min(720, parent.width - DesignTokens.space8 * 2)
+            width: Math.min(640, parent.width - DesignTokens.space4 * 2)
             spacing: DesignTokens.space4
-            Label { text: qsTr("ParchMint"); font.pixelSize: DesignTokens.typeDisplay; font.bold: true; Accessible.role: Accessible.Heading }
-            Label { text: qsTr("A calm, local place to plan and write long-form work."); font.pixelSize: DesignTokens.typeTitle; color: DesignTokens.textMuted; wrapMode: Text.Wrap; Layout.fillWidth: true }
+            Label {
+                text: qsTr("ParchMint")
+                font.pixelSize: DesignTokens.typeDisplay
+                font.bold: true
+                Accessible.role: Accessible.Heading
+            }
             RowLayout {
                 Layout.fillWidth: true
-                Button { text: qsTr("New project…"); highlighted: true; onClicked: newProjectDialog.open(); Accessible.name: text }
-                Button { text: qsTr("Open project…"); onClicked: openProjectFolderDialog.open(); Accessible.name: text }
-                Button { text: qsTr("Create sample project…"); onClicked: sampleProjectParentDialog.open(); Accessible.name: text }
+                Button { text: qsTr("New project…"); highlighted: true; onClicked: newProjectDialog.open() }
+                Button { text: qsTr("Open project…"); onClicked: openProjectFolderDialog.open() }
+                Button { text: qsTr("Create sample project…"); onClicked: sampleProjectParentDialog.open() }
             }
-            Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: DesignTokens.outline; Layout.topMargin: DesignTokens.space2 }
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                color: DesignTokens.outline
+                Layout.topMargin: DesignTokens.space2
+            }
             Label { text: qsTr("Recent projects"); font.bold: true; visible: appSettings.recentProjects.length > 0 }
             ListView {
                 Layout.fillWidth: true
@@ -841,26 +856,16 @@ ApplicationWindow {
                     text: modelData
                     Accessible.name: qsTr("Open recent project %1").arg(modelData)
                     onClicked: {
-                        if (backend.openProject(modelData)) {
+                        if (backend.openProject(modelData))
                             window.rememberProject(backend.project_path)
-                            window.startViewVisible = false
-                        }
                     }
                 }
             }
-            Label { visible: appSettings.recentProjects.length === 0; text: qsTr("Recent projects will appear here after you open one."); color: DesignTokens.textMuted }
-            Label { text: qsTr("Projects stay in ordinary folders of Markdown and TOML. ParchMint makes no network request."); wrapMode: Text.Wrap; Layout.fillWidth: true; color: DesignTokens.textMuted }
-        }
-    }
-
-    footer: ToolBar {
-        RowLayout {
-            anchors.fill: parent
-            anchors.leftMargin: DesignTokens.space3
-            anchors.rightMargin: DesignTokens.space3
-            Label { text: backend.export_in_progress ? backend.export_status : (window.transientMessage.length ? window.transientMessage : qsTr("Local-first · structural changes are saved canonically")); Layout.fillWidth: true; elide: Text.ElideRight }
-            Label { text: backend.save_status; Accessible.name: qsTr("Save status") + ": " + text }
-            Label { text: qsTr("%1 visible · %2 selected").arg(backend.node_count).arg(backend.selected_count) }
+            Label {
+                visible: appSettings.recentProjects.length === 0
+                text: qsTr("Recent projects will appear here after you open one.")
+                color: DesignTokens.textMuted
+            }
         }
     }
 }

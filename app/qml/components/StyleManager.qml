@@ -46,11 +46,6 @@ Dialog {
                 text: root.selectedName
                 Accessible.name: qsTr("Style display name")
             }
-            Label {
-                text: qsTr("Renaming does not rewrite documents; stable IDs remain unchanged.")
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
-            }
             Button {
                 text: qsTr("Rename")
                 enabled: root.selectedStyleId.length > 0 && displayName.text.trim().length > 0

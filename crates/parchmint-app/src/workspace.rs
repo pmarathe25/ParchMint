@@ -163,7 +163,12 @@ pub enum OutlineDelta {
 /// The independently versioned, disposable workspace format.
 pub const WORKSPACE_FORMAT_VERSION: u32 = 1;
 
-/// One of the two symmetric panes. The string representation is intentional:
+/// Maximum number of independently restorable panes. Keeping this bounded
+/// prevents a malformed disposable workspace file from creating an unbounded
+/// number of live document sessions on project open.
+pub const MAX_WORKSPACE_PANES: usize = 16;
+
+/// One independently restorable pane. The string representation is intentional:
 /// unknown future views can fall back without invalidating a project.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -227,8 +232,12 @@ pub struct WorkspacePreferences {
     pub binder_visible: bool,
     #[serde(default)]
     pub inspector_visible: bool,
-    #[serde(default)]
-    pub panes: [PaneWorkspaceState; 2],
+    /// The first two entries are retained for compatibility with the original
+    /// two-pane workspace. TOML represents both the legacy fixed array and
+    /// this vector as `[[panes]]`, so existing workspace files deserialize
+    /// without migration.
+    #[serde(default = "default_panes")]
+    pub panes: Vec<PaneWorkspaceState>,
     #[serde(default)]
     pub focused_pane: u8,
     #[serde(default)]
@@ -258,7 +267,7 @@ impl Default for WorkspacePreferences {
             active_view: String::new(),
             binder_visible: true,
             inspector_visible: true,
-            panes: [PaneWorkspaceState::default(), PaneWorkspaceState::default()],
+            panes: default_panes(),
             focused_pane: 0,
             split_enabled: false,
             split_orientation: SplitOrientation::Horizontal,
@@ -277,6 +286,10 @@ fn workspace_format_version() -> u32 {
 }
 fn default_split_ratio() -> u16 {
     500
+}
+
+fn default_panes() -> Vec<PaneWorkspaceState> {
+    vec![PaneWorkspaceState::default()]
 }
 
 fn literal_match_ranges(source: &str, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
@@ -520,12 +533,35 @@ impl ProjectWorkspace {
     fn from_opened(opened: OpenProject) -> Self {
         let (mut preferences, workspace_diagnostic) = load_preferences(opened.root());
         reconcile_preferences(&opened.project, &mut preferences);
-        let valid = preferences
+        let mut valid = preferences
             .selected_nodes
             .iter()
             .copied()
             .filter(|id| opened.project.nodes.contains_key(id) && !opened.project.is_trashed(*id))
-            .collect();
+            .collect::<Vec<_>>();
+        let has_open_pane = preferences.panes.iter().any(|pane| {
+            pane.node
+                .is_some_and(|node| node_has_document(&opened.project, node))
+        });
+        if !has_open_pane {
+            let preferred = valid
+                .iter()
+                .copied()
+                .find(|node| node_has_document(&opened.project, *node))
+                .or_else(|| first_usable_manuscript_node(&opened.project));
+            if let Some(node) = preferred {
+                if valid.is_empty() || valid.iter().all(|selected| *selected != node) {
+                    valid = vec![node];
+                }
+                preferences.panes[0] = PaneWorkspaceState {
+                    node: Some(node),
+                    view: preferred_view_for_node(&opened.project, node),
+                    ..PaneWorkspaceState::default()
+                };
+                preferences.focused_pane = 0;
+            }
+        }
+        preferences.selected_nodes.clone_from(&valid);
         let snapshot = build_snapshot(&opened.project, None, "", OutlineSort::Binder);
         let mut search = ProjectSearch::open(opened.root());
         let index_revision = 1;
@@ -573,7 +609,7 @@ impl ProjectWorkspace {
                 selection: 1,
                 presentation: 1,
             },
-            outline_deltas: Vec::new(),
+            outline_deltas: vec![OutlineDelta::Reset],
             snapshot_filter: String::new(),
             snapshot_sort: OutlineSort::Binder,
             structural_save_worker: None,
@@ -1329,15 +1365,111 @@ impl ProjectWorkspace {
         self.preferences.panes.get(index)
     }
 
-    /// Opens a node in either symmetric pane. Replacing one pane deliberately
-    /// does not touch the other pane's node/cursor/scroll state, which is what
-    /// lets its Qt document retain its independent undo history.
+    pub fn pane_count(&self) -> usize {
+        self.preferences.panes.len()
+    }
+
+    /// Adds one independently restorable pane, optionally opening a node in it.
+    /// Existing node views are focused instead of duplicated.
+    pub fn add_pane(&mut self, node: Option<NodeId>) -> Result<usize, WorkspaceError> {
+        if let Some(node) = node
+            && let Some(existing) = self
+                .preferences
+                .panes
+                .iter()
+                .position(|pane| pane.node == Some(node))
+        {
+            self.focus_pane(existing)?;
+            return Ok(existing);
+        }
+        if self.preferences.panes.len() >= MAX_WORKSPACE_PANES {
+            return Err(WorkspaceError::Invariant("workspace pane limit reached"));
+        }
+        if let Some(node) = node
+            && (!self.opened.project.nodes.contains_key(&node)
+                || self.opened.project.is_trashed(node)
+                || self
+                    .opened
+                    .project
+                    .nodes
+                    .get(&node)
+                    .and_then(|entry| entry.kind.document_id())
+                    .is_none())
+        {
+            return Err(WorkspaceError::Invariant("pane node is unavailable"));
+        }
+        let index = self.preferences.panes.len();
+        self.preferences.panes.push(PaneWorkspaceState::default());
+        self.preferences.split_enabled = true;
+        if let Some(node) = node {
+            self.open_node_in_pane(index, node)?;
+        } else {
+            self.preferences.focused_pane = u8::try_from(index).unwrap_or(0);
+            self.save_preferences()?;
+        }
+        Ok(index)
+    }
+
+    /// Removes a pane down to the one-pane baseline.
+    pub fn remove_pane(&mut self, index: usize) -> Result<bool, WorkspaceError> {
+        if index >= self.preferences.panes.len() {
+            return Err(WorkspaceError::Invariant("pane index is unavailable"));
+        }
+        if self.preferences.panes.len() <= 1 {
+            self.close_pane(index)?;
+            return Ok(false);
+        }
+        let removed = self.preferences.panes.remove(index);
+        if self.preferences.panes.len() < 2 {
+            self.preferences.split_enabled = false;
+        }
+        let focused = usize::from(self.preferences.focused_pane);
+        self.preferences.focused_pane = u8::try_from(match focused.cmp(&index) {
+            std::cmp::Ordering::Greater => focused - 1,
+            std::cmp::Ordering::Equal => index.min(self.preferences.panes.len().saturating_sub(1)),
+            std::cmp::Ordering::Less => focused,
+        })
+        .unwrap_or(0);
+        if let Some(document) = removed.node.and_then(|node| {
+            self.opened
+                .project
+                .nodes
+                .get(&node)
+                .and_then(|entry| entry.kind.document_id())
+        }) {
+            let still_open = self.preferences.panes.iter().any(|pane| {
+                pane.node
+                    .and_then(|node| self.opened.project.nodes.get(&node))
+                    .and_then(|entry| entry.kind.document_id())
+                    == Some(document)
+            });
+            if !still_open {
+                self.sessions.remove(&document);
+                self.external_conflicts.remove(&document);
+            }
+        }
+        self.save_preferences()?;
+        Ok(true)
+    }
+
+    /// Opens a node in one workspace pane. Replacing a pane deliberately does
+    /// not touch any other pane's node/cursor/scroll state, which is what lets
+    /// each Qt document retain its independent undo history.
     pub fn open_in_pane(
         &mut self,
         index: usize,
         node: Option<NodeId>,
         view: PaneView,
     ) -> Result<(), WorkspaceError> {
+        if index >= MAX_WORKSPACE_PANES {
+            return Err(WorkspaceError::Invariant("workspace pane limit reached"));
+        }
+        while self.preferences.panes.len() <= index {
+            self.preferences.panes.push(PaneWorkspaceState::default());
+        }
+        if index > 0 {
+            self.preferences.split_enabled = true;
+        }
         if let Some(node) = node
             && let Some((other, _)) = self
                 .preferences
@@ -1352,7 +1484,14 @@ impl ProjectWorkspace {
         }
         if let Some(node) = node
             && (!self.opened.project.nodes.contains_key(&node)
-                || self.opened.project.is_trashed(node))
+                || self.opened.project.is_trashed(node)
+                || self
+                    .opened
+                    .project
+                    .nodes
+                    .get(&node)
+                    .and_then(|entry| entry.kind.document_id())
+                    .is_none())
         {
             return Err(WorkspaceError::Invariant("pane node is unavailable"));
         }
@@ -1369,7 +1508,7 @@ impl ProjectWorkspace {
             .preferences
             .panes
             .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
+            .expect("pane index was checked");
         pane.node = node;
         pane.view = view;
         pane.cursor = 0;
@@ -1380,8 +1519,18 @@ impl ProjectWorkspace {
 
     /// Binder navigation changes the focused pane only when it is not pinned.
     pub fn navigate_focused_pane(&mut self, node: NodeId) -> Result<bool, WorkspaceError> {
-        let index = usize::from(self.preferences.focused_pane.min(1));
+        let index = usize::from(self.preferences.focused_pane)
+            .min(self.preferences.panes.len().saturating_sub(1));
         if self.preferences.panes[index].pinned {
+            return Ok(false);
+        }
+        if self
+            .opened
+            .project
+            .nodes
+            .get(&node)
+            .is_some_and(|entry| entry.kind.is_builtin_root())
+        {
             return Ok(false);
         }
         if let Some((existing, _)) = self
@@ -1410,7 +1559,7 @@ impl ProjectWorkspace {
             .preferences
             .panes
             .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
         pane.pinned = pinned && pane.node.is_some();
         self.save_preferences()
     }
@@ -1424,7 +1573,7 @@ impl ProjectWorkspace {
             .preferences
             .panes
             .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
         if pane.node.is_none() && matches!(view, PaneView::Editor | PaneView::Attachment) {
             return Err(WorkspaceError::Invariant(
                 "open a document before selecting this view",
@@ -1436,18 +1585,20 @@ impl ProjectWorkspace {
     }
 
     pub fn focus_next_pane(&mut self) -> usize {
-        self.preferences.focused_pane = if self.preferences.split_enabled {
-            1 - self.preferences.focused_pane.min(1)
+        let count = self.preferences.panes.len();
+        if count > 1 && (self.preferences.split_enabled || count > 2) {
+            let current = usize::from(self.preferences.focused_pane).min(count - 1);
+            self.preferences.focused_pane = u8::try_from((current + 1) % count).unwrap_or(0);
         } else {
-            0
-        };
+            self.preferences.focused_pane = 0;
+        }
         let _ = self.save_preferences();
         usize::from(self.preferences.focused_pane)
     }
 
     pub fn focus_pane(&mut self, index: usize) -> Result<(), WorkspaceError> {
-        if index > 1 {
-            return Err(WorkspaceError::Invariant("pane index must be zero or one"));
+        if index >= self.preferences.panes.len() {
+            return Err(WorkspaceError::Invariant("pane index is unavailable"));
         }
         self.preferences.focused_pane = u8::try_from(index).unwrap_or(0);
         self.save_preferences()
@@ -1495,24 +1646,31 @@ impl ProjectWorkspace {
     }
 
     pub fn swap_panes(&mut self) -> Result<(), WorkspaceError> {
+        if self.preferences.panes.len() < 2 {
+            self.set_split(
+                true,
+                self.preferences.split_orientation,
+                self.preferences.split_ratio_milli,
+            )?;
+        }
         self.preferences.panes.swap(0, 1);
         self.preferences.focused_pane = 1 - self.preferences.focused_pane.min(1);
         self.save_preferences()
     }
 
     pub fn close_pane(&mut self, index: usize) -> Result<(), WorkspaceError> {
+        if index > 0 && index < self.preferences.panes.len() {
+            self.remove_pane(index)?;
+            return Ok(());
+        }
         let closing_document = self.pane_document_id(index).ok();
         let pane = self
             .preferences
             .panes
             .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index must be zero or one"))?;
-        *pane = PaneWorkspaceState {
-            view: PaneView::Outline,
-            ..PaneWorkspaceState::default()
-        };
-        if index == 1 {
-            self.preferences.split_enabled = false;
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
+        *pane = PaneWorkspaceState::default();
+        if usize::from(self.preferences.focused_pane) == index {
             self.preferences.focused_pane = 0;
         }
         if let Some(document) = closing_document {
@@ -1536,9 +1694,19 @@ impl ProjectWorkspace {
         orientation: SplitOrientation,
         ratio_milli: u16,
     ) -> Result<(), WorkspaceError> {
-        self.preferences.split_enabled = enabled;
         self.preferences.split_orientation = orientation;
         self.preferences.split_ratio_milli = ratio_milli.clamp(100, 900);
+        if enabled {
+            if self.preferences.panes.len() < 2 {
+                self.preferences.panes.push(PaneWorkspaceState::default());
+            }
+            self.preferences.split_enabled = true;
+        } else {
+            while self.preferences.panes.len() > 1 {
+                self.remove_pane(1)?;
+            }
+            self.preferences.split_enabled = false;
+        }
         self.save_preferences()
     }
 
@@ -2145,17 +2313,18 @@ impl ProjectWorkspace {
         self.apply(ProjectCommand::Trash { node })?;
         for pane in &mut self.preferences.panes {
             if pane.node.is_some_and(|id| subtree.contains(&id)) {
-                *pane = PaneWorkspaceState {
-                    view: PaneView::Outline,
-                    ..PaneWorkspaceState::default()
-                };
+                *pane = PaneWorkspaceState::default();
             }
         }
         for document in documents {
             self.sessions.remove(&document);
             self.external_conflicts.remove(&document);
         }
-        self.preferences.focused_pane = self.preferences.focused_pane.min(1);
+        self.preferences.focused_pane = u8::try_from(
+            usize::from(self.preferences.focused_pane)
+                .min(self.preferences.panes.len().saturating_sub(1)),
+        )
+        .unwrap_or(0);
         self.save_preferences()?;
         let remaining = self
             .selection
@@ -2639,7 +2808,10 @@ fn reconcile_preferences(project: &Project, preferences: &mut WorkspacePreferenc
     preferences
         .expanded_nodes
         .retain(|id| project.nodes.contains_key(id) && !project.is_trashed(*id));
-    preferences.focused_pane = preferences.focused_pane.min(1);
+    preferences.panes.truncate(MAX_WORKSPACE_PANES);
+    if preferences.panes.is_empty() {
+        preferences.panes.push(PaneWorkspaceState::default());
+    }
     preferences.split_ratio_milli = preferences.split_ratio_milli.clamp(100, 900);
     for pane in &mut preferences.panes {
         let valid = pane
@@ -2651,13 +2823,75 @@ fn reconcile_preferences(project: &Project, preferences: &mut WorkspacePreferenc
             pane.cursor = 0;
             pane.scroll = 0;
         }
+        if matches!(pane.view, PaneView::Outline | PaneView::Cards) {
+            pane.view = PaneView::Editor;
+        }
+        if pane.node.is_some_and(|id| {
+            project
+                .nodes
+                .get(&id)
+                .is_some_and(|entry| entry.kind.is_builtin_root())
+        }) {
+            pane.node = None;
+            pane.pinned = false;
+        }
         if pane.view == PaneView::Attachment && pane.node.is_none() {
-            pane.view = PaneView::Outline;
+            pane.view = PaneView::Editor;
         }
     }
-    if !preferences.split_enabled {
-        preferences.panes[1].pinned = false;
+    if preferences.split_enabled {
+        if preferences.panes.len() < 2 {
+            preferences.panes.resize(2, PaneWorkspaceState::default());
+        }
+    } else {
+        let focused = usize::from(preferences.focused_pane).min(preferences.panes.len() - 1);
+        let active = preferences.panes[focused].clone();
+        let active = if active.node.is_some() {
+            active
+        } else {
+            preferences
+                .panes
+                .iter()
+                .find(|pane| pane.node.is_some())
+                .cloned()
+                .unwrap_or(active)
+        };
+        preferences.panes.truncate(1);
+        preferences.panes[0] = active;
+        preferences.focused_pane = 0;
+        return;
     }
+    preferences.focused_pane = u8::try_from(
+        usize::from(preferences.focused_pane).min(preferences.panes.len().saturating_sub(1)),
+    )
+    .unwrap_or(0);
+}
+
+fn node_has_document(project: &Project, node: NodeId) -> bool {
+    project
+        .nodes
+        .get(&node)
+        .is_some_and(|entry| !project.is_trashed(node) && entry.kind.document_id().is_some())
+}
+
+fn first_usable_manuscript_node(project: &Project) -> Option<NodeId> {
+    let mut pending = project
+        .nodes
+        .get(&project.manuscript_root())?
+        .children
+        .clone();
+    pending.reverse();
+    while let Some(node) = pending.pop() {
+        let entry = project.nodes.get(&node)?;
+        if project.is_trashed(node) {
+            continue;
+        }
+        if entry.kind.document_id().is_some() {
+            return Some(node);
+        }
+        pending.extend(entry.children.iter().rev().copied());
+    }
+    None
 }
 
 fn is_within_research(project: &Project, node: NodeId) -> bool {
@@ -2849,7 +3083,12 @@ fn binder_row(project: &Project, id: NodeId, depth: u16, word_count: usize) -> B
         is_root: node.kind.is_builtin_root(),
         has_children: !node.children.is_empty(),
         title: metadata.map_or_else(
-            || project.builtin_root_key(id).unwrap_or("root").to_owned(),
+            || match project.builtin_root_key(id) {
+                Some("manuscript") => "Manuscript".to_owned(),
+                Some("research") => "Research".to_owned(),
+                Some(key) => key.to_owned(),
+                None => "Root".to_owned(),
+            },
             |entry| entry.title.clone(),
         ),
         synopsis: metadata.map_or_else(String::new, |entry| entry.summary.clone()),
@@ -3207,6 +3446,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut workspace = ProjectWorkspace::create(directory.path(), "Deltas").unwrap();
         let root = workspace.project().manuscript_root();
+        assert_eq!(workspace.take_outline_deltas(), vec![OutlineDelta::Reset]);
         let initial = workspace.revisions();
 
         let first = workspace.create_node(root, "First", false).unwrap();
@@ -3427,6 +3667,109 @@ mod tests {
         assert!(reopened.workspace_diagnostic().is_some());
         assert_eq!(reopened.preferences().version, WORKSPACE_FORMAT_VERSION);
         assert_eq!(reopened.preferences().split_ratio_milli, 500);
+    }
+
+    #[test]
+    fn fresh_open_selects_a_manuscript_node_and_publishes_initial_reset() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Opening", false)
+            .unwrap();
+        drop(workspace);
+        fs::remove_file(root.join(".parchmint/workspace.toml")).unwrap();
+
+        let mut reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(reopened.selected(), &[scene]);
+        assert_eq!(reopened.pane_count(), 1);
+        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(scene));
+        assert_eq!(reopened.take_outline_deltas(), vec![OutlineDelta::Reset]);
+    }
+
+    #[test]
+    fn builtin_roots_select_without_replacing_or_splitting_the_editor() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let scene = workspace.create_node(manuscript, "Opening", false).unwrap();
+        workspace.open_node_in_pane(0, scene).unwrap();
+
+        assert!(!workspace.navigate_focused_pane(manuscript).unwrap());
+        assert_eq!(workspace.pane(0).and_then(|pane| pane.node), Some(scene));
+        assert_eq!(workspace.pane_count(), 1);
+        assert!(workspace.add_pane(Some(manuscript)).is_err());
+    }
+
+    #[test]
+    fn legacy_unsplit_two_pane_preferences_restore_one_active_pane() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let first = workspace.create_node(manuscript, "First", false).unwrap();
+        let second = workspace.create_node(manuscript, "Second", false).unwrap();
+        drop(workspace);
+
+        let preferences = WorkspacePreferences {
+            selected_nodes: vec![second],
+            panes: vec![
+                PaneWorkspaceState {
+                    node: Some(first),
+                    ..PaneWorkspaceState::default()
+                },
+                PaneWorkspaceState {
+                    node: Some(second),
+                    ..PaneWorkspaceState::default()
+                },
+            ],
+            focused_pane: 1,
+            split_enabled: false,
+            ..WorkspacePreferences::default()
+        };
+        fs::write(
+            root.join(".parchmint/workspace.toml"),
+            toml::to_string_pretty(&preferences).unwrap(),
+        )
+        .unwrap();
+
+        let reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(reopened.pane_count(), 1);
+        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(second));
+    }
+
+    #[test]
+    fn dynamic_panes_persist_and_release_removed_document_sessions() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let manuscript = workspace.project().manuscript_root();
+        let first = workspace.create_node(manuscript, "First", false).unwrap();
+        let second = workspace.create_node(manuscript, "Second", false).unwrap();
+        let third = workspace.create_node(manuscript, "Third", false).unwrap();
+        let fourth = workspace.create_node(manuscript, "Fourth", false).unwrap();
+        workspace.open_node_in_pane(0, first).unwrap();
+        assert_eq!(workspace.add_pane(Some(second)).unwrap(), 1);
+        assert_eq!(workspace.add_pane(Some(third)).unwrap(), 2);
+        assert_eq!(workspace.add_pane(Some(second)).unwrap(), 1);
+        assert_eq!(workspace.pane_count(), 3);
+        workspace.open_node_in_pane(2, fourth).unwrap();
+        assert!(workspace.remove_pane(1).unwrap());
+        assert_eq!(workspace.pane_count(), 2);
+        assert!(workspace.open_session_ids().iter().all(|id| {
+            workspace
+                .project()
+                .documents
+                .get(id)
+                .is_none_or(|document| document.node_id != second)
+        }));
+        drop(workspace);
+
+        let reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(reopened.pane_count(), 2);
+        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(first));
+        assert_eq!(reopened.pane(1).and_then(|pane| pane.node), Some(fourth));
     }
 
     #[test]

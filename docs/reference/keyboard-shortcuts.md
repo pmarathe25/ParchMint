@@ -9,11 +9,11 @@ Use Command on macOS and Control on Windows/Linux.
 | `Ctrl/Cmd+Shift+P` | Command palette | Always |
 | `Ctrl/Cmd+N` | New project | Always |
 | `Ctrl/Cmd+O` | Open project | Always |
-| `Ctrl/Cmd+S` | Flush open documents | Project open |
+| `Ctrl/Cmd+S` | Save | Project open |
 | `Ctrl/Cmd+W` | Close project | Project open |
 | `Ctrl/Cmd+Shift+E` | Export | Project open |
-| `Ctrl/Cmd+Z` | Undo structural change | Project open |
-| `Ctrl/Cmd+Shift+Z` | Redo structural change | Project open |
+| `Ctrl/Cmd+Z` | Undo editor text | Editor focused |
+| `Ctrl/Cmd+Shift+Z` | Redo editor text | Editor focused |
 | `Ctrl/Cmd+Shift+Up/Down` | Move selected node | Node selected |
 | `Ctrl/Cmd+[` / `]` | Outdent / indent | Node selected |
 | `Delete` | Move selected node to trash | Node selected |
@@ -21,9 +21,9 @@ Use Command on macOS and Control on Windows/Linux.
 | `Ctrl/Cmd+F` | Find in document | Project open |
 | `Ctrl/Cmd+Shift+F` | Focus project search | Project open |
 | `Ctrl/Cmd+Alt+F` | Preview project replacement | Project open |
-| `Ctrl/Cmd+1/2/3` | Editor / Outline / Cards | Project open |
+| `Ctrl/Cmd+1/2` | Editor / Cards | Project open |
 | `Ctrl/Cmd+,` | Settings | Always |
 | `Ctrl/Cmd+?` | Keyboard help | Always |
 
-Menus, shortcuts, and the palette share stable IDs from
+Shortcuts and the palette share stable IDs from
 `crates/parchmint-app/src/commands.rs`. Update all surfaces and command tests together.

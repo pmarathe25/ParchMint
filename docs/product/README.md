@@ -10,9 +10,9 @@ Markdown, TOML, and asset files without ParchMint.
 ## Required capabilities
 
 - Arbitrarily nested manuscript and research structures with stable identity.
-- Titles, synopses, labels, status, outline, cards, and deterministic binder order.
+- Titles, synopses, labels, status, cards, and deterministic binder order.
 - Source-preserving ParchMint Markdown with reusable paragraph and character styles.
-- Symmetric panes for writing beside research or another document.
+- Arbitrarily split editor panes for writing beside research or other documents.
 - Search and Unicode-aware statistics from document to project scope.
 - Autosave, recovery journals, backups, and explicit external-change handling.
 - Binder-ordered Markdown, text, HTML, PDF, EPUB, and DOCX export.

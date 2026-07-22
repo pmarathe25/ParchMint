@@ -1,3 +1,4 @@
+#include "models/cards_model.h"
 #include "models/outline_model.h"
 
 #include <QMimeData>
@@ -27,11 +28,21 @@ public:
   Q_INVOKABLE QString nodeRowJson(qint32 row) const
   {
     ++rowRequests;
-    return QStringLiteral(R"({"title":"Node %1","nodeId":"node-%1","depth":%2,"parentId":%3,"synopsis":"","status":"","label":"","isGroup":false,"isRoot":%4,"wordCount":%5,"includeInCompile":true})")
+    const bool researchRoot = row == 2;
+    const bool research = researchRoot || row == 3;
+    const bool root = row == 0 || researchRoot;
+    const int parent = root ? -1 : (research ? 2 : 0);
+    const auto title = row == 0 ? QStringLiteral("Draft")
+      : researchRoot ? QStringLiteral("References") : QStringLiteral("Node %1").arg(row);
+    return QStringLiteral(R"({"title":"%1","nodeId":"node-%2","depth":%3,"parentId":%4,"parentNodeId":"%5","rootKey":"%6","synopsis":"","status":"","label":"","isGroup":false,"isRoot":%7,"hasChildren":%8,"wordCount":%9,"includeInCompile":true})")
+      .arg(title)
       .arg(row)
-      .arg(row == 0 ? 0 : 2)
-      .arg(row == 0 ? -1 : 0)
-      .arg(row == 0 ? QStringLiteral("true") : QStringLiteral("false"))
+      .arg(root ? 0 : 2)
+      .arg(parent)
+      .arg(parent < 0 ? QString() : QStringLiteral("node-%1").arg(parent))
+      .arg(research ? QStringLiteral("research") : QStringLiteral("manuscript"))
+      .arg(root ? QStringLiteral("true") : QStringLiteral("false"))
+      .arg(root ? QStringLiteral("true") : QStringLiteral("false"))
       .arg(row + 1);
   }
   Q_INVOKABLE bool moveNode(const QString& source, const QString& target, const QString& placement)
@@ -70,8 +81,13 @@ private slots:
              QStringLiteral("Node 9999"));
     QCOMPARE(model.data(model.index(9'999), OutlineModel::DepthRole).toInt(), 2);
     QCOMPARE(model.data(model.index(9'999), OutlineModel::ParentIdRole).toInt(), 0);
+    QCOMPARE(model.data(model.index(9'999), OutlineModel::ParentNodeIdRole).toString(),
+             QStringLiteral("node-0"));
+    QCOMPARE(model.data(model.index(9'999), OutlineModel::RootKeyRole).toString(),
+             QStringLiteral("manuscript"));
+    QVERIFY(model.data(model.index(0), OutlineModel::HasChildrenRole).toBool());
     QCOMPARE(model.data(model.index(4), OutlineModel::WordCountRole).toInt(), 5);
-    QCOMPARE(source.rowRequests, 2); // rows 9999 and 4, never once per role
+    QCOMPARE(source.rowRequests, 3); // rows 9999, 0, and 4, never once per role
   }
 
   void typedDragPayloadUsesTheSameMoveContractAsTheBinder()
@@ -109,6 +125,28 @@ private slots:
     QCOMPARE(model.rowCount(), 10'002);
     emit source.outlineModelDelta(QStringLiteral("remove"), 5, 0, 2);
     QCOMPARE(model.rowCount(), 10'000);
+  }
+
+  void cardsKeepOnlyTheExpandableManuscriptHierarchy()
+  {
+    FakeRustOutline source;
+    OutlineModel outline;
+    outline.setSource(&source);
+    CardsModel cards;
+    cards.setSource(&outline);
+
+    QCOMPARE(outline.data(outline.index(0), OutlineModel::RootKeyRole).toString(),
+             QStringLiteral("manuscript"));
+    QCOMPARE(outline.data(outline.index(2), OutlineModel::RootKeyRole).toString(),
+             QStringLiteral("research"));
+    QCOMPARE(cards.rowCount(), 9'997);
+    QCOMPARE(cards.mapToSource(cards.index(0, 0)).row(), 1);
+    QCOMPARE(cards.data(cards.index(0, 0), OutlineModel::RootKeyRole).toString(),
+             QStringLiteral("manuscript"));
+    QVariantMap collapsed;
+    QVERIFY(cards.ancestorsExpanded(0, collapsed));
+    collapsed.insert(QStringLiteral("node-0"), true);
+    QVERIFY(!cards.ancestorsExpanded(0, collapsed));
   }
 };
 

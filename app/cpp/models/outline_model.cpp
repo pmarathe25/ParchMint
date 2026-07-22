@@ -76,6 +76,23 @@ int OutlineModel::rowCount(const QModelIndex& parent) const
   return m_rowCount;
 }
 
+bool OutlineModel::ancestorsExpanded(int row, const QVariantMap& collapsedNodes) const
+{
+  const auto* current = cachedRow(row);
+  if (!current)
+    return false;
+  int parent = current->parent;
+  while (parent >= 0) {
+    current = cachedRow(parent);
+    if (!current)
+      return false;
+    if (collapsedNodes.value(current->id).toBool())
+      return false;
+    parent = current->parent;
+  }
+  return true;
+}
+
 QVariant OutlineModel::data(const QModelIndex& index, int role) const
 {
   if (!index.isValid() || index.row() < 0 || index.row() >= rowCount())
@@ -93,6 +110,10 @@ QVariant OutlineModel::data(const QModelIndex& index, int role) const
       return row->depth;
     case ParentIdRole:
       return row->parent;
+    case ParentNodeIdRole:
+      return row->parentNodeId;
+    case RootKeyRole:
+      return row->rootKey;
     case SynopsisRole:
       return row->synopsis;
     case StatusRole:
@@ -103,6 +124,8 @@ QVariant OutlineModel::data(const QModelIndex& index, int role) const
       return row->group;
     case RootRole:
       return row->root;
+    case HasChildrenRole:
+      return row->hasChildren;
     case WordCountRole:
       return row->words;
     case IncludeInCompileRole:
@@ -119,11 +142,14 @@ QHash<int, QByteArray> OutlineModel::roleNames() const
     { IdRole, QByteArrayLiteral("nodeId") },
     { DepthRole, QByteArrayLiteral("depth") },
     { ParentIdRole, QByteArrayLiteral("parentId") },
+    { ParentNodeIdRole, QByteArrayLiteral("parentNodeId") },
+    { RootKeyRole, QByteArrayLiteral("rootKey") },
     { SynopsisRole, QByteArrayLiteral("synopsis") },
     { StatusRole, QByteArrayLiteral("status") },
     { LabelRole, QByteArrayLiteral("label") },
     { GroupRole, QByteArrayLiteral("isGroup") },
     { RootRole, QByteArrayLiteral("isRoot") },
+    { HasChildrenRole, QByteArrayLiteral("hasChildren") },
     { WordCountRole, QByteArrayLiteral("wordCount") },
     { IncludeInCompileRole, QByteArrayLiteral("includeInCompile") },
   };
@@ -205,6 +231,8 @@ const OutlineModel::CachedRow* OutlineModel::cachedRow(int row) const
   CachedRow value;
   value.title = object.value(QStringLiteral("title")).toString();
   value.id = object.value(QStringLiteral("nodeId")).toString();
+  value.parentNodeId = object.value(QStringLiteral("parentNodeId")).toString();
+  value.rootKey = object.value(QStringLiteral("rootKey")).toString();
   value.depth = object.value(QStringLiteral("depth")).toInt();
   value.parent = object.value(QStringLiteral("parentId")).toInt(-1);
   value.synopsis = object.value(QStringLiteral("synopsis")).toString();
@@ -212,6 +240,7 @@ const OutlineModel::CachedRow* OutlineModel::cachedRow(int row) const
   value.label = object.value(QStringLiteral("label")).toString();
   value.group = object.value(QStringLiteral("isGroup")).toBool();
   value.root = object.value(QStringLiteral("isRoot")).toBool();
+  value.hasChildren = object.value(QStringLiteral("hasChildren")).toBool();
   value.words = object.value(QStringLiteral("wordCount")).toInt();
   value.include = object.value(QStringLiteral("includeInCompile")).toBool();
   return &m_rows.insert(row, value).value();

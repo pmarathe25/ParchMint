@@ -4,6 +4,7 @@
 #include <QHash>
 #include <QMimeData>
 #include <QPointer>
+#include <QVariantMap>
 #include <qqmlintegration.h>
 
 class OutlineModel : public QAbstractListModel
@@ -18,11 +19,14 @@ public:
     IdRole,
     DepthRole,
     ParentIdRole,
+    ParentNodeIdRole,
+    RootKeyRole,
     SynopsisRole,
     StatusRole,
     LabelRole,
     GroupRole,
     RootRole,
+    HasChildrenRole,
     WordCountRole,
     IncludeInCompileRole,
   };
@@ -31,6 +35,8 @@ public:
   explicit OutlineModel(QObject* parent = nullptr);
   QObject* source() const;
   void setSource(QObject* source);
+  Q_INVOKABLE bool ancestorsExpanded(int row,
+                                     const QVariantMap& collapsedNodes) const;
   int rowCount(const QModelIndex& parent = QModelIndex()) const override;
   QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
   QHash<int, QByteArray> roleNames() const override;
@@ -55,6 +61,8 @@ private:
   {
     QString title;
     QString id;
+    QString parentNodeId;
+    QString rootKey;
     int depth = 0;
     int parent = -1;
     QString synopsis;
@@ -62,6 +70,7 @@ private:
     QString label;
     bool group = false;
     bool root = false;
+    bool hasChildren = false;
     int words = 0;
     bool include = false;
   };

@@ -22,7 +22,9 @@ formatting must round-trip through the Rust semantic codec.
 
 ## Rules
 
-- One document has one authoritative session, even when referenced by two panes.
+- One document has one authoritative session across pane navigation and splits.
+- Each split owns a stable Qt pane host; closing another split only reindexes its backend binding.
+- Split topology and divider ratios are per-project UI state, not canonical project content.
 - Deltas use Qt UTF-16 offsets and are rejected on invalid boundaries.
 - A rejected delta triggers a full body resync; the editor does not continue from divergent state.
 - Source parse errors retain the user buffer until it is fixed or explicitly discarded.
