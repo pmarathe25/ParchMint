@@ -1,16 +1,32 @@
 services:
   parchmint:
     build:
-      dockerfile: Dockerfile
       context: .
-    network_mode: host
+      dockerfile: Dockerfile
+      network: host
+      args:
+        QT_VERSION: "6.8.3"
+        AQTINSTALL_VERSION: "3.3.0"
+        JUST_VERSION: "1.50.0"
+        CODEX_VERSION: "0.144.6"
+        OPENCODE_VERSION: "1.18.4"
+        NODE_VERSION: "24.11.0"
+    user: vscode
+    init: true
+    command: sleep infinity
     environment:
-      - DISPLAY
-      - WAYLAND_DISPLAY
-      - XDG_RUNTIME_DIR=/tmp/runtime
-      - XAUTHORITY=/tmp/.Xauthority
+      QT_QPA_PLATFORM: offscreen
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
-      - ${XDG_RUNTIME_DIR:-/run/user/1000}:/tmp/runtime:ro
-      - ${XAUTHORITY:-~/.Xauthority}:/tmp/.Xauthority:ro
       - ..:/workspaces/ParchMint:cached
+      - parchmint-cargo-git:/home/vscode/.cargo/git
+      - parchmint-cargo-registry:/home/vscode/.cargo/registry
+      - parchmint-codex-state:/home/vscode/.codex
+      - parchmint-opencode-config:/home/vscode/.config/opencode
+      - parchmint-opencode-state:/home/vscode/.local/share/opencode
+
+volumes:
+  parchmint-cargo-git:
+  parchmint-cargo-registry:
+  parchmint-codex-state:
+  parchmint-opencode-config:
+  parchmint-opencode-state:

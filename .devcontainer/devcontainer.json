@@ -1,20 +1,31 @@
 {
   "name": "ParchMint",
-  "initializeCommand": "bash scripts/detect-gpu.sh",
+  "initializeCommand": [
+    "bash",
+    "scripts/detect-gpu.sh"
+  ],
   "dockerComposeFile": [
     "docker-compose.yml",
     "docker-compose.override.yml"
   ],
   "service": "parchmint",
   "workspaceFolder": "/workspaces/ParchMint",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "overrideCommand": false,
+  "shutdownAction": "stopCompose",
+  "hostRequirements": {
+    "gpu": "optional"
+  },
   "customizations": {
     "vscode": {
       "extensions": [
         "rust-lang.rust-analyzer",
         "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools",
         "tamasfe.evenbettertoml"
       ]
     }
   },
-  "postCreateCommand": "git config --global --add safe.directory /workspaces/ParchMint && rustup show && cmake --version && qmake -query QT_VERSION && just --list"
+  "postCreateCommand": "rustup show && cmake --version && qmake -query QT_VERSION && just --version && node --version && npm --version && codex --version && opencode --version"
 }
