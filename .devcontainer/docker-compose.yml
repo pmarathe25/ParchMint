@@ -1,0 +1,16 @@
+services:
+  parchmint:
+    build:
+      dockerfile: Dockerfile
+      context: .
+    network_mode: host
+    environment:
+      - DISPLAY
+      - WAYLAND_DISPLAY
+      - XDG_RUNTIME_DIR=/tmp/runtime
+      - XAUTHORITY=/tmp/.Xauthority
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}:/tmp/runtime:ro
+      - ${XAUTHORITY:-~/.Xauthority}:/tmp/.Xauthority:ro
+      - ..:/workspaces/ParchMint:cached
