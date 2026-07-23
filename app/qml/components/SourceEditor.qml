@@ -12,6 +12,10 @@ Item {
     signal acceptRequested(string source)
     signal discardRequested()
 
+    function focusEditor() {
+        source.forceActiveFocus()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         RowLayout {

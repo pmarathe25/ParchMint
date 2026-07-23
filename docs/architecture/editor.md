@@ -4,7 +4,8 @@
 > Markdown serialization, pane state, or editor tests.
 
 Canonical document content is ParchMint Markdown. Rust owns the live body and
-its revision; each pane owns only Qt cursor, selection, scroll, focus, and text
+its revision. Rust workspace state owns each pane's ordered tabs and active tab;
+each persistent Qt tab host owns only cursor, selection, scroll, focus, and text
 undo state.
 
 ## Data flow
@@ -23,7 +24,10 @@ formatting must round-trip through the Rust semantic codec.
 ## Rules
 
 - One document has one authoritative session across pane navigation and splits.
-- Each split owns a stable Qt pane host; closing another split only reindexes its backend binding.
+- Each split owns a stable Qt pane host and each open tab retains a stable Qt editor host.
+- Closing the last tab removes its split when another split remains.
+- One shared formatting controller targets only the active tab in the focused pane.
+- Closing another split only reindexes the surviving hosts' backend bindings.
 - Split topology and divider ratios are per-project UI state, not canonical project content.
 - Deltas use Qt UTF-16 offsets and are rejected on invalid boundaries.
 - A rejected delta triggers a full body resync; the editor does not continue from divergent state.

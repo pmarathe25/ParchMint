@@ -16,6 +16,10 @@ Item {
     property bool changingPanes: false
     property string layoutProjectKey: ""
     property int layoutPaneCount: 0
+    readonly property var focusedHost: {
+        const pane = backend.focused_pane
+        return pane >= 0 && pane < paneHosts.length ? paneHosts[pane] : null
+    }
     readonly property int dividerSize: 5
     readonly property int minimumPaneSize: 220
 
@@ -24,12 +28,26 @@ Item {
         category: "editor-split-layouts"
         property string projectLayoutsJson: "{}"
     }
+    FormattingBar {
+        id: formattingBar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        z: 40
+        adapter: root.focusedHost ? root.focusedHost.activeAdapter : null
+        styleModel: root.focusedHost ? root.focusedHost.paragraphStyles : []
+        sourceMode: root.focusedHost ? root.focusedHost.activeSourceMode : false
+        onSourceModeRequested: { if (root.focusedHost) root.focusedHost.beginActiveSource() }
+        onHeightChanged: root.updateGeometry()
+    }
+
 
     Component {
         id: paneHostComponent
         PaneHost {
             backend: root.backend
             model: root.model
+            backendSyncSuspended: root.changingPanes
             splitRequestHandler: function(direction, nodeId) {
                 return root.splitPane(paneIndex, direction, nodeId)
             }
@@ -186,10 +204,7 @@ Item {
 
     function createPaneHost(pane) {
         const item = paneHostComponent.createObject(root, {
-            "paneIndex": pane,
-            "nodeId": backend.paneId(pane),
-            "viewName": backend.paneView(pane),
-            "pinned": backend.panePinned(pane)
+            "paneIndex": pane
         })
         if (!item)
             console.warn("ParchMint editor: pane host creation failed")
@@ -199,8 +214,8 @@ Item {
     function retirePaneHost(item) {
         if (!item)
             return
-        item.visible = false
         item.retiring = true
+        item.visible = false
         item.paneIndex = -1
         item.destroy()
     }
@@ -237,9 +252,7 @@ Item {
         for (let pane = 0; pane < count; ++pane) {
             const item = paneHosts[pane]
             item.paneIndex = pane
-            item.viewName = backend.paneView(pane)
-            item.pinned = backend.panePinned(pane)
-            item.nodeId = backend.paneId(pane)
+            item.syncTabs()
         }
     }
 
@@ -340,7 +353,7 @@ Item {
         let succeeded = true
         for (let pane = 0; pane < paneHosts.length; ++pane) {
             const item = paneHosts[pane]
-            if (item && !item.syncLiveBody())
+            if (item && !item.syncLiveBodies())
                 succeeded = false
         }
         return succeeded
@@ -395,7 +408,7 @@ Item {
             if (!item || !geometry)
                 continue
             item.x = geometry.x
-            item.y = geometry.y
+            item.y = formattingBar.height + geometry.y
             item.width = geometry.width
             item.height = geometry.height
         }
@@ -449,7 +462,7 @@ Item {
                 })
             }
         }
-        visit(splitTree, 0, 0, width, height, "")
+        visit(splitTree, 0, 0, width, Math.max(0, height - formattingBar.height), "")
         paneRects = panes
         dividerRects = dividers
         layoutRevision += 1
@@ -515,7 +528,7 @@ Item {
             id: divider
             required property var modelData
             x: modelData.x
-            y: modelData.y
+            y: formattingBar.height + modelData.y
             width: modelData.width
             height: modelData.height
             z: 20
@@ -535,7 +548,7 @@ Item {
                     const point = mapToItem(root, mouse.x, mouse.y)
                     const ratio = divider.modelData.axis === "horizontal"
                                 ? (point.x - divider.modelData.branchX) / divider.modelData.branchWidth
-                                : (point.y - divider.modelData.branchY) / divider.modelData.branchHeight
+                                : (point.y - formattingBar.height - divider.modelData.branchY) / divider.modelData.branchHeight
                     root.resizeDivider(divider.modelData.path, ratio)
                 }
                 onReleased: root.saveLayout()

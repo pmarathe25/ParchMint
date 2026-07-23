@@ -4,838 +4,1018 @@
 <context>
     <name>BinderPane</name>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="15"/>
-        <source>BINDER</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="63"/>
+        <source>Project</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="30"/>
-        <source>Binder item %1</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="82"/>
+        <source>Filter files</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="34"/>
-        <source>New group</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="83"/>
+        <source>Filter project files</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="34"/>
-        <source>Untitled Group</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="105"/>
+        <source>Project files</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="35"/>
-        <source>New scene</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="173"/>
+        <source>Project item %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="35"/>
-        <source>Untitled Scene</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="232"/>
+        <source>Collapse %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="37"/>
-        <source>Duplicate</source>
-        <translation type="unfinished">Duplicate</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="38"/>
-        <source>Open in other pane</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="233"/>
+        <source>Expand %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="39"/>
-        <source>Move up</source>
-        <translation type="unfinished">Move up</translation>
+        <location filename="../app/qml/components/BinderPane.qml" line="263"/>
+        <source>Rename %1</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="40"/>
-        <source>Move down</source>
-        <translation type="unfinished">Move down</translation>
+        <location filename="../app/qml/components/BinderPane.qml" line="348"/>
+        <source>New section</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="41"/>
-        <source>Indent</source>
-        <translation type="unfinished">Indent</translation>
+        <location filename="../app/qml/components/BinderPane.qml" line="351"/>
+        <source>Untitled Section</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="42"/>
-        <source>Outdent</source>
-        <translation type="unfinished">Outdent</translation>
+        <location filename="../app/qml/components/BinderPane.qml" line="354"/>
+        <source>New document</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/BinderPane.qml" line="44"/>
-        <source>Move to trash</source>
+        <location filename="../app/qml/components/BinderPane.qml" line="357"/>
+        <source>Untitled Document</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="361"/>
+        <source>Rename</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="366"/>
+        <source>Properties…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="373"/>
+        <source>Open in split</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="378"/>
+        <source>Move to Trash</source>
+        <translation type="unfinished">Move to Trash</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="396"/>
+        <source>Expand binder</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="396"/>
+        <source>Collapse binder</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="419"/>
+        <source>Properties — %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="435"/>
+        <location filename="../app/qml/components/BinderPane.qml" line="442"/>
+        <source>Summary</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="441"/>
+        <source>Add a short summary</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="447"/>
+        <location filename="../app/qml/components/BinderPane.qml" line="448"/>
+        <source>Status</source>
+        <translation type="unfinished">Status</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="449"/>
+        <location filename="../app/qml/components/BinderPane.qml" line="450"/>
+        <source>Label</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/BinderPane.qml" line="454"/>
+        <source>Include in compile</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>CardsView</name>
     <message>
-        <location filename="../app/qml/components/CardsView.qml" line="15"/>
+        <location filename="../app/qml/components/CardsView.qml" line="50"/>
         <source>Cards</source>
         <translation type="unfinished">Cards</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/CardsView.qml" line="16"/>
-        <source>Ordered cards</source>
+        <location filename="../app/qml/components/CardsView.qml" line="64"/>
+        <source>Manuscript cards</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/CardsView.qml" line="32"/>
+        <location filename="../app/qml/components/CardsView.qml" line="93"/>
         <source>Card %1</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/CardsView.qml" line="36"/>
+        <location filename="../app/qml/components/CardsView.qml" line="154"/>
+        <source>Collapse %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="155"/>
+        <source>Expand %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="180"/>
+        <source>Rename %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="191"/>
         <source>No synopsis</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="275"/>
+        <source>New section</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="278"/>
+        <source>Untitled Section</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="281"/>
+        <source>New document</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="284"/>
+        <source>Untitled Document</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="288"/>
+        <source>Rename</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="292"/>
+        <source>Edit summary…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="296"/>
+        <source>Move to Trash</source>
+        <translation type="unfinished">Move to Trash</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="306"/>
+        <source>Summary — %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="313"/>
+        <source>Summary</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="320"/>
+        <source>Add a short summary</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/CardsView.qml" line="321"/>
+        <source>Section summary</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>EditorAdapter</name>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="93"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="142"/>
         <source>The editor supplied an unsupported text document.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="288"/>
-        <location filename="../app/cpp/editor_adapter.cpp" line="666"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="348"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="759"/>
         <source>No editor document is connected.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="308"/>
-        <location filename="../app/cpp/editor_adapter.cpp" line="673"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="368"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="769"/>
         <source>Page break (compile marker)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="495"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="564"/>
         <source>A style must have a stable identifier.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="511"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="580"/>
         <source>A character style cannot be applied to a paragraph.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="543"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="612"/>
         <source>A paragraph style cannot be applied to characters.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="602"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="689"/>
         <source>The link uses an unsupported or unsafe destination.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/cpp/editor_adapter.cpp" line="784"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="703"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="717"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="762"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="782"/>
+        <source>replace</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/cpp/editor_adapter.cpp" line="846"/>
+        <location filename="../app/cpp/editor_adapter.cpp" line="855"/>
+        <source>paste over</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/cpp/editor_adapter.cpp" line="916"/>
         <source>Protected source and page-break objects cannot be formatted.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/cpp/editor_adapter.cpp" line="929"/>
+        <source>Protected source and page-break objects cannot be %1 by paste or insertion. Use Delete or Backspace to remove them explicitly.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>FormattingBar</name>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="15"/>
-        <source>Bold</source>
-        <translation type="unfinished">Bold</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="20"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="43"/>
         <source>Toggle bold</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="24"/>
-        <source>Italic</source>
-        <translation type="unfinished">Italic</translation>
+        <location filename="../app/qml/components/FormattingBar.qml" line="26"/>
+        <source>Text formatting controls</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="29"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="38"/>
+        <source>B</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="47"/>
+        <source>I</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="52"/>
         <source>Toggle italic</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="33"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="56"/>
+        <source>U</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="61"/>
+        <source>Toggle underline</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="65"/>
         <source>Sup</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="35"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="67"/>
         <source>Superscript</source>
         <translation type="unfinished">Superscript</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="39"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="71"/>
         <source>Sub</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="41"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="73"/>
         <source>Subscript</source>
         <translation type="unfinished">Subscript</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="50"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="88"/>
         <source>Clear formatting</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="55"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="90"/>
+        <source>Clear direct formatting</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="94"/>
+        <source>Bulleted list</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="96"/>
+        <source>Toggle bulleted list</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="100"/>
+        <source>Numbered list</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="102"/>
+        <source>Toggle numbered list</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="106"/>
+        <source>Left</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="108"/>
+        <source>Align paragraph left</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="112"/>
+        <source>Center</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="114"/>
+        <source>Align paragraph center</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="118"/>
+        <source>Right</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="120"/>
+        <source>Align paragraph right</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="124"/>
+        <source>Link…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="126"/>
+        <source>Set link destination</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="130"/>
+        <source>Image…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="132"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="187"/>
+        <source>Insert image</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="136"/>
         <source>Scene break</source>
         <translation type="unfinished">Scene break</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="60"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="138"/>
+        <source>Insert scene break</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="142"/>
         <source>Page break</source>
         <translation type="unfinished">Page break</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="65"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="144"/>
+        <source>Insert page break</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="148"/>
         <source>Undo</source>
         <translation type="unfinished">Undo</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="70"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="150"/>
+        <source>Undo editor change</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="154"/>
         <source>Redo</source>
         <translation type="unfinished">Redo</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="75"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="156"/>
+        <source>Redo editor change</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/FormattingBar.qml" line="160"/>
         <source>Source</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/FormattingBar.qml" line="76"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="162"/>
         <source>Edit raw Markdown source</source>
         <translation type="unfinished">Edit raw Markdown source</translation>
     </message>
-</context>
-<context>
-    <name>InspectorPane</name>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="13"/>
-        <source>Inspector</source>
-        <translation type="unfinished">Inspector</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="14"/>
-        <source>%1 items selected</source>
+        <location filename="../app/qml/components/FormattingBar.qml" line="170"/>
+        <location filename="../app/qml/components/FormattingBar.qml" line="177"/>
+        <source>Link destination</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="14"/>
-        <source>No selection</source>
-        <translation type="unfinished">No selection</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="15"/>
-        <source>Synopsis</source>
-        <translation type="unfinished">Synopsis</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="16"/>
-        <source>Selected synopsis</source>
+        <location filename="../app/qml/components/FormattingBar.qml" line="176"/>
+        <source>https://, mailto:, or asset:</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="17"/>
-        <source>Status</source>
-        <translation type="unfinished">Status</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="19"/>
-        <source>Label</source>
+        <location filename="../app/qml/components/FormattingBar.qml" line="195"/>
+        <source>Asset identifier</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="21"/>
-        <source>Include in compile</source>
+        <location filename="../app/qml/components/FormattingBar.qml" line="196"/>
+        <source>Image asset identifier</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="22"/>
-        <source>Tags and notes will be available here.</source>
-        <translation type="unfinished">Tags and notes will be available here.</translation>
+        <location filename="../app/qml/components/FormattingBar.qml" line="201"/>
+        <source>Alternative text</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/InspectorPane.qml" line="24"/>
-        <source>Move to Trash</source>
-        <translation type="unfinished">Move to Trash</translation>
+        <location filename="../app/qml/components/FormattingBar.qml" line="202"/>
+        <source>Image alternative text</source>
+        <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>Main</name>
     <message>
-        <location filename="../app/qml/Main.qml" line="18"/>
+        <location filename="../app/qml/Main.qml" line="19"/>
         <source>%1 — ParchMint</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="18"/>
+        <location filename="../app/qml/Main.qml" line="19"/>
+        <location filename="../app/qml/Main.qml" line="852"/>
         <source>ParchMint</source>
         <translation type="unfinished">ParchMint</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="47"/>
-        <source>Untitled Group</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="48"/>
-        <source>Untitled Scene</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="94"/>
+        <location filename="../app/qml/Main.qml" line="161"/>
         <source>Command palette</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="98"/>
+        <location filename="../app/qml/Main.qml" line="165"/>
         <source>Type a command</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="99"/>
+        <location filename="../app/qml/Main.qml" line="166"/>
         <source>Command search</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="160"/>
-        <source>Open search result in other pane</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="172"/>
-        <source>%1 at revision %2</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="198"/>
+        <location filename="../app/qml/Main.qml" line="257"/>
         <source>ParchMint could not complete the operation</source>
         <translation type="unfinished">ParchMint could not complete the operation</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="200"/>
+        <location filename="../app/qml/Main.qml" line="259"/>
         <source>Close</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="206"/>
+        <location filename="../app/qml/Main.qml" line="279"/>
         <source>Create project</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="222"/>
-        <source>Project folder</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="223"/>
-        <source>/path/to/My Novel</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="224"/>
+        <location filename="../app/qml/Main.qml" line="287"/>
         <source>Project name</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="225"/>
+        <location filename="../app/qml/Main.qml" line="288"/>
         <source>Untitled Novel</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="231"/>
+        <location filename="../app/qml/Main.qml" line="314"/>
         <source>Import research attachment</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="237"/>
-        <source>File path (copied safely into this project)</source>
+        <location filename="../app/qml/Main.qml" line="46"/>
+        <source>Finish or discard raw Markdown source edits before continuing.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="238"/>
-        <source>/path/to/reference.pdf</source>
+        <location filename="../app/qml/Main.qml" line="63"/>
+        <source>Untitled Section</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="244"/>
-        <source>Export manuscript</source>
-        <translation type="unfinished">Export manuscript</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="253"/>
-        <source>Format</source>
+        <location filename="../app/qml/Main.qml" line="64"/>
+        <source>Untitled Document</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="260"/>
-        <source>Markdown</source>
-        <translation type="unfinished">Markdown</translation>
+        <location filename="../app/qml/Main.qml" line="86"/>
+        <source>File</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="261"/>
-        <source>Plain text</source>
-        <translation type="unfinished">Plain text</translation>
+        <location filename="../app/qml/Main.qml" line="103"/>
+        <source>Save</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="262"/>
-        <source>HTML</source>
-        <translation type="unfinished">HTML</translation>
+        <location filename="../app/qml/Main.qml" line="109"/>
+        <source>Export…</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="263"/>
-        <source>PDF</source>
-        <translation type="unfinished">PDF</translation>
+        <location filename="../app/qml/Main.qml" line="266"/>
+        <source>Project already open</source>
+        <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="264"/>
-        <source>EPUB</source>
-        <translation type="unfinished">EPUB</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="265"/>
-        <source>DOCX</source>
-        <translation type="unfinished">DOCX</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="267"/>
-        <source>Export format</source>
-        <translation type="unfinished">Export format</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="269"/>
-        <source>Destination</source>
+        <location filename="../app/qml/Main.qml" line="272"/>
+        <source>This project is open elsewhere. You can open it read-only.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="273"/>
-        <source>/path/to/manuscript</source>
+        <source>Open Read-Only</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="274"/>
-        <source>Export destination</source>
-        <translation type="unfinished">Export destination</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="279"/>
-        <source>Existing files are left untouched unless a completed export safely replaces them.</source>
+        <location filename="../app/qml/Main.qml" line="294"/>
+        <source>Choose the parent folder for the new project</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="288"/>
-        <source>Replace across project</source>
+        <location filename="../app/qml/Main.qml" line="304"/>
+        <source>Open a ParchMint project folder</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="297"/>
-        <source>Find literal text</source>
-        <translation type="unfinished"></translation>
+        <location filename="../app/qml/Main.qml" line="322"/>
+        <source>Export manuscript</source>
+        <translation type="unfinished">Export manuscript</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="297"/>
-        <source>Project replacement search text</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="298"/>
-        <source>Replace with</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="298"/>
-        <source>Project replacement value</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="299"/>
-        <source>Case sensitive</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="300"/>
-        <source>Preview</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="303"/>
-        <source>No previewed changes</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="303"/>
-        <source>%1 previewed changes; select each change before applying</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="326"/>
-        <source>ParchMint checks every source again, writes recovery backups, and stops on conflicts. The completed replacement can be undone until those documents change.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="333"/>
-        <source>Undo last project replacement</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="334"/>
-        <source>Apply selected changes</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="341"/>
-        <source>Export diagnostics</source>
+        <location filename="../app/qml/Main.qml" line="340"/>
+        <source>Format</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="347"/>
-        <source>Save local diagnostics to</source>
-        <translation type="unfinished"></translation>
+        <source>Markdown</source>
+        <translation type="unfinished">Markdown</translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="348"/>
-        <source>/path/to/parchmint-diagnostics.txt</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="348"/>
-        <source>Diagnostics destination</source>
-        <translation type="unfinished"></translation>
+        <source>Plain text</source>
+        <translation type="unfinished">Plain text</translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="349"/>
-        <source>The report contains versions, platform, counts, and non-content warnings. It contains no writing or project paths and is never uploaded.</source>
-        <translation type="unfinished"></translation>
+        <source>HTML</source>
+        <translation type="unfinished">HTML</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="355"/>
-        <source>Settings</source>
-        <translation type="unfinished"></translation>
+        <location filename="../app/qml/Main.qml" line="350"/>
+        <source>PDF</source>
+        <translation type="unfinished">PDF</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="361"/>
-        <source>Theme</source>
-        <translation type="unfinished"></translation>
+        <location filename="../app/qml/Main.qml" line="351"/>
+        <source>EPUB</source>
+        <translation type="unfinished">EPUB</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="367"/>
-        <source>Follow system</source>
-        <translation type="unfinished"></translation>
+        <location filename="../app/qml/Main.qml" line="352"/>
+        <source>DOCX</source>
+        <translation type="unfinished">DOCX</translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="368"/>
-        <source>Light</source>
+        <location filename="../app/qml/Main.qml" line="354"/>
+        <source>Export format</source>
+        <translation type="unfinished">Export format</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="356"/>
+        <location filename="../app/qml/Main.qml" line="365"/>
+        <source>Compile preset</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="369"/>
-        <source>Dark</source>
+        <source>Edit…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="373"/>
-        <source>Application theme</source>
+        <location filename="../app/qml/Main.qml" line="371"/>
+        <source>Edit compile preset</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="375"/>
-        <source>Motion</source>
+        <location filename="../app/qml/Main.qml" line="385"/>
+        <location filename="../app/qml/Main.qml" line="392"/>
+        <source>Compile preset name</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="376"/>
-        <source>ParchMint uses no nonessential animation and follows the platform focus behavior.</source>
+        <location filename="../app/qml/Main.qml" line="391"/>
+        <source>Preset name</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="382"/>
-        <location filename="../app/qml/Main.qml" line="520"/>
-        <source>Keyboard shortcuts</source>
+        <location filename="../app/qml/Main.qml" line="403"/>
+        <source>Save exported manuscript</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="405"/>
-        <source>Recent projects</source>
+        <location filename="../app/qml/Main.qml" line="408"/>
+        <location filename="../app/qml/Main.qml" line="611"/>
+        <location filename="../app/qml/Main.qml" line="653"/>
+        <source>Markdown files (*.md)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="418"/>
-        <source>Open recent project %1</source>
+        <location filename="../app/qml/Main.qml" line="409"/>
+        <location filename="../app/qml/Main.qml" line="491"/>
+        <location filename="../app/qml/Main.qml" line="611"/>
+        <location filename="../app/qml/Main.qml" line="653"/>
+        <source>Text files (*.txt)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="426"/>
-        <source>Welcome to ParchMint</source>
+        <location filename="../app/qml/Main.qml" line="410"/>
+        <source>HTML files (*.html)</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="434"/>
-        <source>Plan, write, research, and export—locally.</source>
+        <location filename="../app/qml/Main.qml" line="411"/>
+        <source>PDF files (*.pdf)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="412"/>
+        <source>EPUB files (*.epub)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="413"/>
+        <source>Word documents (*.docx)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="415"/>
+        <source>All files (*)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="427"/>
+        <source>Replace existing export?</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="435"/>
-        <source>Projects are ordinary folders of Markdown and TOML. ParchMint does not need an account or network connection.</source>
+        <source>A file already exists at this location. Replace it?</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="436"/>
-        <source>Folder for a guided sample project</source>
+        <location filename="../app/qml/Main.qml" line="567"/>
+        <source>Choose the parent folder for the sample project</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="438"/>
-        <source>Create sample project</source>
+        <location filename="../app/qml/Main.qml" line="579"/>
+        <source>Corrupt recovery record</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="452"/>
-        <source>Move selection to project trash?</source>
+        <location filename="../app/qml/Main.qml" line="579"/>
+        <source>Recover unsaved writing</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/Main.qml" line="457"/>
-        <source>The document remains recoverable in the project&apos;s canonical trash until you explicitly empty it.</source>
+        <location filename="../app/qml/Main.qml" line="589"/>
+        <source>Recovery preview</source>
         <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="469"/>
-        <source>Project</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="470"/>
-        <source>New Project…</source>
-        <translation type="unfinished">New Project…</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="471"/>
-        <source>Open Project…</source>
-        <translation type="unfinished">Open Project…</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="472"/>
-        <source>Recent Projects…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="473"/>
-        <source>Close Project</source>
-        <translation type="unfinished">Close Project</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="475"/>
-        <source>Export manuscript…</source>
-        <translation type="unfinished">Export manuscript…</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="476"/>
-        <source>Cancel export</source>
-        <translation type="unfinished">Cancel export</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="478"/>
-        <source>Export diagnostics…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="481"/>
-        <source>Edit</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="482"/>
-        <source>Undo structural change</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="483"/>
-        <source>Redo structural change</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="485"/>
-        <source>Find in document</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="486"/>
-        <source>Replace across project…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="489"/>
-        <source>Structure</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="490"/>
-        <source>New Group</source>
-        <translation type="unfinished">New Group</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="491"/>
-        <source>New Scene</source>
-        <translation type="unfinished">New Scene</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="493"/>
-        <source>Move Up</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="494"/>
-        <source>Move Down</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="495"/>
-        <source>Indent</source>
-        <translation type="unfinished">Indent</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="496"/>
-        <source>Outdent</source>
-        <translation type="unfinished">Outdent</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="497"/>
-        <source>Duplicate</source>
-        <translation type="unfinished">Duplicate</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="498"/>
-        <source>Move to Trash</source>
-        <translation type="unfinished">Move to Trash</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="501"/>
-        <source>Research</source>
-        <translation type="unfinished">Research</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="502"/>
-        <source>New research group</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="502"/>
-        <source>Untitled Research Group</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="503"/>
-        <source>New research note</source>
-        <translation type="unfinished">New research note</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="503"/>
-        <source>Untitled Research Note</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="504"/>
-        <source>Import attachment…</source>
-        <translation type="unfinished">Import attachment…</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="507"/>
-        <source>View</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="508"/>
-        <source>Binder</source>
-        <translation type="unfinished">Binder</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="509"/>
-        <source>Inspector</source>
-        <translation type="unfinished">Inspector</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="511"/>
-        <source>Split workspace</source>
-        <translation type="unfinished">Split workspace</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="512"/>
-        <source>Focus next pane</source>
-        <translation type="unfinished">Focus next pane</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="513"/>
-        <source>Swap panes</source>
-        <translation type="unfinished">Swap panes</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="515"/>
-        <source>Settings…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="518"/>
-        <source>Help</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="519"/>
-        <source>Command palette…</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="521"/>
-        <source>ParchMint tour</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="540"/>
-        <source>Toggle binder</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="541"/>
-        <source>Toggle inspector</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="544"/>
-        <location filename="../app/qml/Main.qml" line="547"/>
-        <source>Filter outline</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="552"/>
-        <source>Search project…</source>
-        <translation type="unfinished">Search project…</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="561"/>
-        <source>Search project; quote an exact phrase</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/Main.qml" line="564"/>
-        <source>No project open</source>
-        <translation type="unfinished">No project open</translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="592"/>
-        <source>Local-first · structural changes are saved canonically</source>
+        <source>This recovery record cannot be read.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
         <location filename="../app/qml/Main.qml" line="593"/>
-        <source>%1 visible · %2 selected</source>
+        <source>Restore, save a copy, or discard this version.</source>
         <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="599"/>
+        <source>Discard</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="600"/>
+        <location filename="../app/qml/Main.qml" line="641"/>
+        <source>Save Copy…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="601"/>
+        <source>Restore</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="608"/>
+        <source>Save recovered writing as a copy</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="618"/>
+        <source>%1 changed outside ParchMint</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="629"/>
+        <source>Your unsaved version</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="634"/>
+        <source>Version on disk</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="638"/>
+        <source>Choose which version to keep, or save a copy first.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="642"/>
+        <source>Reload Disk Version</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="643"/>
+        <source>Overwrite with Mine</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="650"/>
+        <source>Save your version as a copy</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="664"/>
+        <source>You can restore it later from project trash.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="720"/>
+        <source>Editor</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="725"/>
+        <source>Show Editor</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="744"/>
+        <source>Cards</source>
+        <translation type="unfinished">Cards</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="749"/>
+        <source>Show Cards</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="788"/>
+        <source>Search project</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="846"/>
+        <source>ParchMint start view</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="859"/>
+        <source>New project…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="860"/>
+        <source>Open project…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="861"/>
+        <source>Create sample project…</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="889"/>
+        <source>Recent projects will appear here after you open one.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="441"/>
+        <source>Replace across project</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="450"/>
+        <source>Find literal text</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="450"/>
+        <source>Project replacement search text</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="451"/>
+        <source>Replace with</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="451"/>
+        <source>Project replacement value</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="452"/>
+        <source>Case sensitive</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="453"/>
+        <source>Preview</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="456"/>
+        <source>No previewed changes</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="456"/>
+        <source>%1 previewed changes; select each change before applying</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="480"/>
+        <source>Undo last project replacement</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="481"/>
+        <source>Apply selected changes</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="488"/>
+        <source>Export diagnostics</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="497"/>
+        <source>Settings</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="503"/>
+        <source>Theme</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="509"/>
+        <source>Follow system</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="510"/>
+        <source>Light</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="511"/>
+        <source>Dark</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="515"/>
+        <source>Application theme</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="522"/>
+        <source>Keyboard shortcuts</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="545"/>
+        <location filename="../app/qml/Main.qml" line="869"/>
+        <source>Recent projects</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="558"/>
+        <location filename="../app/qml/Main.qml" line="880"/>
+        <source>Open recent project %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="659"/>
+        <source>Move selection to project trash?</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="89"/>
+        <source>New Project…</source>
+        <translation type="unfinished">New Project…</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="93"/>
+        <source>Open Project…</source>
+        <translation type="unfinished">Open Project…</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="98"/>
+        <source>Close Project</source>
+        <translation type="unfinished">Close Project</translation>
+    </message>
+    <message>
+        <location filename="../app/qml/Main.qml" line="772"/>
+        <source>Search project…</source>
+        <translation type="unfinished">Search project…</translation>
     </message>
 </context>
 <context>
@@ -849,404 +1029,204 @@
 <context>
     <name>OutlineModel</name>
     <message>
-        <location filename="../app/cpp/models/outline_model.cpp" line="109"/>
-        <source>Rust outline bridge method %1 failed.</source>
-        <translation type="unfinished"></translation>
-    </message>
-</context>
-<context>
-    <name>OutlineView</name>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="15"/>
-        <source>Summary outline</source>
-        <translation type="unfinished">Summary outline</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="16"/>
-        <source>Binder order</source>
+        <location filename="../app/cpp/models/outline_model.cpp" line="223"/>
+        <source>Rust outline row bridge failed.</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="16"/>
-        <location filename="../app/qml/components/OutlineView.qml" line="20"/>
-        <source>Title</source>
-        <translation type="unfinished">Title</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="16"/>
-        <location filename="../app/qml/components/OutlineView.qml" line="22"/>
-        <source>Status</source>
-        <translation type="unfinished">Status</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="16"/>
-        <source>Outline sort</source>
-        <translation type="unfinished">Outline sort</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="21"/>
-        <source>Synopsis</source>
-        <translation type="unfinished">Synopsis</translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="23"/>
-        <source>Label</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="24"/>
-        <source>Words</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="41"/>
-        <source>Title for %1</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="42"/>
-        <source>Synopsis for %1</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="43"/>
-        <source>Status for %1</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="44"/>
-        <source>Label for %1</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/OutlineView.qml" line="45"/>
-        <source>—</source>
+        <location filename="../app/cpp/models/outline_model.cpp" line="228"/>
+        <source>Rust outline row payload is invalid.</source>
         <translation type="unfinished"></translation>
     </message>
 </context>
 <context>
     <name>PaneHost</name>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="99"/>
-        <source>Pin pane</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="100"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="688"/>
         <source>Attachment</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="101"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="289"/>
         <source>Find and replace in document</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="102"/>
-        <source>Close pane</source>
+        <location filename="../app/qml/components/PaneHost.qml" line="38"/>
+        <source>Body</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="109"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="39"/>
+        <source>Heading 1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="40"/>
+        <source>Heading 2</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="200"/>
+        <source>Editor tabs</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="220"/>
+        <source>Open %1 tab</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="253"/>
+        <source>Close %1 tab</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="265"/>
+        <source>No document</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="284"/>
+        <source>Tab save status</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="307"/>
+        <source>Split editor right</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="317"/>
+        <source>Split editor down</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="335"/>
         <source>Find</source>
         <translation type="unfinished">Find</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="110"/>
-        <location filename="../app/qml/components/PaneHost.qml" line="113"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="336"/>
+        <source>Find text</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="343"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="356"/>
         <source>Replace</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="111"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="344"/>
+        <source>Replacement text</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="348"/>
         <source>Case</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="112"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="349"/>
+        <source>Match case</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="352"/>
         <source>Next</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="114"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="360"/>
         <source>Replace all</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="128"/>
-        <source>Markdown research or manuscript note</source>
+        <location filename="../app/qml/components/PaneHost.qml" line="422"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="425"/>
+        <source>%1 words · %2 characters</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="128"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="502"/>
+        <source>The document changed in another pane; discard or copy these source edits and reopen source mode.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="595"/>
+        <source>Replaced the first %1 matches; more remain</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="597"/>
+        <source>Replaced %1 matches</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="783"/>
+        <source>Editor resynchronized after a sync error</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="825"/>
+        <source>Open in new tab</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="826"/>
+        <source>Split left</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="827"/>
+        <source>Split right</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="828"/>
+        <source>Split up</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="829"/>
+        <source>Split down</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="639"/>
         <source>Select a document</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="129"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="640"/>
         <source>Document editor</source>
         <translation type="unfinished">Document editor</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="142"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="697"/>
+        <source>Attachment description</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <location filename="../app/qml/components/PaneHost.qml" line="773"/>
         <source>Live document statistics</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="154"/>
-        <source>Safe attachment preview</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="156"/>
-        <source>Images, PDFs where the platform supports them, and plain text are previewed passively. Other files require an explicit system-open action.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="158"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="700"/>
         <source>Open in system application…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="172"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="719"/>
         <source>Open attachment outside ParchMint?</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/PaneHost.qml" line="179"/>
+        <location filename="../app/qml/components/PaneHost.qml" line="726"/>
         <source>The system application may execute or transmit content according to its own settings. Only continue if you trust this attachment.</source>
         <translation type="unfinished"></translation>
-    </message>
-</context>
-<context>
-    <name>ParchMint</name>
-    <message>
-        <source>ParchMint</source>
-        <translation type="vanished">ParchMint</translation>
-    </message>
-    <message>
-        <source>Binder</source>
-        <translation type="vanished">Binder</translation>
-    </message>
-    <message>
-        <source>Cards</source>
-        <translation type="vanished">Cards</translation>
-    </message>
-    <message>
-        <source>Outline sort</source>
-        <translation type="vanished">Outline sort</translation>
-    </message>
-    <message>
-        <source>Research</source>
-        <translation type="vanished">Research</translation>
-    </message>
-    <message>
-        <source>Inspector</source>
-        <translation type="vanished">Inspector</translation>
-    </message>
-    <message>
-        <source>Document editor</source>
-        <translation type="vanished">Document editor</translation>
-    </message>
-    <message>
-        <source>Summary outline</source>
-        <translation type="vanished">Summary outline</translation>
-    </message>
-    <message>
-        <source>Title</source>
-        <translation type="vanished">Title</translation>
-    </message>
-    <message>
-        <source>Synopsis</source>
-        <translation type="vanished">Synopsis</translation>
-    </message>
-    <message>
-        <source>Status</source>
-        <translation type="vanished">Status</translation>
-    </message>
-    <message>
-        <source>Tags and notes will be available here.</source>
-        <translation type="vanished">Tags and notes will be available here.</translation>
-    </message>
-    <message>
-        <source>New Project…</source>
-        <translation type="vanished">New Project…</translation>
-    </message>
-    <message>
-        <source>Open Project…</source>
-        <translation type="vanished">Open Project…</translation>
-    </message>
-    <message>
-        <source>Close Project</source>
-        <translation type="vanished">Close Project</translation>
-    </message>
-    <message>
-        <source>Export manuscript…</source>
-        <translation type="vanished">Export manuscript…</translation>
-    </message>
-    <message>
-        <source>Export manuscript</source>
-        <translation type="vanished">Export manuscript</translation>
-    </message>
-    <message>
-        <source>Cancel export</source>
-        <translation type="vanished">Cancel export</translation>
-    </message>
-    <message>
-        <source>Export destination</source>
-        <translation type="vanished">Export destination</translation>
-    </message>
-    <message>
-        <source>Export format</source>
-        <translation type="vanished">Export format</translation>
-    </message>
-    <message>
-        <source>Markdown</source>
-        <translation type="vanished">Markdown</translation>
-    </message>
-    <message>
-        <source>Plain text</source>
-        <translation type="vanished">Plain text</translation>
-    </message>
-    <message>
-        <source>HTML</source>
-        <translation type="vanished">HTML</translation>
-    </message>
-    <message>
-        <source>PDF</source>
-        <translation type="vanished">PDF</translation>
-    </message>
-    <message>
-        <source>EPUB</source>
-        <translation type="vanished">EPUB</translation>
-    </message>
-    <message>
-        <source>DOCX</source>
-        <translation type="vanished">DOCX</translation>
-    </message>
-    <message>
-        <source>Bold</source>
-        <translation type="vanished">Bold</translation>
-    </message>
-    <message>
-        <source>Italic</source>
-        <translation type="vanished">Italic</translation>
-    </message>
-    <message>
-        <source>Subscript</source>
-        <translation type="vanished">Subscript</translation>
-    </message>
-    <message>
-        <source>Superscript</source>
-        <translation type="vanished">Superscript</translation>
-    </message>
-    <message>
-        <source>Page break</source>
-        <translation type="vanished">Page break</translation>
-    </message>
-    <message>
-        <source>Scene break</source>
-        <translation type="vanished">Scene break</translation>
-    </message>
-    <message>
-        <source>Paragraph style</source>
-        <translation type="vanished">Paragraph style</translation>
-    </message>
-    <message>
-        <source>Manage styles</source>
-        <translation type="vanished">Manage styles</translation>
-    </message>
-    <message>
-        <source>Edit raw Markdown source</source>
-        <translation type="vanished">Edit raw Markdown source</translation>
-    </message>
-    <message>
-        <source>Return to editor</source>
-        <translation type="vanished">Return to editor</translation>
-    </message>
-    <message>
-        <source>Find</source>
-        <translation type="vanished">Find</translation>
-    </message>
-    <message>
-        <source>Search project…</source>
-        <translation type="vanished">Search project…</translation>
-    </message>
-    <message>
-        <source>Focus next pane</source>
-        <translation type="vanished">Focus next pane</translation>
-    </message>
-    <message>
-        <source>Split workspace</source>
-        <translation type="vanished">Split workspace</translation>
-    </message>
-    <message>
-        <source>Swap panes</source>
-        <translation type="vanished">Swap panes</translation>
-    </message>
-    <message>
-        <source>Undo</source>
-        <translation type="vanished">Undo</translation>
-    </message>
-    <message>
-        <source>Redo</source>
-        <translation type="vanished">Redo</translation>
-    </message>
-    <message>
-        <source>Move up</source>
-        <translation type="vanished">Move up</translation>
-    </message>
-    <message>
-        <source>Move down</source>
-        <translation type="vanished">Move down</translation>
-    </message>
-    <message>
-        <source>Move to Trash</source>
-        <translation type="vanished">Move to Trash</translation>
-    </message>
-    <message>
-        <source>Indent</source>
-        <translation type="vanished">Indent</translation>
-    </message>
-    <message>
-        <source>Outdent</source>
-        <translation type="vanished">Outdent</translation>
-    </message>
-    <message>
-        <source>Duplicate</source>
-        <translation type="vanished">Duplicate</translation>
-    </message>
-    <message>
-        <source>New Group</source>
-        <translation type="vanished">New Group</translation>
-    </message>
-    <message>
-        <source>New Scene</source>
-        <translation type="vanished">New Scene</translation>
-    </message>
-    <message>
-        <source>New research note</source>
-        <translation type="vanished">New research note</translation>
-    </message>
-    <message>
-        <source>Import attachment…</source>
-        <translation type="vanished">Import attachment…</translation>
-    </message>
-    <message>
-        <source>No project open</source>
-        <translation type="vanished">No project open</translation>
-    </message>
-    <message>
-        <source>No selection</source>
-        <translation type="vanished">No selection</translation>
-    </message>
-    <message>
-        <source>Source has errors — buffer retained</source>
-        <translation type="vanished">Source has errors — buffer retained</translation>
-    </message>
-    <message>
-        <source>ParchMint could not complete the operation</source>
-        <translation type="vanished">ParchMint could not complete the operation</translation>
     </message>
 </context>
 <context>
@@ -1265,32 +1245,32 @@
 <context>
     <name>SourceEditor</name>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="20"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="24"/>
         <source>Markdown source</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="20"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="24"/>
         <source>Source has errors — buffer retained</source>
         <translation type="unfinished">Source has errors — buffer retained</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="25"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="29"/>
         <source>Return to editor</source>
         <translation type="unfinished">Return to editor</translation>
     </message>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="30"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="34"/>
         <source>Discard source changes</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="43"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="47"/>
         <source>Raw Markdown source editor</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/SourceEditor.qml" line="55"/>
+        <location filename="../app/qml/components/SourceEditor.qml" line="59"/>
         <source>Byte %1: %2</source>
         <translation type="unfinished"></translation>
     </message>
@@ -1314,26 +1294,21 @@
     </message>
     <message>
         <location filename="../app/qml/components/StyleManager.qml" line="50"/>
-        <source>Renaming does not rewrite documents; stable IDs remain unchanged.</source>
-        <translation type="unfinished"></translation>
-    </message>
-    <message>
-        <location filename="../app/qml/components/StyleManager.qml" line="55"/>
         <source>Rename</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/StyleManager.qml" line="61"/>
+        <location filename="../app/qml/components/StyleManager.qml" line="56"/>
         <source>Delete and replace…</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/StyleManager.qml" line="70"/>
+        <location filename="../app/qml/components/StyleManager.qml" line="65"/>
         <source>Replace deleted style</source>
         <translation type="unfinished"></translation>
     </message>
     <message>
-        <location filename="../app/qml/components/StyleManager.qml" line="78"/>
+        <location filename="../app/qml/components/StyleManager.qml" line="73"/>
         <source>Replacement style</source>
         <translation type="unfinished"></translation>
     </message>

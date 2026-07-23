@@ -10,17 +10,19 @@ Installing, upgrading, or uninstalling ParchMint does not remove project folders
 
 ## Build from source
 
-Install the pinned tools using the upstream links and platform notes in
-[developer setup](../development/setup.md), then:
+On Ubuntu 24.04 or newer, use the repository's native dependency installer:
 
 ```sh
 git clone https://github.com/pmarathe25/ParchMint.git
 cd ParchMint
+./scripts/install-dependencies.sh
+source scripts/host-env.sh
 just bootstrap
 just build
 just run
 ```
 
+On other platforms, install and configure the pinned tools using the upstream
+links and platform notes in [developer setup](../development/setup.md).
 `just bootstrap` verifies Rust, CMake, and Qt discovery. If Qt is outside the
-normal search path, configure `QMAKE` and `CMAKE_PREFIX_PATH` as shown in the
-developer guide.
+normal search path, export the kit environment shown in the developer guide.

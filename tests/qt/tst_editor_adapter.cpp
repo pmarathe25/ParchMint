@@ -50,6 +50,24 @@ private slots:
     QVERIFY(!document.isUndoAvailable());
   }
 
+  void plainTextLoadDoesNotBecomeAnEditorDelta()
+  {
+    QTextDocument document;
+    EditorAdapter adapter;
+    adapter.setDocumentForTesting(&document);
+    QSignalSpy dirty(&adapter, &EditorAdapter::incrementalDirty);
+
+    const auto body = QStringLiteral("Loaded without a user edit — 本#%.\n");
+    adapter.loadPlainText(body);
+    adapter.setFocused(true);
+    QCoreApplication::processEvents();
+
+    QCOMPARE(document.toPlainText(), body);
+    QCOMPARE(dirty.size(), 0);
+    QCOMPARE(adapter.revision(), 0);
+    QVERIFY(!document.isUndoAvailable());
+  }
+
   void incrementalDirtyIsRevisionedAndFocusLossRequestsFlush()
   {
     QTextDocument document;

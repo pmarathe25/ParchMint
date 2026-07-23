@@ -8,6 +8,8 @@ Pane {
     required property var backend
     required property var model
     signal openInSplitRequested(string nodeId)
+    signal collapseToggled()
+    property bool collapsed: false
     property var collapsedNodes: ({})
     property alias filterText: filter.text
     property string propertiesNodeId: ""
@@ -47,7 +49,9 @@ Pane {
     }
 
     ColumnLayout {
+        id: binderContent
         anchors.fill: parent
+        visible: !root.collapsed
         spacing: 0
         RowLayout {
             Layout.fillWidth: true
@@ -269,6 +273,8 @@ Pane {
                 }
 
                 Drag.active: dragHandler.active && !isRoot
+                Drag.dragType: Drag.Automatic
+                Drag.keys: ["application/x-parchmint-node-id"]
                 Drag.supportedActions: Qt.MoveAction
                 Drag.mimeData: ({ "application/x-parchmint-node-id": nodeId })
                 Drag.hotSpot.x: width / 2
@@ -276,33 +282,36 @@ Pane {
                 DragHandler {
                     id: dragHandler
                     enabled: !delegateRoot.isRoot && !delegateRoot.editing
+                    target: null
                 }
                 DropArea {
                     anchors.fill: parent
                     keys: ["application/x-parchmint-node-id"]
-                    onEntered: function(drag) {
-                        if (drag.source && drag.source.nodeId === delegateRoot.nodeId) {
+                    function updatePlacement(drag) {
+                        const sourceId = drag.getDataAsString("application/x-parchmint-node-id")
+                        const candidate = delegateRoot.isRoot
+                                ? "inside"
+                                : drag.y < height * .25 ? "before"
+                                : drag.y > height * .75 ? "after"
+                                : delegateRoot.isGroup ? "inside" : "after"
+                        if (!sourceId.length
+                                || !root.backend.canMoveNode(sourceId, delegateRoot.nodeId,
+                                                             candidate)) {
+                            delegateRoot.dropPlacement = ""
                             drag.accepted = false
                             return
                         }
-                        delegateRoot.dropPlacement = delegateRoot.isRoot
-                                ? "inside"
-                                : drag.y < height * .25 ? "before"
-                                : drag.y > height * .75 ? "after"
-                                : delegateRoot.isGroup ? "inside" : "after"
+                        delegateRoot.dropPlacement = candidate
+                        drag.accepted = true
                     }
-                    onPositionChanged: function(drag) {
-                        delegateRoot.dropPlacement = delegateRoot.isRoot
-                                ? "inside"
-                                : drag.y < height * .25 ? "before"
-                                : drag.y > height * .75 ? "after"
-                                : delegateRoot.isGroup ? "inside" : "after"
-                    }
+                    onEntered: function(drag) { updatePlacement(drag) }
+                    onPositionChanged: function(drag) { updatePlacement(drag) }
                     onExited: delegateRoot.dropPlacement = ""
                     onDropped: function(drop) {
                         const id = drop.getDataAsString("application/x-parchmint-node-id")
-                        if (id.length && root.backend.moveNode(id, delegateRoot.nodeId,
-                                                               delegateRoot.dropPlacement))
+                        if (id.length && delegateRoot.dropPlacement.length
+                                && root.backend.moveNode(id, delegateRoot.nodeId,
+                                                         delegateRoot.dropPlacement))
                             drop.accepted = true
                         delegateRoot.dropPlacement = ""
                     }
@@ -372,6 +381,36 @@ Pane {
                     }
                 }
             }
+        }
+    }
+
+    ToolButton {
+        id: collapseButton
+        objectName: "binderCollapseButton"
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 2
+        width: 28
+        height: 28
+        z: 10
+        Accessible.name: root.collapsed ? qsTr("Expand binder") : qsTr("Collapse binder")
+        ToolTip.visible: hovered
+        ToolTip.text: Accessible.name
+        onClicked: root.collapseToggled()
+        contentItem: Image {
+            source: "qrc:/icons/chevron.svg"
+            sourceSize.width: 14
+            sourceSize.height: 14
+            width: 14
+            height: 14
+            anchors.centerIn: parent
+            rotation: root.collapsed ? 0 : 180
+        }
+        background: Rectangle {
+            color: collapseButton.hovered ? DesignTokens.overlay : DesignTokens.surface
+            border.width: 1
+            border.color: DesignTokens.outline
+            radius: DesignTokens.radiusSmall
         }
     }
 

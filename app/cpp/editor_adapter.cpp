@@ -342,6 +342,26 @@ QTextCursor EditorAdapter::cursor() const
   return result;
 }
 
+void EditorAdapter::loadPlainText(const QString& text)
+{
+  if (!m_document) {
+    emit adapterError(tr("No editor document is connected."));
+    return;
+  }
+  m_loading = true;
+  m_pendingChanges.clear();
+  m_changeDeliveryScheduled = false;
+  m_document->setPlainText(text);
+  m_document->clearUndoRedoStacks();
+  m_pendingChanges.clear();
+  m_revision = 0;
+  m_loading = false;
+  emit revisionChanged();
+  emit selectionFormatChanged();
+  emit undoAvailabilityChanged();
+  emit redoAvailabilityChanged();
+}
+
 void EditorAdapter::loadSemanticBlocks(const QVariantList& blocks)
 {
   if (!m_document) {

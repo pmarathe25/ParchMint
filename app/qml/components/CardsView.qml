@@ -200,6 +200,8 @@ Pane {
                 }
 
                 Drag.active: dragHandler.active
+                Drag.dragType: Drag.Automatic
+                Drag.keys: ["application/x-parchmint-node-id"]
                 Drag.supportedActions: Qt.MoveAction
                 Drag.mimeData: ({ "application/x-parchmint-node-id": nodeId })
                 Drag.hotSpot.x: width / 2
@@ -207,34 +209,36 @@ Pane {
                 DragHandler {
                     id: dragHandler
                     enabled: !cardRoot.editing
+                    target: null
                 }
 
                 DropArea {
                     anchors.fill: parent
                     keys: ["application/x-parchmint-node-id"]
-                    onEntered: function(drag) {
-                        if (drag.source && drag.source.nodeId === cardRoot.nodeId) {
+                    function updatePlacement(drag) {
+                        const sourceId = drag.getDataAsString("application/x-parchmint-node-id")
+                        const candidate = drag.y < height * .25
+                                ? "before"
+                                : drag.y > height * .75
+                                  ? "after"
+                                  : (cardRoot.isGroup ? "inside" : "after")
+                        if (!sourceId.length
+                                || !root.backend.canMoveNode(sourceId, cardRoot.nodeId, candidate)) {
+                            cardRoot.dropPlacement = ""
                             drag.accepted = false
                             return
                         }
-                        cardRoot.dropPlacement = drag.y < height * .25
-                                ? "before"
-                                : drag.y > height * .75
-                                  ? "after"
-                                  : (cardRoot.isGroup ? "inside" : "after")
+                        cardRoot.dropPlacement = candidate
+                        drag.accepted = true
                     }
-                    onPositionChanged: function(drag) {
-                        cardRoot.dropPlacement = drag.y < height * .25
-                                ? "before"
-                                : drag.y > height * .75
-                                  ? "after"
-                                  : (cardRoot.isGroup ? "inside" : "after")
-                    }
+                    onEntered: function(drag) { updatePlacement(drag) }
+                    onPositionChanged: function(drag) { updatePlacement(drag) }
                     onExited: cardRoot.dropPlacement = ""
                     onDropped: function(drop) {
                         const id = drop.getDataAsString("application/x-parchmint-node-id")
-                        if (id.length && root.backend.moveNode(id, cardRoot.nodeId,
-                                                               cardRoot.dropPlacement))
+                        if (id.length && cardRoot.dropPlacement.length
+                                && root.backend.moveNode(id, cardRoot.nodeId,
+                                                         cardRoot.dropPlacement))
                             drop.accepted = true
                         cardRoot.dropPlacement = ""
                     }

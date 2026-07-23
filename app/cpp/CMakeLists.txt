@@ -59,8 +59,6 @@ qt_add_resources(parchmint "parchmint_ui_icons"
   PREFIX "/icons"
   BASE "${CMAKE_SOURCE_DIR}/app/qml/icons"
   FILES
-    "${CMAKE_SOURCE_DIR}/app/qml/icons/binder.svg"
-    "${CMAKE_SOURCE_DIR}/app/qml/icons/pin.svg"
     "${CMAKE_SOURCE_DIR}/app/qml/icons/search.svg"
     "${CMAKE_SOURCE_DIR}/app/qml/icons/close.svg"
     "${CMAKE_SOURCE_DIR}/app/qml/icons/chevron.svg"

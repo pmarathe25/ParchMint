@@ -55,6 +55,7 @@ public:
   void setFocused(bool focused);
   qulonglong revision() const;
 
+  Q_INVOKABLE void loadPlainText(const QString& text);
   Q_INVOKABLE void loadSemanticBlocks(const QVariantList& blocks);
   Q_INVOKABLE QVariantList semanticBlocks() const;
   Q_INVOKABLE void toggleBold();

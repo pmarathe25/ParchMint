@@ -26,7 +26,7 @@ use parchmint_storage::{
     AttachmentPreview, AttachmentRecord, OpenMode, OpenProject, ProjectSavePlan, ProjectStorage,
     SaveMetrics, ScheduledCommandRollback, StorageError, atomic_write,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -56,6 +56,18 @@ pub enum DropPlacement {
     After(NodeId),
     /// Append as a child of the target.
     Inside(NodeId),
+}
+
+/// The next persistence action for one live document session.
+pub enum DocumentNextSaveAction {
+    Idle,
+    /// The session is dirty but its journal debounce has not elapsed.
+    Deferred,
+    Journal(JournalRequest),
+    Canonical {
+        request: CanonicalSaveRequest,
+        plan: parchmint_storage::DocumentSavePlan,
+    },
 }
 
 /// Compact, immutable row shared by binder, outline, and cards.
@@ -161,12 +173,15 @@ pub enum OutlineDelta {
 }
 
 /// The independently versioned, disposable workspace format.
-pub const WORKSPACE_FORMAT_VERSION: u32 = 1;
+pub const WORKSPACE_FORMAT_VERSION: u32 = 2;
 
 /// Maximum number of independently restorable panes. Keeping this bounded
 /// prevents a malformed disposable workspace file from creating an unbounded
 /// number of live document sessions on project open.
 pub const MAX_WORKSPACE_PANES: usize = 16;
+
+/// Maximum number of independently restorable tabs in one pane.
+pub const MAX_WORKSPACE_TABS_PER_PANE: usize = 64;
 
 /// One independently restorable pane. The string representation is intentional:
 /// unknown future views can fall back without invalidating a project.
@@ -189,30 +204,75 @@ pub enum SplitOrientation {
     Vertical,
 }
 
-/// Local restoration hints for a single editor/reference pane.
+/// Local restoration hints for one tab in an editor/reference pane.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PaneWorkspaceState {
-    #[serde(default)]
-    pub node: Option<NodeId>,
+pub struct PaneTabState {
+    pub node: NodeId,
     #[serde(default)]
     pub view: PaneView,
-    #[serde(default)]
-    pub pinned: bool,
     #[serde(default)]
     pub cursor: u32,
     #[serde(default)]
     pub scroll: u32,
 }
 
-impl Default for PaneWorkspaceState {
-    fn default() -> Self {
-        Self {
-            node: None,
-            view: PaneView::Editor,
-            pinned: false,
-            cursor: 0,
-            scroll: 0,
+/// Ordered Rust-owned tabs and the active tab in a single split pane.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PaneWorkspaceState {
+    #[serde(default)]
+    pub tabs: Vec<PaneTabState>,
+    #[serde(default)]
+    pub active_tab: usize,
+}
+
+impl PaneWorkspaceState {
+    pub fn active(&self) -> Option<&PaneTabState> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut PaneTabState> {
+        self.tabs.get_mut(self.active_tab)
+    }
+}
+
+impl<'de> Deserialize<'de> for PaneWorkspaceState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StoredPane {
+            #[serde(default)]
+            tabs: Vec<PaneTabState>,
+            #[serde(default)]
+            active_tab: usize,
+            // Version 1 fields. `pinned` is deliberately ignored during migration.
+            #[serde(default)]
+            node: Option<NodeId>,
+            #[serde(default)]
+            view: PaneView,
+            #[serde(default)]
+            cursor: u32,
+            #[serde(default)]
+            scroll: u32,
+            #[serde(default, rename = "pinned")]
+            _pinned: bool,
         }
+
+        let stored = StoredPane::deserialize(deserializer)?;
+        let mut tabs = stored.tabs;
+        if tabs.is_empty()
+            && let Some(node) = stored.node
+        {
+            tabs.push(PaneTabState {
+                node,
+                view: stored.view,
+                cursor: stored.cursor,
+                scroll: stored.scroll,
+            });
+        }
+        let active_tab = stored.active_tab.min(tabs.len().saturating_sub(1));
+        Ok(Self { tabs, active_tab })
     }
 }
 
@@ -540,7 +600,8 @@ impl ProjectWorkspace {
             .filter(|id| opened.project.nodes.contains_key(id) && !opened.project.is_trashed(*id))
             .collect::<Vec<_>>();
         let has_open_pane = preferences.panes.iter().any(|pane| {
-            pane.node
+            pane.active()
+                .map(|tab| tab.node)
                 .is_some_and(|node| node_has_document(&opened.project, node))
         });
         if !has_open_pane {
@@ -553,11 +614,12 @@ impl ProjectWorkspace {
                 if valid.is_empty() || valid.iter().all(|selected| *selected != node) {
                     valid = vec![node];
                 }
-                preferences.panes[0] = PaneWorkspaceState {
-                    node: Some(node),
+                preferences.panes[0].tabs.push(PaneTabState {
+                    node,
                     view: preferred_view_for_node(&opened.project, node),
-                    ..PaneWorkspaceState::default()
-                };
+                    cursor: 0,
+                    scroll: 0,
+                });
                 preferences.focused_pane = 0;
             }
         }
@@ -741,7 +803,8 @@ impl ProjectWorkspace {
             .preferences
             .panes
             .iter()
-            .filter_map(|pane| pane.node)
+            .flat_map(|pane| pane.tabs.iter())
+            .map(|tab| tab.node)
             .collect::<Vec<_>>();
         for node in nodes {
             if let Ok(document) = document_for_node(&self.opened.project, node) {
@@ -770,29 +833,69 @@ impl ProjectWorkspace {
         Ok(())
     }
 
-    fn pane_document_id(&self, pane: usize) -> Result<DocumentId, WorkspaceError> {
+    fn release_session_if_unused(&mut self, document: DocumentId) {
+        if self
+            .sessions
+            .get(&document)
+            .is_some_and(DocumentSession::is_dirty)
+        {
+            return;
+        }
+        let still_open = self.preferences.panes.iter().any(|pane| {
+            pane.tabs.iter().any(|tab| {
+                self.opened
+                    .project
+                    .nodes
+                    .get(&tab.node)
+                    .and_then(|node| node.kind.document_id())
+                    == Some(document)
+            })
+        });
+        if !still_open {
+            self.sessions.remove(&document);
+            self.external_conflicts.remove(&document);
+        }
+    }
+
+    pub fn tab_document_id(&self, pane: usize, tab: usize) -> Result<DocumentId, WorkspaceError> {
         let node = self
             .pane(pane)
-            .and_then(|state| state.node)
-            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+            .and_then(|state| state.tabs.get(tab))
+            .map(|tab| tab.node)
+            .ok_or(WorkspaceError::Invariant("pane tab has no document"))?;
         document_for_node(&self.opened.project, node)
     }
 
-    pub fn pane_live_body(&mut self, pane: usize) -> Result<&str, WorkspaceError> {
-        let document = self.pane_document_id(pane)?;
+    pub fn pane_document_id(&self, pane: usize) -> Result<DocumentId, WorkspaceError> {
+        let active = self
+            .pane_active_tab(pane)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.tab_document_id(pane, active)
+    }
+
+    pub fn tab_live_body(&mut self, pane: usize, tab: usize) -> Result<&str, WorkspaceError> {
+        let document = self.tab_document_id(pane, tab)?;
         self.ensure_session(document)?;
         Ok(self.sessions[&document].body())
     }
 
-    pub fn update_pane_live_body(
+    pub fn pane_live_body(&mut self, pane: usize) -> Result<&str, WorkspaceError> {
+        let active = self
+            .pane_active_tab(pane)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.tab_live_body(pane, active)
+    }
+
+    pub fn update_tab_live_body(
         &mut self,
         pane: usize,
+        tab: usize,
         body: String,
         first_block: usize,
         last_block_exclusive: usize,
         now: Instant,
     ) -> Result<WorkStamp, WorkspaceError> {
-        let document = self.pane_document_id(pane)?;
+        let document = self.tab_document_id(pane, tab)?;
         self.ensure_session(document)?;
         let new_counts = text_statistics(&body);
         let session = self
@@ -806,12 +909,27 @@ impl ProjectWorkspace {
         Ok(stamp)
     }
 
+    pub fn update_pane_live_body(
+        &mut self,
+        pane: usize,
+        body: String,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<WorkStamp, WorkspaceError> {
+        let active = self
+            .pane_active_tab(pane)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.update_tab_live_body(pane, active, body, first_block, last_block_exclusive, now)
+    }
+
     /// Applies one bounded Qt text delta and propagates its count adjustment to
     /// the document and all cached ancestors.
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_pane_text_delta(
+    pub fn apply_tab_text_delta(
         &mut self,
         pane: usize,
+        tab: usize,
         position_utf16: usize,
         removed_utf16: usize,
         inserted: &str,
@@ -819,7 +937,7 @@ impl ProjectWorkspace {
         last_block_exclusive: usize,
         now: Instant,
     ) -> Result<WorkStamp, WorkspaceError> {
-        let document = self.pane_document_id(pane)?;
+        let document = self.tab_document_id(pane, tab)?;
         self.ensure_session(document)?;
         let applied = self
             .sessions
@@ -856,10 +974,47 @@ impl ProjectWorkspace {
         })
     }
 
-    pub fn pane_text_statistics(&mut self, pane: usize) -> Result<TextStatistics, WorkspaceError> {
-        let document = self.pane_document_id(pane)?;
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_pane_text_delta(
+        &mut self,
+        pane: usize,
+        position_utf16: usize,
+        removed_utf16: usize,
+        inserted: &str,
+        first_block: usize,
+        last_block_exclusive: usize,
+        now: Instant,
+    ) -> Result<WorkStamp, WorkspaceError> {
+        let active = self
+            .pane_active_tab(pane)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.apply_tab_text_delta(
+            pane,
+            active,
+            position_utf16,
+            removed_utf16,
+            inserted,
+            first_block,
+            last_block_exclusive,
+            now,
+        )
+    }
+
+    pub fn tab_text_statistics(
+        &mut self,
+        pane: usize,
+        tab: usize,
+    ) -> Result<TextStatistics, WorkspaceError> {
+        let document = self.tab_document_id(pane, tab)?;
         self.ensure_session(document)?;
         Ok(self.document_counts[&document])
+    }
+
+    pub fn pane_text_statistics(&mut self, pane: usize) -> Result<TextStatistics, WorkspaceError> {
+        let active = self
+            .pane_active_tab(pane)
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.tab_text_statistics(pane, active)
     }
 
     pub const fn counts_complete(&self) -> bool {
@@ -952,15 +1107,24 @@ impl ProjectWorkspace {
             .map(DocumentSession::save_state)
     }
 
-    pub fn pane_save_state(&self, pane: usize) -> Option<&SaveState> {
-        let document = self.pane_document_id(pane).ok()?;
+    pub fn tab_save_state(&self, pane: usize, tab: usize) -> Option<&SaveState> {
+        let document = self.tab_document_id(pane, tab).ok()?;
         self.session_save_state(document)
     }
 
-    pub fn pane_revision(&self, pane: usize) -> Revision {
-        self.pane_document_id(pane)
+    pub fn pane_save_state(&self, pane: usize) -> Option<&SaveState> {
+        self.tab_save_state(pane, self.pane_active_tab(pane)?)
+    }
+
+    pub fn tab_revision(&self, pane: usize, tab: usize) -> Revision {
+        self.tab_document_id(pane, tab)
             .ok()
             .map_or(Revision::INITIAL, |id| self.session_revision(id))
+    }
+
+    pub fn pane_revision(&self, pane: usize) -> Revision {
+        self.pane_active_tab(pane)
+            .map_or(Revision::INITIAL, |tab| self.tab_revision(pane, tab))
     }
 
     pub fn all_sessions_saved(&self) -> bool {
@@ -995,6 +1159,42 @@ impl ProjectWorkspace {
         session
             .prepare_journal(now, force)
             .map_err(WorkspaceError::Lifecycle)
+    }
+
+    pub fn next_session_save_action(
+        &mut self,
+        document: DocumentId,
+        now: Instant,
+        force: bool,
+    ) -> Result<DocumentNextSaveAction, WorkspaceError> {
+        let session = self
+            .sessions
+            .get_mut(&document)
+            .ok_or(WorkspaceError::Invariant("document session is not open"))?;
+        if !session.is_dirty() {
+            return Ok(DocumentNextSaveAction::Idle);
+        }
+        if session.journaled_revision() < session.revision() {
+            return session
+                .prepare_journal(now, force)
+                .map(|request| {
+                    request.map_or(
+                        DocumentNextSaveAction::Deferred,
+                        DocumentNextSaveAction::Journal,
+                    )
+                })
+                .map_err(WorkspaceError::Lifecycle);
+        }
+        let Some(request) = session
+            .prepare_canonical_save()
+            .map_err(WorkspaceError::Lifecycle)?
+        else {
+            return Ok(DocumentNextSaveAction::Idle);
+        };
+        let plan = request
+            .prepare_disk_plan(&self.opened)
+            .map_err(WorkspaceError::Lifecycle)?;
+        Ok(DocumentNextSaveAction::Canonical { request, plan })
     }
 
     pub fn acknowledge_session_journal(
@@ -1041,7 +1241,7 @@ impl ProjectWorkspace {
         if session.stamp() != stamp {
             return CompletionDisposition::Stale;
         }
-        match outcome {
+        let disposition = match outcome {
             Ok((fingerprint, plan)) => {
                 if let Err(error) =
                     ProjectStorage::acknowledge_document_save(&mut self.opened, &plan)
@@ -1062,7 +1262,11 @@ impl ProjectWorkspace {
                 disposition
             }
             Err(error) => session.acknowledge_canonical_save(stamp, Err(error)),
+        };
+        if disposition == CompletionDisposition::Applied {
+            self.release_session_if_unused(document);
         }
+        disposition
     }
 
     pub fn external_poll_plan(
@@ -1350,6 +1554,30 @@ impl ProjectWorkspace {
             .map_err(WorkspaceError::Search)
     }
 
+    /// Returns bounded human-readable ancestor titles for a search result.
+    pub fn search_result_context(&self, node: NodeId) -> String {
+        let mut current = self
+            .opened
+            .project
+            .nodes
+            .get(&node)
+            .and_then(|node| node.parent);
+        let mut seen = BTreeSet::new();
+        let mut titles = Vec::new();
+        while let Some(id) = current {
+            if !seen.insert(id) {
+                break;
+            }
+            let Some(entry) = self.opened.project.nodes.get(&id) else {
+                break;
+            };
+            titles.push(binder_row(&self.opened.project, id, 0, 0).title);
+            current = entry.parent;
+        }
+        titles.reverse();
+        titles.join(" › ")
+    }
+
     /// Returns stored aggregate counts for manuscript/research/project/subtree.
     pub fn search_totals(
         &mut self,
@@ -1369,19 +1597,56 @@ impl ProjectWorkspace {
         self.preferences.panes.len()
     }
 
-    /// Adds one independently restorable pane, optionally opening a node in it.
-    /// Existing node views are focused instead of duplicated.
-    pub fn add_pane(&mut self, node: Option<NodeId>) -> Result<usize, WorkspaceError> {
-        if let Some(node) = node
-            && let Some(existing) = self
-                .preferences
-                .panes
-                .iter()
-                .position(|pane| pane.node == Some(node))
-        {
-            self.focus_pane(existing)?;
-            return Ok(existing);
+    pub fn pane_tab_count(&self, pane: usize) -> usize {
+        self.pane(pane).map_or(0, |pane| pane.tabs.len())
+    }
+
+    pub fn pane_active_tab(&self, pane: usize) -> Option<usize> {
+        self.pane(pane)
+            .and_then(|pane| (!pane.tabs.is_empty()).then_some(pane.active_tab))
+    }
+
+    pub fn pane_tab(&self, pane: usize, tab: usize) -> Option<&PaneTabState> {
+        self.pane(pane)?.tabs.get(tab)
+    }
+
+    pub fn activate_pane_tab(&mut self, pane: usize, tab: usize) -> Result<(), WorkspaceError> {
+        let state = self
+            .preferences
+            .panes
+            .get_mut(pane)
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
+        if tab >= state.tabs.len() {
+            return Err(WorkspaceError::Invariant("pane tab is unavailable"));
         }
+        state.active_tab = tab;
+        self.preferences.focused_pane = u8::try_from(pane).unwrap_or(0);
+        self.save_preferences()
+    }
+
+    pub fn close_pane_tab(&mut self, pane: usize, tab: usize) -> Result<(), WorkspaceError> {
+        let document = self.tab_document_id(pane, tab)?;
+        let state = self
+            .preferences
+            .panes
+            .get_mut(pane)
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
+        if tab >= state.tabs.len() {
+            return Err(WorkspaceError::Invariant("pane tab is unavailable"));
+        }
+        state.tabs.remove(tab);
+        if state.tabs.is_empty() {
+            state.active_tab = 0;
+        } else if tab < state.active_tab || state.active_tab >= state.tabs.len() {
+            state.active_tab = state.active_tab.saturating_sub(1).min(state.tabs.len() - 1);
+        }
+        self.preferences.focused_pane = u8::try_from(pane).unwrap_or(0);
+        self.release_session_if_unused(document);
+        self.save_preferences()
+    }
+
+    /// Adds one independently restorable pane, optionally opening a node in it.
+    pub fn add_pane(&mut self, node: Option<NodeId>) -> Result<usize, WorkspaceError> {
         if self.preferences.panes.len() >= MAX_WORKSPACE_PANES {
             return Err(WorkspaceError::Invariant("workspace pane limit reached"));
         }
@@ -1430,31 +1695,26 @@ impl ProjectWorkspace {
             std::cmp::Ordering::Less => focused,
         })
         .unwrap_or(0);
-        if let Some(document) = removed.node.and_then(|node| {
-            self.opened
-                .project
-                .nodes
-                .get(&node)
-                .and_then(|entry| entry.kind.document_id())
-        }) {
-            let still_open = self.preferences.panes.iter().any(|pane| {
-                pane.node
-                    .and_then(|node| self.opened.project.nodes.get(&node))
+        let documents = removed
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                self.opened
+                    .project
+                    .nodes
+                    .get(&tab.node)
                     .and_then(|entry| entry.kind.document_id())
-                    == Some(document)
-            });
-            if !still_open {
-                self.sessions.remove(&document);
-                self.external_conflicts.remove(&document);
-            }
+            })
+            .collect::<BTreeSet<_>>();
+        for document in documents {
+            self.release_session_if_unused(document);
         }
         self.save_preferences()?;
         Ok(true)
     }
 
-    /// Opens a node in one workspace pane. Replacing a pane deliberately does
-    /// not touch any other pane's node/cursor/scroll state, which is what lets
-    /// each Qt document retain its independent undo history.
+    /// Opens a node as a new tab, or activates its existing tab in this pane.
+    /// Other tabs retain their cursor/scroll hints and their persistent Qt hosts.
     pub fn open_in_pane(
         &mut self,
         index: usize,
@@ -1471,18 +1731,6 @@ impl ProjectWorkspace {
             self.preferences.split_enabled = true;
         }
         if let Some(node) = node
-            && let Some((other, _)) = self
-                .preferences
-                .panes
-                .iter()
-                .enumerate()
-                .find(|(other, pane)| *other != index && pane.node == Some(node))
-        {
-            self.preferences.focused_pane = u8::try_from(other).unwrap_or(0);
-            self.save_preferences()?;
-            return Ok(());
-        }
-        if let Some(node) = node
             && (!self.opened.project.nodes.contains_key(&node)
                 || self.opened.project.is_trashed(node)
                 || self
@@ -1495,35 +1743,49 @@ impl ProjectWorkspace {
         {
             return Err(WorkspaceError::Invariant("pane node is unavailable"));
         }
-        if let Some(document) = node.and_then(|node| {
-            self.opened
-                .project
-                .nodes
-                .get(&node)
-                .and_then(|entry| entry.kind.document_id())
-        }) {
+        if let Some(node) = node {
+            let document = document_for_node(&self.opened.project, node)?;
             self.ensure_session(document)?;
+            let pane = &mut self.preferences.panes[index];
+            if let Some(existing) = pane.tabs.iter().position(|tab| tab.node == node) {
+                pane.active_tab = existing;
+            } else {
+                if pane.tabs.len() >= MAX_WORKSPACE_TABS_PER_PANE {
+                    return Err(WorkspaceError::Invariant("workspace tab limit reached"));
+                }
+                pane.tabs.push(PaneTabState {
+                    node,
+                    view,
+                    cursor: 0,
+                    scroll: 0,
+                });
+                pane.active_tab = pane.tabs.len() - 1;
+            }
+        } else {
+            let documents = self.preferences.panes[index]
+                .tabs
+                .iter()
+                .filter_map(|tab| {
+                    self.opened
+                        .project
+                        .nodes
+                        .get(&tab.node)
+                        .and_then(|entry| entry.kind.document_id())
+                })
+                .collect::<BTreeSet<_>>();
+            self.preferences.panes[index] = PaneWorkspaceState::default();
+            for document in documents {
+                self.release_session_if_unused(document);
+            }
         }
-        let pane = self
-            .preferences
-            .panes
-            .get_mut(index)
-            .expect("pane index was checked");
-        pane.node = node;
-        pane.view = view;
-        pane.cursor = 0;
-        pane.scroll = 0;
         self.preferences.focused_pane = u8::try_from(index).unwrap_or(0);
         self.save_preferences()
     }
 
-    /// Binder navigation changes the focused pane only when it is not pinned.
+    /// Binder, cards, center-drop, and search navigation open or activate a tab.
     pub fn navigate_focused_pane(&mut self, node: NodeId) -> Result<bool, WorkspaceError> {
         let index = usize::from(self.preferences.focused_pane)
             .min(self.preferences.panes.len().saturating_sub(1));
-        if self.preferences.panes[index].pinned {
-            return Ok(false);
-        }
         if self
             .opened
             .project
@@ -1533,17 +1795,6 @@ impl ProjectWorkspace {
         {
             return Ok(false);
         }
-        if let Some((existing, _)) = self
-            .preferences
-            .panes
-            .iter()
-            .enumerate()
-            .find(|(pane, state)| *pane != index && state.node == Some(node))
-        {
-            self.preferences.focused_pane = u8::try_from(existing).unwrap_or(0);
-            self.save_preferences()?;
-            return Ok(true);
-        }
         let view = preferred_view_for_node(&self.opened.project, node);
         self.open_in_pane(index, Some(node), view)?;
         Ok(true)
@@ -1552,16 +1803,6 @@ impl ProjectWorkspace {
     pub fn open_node_in_pane(&mut self, index: usize, node: NodeId) -> Result<(), WorkspaceError> {
         let view = preferred_view_for_node(&self.opened.project, node);
         self.open_in_pane(index, Some(node), view)
-    }
-
-    pub fn set_pane_pin(&mut self, index: usize, pinned: bool) -> Result<(), WorkspaceError> {
-        let pane = self
-            .preferences
-            .panes
-            .get_mut(index)
-            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
-        pane.pinned = pinned && pane.node.is_some();
-        self.save_preferences()
     }
 
     /// Switches the presentation for one live pane without replacing its node
@@ -1574,12 +1815,12 @@ impl ProjectWorkspace {
             .panes
             .get_mut(index)
             .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?;
-        if pane.node.is_none() && matches!(view, PaneView::Editor | PaneView::Attachment) {
+        let Some(tab) = pane.active_mut() else {
             return Err(WorkspaceError::Invariant(
                 "open a document before selecting this view",
             ));
-        }
-        pane.view = view;
+        };
+        tab.view = view;
         self.preferences.focused_pane = u8::try_from(index).unwrap_or(0);
         self.save_preferences()
     }
@@ -1604,12 +1845,33 @@ impl ProjectWorkspace {
         self.save_preferences()
     }
 
-    pub fn pane_document_body(&self, index: usize) -> Result<&str, WorkspaceError> {
+    pub fn tab_document_body(&self, pane: usize, tab: usize) -> Result<&str, WorkspaceError> {
         let node = self
-            .pane(index)
-            .and_then(|pane| pane.node)
-            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+            .pane_tab(pane, tab)
+            .map(|tab| tab.node)
+            .ok_or(WorkspaceError::Invariant("pane tab has no document"))?;
         self.document_body(node)
+    }
+
+    pub fn pane_document_body(&self, index: usize) -> Result<&str, WorkspaceError> {
+        let tab = self
+            .pane(index)
+            .and_then(|pane| pane.active().map(|_| pane.active_tab))
+            .ok_or(WorkspaceError::Invariant("pane has no document"))?;
+        self.tab_document_body(index, tab)
+    }
+
+    pub fn save_tab_document_body(
+        &mut self,
+        pane: usize,
+        tab: usize,
+        body: String,
+    ) -> Result<(), WorkspaceError> {
+        let node = self
+            .pane_tab(pane, tab)
+            .map(|tab| tab.node)
+            .ok_or(WorkspaceError::Invariant("pane tab has no document"))?;
+        self.save_document_body(node, body)
     }
 
     pub fn save_pane_document_body(
@@ -1617,18 +1879,22 @@ impl ProjectWorkspace {
         index: usize,
         body: String,
     ) -> Result<(), WorkspaceError> {
-        let node = self
+        let tab = self
             .pane(index)
-            .and_then(|pane| pane.node)
+            .and_then(|pane| pane.active().map(|_| pane.active_tab))
             .ok_or(WorkspaceError::Invariant("pane has no document"))?;
-        self.save_document_body(node, body)
+        self.save_tab_document_body(index, tab, body)
     }
 
-    pub fn pane_attachment(&self, index: usize) -> Result<&AttachmentRecord, WorkspaceError> {
+    pub fn tab_attachment(
+        &self,
+        pane: usize,
+        tab: usize,
+    ) -> Result<&AttachmentRecord, WorkspaceError> {
         let node = self
-            .pane(index)
-            .and_then(|pane| pane.node)
-            .ok_or(WorkspaceError::Invariant("pane has no attachment"))?;
+            .pane_tab(pane, tab)
+            .map(|tab| tab.node)
+            .ok_or(WorkspaceError::Invariant("pane tab has no attachment"))?;
         let document = document_for_node(&self.opened.project, node)?;
         let attachment = self
             .opened
@@ -1643,6 +1909,14 @@ impl ProjectWorkspace {
             .ok_or(WorkspaceError::Invariant(
                 "attachment catalog entry is missing",
             ))
+    }
+
+    pub fn pane_attachment(&self, index: usize) -> Result<&AttachmentRecord, WorkspaceError> {
+        let tab = self
+            .pane(index)
+            .and_then(|pane| pane.active().map(|_| pane.active_tab))
+            .ok_or(WorkspaceError::Invariant("pane has no attachment"))?;
+        self.tab_attachment(index, tab)
     }
 
     pub fn swap_panes(&mut self) -> Result<(), WorkspaceError> {
@@ -1663,7 +1937,21 @@ impl ProjectWorkspace {
             self.remove_pane(index)?;
             return Ok(());
         }
-        let closing_document = self.pane_document_id(index).ok();
+        let closing_documents = self
+            .preferences
+            .panes
+            .get(index)
+            .ok_or(WorkspaceError::Invariant("pane index is unavailable"))?
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                self.opened
+                    .project
+                    .nodes
+                    .get(&tab.node)
+                    .and_then(|node| node.kind.document_id())
+            })
+            .collect::<BTreeSet<_>>();
         let pane = self
             .preferences
             .panes
@@ -1673,17 +1961,8 @@ impl ProjectWorkspace {
         if usize::from(self.preferences.focused_pane) == index {
             self.preferences.focused_pane = 0;
         }
-        if let Some(document) = closing_document {
-            let still_open = self.preferences.panes.iter().any(|pane| {
-                pane.node
-                    .and_then(|node| self.opened.project.nodes.get(&node))
-                    .and_then(|node| node.kind.document_id())
-                    == Some(document)
-            });
-            if !still_open {
-                self.sessions.remove(&document);
-                self.external_conflicts.remove(&document);
-            }
+        for document in closing_documents {
+            self.release_session_if_unused(document);
         }
         self.save_preferences()
     }
@@ -2208,12 +2487,11 @@ impl ProjectWorkspace {
         Ok(copy)
     }
 
-    /// Applies an explicitly distinguished drag/drop placement.
-    pub fn drop_node(
-        &mut self,
+    fn drop_command(
+        &self,
         node: NodeId,
         placement: DropPlacement,
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<ProjectCommand, WorkspaceError> {
         let (parent, index) = match placement {
             DropPlacement::Inside(parent) => (parent, child_count(&self.opened.project, parent)?),
             DropPlacement::Before(target) => {
@@ -2232,17 +2510,50 @@ impl ProjectWorkspace {
         if current_parent == parent {
             let old = sibling_index(&self.opened.project, parent, node)?;
             let adjusted = if index > old { index - 1 } else { index };
-            self.apply(ProjectCommand::Reorder {
+            Ok(ProjectCommand::Reorder {
                 node,
                 index: adjusted,
             })
         } else {
-            self.apply(ProjectCommand::Reparent {
+            Ok(ProjectCommand::Reparent {
                 node,
                 parent,
                 index,
             })
         }
+    }
+
+    /// Validates a drag/drop using the exact command that execution would use.
+    pub fn can_drop_node(&self, node: NodeId, placement: DropPlacement) -> bool {
+        let target = match placement {
+            DropPlacement::Before(target)
+            | DropPlacement::After(target)
+            | DropPlacement::Inside(target) => target,
+        };
+        if node == target {
+            return false;
+        }
+        let Ok(command) = self.drop_command(node, placement) else {
+            return false;
+        };
+        if let ProjectCommand::Reorder { node, index } = command
+            && parent_for(&self.opened.project, node)
+                .and_then(|parent| sibling_index(&self.opened.project, parent, node))
+                .is_ok_and(|old| old == index)
+        {
+            return false;
+        }
+        self.opened.project.can_execute(&command).is_ok()
+    }
+
+    /// Applies an explicitly distinguished drag/drop placement.
+    pub fn drop_node(
+        &mut self,
+        node: NodeId,
+        placement: DropPlacement,
+    ) -> Result<(), WorkspaceError> {
+        let command = self.drop_command(node, placement)?;
+        self.apply(command)
     }
 
     pub fn move_up(&mut self, node: NodeId) -> Result<(), WorkspaceError> {
@@ -2312,9 +2623,11 @@ impl ProjectWorkspace {
             .collect::<Vec<_>>();
         self.apply(ProjectCommand::Trash { node })?;
         for pane in &mut self.preferences.panes {
-            if pane.node.is_some_and(|id| subtree.contains(&id)) {
-                *pane = PaneWorkspaceState::default();
-            }
+            let active_node = pane.active().map(|tab| tab.node);
+            pane.tabs.retain(|tab| !subtree.contains(&tab.node));
+            pane.active_tab = active_node
+                .and_then(|node| pane.tabs.iter().position(|tab| tab.node == node))
+                .unwrap_or_else(|| pane.active_tab.min(pane.tabs.len().saturating_sub(1)));
         }
         for document in documents {
             self.sessions.remove(&document);
@@ -2785,7 +3098,9 @@ fn load_preferences(root: &Path) -> (WorkspacePreferences, Option<String>) {
         }
     };
     match toml::from_str::<WorkspacePreferences>(&source) {
-        Ok(preferences) if preferences.version == WORKSPACE_FORMAT_VERSION => (preferences, None),
+        Ok(preferences) if matches!(preferences.version, 1 | WORKSPACE_FORMAT_VERSION) => {
+            (preferences, None)
+        }
         Ok(preferences) => (
             WorkspacePreferences::default(),
             Some(format!(
@@ -2814,30 +3129,20 @@ fn reconcile_preferences(project: &Project, preferences: &mut WorkspacePreferenc
     }
     preferences.split_ratio_milli = preferences.split_ratio_milli.clamp(100, 900);
     for pane in &mut preferences.panes {
-        let valid = pane
-            .node
-            .is_some_and(|id| project.nodes.contains_key(&id) && !project.is_trashed(id));
-        if !valid {
-            pane.node = None;
-            pane.pinned = false;
-            pane.cursor = 0;
-            pane.scroll = 0;
-        }
-        if matches!(pane.view, PaneView::Outline | PaneView::Cards) {
-            pane.view = PaneView::Editor;
-        }
-        if pane.node.is_some_and(|id| {
-            project
-                .nodes
-                .get(&id)
-                .is_some_and(|entry| entry.kind.is_builtin_root())
-        }) {
-            pane.node = None;
-            pane.pinned = false;
-        }
-        if pane.view == PaneView::Attachment && pane.node.is_none() {
-            pane.view = PaneView::Editor;
-        }
+        pane.tabs.truncate(MAX_WORKSPACE_TABS_PER_PANE);
+        let active_node = pane.active().map(|tab| tab.node);
+        let mut seen = BTreeSet::new();
+        pane.tabs.retain(|tab| {
+            seen.insert(tab.node)
+                && project.nodes.get(&tab.node).is_some_and(|node| {
+                    !project.is_trashed(tab.node)
+                        && !node.kind.is_builtin_root()
+                        && node.kind.document_id().is_some()
+                })
+        });
+        pane.active_tab = active_node
+            .and_then(|node| pane.tabs.iter().position(|tab| tab.node == node))
+            .unwrap_or_else(|| pane.active_tab.min(pane.tabs.len().saturating_sub(1)));
     }
     if preferences.split_enabled {
         if preferences.panes.len() < 2 {
@@ -2846,15 +3151,15 @@ fn reconcile_preferences(project: &Project, preferences: &mut WorkspacePreferenc
     } else {
         let focused = usize::from(preferences.focused_pane).min(preferences.panes.len() - 1);
         let active = preferences.panes[focused].clone();
-        let active = if active.node.is_some() {
-            active
-        } else {
+        let active = if active.tabs.is_empty() {
             preferences
                 .panes
                 .iter()
-                .find(|pane| pane.node.is_some())
+                .find(|pane| !pane.tabs.is_empty())
                 .cloned()
                 .unwrap_or(active)
+        } else {
+            active
         };
         preferences.panes.truncate(1);
         preferences.panes[0] = active;
@@ -3294,6 +3599,163 @@ mod tests {
     }
 
     #[test]
+    fn ordered_tabs_dedupe_within_pane_share_across_panes_and_may_be_empty() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Tabs").unwrap();
+        let root = workspace.project().manuscript_root();
+        let first = workspace.create_node(root, "First", false).unwrap();
+        let second = workspace.create_node(root, "Second", false).unwrap();
+        let third = workspace.create_node(root, "Third", false).unwrap();
+        let first_document = document_for_node(workspace.project(), first).unwrap();
+
+        workspace.open_node_in_pane(0, first).unwrap();
+        workspace.open_node_in_pane(0, second).unwrap();
+        assert_eq!(workspace.pane_tab_count(0), 2);
+        assert_eq!(workspace.pane_active_tab(0), Some(1));
+        workspace.open_node_in_pane(0, first).unwrap();
+        assert_eq!(workspace.pane_tab_count(0), 2);
+        assert_eq!(workspace.pane_active_tab(0), Some(0));
+        workspace.open_node_in_pane(0, third).unwrap();
+        workspace.activate_pane_tab(0, 1).unwrap();
+        workspace.close_pane_tab(0, 0).unwrap();
+        assert_eq!(workspace.pane_active_tab(0), Some(0));
+        assert_eq!(
+            workspace.pane(0).unwrap().active().map(|tab| tab.node),
+            Some(second)
+        );
+        workspace.close_pane_tab(0, 0).unwrap();
+        assert_eq!(workspace.pane_active_tab(0), Some(0));
+        assert_eq!(
+            workspace.pane(0).unwrap().active().map(|tab| tab.node),
+            Some(third)
+        );
+        workspace.open_node_in_pane(0, first).unwrap();
+
+        assert_eq!(workspace.add_pane(Some(first)).unwrap(), 1);
+        assert_eq!(workspace.pane_tab(1, 0).map(|tab| tab.node), Some(first));
+        assert_eq!(
+            workspace
+                .open_session_ids()
+                .iter()
+                .filter(|id| **id == first_document)
+                .count(),
+            1
+        );
+        workspace.close_pane_tab(0, 1).unwrap();
+        assert!(workspace.open_session_ids().contains(&first_document));
+        workspace.close_pane_tab(1, 0).unwrap();
+        assert!(!workspace.open_session_ids().contains(&first_document));
+        assert_eq!(workspace.pane_tab_count(1), 0);
+        assert_eq!(workspace.pane_active_tab(1), None);
+    }
+
+    #[test]
+    fn pane_tabs_are_bounded_at_sixty_four() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Bounded tabs").unwrap();
+        let root = workspace.project().manuscript_root();
+        for index in 0..MAX_WORKSPACE_TABS_PER_PANE {
+            let node = workspace
+                .create_node(root, format!("Tab {index}"), false)
+                .unwrap();
+            workspace.open_node_in_pane(0, node).unwrap();
+        }
+        assert_eq!(workspace.pane_tab_count(0), MAX_WORKSPACE_TABS_PER_PANE);
+        let overflow = workspace.create_node(root, "Overflow", false).unwrap();
+        assert!(workspace.open_node_in_pane(0, overflow).is_err());
+        assert_eq!(workspace.pane_tab_count(0), MAX_WORKSPACE_TABS_PER_PANE);
+    }
+
+    #[test]
+    fn next_save_action_defers_then_journals_before_canonical_save() {
+        let directory = tempdir().unwrap();
+        let mut workspace = ProjectWorkspace::create(directory.path(), "Lifecycle").unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Scene", false)
+            .unwrap();
+        workspace.open_node_in_pane(0, scene).unwrap();
+        let document = workspace.pane_document_id(0).unwrap();
+        let edited = Instant::now();
+        workspace
+            .update_pane_live_body(0, "new text".into(), 0, 1, edited)
+            .unwrap();
+
+        assert!(matches!(
+            workspace
+                .next_session_save_action(document, edited, false)
+                .unwrap(),
+            DocumentNextSaveAction::Deferred
+        ));
+        let DocumentNextSaveAction::Journal(journal) = workspace
+            .next_session_save_action(document, edited + Duration::from_millis(751), false)
+            .unwrap()
+        else {
+            panic!("journal must precede canonical save");
+        };
+        let stamp = journal.stamp;
+        journal.execute().unwrap();
+        assert_eq!(
+            workspace.acknowledge_session_journal(document, stamp, Ok(())),
+            CompletionDisposition::Applied
+        );
+        assert!(matches!(
+            workspace
+                .next_session_save_action(document, edited, false)
+                .unwrap(),
+            DocumentNextSaveAction::Canonical { .. }
+        ));
+    }
+
+    #[test]
+    fn closing_final_dirty_tab_retains_session_until_canonical_acknowledgement() {
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Lifecycle").unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Scene", false)
+            .unwrap();
+        workspace.open_node_in_pane(0, scene).unwrap();
+        let document = workspace.pane_document_id(0).unwrap();
+        workspace
+            .update_pane_live_body(0, "retained after close".into(), 0, 1, Instant::now())
+            .unwrap();
+        workspace.close_pane_tab(0, 0).unwrap();
+        assert!(workspace.open_session_ids().contains(&document));
+
+        let DocumentNextSaveAction::Journal(journal) = workspace
+            .next_session_save_action(document, Instant::now(), true)
+            .unwrap()
+        else {
+            panic!("dirty closed tab must remain journalable");
+        };
+        let journal_stamp = journal.stamp;
+        journal.execute().unwrap();
+        workspace.acknowledge_session_journal(document, journal_stamp, Ok(()));
+        let DocumentNextSaveAction::Canonical { request, plan } = workspace
+            .next_session_save_action(document, Instant::now(), true)
+            .unwrap()
+        else {
+            panic!("journalled closed tab must remain canonically saveable");
+        };
+        let fingerprint = request.execute_disk(&plan, request.stamp).unwrap();
+        assert_eq!(
+            workspace.acknowledge_session_canonical(
+                document,
+                request.stamp,
+                Ok((fingerprint, plan)),
+            ),
+            CompletionDisposition::Applied
+        );
+        assert!(!workspace.open_session_ids().contains(&document));
+        drop(workspace);
+        let reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(
+            reopened.document_body(scene).unwrap(),
+            "retained after close"
+        );
+    }
+
+    #[test]
     fn pane_view_switches_keep_the_live_document_reference() {
         let directory = tempdir().unwrap();
         let mut workspace = ProjectWorkspace::create(directory.path(), "Views").unwrap();
@@ -3306,11 +3768,14 @@ mod tests {
         workspace.set_pane_view(0, PaneView::Cards).unwrap();
         workspace.set_pane_view(0, PaneView::Editor).unwrap();
         assert_eq!(workspace.pane_document_id(0).unwrap(), live);
-        assert_eq!(workspace.pane(0).unwrap().view, PaneView::Editor);
+        assert_eq!(
+            workspace.pane(0).unwrap().active().unwrap().view,
+            PaneView::Editor
+        );
 
         workspace.close_pane(0).unwrap();
         assert!(workspace.set_pane_view(0, PaneView::Editor).is_err());
-        workspace.set_pane_view(0, PaneView::Cards).unwrap();
+        assert!(workspace.set_pane_view(0, PaneView::Cards).is_err());
     }
 
     #[test]
@@ -3336,6 +3801,11 @@ mod tests {
         let root = workspace.project().manuscript_root();
         let first = workspace.create_node(root, "First", true).unwrap();
         let second = workspace.create_node(root, "Second", true).unwrap();
+        let child = workspace.create_node(first, "Child", false).unwrap();
+        assert!(workspace.can_drop_node(second, DropPlacement::Before(first)));
+        assert!(!workspace.can_drop_node(first, DropPlacement::Inside(child)));
+        assert!(!workspace.can_drop_node(root, DropPlacement::Inside(first)));
+        assert!(!workspace.can_drop_node(first, DropPlacement::Inside(first)));
         workspace
             .drop_node(second, DropPlacement::Before(first))
             .unwrap();
@@ -3343,6 +3813,7 @@ mod tests {
             workspace.project().nodes[&root].children,
             vec![second, first]
         );
+        assert!(!workspace.can_drop_node(second, DropPlacement::Before(first)));
         let before = workspace.snapshot().clone();
         assert!(
             workspace
@@ -3496,9 +3967,12 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut workspace = ProjectWorkspace::create(directory.path(), "Search").unwrap();
         let manuscript = workspace.project().manuscript_root();
-        let scene = workspace
-            .create_node(manuscript, "Winter Harbor", false)
-            .unwrap();
+        let part = workspace.create_node(manuscript, "Part One", true).unwrap();
+        let scene = workspace.create_node(part, "Winter Harbor", false).unwrap();
+        assert_eq!(
+            workspace.search_result_context(scene),
+            "Manuscript › Part One"
+        );
         workspace
             .save_document_body(scene, "Mara walks through the silent orchard.".into())
             .unwrap();
@@ -3582,25 +4056,39 @@ mod tests {
         workspace
             .open_in_pane(0, Some(note), PaneView::Editor)
             .unwrap();
-        assert_eq!(workspace.preferences().focused_pane, 1);
-        assert_eq!(workspace.pane(0).unwrap().node, Some(scene));
+        assert_eq!(workspace.preferences().focused_pane, 0);
+        assert_eq!(
+            workspace.pane(0).unwrap().active().map(|tab| tab.node),
+            Some(note)
+        );
         workspace.focus_pane(0).unwrap();
         assert!(workspace.navigate_focused_pane(note).unwrap());
-        assert_eq!(workspace.preferences().focused_pane, 1);
+        assert_eq!(workspace.preferences().focused_pane, 0);
         workspace
             .set_split(true, SplitOrientation::Vertical, 620)
             .unwrap();
-        workspace.set_pane_pin(1, true).unwrap();
         workspace.focus_pane(0).unwrap();
         assert!(workspace.navigate_focused_pane(attachment).unwrap());
-        assert_eq!(workspace.pane(0).unwrap().node, Some(attachment));
-        assert_eq!(workspace.pane(1).unwrap().node, Some(note));
-        let first_cursor = workspace.pane(0).unwrap().cursor;
+        assert_eq!(
+            workspace.pane(0).unwrap().active().map(|tab| tab.node),
+            Some(attachment)
+        );
+        assert_eq!(
+            workspace.pane(1).unwrap().active().map(|tab| tab.node),
+            Some(note)
+        );
+        let first_cursor = workspace.pane(0).unwrap().active().unwrap().cursor;
         workspace.close_pane(1).unwrap();
-        assert_eq!(workspace.pane(0).unwrap().cursor, first_cursor);
+        assert_eq!(
+            workspace.pane(0).unwrap().active().unwrap().cursor,
+            first_cursor
+        );
         drop(workspace);
         let reopened = ProjectWorkspace::open(&root).unwrap();
-        assert_eq!(reopened.pane(0).unwrap().node, Some(attachment));
+        assert_eq!(
+            reopened.pane(0).unwrap().active().map(|tab| tab.node),
+            Some(attachment)
+        );
         assert!(reopened.attachments().contains_key(&asset.id));
     }
 
@@ -3643,7 +4131,7 @@ mod tests {
             .unwrap();
         assert_eq!(workspace.pane_live_body(0).unwrap(), latest);
         workspace.trash(scene).unwrap();
-        assert!(workspace.pane(0).unwrap().node.is_none());
+        assert!(workspace.pane(0).unwrap().tabs.is_empty());
         assert!(workspace.open_session_ids().is_empty());
         drop(workspace);
 
@@ -3683,7 +4171,13 @@ mod tests {
         let mut reopened = ProjectWorkspace::open(&root).unwrap();
         assert_eq!(reopened.selected(), &[scene]);
         assert_eq!(reopened.pane_count(), 1);
-        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(scene));
+        assert_eq!(
+            reopened
+                .pane(0)
+                .and_then(|pane| pane.active())
+                .map(|tab| tab.node),
+            Some(scene)
+        );
         assert_eq!(reopened.take_outline_deltas(), vec![OutlineDelta::Reset]);
     }
 
@@ -3697,9 +4191,71 @@ mod tests {
         workspace.open_node_in_pane(0, scene).unwrap();
 
         assert!(!workspace.navigate_focused_pane(manuscript).unwrap());
-        assert_eq!(workspace.pane(0).and_then(|pane| pane.node), Some(scene));
+        assert_eq!(
+            workspace
+                .pane(0)
+                .and_then(|pane| pane.active())
+                .map(|tab| tab.node),
+            Some(scene)
+        );
         assert_eq!(workspace.pane_count(), 1);
         assert!(workspace.add_pane(Some(manuscript)).is_err());
+    }
+
+    #[test]
+    fn flat_version_one_pane_migrates_to_one_active_unpinned_tab() {
+        #[derive(Serialize)]
+        struct LegacyPane {
+            node: NodeId,
+            view: PaneView,
+            pinned: bool,
+            cursor: u32,
+            scroll: u32,
+        }
+        #[derive(Serialize)]
+        struct LegacyPreferences {
+            version: u32,
+            panes: Vec<LegacyPane>,
+            focused_pane: u8,
+            split_enabled: bool,
+        }
+
+        let directory = tempdir().unwrap();
+        let root = directory.path().join("Novel");
+        let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
+        let scene = workspace
+            .create_node(workspace.project().manuscript_root(), "Scene", false)
+            .unwrap();
+        drop(workspace);
+        let legacy = LegacyPreferences {
+            version: 1,
+            panes: vec![LegacyPane {
+                node: scene,
+                view: PaneView::Editor,
+                pinned: true,
+                cursor: 42,
+                scroll: 17,
+            }],
+            focused_pane: 0,
+            split_enabled: false,
+        };
+        fs::write(
+            root.join(".parchmint/workspace.toml"),
+            toml::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let mut reopened = ProjectWorkspace::open(&root).unwrap();
+        assert_eq!(reopened.preferences().version, WORKSPACE_FORMAT_VERSION);
+        let tab = reopened.pane(0).unwrap().active().unwrap();
+        assert_eq!(tab.node, scene);
+        assert_eq!(tab.view, PaneView::Editor);
+        assert_eq!(tab.cursor, 42);
+        assert_eq!(tab.scroll, 17);
+        reopened.focus_pane(0).unwrap();
+        let saved = fs::read_to_string(root.join(".parchmint/workspace.toml")).unwrap();
+        assert!(saved.contains("version = 2"));
+        assert!(!saved.contains("pinned"));
     }
 
     #[test]
@@ -3716,11 +4272,21 @@ mod tests {
             selected_nodes: vec![second],
             panes: vec![
                 PaneWorkspaceState {
-                    node: Some(first),
+                    tabs: vec![PaneTabState {
+                        node: first,
+                        view: PaneView::Editor,
+                        cursor: 0,
+                        scroll: 0,
+                    }],
                     ..PaneWorkspaceState::default()
                 },
                 PaneWorkspaceState {
-                    node: Some(second),
+                    tabs: vec![PaneTabState {
+                        node: second,
+                        view: PaneView::Editor,
+                        cursor: 0,
+                        scroll: 0,
+                    }],
                     ..PaneWorkspaceState::default()
                 },
             ],
@@ -3736,11 +4302,17 @@ mod tests {
 
         let reopened = ProjectWorkspace::open(&root).unwrap();
         assert_eq!(reopened.pane_count(), 1);
-        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(second));
+        assert_eq!(
+            reopened
+                .pane(0)
+                .and_then(|pane| pane.active())
+                .map(|tab| tab.node),
+            Some(second)
+        );
     }
 
     #[test]
-    fn dynamic_panes_persist_and_release_removed_document_sessions() {
+    fn dynamic_panes_persist_and_retain_sessions_referenced_by_other_tabs() {
         let directory = tempdir().unwrap();
         let root = directory.path().join("Novel");
         let mut workspace = ProjectWorkspace::create(&root, "Novel").unwrap();
@@ -3752,24 +4324,36 @@ mod tests {
         workspace.open_node_in_pane(0, first).unwrap();
         assert_eq!(workspace.add_pane(Some(second)).unwrap(), 1);
         assert_eq!(workspace.add_pane(Some(third)).unwrap(), 2);
-        assert_eq!(workspace.add_pane(Some(second)).unwrap(), 1);
-        assert_eq!(workspace.pane_count(), 3);
+        assert_eq!(workspace.add_pane(Some(second)).unwrap(), 3);
+        assert_eq!(workspace.pane_count(), 4);
         workspace.open_node_in_pane(2, fourth).unwrap();
         assert!(workspace.remove_pane(1).unwrap());
-        assert_eq!(workspace.pane_count(), 2);
-        assert!(workspace.open_session_ids().iter().all(|id| {
+        assert_eq!(workspace.pane_count(), 3);
+        assert!(workspace.open_session_ids().iter().any(|id| {
             workspace
                 .project()
                 .documents
                 .get(id)
-                .is_none_or(|document| document.node_id != second)
+                .is_some_and(|document| document.node_id == second)
         }));
         drop(workspace);
 
         let reopened = ProjectWorkspace::open(&root).unwrap();
-        assert_eq!(reopened.pane_count(), 2);
-        assert_eq!(reopened.pane(0).and_then(|pane| pane.node), Some(first));
-        assert_eq!(reopened.pane(1).and_then(|pane| pane.node), Some(fourth));
+        assert_eq!(reopened.pane_count(), 3);
+        assert_eq!(
+            reopened
+                .pane(0)
+                .and_then(|pane| pane.active())
+                .map(|tab| tab.node),
+            Some(first)
+        );
+        assert_eq!(
+            reopened
+                .pane(1)
+                .and_then(|pane| pane.active())
+                .map(|tab| tab.node),
+            Some(fourth)
+        );
     }
 
     #[test]

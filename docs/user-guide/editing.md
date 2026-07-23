@@ -7,6 +7,14 @@ emphasis, lists, links, images, alignment, thematic breaks, page breaks, and
 named styles. Style references use stable IDs; page breaks are compile markers,
 not live page layout.
 
+Each pane can retain multiple document tabs. The thin formatting strip above
+the panes is shared and always applies to the active tab in the focused pane;
+each tab otherwise retains its own cursor, selection, scroll, and text undo.
+Raw Markdown source buffers are tab-local and remain available when switching
+tabs. If the same document changes in another pane, the older source buffer is
+not allowed to overwrite it. Finish or discard every source buffer before
+saving, exporting, changing projects, or quitting.
+
 ## Safety rules
 
 - Save/reopen preserves supported syntax deterministically.

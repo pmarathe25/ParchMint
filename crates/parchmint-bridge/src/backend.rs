@@ -10,13 +10,14 @@ use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use parchmint_app::{
     CancellationToken, CollisionPolicy, CommandSpec, CompileExportJob, CompileExportOutput,
-    CompileExportWorker, CompileIr, DiagnosticsSnapshot, DocumentLifecycleWorker, DocumentWorkKind,
-    DocumentWorkPayload, DropPlacement, ExportFormat, ExportOptions, ExternalChange, HtmlAssetMode,
-    IndexStatus, OutlineSort, PaneView, PathInputError, PreparedExport, ProjectPathIntent,
-    ProjectReplacePreview, ProjectWorkspace, RecoveryCandidate, RecoveryIssue, SaveState,
-    SearchQuery, SearchResult, SplitOrientation, commit_prepared_export, export_diagnostics,
-    matching_commands, normalize_path_input, prepare_export_bytes, render_html, text_statistics,
-    validate_project_creation, validate_project_path,
+    CompileExportWorker, CompileIr, DiagnosticsSnapshot, DocumentLifecycleWorker,
+    DocumentNextSaveAction, DocumentWorkKind, DocumentWorkPayload, DropPlacement, ExportFormat,
+    ExportOptions, ExternalChange, HtmlAssetMode, IndexStatus, OutlineSort, PaneView,
+    PathInputError, PreparedExport, ProjectPathIntent, ProjectReplacePreview, ProjectWorkspace,
+    RecoveryCandidate, RecoveryIssue, SaveState, SearchQuery, SearchResult, SplitOrientation,
+    commit_prepared_export, export_diagnostics, matching_commands, normalize_path_input,
+    prepare_export_bytes, render_html, text_statistics, validate_project_creation,
+    validate_project_path,
 };
 use parchmint_domain::{
     CompilePreset, DocumentId, DocumentMetadata, NodeId, ProjectGeneration, Revision, WorkStamp,
@@ -61,8 +62,6 @@ pub struct ParchMintBackendRust {
     pane_two_id: QString,
     pane_one_view: QString,
     pane_two_view: QString,
-    pane_one_pinned: bool,
-    pane_two_pinned: bool,
     focused_pane: i32,
     split_enabled: bool,
     pane_count: i32,
@@ -132,8 +131,6 @@ impl Default for ParchMintBackendRust {
             pane_two_id: QString::default(),
             pane_one_view: QString::from("editor"),
             pane_two_view: QString::from("outline"),
-            pane_one_pinned: false,
-            pane_two_pinned: false,
             focused_pane: 0,
             split_enabled: false,
             pane_count: 0,
@@ -227,8 +224,6 @@ pub mod qobject {
         #[qproperty(QString, pane_two_id)]
         #[qproperty(QString, pane_one_view)]
         #[qproperty(QString, pane_two_view)]
-        #[qproperty(bool, pane_one_pinned)]
-        #[qproperty(bool, pane_two_pinned)]
         #[qproperty(i32, focused_pane)]
         #[qproperty(bool, split_enabled)]
         #[qproperty(i32, pane_count, READ, NOTIFY)]
@@ -482,6 +477,14 @@ pub mod qobject {
         #[cxx_name = "duplicateNode"]
         fn duplicate_node(self: Pin<&mut ParchMintBackend>, id: &QString) -> bool;
         #[qinvokable]
+        #[cxx_name = "canMoveNode"]
+        fn can_move_node(
+            self: &ParchMintBackend,
+            id: &QString,
+            target: &QString,
+            placement: &QString,
+        ) -> bool;
+        #[qinvokable]
         #[cxx_name = "moveNode"]
         fn move_node(
             self: Pin<&mut ParchMintBackend>,
@@ -526,9 +529,6 @@ pub mod qobject {
         #[cxx_name = "focusNextPane"]
         fn focus_next_pane(self: Pin<&mut ParchMintBackend>);
         #[qinvokable]
-        #[cxx_name = "setPanePinned"]
-        fn set_pane_pinned(self: Pin<&mut ParchMintBackend>, pane: i32, pinned: bool) -> bool;
-        #[qinvokable]
         #[cxx_name = "setPaneView"]
         fn set_pane_view(self: Pin<&mut ParchMintBackend>, pane: i32, view: &QString) -> bool;
         #[qinvokable]
@@ -549,8 +549,72 @@ pub mod qobject {
         #[cxx_name = "paneView"]
         fn pane_view(self: &ParchMintBackend, pane: i32) -> QString;
         #[qinvokable]
-        #[cxx_name = "panePinned"]
-        fn pane_pinned(self: &ParchMintBackend, pane: i32) -> bool;
+        #[cxx_name = "paneTabCount"]
+        fn pane_tab_count(self: &ParchMintBackend, pane: i32) -> i32;
+        #[qinvokable]
+        #[cxx_name = "paneActiveTab"]
+        fn pane_active_tab(self: &ParchMintBackend, pane: i32) -> i32;
+        #[qinvokable]
+        #[cxx_name = "paneTabId"]
+        fn pane_tab_id(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "paneTabTitle"]
+        fn pane_tab_title(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "paneTabView"]
+        fn pane_tab_view(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "activatePaneTab"]
+        fn activate_pane_tab(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "closePaneTab"]
+        fn close_pane_tab(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32) -> bool;
+        #[qinvokable]
+        #[cxx_name = "tabDocumentBody"]
+        fn tab_document_body(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "tabDocumentRevision"]
+        fn tab_document_revision(self: &ParchMintBackend, pane: i32, tab: i32) -> u64;
+        #[qinvokable]
+        #[cxx_name = "updateTabBody"]
+        fn update_tab_body(
+            self: Pin<&mut ParchMintBackend>,
+            pane: i32,
+            tab: i32,
+            body: &QString,
+            first_block: i32,
+            last_block: i32,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "applyTabTextDelta"]
+        fn apply_tab_text_delta(
+            self: Pin<&mut ParchMintBackend>,
+            pane: i32,
+            tab: i32,
+            position_utf16: i32,
+            removed_utf16: i32,
+            inserted: &QString,
+            first_block: i32,
+        ) -> bool;
+        #[qinvokable]
+        #[cxx_name = "tabWordCount"]
+        fn tab_word_count(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32) -> u64;
+        #[qinvokable]
+        #[cxx_name = "tabCharacterCount"]
+        fn tab_character_count(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32) -> u64;
+        #[qinvokable]
+        #[cxx_name = "flushTab"]
+        fn flush_tab(self: Pin<&mut ParchMintBackend>, pane: i32, tab: i32, body: &QString)
+        -> bool;
+        #[qinvokable]
+        #[cxx_name = "tabSaveStatus"]
+        fn tab_save_status(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "tabAttachmentDescription"]
+        fn tab_attachment_description(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
+        #[qinvokable]
+        #[cxx_name = "tabAttachmentUrl"]
+        fn tab_attachment_url(self: &ParchMintBackend, pane: i32, tab: i32) -> QString;
         #[qinvokable]
         #[cxx_name = "addPane"]
         fn add_pane(self: Pin<&mut ParchMintBackend>, node: &QString) -> i32;
@@ -1007,10 +1071,16 @@ impl ParchMintBackend {
             .map_or_else(QString::default, |result| QString::from(&result.title))
     }
     pub fn search_result_context(&self, row: i32) -> QString {
-        self.search_row(row)
-            .map_or_else(QString::default, |result| {
-                QString::from(format!("{} · {}", result.scope, result.path))
-            })
+        let node = self
+            .search_row(row)
+            .and_then(|result| NodeId::parse(&result.node_id).ok());
+        node.and_then(|node| {
+            self.rust()
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.search_result_context(node))
+        })
+        .map_or_else(QString::default, QString::from)
     }
     pub fn search_result_snippet(&self, row: i32) -> QString {
         self.search_row(row)
@@ -1029,7 +1099,9 @@ impl ParchMintBackend {
             if other_pane {
                 workspace.add_pane(Some(node)).map(|_| ())
             } else {
-                workspace.navigate_focused_pane(node).map(|_| ())
+                let pane = usize::from(workspace.preferences().focused_pane)
+                    .min(workspace.pane_count().saturating_sub(1));
+                workspace.open_node_in_pane(pane, node)
             }
             .map_err(|error| error.to_string())?;
             workspace.select([node]);
@@ -1669,6 +1741,27 @@ impl ParchMintBackend {
                 .map_err(|error| error.to_string())
         })
     }
+    pub fn can_move_node(&self, id: &QString, target: &QString, placement: &QString) -> bool {
+        if *self.project_read_only() {
+            return false;
+        }
+        let Some(node) = parse_node(id) else {
+            return false;
+        };
+        let Some(target) = parse_node(target) else {
+            return false;
+        };
+        let placement = match placement.to_string().as_str() {
+            "before" => DropPlacement::Before(target),
+            "after" => DropPlacement::After(target),
+            "inside" => DropPlacement::Inside(target),
+            _ => return false,
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.can_drop_node(node, placement))
+    }
     pub fn move_node(
         mut self: Pin<&mut Self>,
         id: &QString,
@@ -1781,17 +1874,6 @@ impl ParchMintBackend {
         }
         self.as_mut().refresh_projection("Focus next pane");
     }
-    pub fn set_pane_pinned(mut self: Pin<&mut Self>, pane: i32, pinned: bool) -> bool {
-        self.as_mut().perform("Pin pane", |workspace| {
-            usize::try_from(pane)
-                .map_err(|_| "Choose a valid pane".to_owned())
-                .and_then(|pane| {
-                    workspace
-                        .set_pane_pin(pane, pinned)
-                        .map_err(|error| error.to_string())
-                })
-        })
-    }
     pub fn set_pane_view(mut self: Pin<&mut Self>, pane: i32, view: &QString) -> bool {
         let view = match view.to_string().as_str() {
             "editor" => PaneView::Editor,
@@ -1842,22 +1924,112 @@ impl ParchMintBackend {
     pub fn pane_id(&self, pane: i32) -> QString {
         usize::try_from(pane)
             .ok()
-            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane)?.node)
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane)?.active())
+            .map(|tab| tab.node)
             .map_or_else(QString::default, |node| QString::from(node.to_string()))
     }
     pub fn pane_view(&self, pane: i32) -> QString {
         usize::try_from(pane)
             .ok()
-            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane))
-            .map_or_else(QString::default, |state| {
-                QString::from(pane_view_name(state.view))
-            })
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane)?.active())
+            .map_or_else(
+                || QString::from("editor"),
+                |tab| QString::from(pane_view_name(tab.view)),
+            )
     }
-    pub fn pane_pinned(&self, pane: i32) -> bool {
+    pub fn pane_tab_count(&self, pane: i32) -> i32 {
         usize::try_from(pane)
             .ok()
-            .and_then(|pane| self.rust().workspace.as_ref()?.pane(pane))
-            .is_some_and(|state| state.pinned)
+            .and_then(|pane| {
+                self.rust()
+                    .workspace
+                    .as_ref()
+                    .map(|workspace| workspace.pane_tab_count(pane))
+            })
+            .and_then(|count| i32::try_from(count).ok())
+            .unwrap_or(0)
+    }
+    pub fn pane_active_tab(&self, pane: i32) -> i32 {
+        usize::try_from(pane)
+            .ok()
+            .and_then(|pane| self.rust().workspace.as_ref()?.pane_active_tab(pane))
+            .and_then(|tab| i32::try_from(tab).ok())
+            .unwrap_or(-1)
+    }
+    pub fn pane_tab_id(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::default();
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.pane_tab(pane, tab))
+            .map_or_else(QString::default, |tab| QString::from(tab.node.to_string()))
+    }
+    pub fn pane_tab_title(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::default();
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| {
+                let node = workspace.pane_tab(pane, tab)?.node;
+                workspace
+                    .project()
+                    .nodes
+                    .get(&node)?
+                    .kind
+                    .document_id()
+                    .and_then(|id| workspace.project().documents.get(&id))
+                    .map(|record| record.metadata.title.as_str())
+                    .or_else(|| workspace.project().builtin_root_key(node))
+            })
+            .map_or_else(QString::default, QString::from)
+    }
+    pub fn pane_tab_view(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::default();
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.pane_tab(pane, tab))
+            .map_or_else(QString::default, |tab| {
+                QString::from(pane_view_name(tab.view))
+            })
+    }
+    pub fn activate_pane_tab(mut self: Pin<&mut Self>, pane: i32, tab: i32) -> bool {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                let pane = usize::try_from(pane).map_err(|_| "Choose a valid pane".to_owned())?;
+                let tab = usize::try_from(tab).map_err(|_| "Choose a valid tab".to_owned())?;
+                workspace
+                    .activate_pane_tab(pane, tab)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => {
+                self.as_mut().refresh_projection("Activate tab");
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+    pub fn close_pane_tab(mut self: Pin<&mut Self>, pane: i32, tab: i32) -> bool {
+        self.as_mut().perform("Close tab", |workspace| {
+            let pane = usize::try_from(pane).map_err(|_| "Choose a valid pane".to_owned())?;
+            let tab = usize::try_from(tab).map_err(|_| "Choose a valid tab".to_owned())?;
+            workspace
+                .close_pane_tab(pane, tab)
+                .map_err(|error| error.to_string())
+        })
     }
     pub fn add_pane(mut self: Pin<&mut Self>, node: &QString) -> i32 {
         let node = if node.is_empty() {
@@ -1921,6 +2093,223 @@ impl ParchMintBackend {
             Err(error) => self.as_mut().fail(error),
         }
     }
+    pub fn tab_document_body(mut self: Pin<&mut Self>, pane: i32, tab: i32) -> QString {
+        let body = match (usize::try_from(pane), usize::try_from(tab)) {
+            (Ok(pane), Ok(tab)) => self
+                .as_mut()
+                .rust_mut()
+                .workspace
+                .as_mut()
+                .and_then(|workspace| workspace.tab_live_body(pane, tab).ok())
+                .map(str::to_owned),
+            _ => None,
+        };
+        body.map_or_else(QString::default, QString::from)
+    }
+    pub fn tab_document_revision(&self, pane: i32, tab: i32) -> u64 {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return 0;
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .map_or(0, |workspace| workspace.tab_revision(pane, tab).get())
+    }
+    pub fn update_tab_body(
+        mut self: Pin<&mut Self>,
+        pane: i32,
+        tab: i32,
+        body: &QString,
+        first_block: i32,
+        last_block: i32,
+    ) -> bool {
+        if *self.project_read_only() {
+            return self.as_mut().fail("This project is open read-only");
+        }
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return self.as_mut().fail("Choose a valid pane and tab");
+        };
+        let first = usize::try_from(first_block.max(0)).unwrap_or(0);
+        let last = usize::try_from(last_block.max(first_block + 1)).unwrap_or(first + 1);
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .update_tab_live_body(pane, tab, body.to_string(), first, last, Instant::now())
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(stamp) => {
+                if let Err(error) = self.as_mut().publish_tab_document_stamp(stamp, pane, tab) {
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut().cancel_export();
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_document_status();
+                true
+            }
+            Err(error) => self.as_mut().fail(error),
+        }
+    }
+    pub fn apply_tab_text_delta(
+        mut self: Pin<&mut Self>,
+        pane: i32,
+        tab: i32,
+        position_utf16: i32,
+        removed_utf16: i32,
+        inserted: &QString,
+        first_block: i32,
+    ) -> bool {
+        if *self.project_read_only() {
+            return self.as_mut().fail("This project is open read-only");
+        }
+        let (Ok(pane), Ok(tab), Ok(position), Ok(removed)) = (
+            usize::try_from(pane),
+            usize::try_from(tab),
+            usize::try_from(position_utf16),
+            usize::try_from(removed_utf16),
+        ) else {
+            return self
+                .as_mut()
+                .fail("The editor supplied an invalid text delta");
+        };
+        let first = usize::try_from(first_block.max(0)).unwrap_or(0);
+        let inserted = inserted.to_string();
+        // One removed UTF-16 unit can cover at most one line break. Including
+        // one surrounding block makes this a conservative bounded range.
+        let affected_blocks = removed.saturating_add(1).max(
+            inserted
+                .bytes()
+                .filter(|value| *value == b'\n')
+                .count()
+                .saturating_add(1),
+        );
+        let last = first.saturating_add(affected_blocks);
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .ok_or_else(|| "Create or open a project first".to_owned())
+            .and_then(|workspace| {
+                workspace
+                    .apply_tab_text_delta(
+                        pane,
+                        tab,
+                        position,
+                        removed,
+                        &inserted,
+                        first,
+                        last,
+                        Instant::now(),
+                    )
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(stamp) => {
+                self.as_mut().record_ffi_bytes(inserted.len());
+                if let Err(error) = self.as_mut().publish_tab_document_stamp(stamp, pane, tab) {
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut().cancel_export();
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
+                self.as_mut().sync_document_status();
+                let _ = self.as_mut().publish_outline_state();
+                true
+            }
+            Err(error) => {
+                tracing::warn!("rejected editor text delta: {error}");
+                false
+            }
+        }
+    }
+    pub fn tab_word_count(mut self: Pin<&mut Self>, pane: i32, tab: i32) -> u64 {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return 0;
+        };
+        self.as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .and_then(|workspace| workspace.tab_text_statistics(pane, tab).ok())
+            .map_or(0, |counts| counts.words)
+    }
+    pub fn tab_character_count(mut self: Pin<&mut Self>, pane: i32, tab: i32) -> u64 {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return 0;
+        };
+        self.as_mut()
+            .rust_mut()
+            .workspace
+            .as_mut()
+            .and_then(|workspace| workspace.tab_text_statistics(pane, tab).ok())
+            .map_or(0, |counts| counts.characters)
+    }
+    pub fn flush_tab(mut self: Pin<&mut Self>, pane: i32, tab: i32, _body: &QString) -> bool {
+        if *self.project_read_only() {
+            return true;
+        }
+        let document = {
+            let backend = self.as_ref();
+            let workspace = backend.rust().workspace.as_ref();
+            match (usize::try_from(pane), usize::try_from(tab)) {
+                (Ok(pane), Ok(tab)) => {
+                    workspace.and_then(|workspace| workspace.tab_document_id(pane, tab).ok())
+                }
+                _ => None,
+            }
+        };
+        document.is_none_or(|document| self.as_mut().schedule_document(document, true))
+    }
+    pub fn tab_save_status(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::from("No document");
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.tab_save_state(pane, tab))
+            .map_or_else(
+                || QString::from("No document"),
+                |state| QString::from(save_state_name(state)),
+            )
+    }
+    pub fn tab_attachment_description(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::default();
+        };
+        self.rust()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.tab_attachment(pane, tab).ok())
+            .map(|attachment| {
+                QString::from(format!(
+                    "{} · {} · {} bytes",
+                    attachment.display_name, attachment.media_type, attachment.bytes
+                ))
+            })
+            .unwrap_or_default()
+    }
+    pub fn tab_attachment_url(&self, pane: i32, tab: i32) -> QString {
+        let (Ok(pane), Ok(tab)) = (usize::try_from(pane), usize::try_from(tab)) else {
+            return QString::default();
+        };
+        let path = self.rust().workspace.as_ref().and_then(|workspace| {
+            let attachment = workspace.tab_attachment(pane, tab).ok()?;
+            workspace
+                .attachment_preview(attachment.id)
+                .ok()
+                .map(|(path, _)| path)
+        });
+        path.map(|path| local_file_url(&path))
+            .map_or_else(QString::default, QString::from)
+    }
     pub fn pane_document_body(mut self: Pin<&mut Self>, pane: i32) -> QString {
         let body = usize::try_from(pane).ok().and_then(|pane| {
             self.as_mut()
@@ -1938,7 +2327,7 @@ impl ParchMintBackend {
             .ok()
             .and_then(|pane| {
                 let workspace = self.rust().workspace.as_ref()?;
-                let node = workspace.pane(pane)?.node?;
+                let node = workspace.pane(pane)?.active()?.node;
                 workspace
                     .project()
                     .nodes
@@ -2041,7 +2430,8 @@ impl ParchMintBackend {
                     return self.as_mut().fail(error);
                 }
                 self.as_mut().cancel_export();
-                self.as_mut().set_document_revision(stamp.revision.get());
+                let revision = self.document_revision().saturating_add(1);
+                self.as_mut().set_document_revision(revision);
                 self.as_mut().sync_document_status();
                 let _ = self.as_mut().publish_outline_state();
                 true
@@ -2091,11 +2481,7 @@ impl ParchMintBackend {
             let workspace = backend.rust().workspace.as_ref();
             usize::try_from(pane).ok().and_then(|pane| {
                 let workspace = workspace?;
-                workspace
-                    .pane(pane)
-                    .and_then(|state| state.node)
-                    .and_then(|node| workspace.project().nodes.get(&node))
-                    .and_then(|node| node.kind.document_id())
+                workspace.pane_document_id(pane).ok()
             })
         };
         document.is_none_or(|document| self.as_mut().schedule_document(document, true))
@@ -2219,20 +2605,35 @@ impl ParchMintBackend {
             .rust()
             .workspace
             .as_ref()
-            .and_then(|workspace| workspace.pane(pane))
-            .and_then(|state| state.node)
-            .and_then(|node| {
-                self.as_ref()
-                    .rust()
-                    .workspace
-                    .as_ref()?
-                    .project()
-                    .nodes
-                    .get(&node)?
-                    .kind
-                    .document_id()
-            })
-            .ok_or_else(|| "pane document is unavailable".to_owned())?;
+            .ok_or_else(|| "project workspace is unavailable".to_owned())?
+            .pane_document_id(pane)
+            .map_err(|error| error.to_string())?;
+        self.as_mut().publish_stamp(document, stamp)
+    }
+
+    fn publish_tab_document_stamp(
+        mut self: Pin<&mut Self>,
+        stamp: WorkStamp,
+        pane: usize,
+        tab: usize,
+    ) -> Result<(), String> {
+        self.as_mut().ensure_document_worker()?;
+        let document = self
+            .as_ref()
+            .rust()
+            .workspace
+            .as_ref()
+            .ok_or_else(|| "project workspace is unavailable".to_owned())?
+            .tab_document_id(pane, tab)
+            .map_err(|error| error.to_string())?;
+        self.as_mut().publish_stamp(document, stamp)
+    }
+
+    fn publish_stamp(
+        self: Pin<&mut Self>,
+        document: DocumentId,
+        stamp: WorkStamp,
+    ) -> Result<(), String> {
         self.as_ref()
             .rust()
             .document_worker
@@ -2242,6 +2643,7 @@ impl ParchMintBackend {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_lines)] // Keep the save-state match explicit and auditable.
     fn schedule_document(mut self: Pin<&mut Self>, document: DocumentId, force: bool) -> bool {
         if self
             .as_ref()
@@ -2251,61 +2653,7 @@ impl ParchMintBackend {
         {
             return true;
         }
-        if let Err(error) = self.as_mut().ensure_document_worker() {
-            return self.as_mut().fail(error);
-        }
-        let journal = {
-            let mut rust = self.as_mut().rust_mut();
-            let Some(workspace) = rust.workspace.as_mut() else {
-                return true;
-            };
-            match workspace.prepare_session_journal(document, Instant::now(), force) {
-                Ok(request) => request,
-                Err(error) => return self.as_mut().fail(error),
-            }
-        };
-        if let Some(request) = journal {
-            let stamp = request.stamp;
-            let submitted = self
-                .as_ref()
-                .rust()
-                .document_worker
-                .as_ref()
-                .expect("worker was initialized")
-                .publish_current(document, stamp)
-                .and_then(|()| {
-                    self.as_ref()
-                        .rust()
-                        .document_worker
-                        .as_ref()
-                        .expect("worker was initialized")
-                        .submit_journal(document, request)
-                });
-            if let Err(error) = submitted {
-                if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
-                    workspace.acknowledge_session_journal(document, stamp, Err(error.to_string()));
-                }
-                return self.as_mut().fail(error);
-            }
-            self.as_mut()
-                .rust_mut()
-                .document_inflight
-                .insert(document, DocumentWorkKind::Journal);
-            self.as_mut().sync_document_status();
-            return true;
-        }
-        self.as_mut().schedule_canonical(document)
-    }
-
-    fn schedule_canonical(mut self: Pin<&mut Self>, document: DocumentId) -> bool {
-        if self
-            .as_ref()
-            .rust()
-            .document_inflight
-            .contains_key(&document)
-        {
-            return true;
-        }
+        // Canonical planning waits for pending project-structure saves to drain.
         if self
             .as_ref()
             .rust()
@@ -2315,48 +2663,91 @@ impl ParchMintBackend {
         {
             return true;
         }
-        let prepared = {
+        if let Err(error) = self.as_mut().ensure_document_worker() {
+            return self.as_mut().fail(error);
+        }
+        let action = {
             let mut rust = self.as_mut().rust_mut();
             let Some(workspace) = rust.workspace.as_mut() else {
                 return true;
             };
-            workspace.prepare_session_canonical(document)
+            workspace.next_session_save_action(document, Instant::now(), force)
         };
-        let prepared = match prepared {
-            Ok(prepared) => prepared,
+        let action = match action {
+            Ok(action) => action,
             Err(error) => return self.as_mut().fail(error),
         };
-        let Some((request, plan)) = prepared else {
-            return true;
-        };
-        let stamp = request.stamp;
-        let submitted = self
-            .as_ref()
-            .rust()
-            .document_worker
-            .as_ref()
-            .expect("worker was initialized")
-            .publish_current(document, stamp)
-            .and_then(|()| {
-                self.as_ref()
+        match action {
+            DocumentNextSaveAction::Idle | DocumentNextSaveAction::Deferred => true,
+            DocumentNextSaveAction::Journal(request) => {
+                let stamp = request.stamp;
+                let submitted = self
+                    .as_ref()
                     .rust()
                     .document_worker
                     .as_ref()
                     .expect("worker was initialized")
-                    .submit_canonical(request, plan)
-            });
-        if let Err(error) = submitted {
-            if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
-                workspace.acknowledge_session_canonical(document, stamp, Err(error.to_string()));
+                    .publish_current(document, stamp)
+                    .and_then(|()| {
+                        self.as_ref()
+                            .rust()
+                            .document_worker
+                            .as_ref()
+                            .expect("worker was initialized")
+                            .submit_journal(document, request)
+                    });
+                if let Err(error) = submitted {
+                    if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                        workspace.acknowledge_session_journal(
+                            document,
+                            stamp,
+                            Err(error.to_string()),
+                        );
+                    }
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut()
+                    .rust_mut()
+                    .document_inflight
+                    .insert(document, DocumentWorkKind::Journal);
+                self.as_mut().sync_document_status();
+                true
             }
-            return self.as_mut().fail(error);
+            DocumentNextSaveAction::Canonical { request, plan } => {
+                let stamp = request.stamp;
+                let submitted = self
+                    .as_ref()
+                    .rust()
+                    .document_worker
+                    .as_ref()
+                    .expect("worker was initialized")
+                    .publish_current(document, stamp)
+                    .and_then(|()| {
+                        self.as_ref()
+                            .rust()
+                            .document_worker
+                            .as_ref()
+                            .expect("worker was initialized")
+                            .submit_canonical(request, plan)
+                    });
+                if let Err(error) = submitted {
+                    if let Some(workspace) = self.as_mut().rust_mut().workspace.as_mut() {
+                        workspace.acknowledge_session_canonical(
+                            document,
+                            stamp,
+                            Err(error.to_string()),
+                        );
+                    }
+                    return self.as_mut().fail(error);
+                }
+                self.as_mut()
+                    .rust_mut()
+                    .document_inflight
+                    .insert(document, DocumentWorkKind::Canonical);
+                self.as_mut().sync_document_status();
+                true
+            }
         }
-        self.as_mut()
-            .rust_mut()
-            .document_inflight
-            .insert(document, DocumentWorkKind::Canonical);
-        self.as_mut().sync_document_status();
-        true
     }
 
     fn process_document_results(mut self: Pin<&mut Self>) {
@@ -2405,7 +2796,8 @@ impl ParchMintBackend {
                         },
                     );
                     if succeeded && disposition == parchmint_app::CompletionDisposition::Applied {
-                        self.as_mut().schedule_canonical(completion.document_id);
+                        self.as_mut()
+                            .schedule_document(completion.document_id, false);
                     }
                 }
                 DocumentWorkKind::Canonical => {
@@ -3211,7 +3603,15 @@ impl ParchMintBackend {
     }
     fn sync_panes(mut self: Pin<&mut Self>) {
         let values = self.as_ref().rust().workspace.as_ref().map(|workspace| {
-            let value = |index| workspace.pane(index).cloned().unwrap_or_default();
+            let value = |index| {
+                workspace
+                    .pane(index)
+                    .and_then(|pane| pane.active())
+                    .map_or_else(
+                        || (String::new(), "editor".to_owned()),
+                        |tab| (tab.node.to_string(), pane_view_name(tab.view).to_owned()),
+                    )
+            };
             (
                 value(0),
                 value(1),
@@ -3221,18 +3621,10 @@ impl ParchMintBackend {
             )
         });
         let (first, second, focused, count, split) = values.unwrap_or_default();
-        self.as_mut().set_pane_one_id(QString::from(
-            first.node.map_or_else(String::new, |id| id.to_string()),
-        ));
-        self.as_mut().set_pane_two_id(QString::from(
-            second.node.map_or_else(String::new, |id| id.to_string()),
-        ));
-        self.as_mut()
-            .set_pane_one_view(QString::from(pane_view_name(first.view)));
-        self.as_mut()
-            .set_pane_two_view(QString::from(pane_view_name(second.view)));
-        self.as_mut().set_pane_one_pinned(first.pinned);
-        self.as_mut().set_pane_two_pinned(second.pinned);
+        self.as_mut().set_pane_one_id(QString::from(first.0));
+        self.as_mut().set_pane_two_id(QString::from(second.0));
+        self.as_mut().set_pane_one_view(QString::from(first.1));
+        self.as_mut().set_pane_two_view(QString::from(second.1));
         self.as_mut().set_focused_pane(i32::from(focused));
         let count = i32::try_from(count).unwrap_or(i32::MAX);
         if self.as_ref().rust().pane_count != count {

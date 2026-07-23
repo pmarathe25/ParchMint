@@ -227,6 +227,18 @@ int main(int argc, char* argv[])
         fail("pane swap vetoed current text");
         return;
       }
+      QString swappedBody;
+      if (!QMetaObject::invokeMethod(
+            backend, "paneDocumentBody", Qt::DirectConnection,
+            Q_RETURN_ARG(QString, swappedBody), Q_ARG(int, 1))
+          || swappedBody != liveText) {
+        std::fprintf(stderr,
+                     "lifecycle smoke: swapped body %lld UTF-16 units (%s)\n",
+                     static_cast<long long>(swappedBody.size()),
+                     swappedBody.toUtf8().toHex().constData());
+        fail("live session changed during pane swap");
+        return;
+      }
       succeeded = false;
       if (!QMetaObject::invokeMethod(
             backend, "closePane", Qt::DirectConnection, Q_RETURN_ARG(bool, succeeded),
@@ -239,6 +251,23 @@ int main(int argc, char* argv[])
             backend, "selectNode", Qt::DirectConnection, Q_ARG(QString, documentId),
             Q_ARG(bool, false))) {
         fail("document reopen failed");
+        return;
+      }
+      QString reopenedBody;
+      if (!QMetaObject::invokeMethod(
+            backend, "paneDocumentBody", Qt::DirectConnection,
+            Q_RETURN_ARG(QString, reopenedBody), Q_ARG(int, 0))
+          || reopenedBody != liveText) {
+        fail("Rust live session did not survive pane close and reopen");
+        return;
+      }
+      application.processEvents();
+      reopenedBody.clear();
+      if (!QMetaObject::invokeMethod(
+            backend, "paneDocumentBody", Qt::DirectConnection,
+            Q_RETURN_ARG(QString, reopenedBody), Q_ARG(int, 0))
+          || reopenedBody != liveText) {
+        fail("QML pane reconciliation overwrote the reopened live session");
         return;
       }
 

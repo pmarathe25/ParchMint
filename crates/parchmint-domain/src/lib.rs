@@ -581,6 +581,11 @@ impl Project {
         Ok(outcome)
     }
 
+    /// Validates a command without mutating project state.
+    pub fn can_execute(&self, command: &ProjectCommand) -> Result<(), ProjectError> {
+        self.validate_command(command)
+    }
+
     /// Reverts an unacknowledged command without creating a user-visible trash
     /// entry. Persistence uses this when a canonical transaction cannot commit.
     pub fn rollback(&mut self, outcome: &CommandOutcome) -> Result<(), ProjectError> {
@@ -2015,6 +2020,26 @@ mod tests {
         project.execute(undo.inverse).unwrap();
         project.validate().unwrap();
     }
+
+    #[test]
+    fn command_prevalidation_is_read_only_and_rejects_cycles() {
+        let mut project = Project::new("Novel");
+        let root = project.manuscript_root();
+        let parent = create(&mut project, root, "Parent");
+        let child = create(&mut project, parent, "Child");
+        let before = project.clone();
+        assert!(
+            project
+                .can_execute(&ProjectCommand::Reparent {
+                    node: parent,
+                    parent: child,
+                    index: 0,
+                })
+                .is_err()
+        );
+        assert_eq!(project, before);
+    }
+
     #[test]
     fn style_cycles_and_path_traversal_are_rejected() {
         assert!(RelativeProjectPath::new("../outside").is_err());

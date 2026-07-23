@@ -40,13 +40,21 @@ ApplicationWindow {
         appSettings.recentProjects = values.slice(0, 12)
     }
 
+    function syncEditorBuffers() {
+        if (editorWorkspace.syncLiveBodies())
+            return true
+        transientMessage = qsTr("Finish or discard raw Markdown source edits before continuing.")
+        errorPopup.open()
+        return false
+    }
+
     function dispatchCommand(id) {
         switch (id) {
-        case "project.new": newProjectDialog.open(); break
-        case "project.open": openProjectFolderDialog.open(); break
-        case "project.close": backend.closeProject(); break
-        case "project.save": backend.flushAllDocuments(); break
-        case "project.export": exportDialog.open(); break
+        case "project.new": if (syncEditorBuffers()) newProjectDialog.open(); break
+        case "project.open": if (syncEditorBuffers()) openProjectFolderDialog.open(); break
+        case "project.close": if (syncEditorBuffers()) backend.closeProject(); break
+        case "project.save": if (syncEditorBuffers()) backend.flushAllDocuments(); break
+        case "project.export": if (syncEditorBuffers()) exportDialog.open(); break
         case "project.diagnostics": diagnosticsDialog.open(); break
         case "edit.undo": backend.undoStructural(); break
         case "edit.redo": backend.redoStructural(); break
@@ -68,6 +76,40 @@ ApplicationWindow {
         case "view.settings": settingsDialog.open(); break
         case "help.keyboard": keyboardDialog.open(); break
         case "help.onboarding": sampleProjectParentDialog.open(); break
+        }
+    }
+
+    menuBar: MenuBar {
+        objectName: "mainMenuBar"
+
+        Menu {
+            title: qsTr("File")
+
+            MenuItem {
+                text: qsTr("New Project…")
+                onTriggered: window.dispatchCommand("project.new")
+            }
+            MenuItem {
+                text: qsTr("Open Project…")
+                onTriggered: window.dispatchCommand("project.open")
+            }
+            MenuSeparator {}
+            MenuItem {
+                text: qsTr("Close Project")
+                enabled: backend.project_open
+                onTriggered: window.dispatchCommand("project.close")
+            }
+            MenuItem {
+                text: qsTr("Save")
+                enabled: backend.project_open
+                onTriggered: window.dispatchCommand("project.save")
+            }
+            MenuSeparator {}
+            MenuItem {
+                text: qsTr("Export…")
+                enabled: backend.project_open && !backend.export_in_progress
+                onTriggered: window.dispatchCommand("project.export")
+            }
         }
     }
 
@@ -93,7 +135,10 @@ ApplicationWindow {
             close.accepted = true
             return
         }
-        editorWorkspace.syncLiveBodies()
+        if (!syncEditorBuffers()) {
+            close.accepted = false
+            return
+        }
         close.accepted = backend.prepareQuit()
         quitApproved = close.accepted
     }
@@ -174,23 +219,6 @@ ApplicationWindow {
                         Label { text: backend.searchResultTitle(index); font.bold: true; Layout.fillWidth: true; elide: Text.ElideRight }
                         Label { text: backend.searchResultContext(index); opacity: .65; Layout.fillWidth: true; elide: Text.ElideRight }
                         Label { text: backend.searchResultSnippet(index); Layout.fillWidth: true; wrapMode: Text.Wrap; maximumLineCount: 2; elide: Text.ElideRight }
-                    }
-                    ToolButton {
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        Accessible.name: qsTr("Open search result in other pane")
-                        ToolTip.visible: hovered
-                        ToolTip.text: Accessible.name
-                        onClicked: { backend.openSearchResult(index, true); searchPopup.close() }
-                        contentItem: Image {
-                            source: "qrc:/icons/chevron.svg"
-                            sourceSize.width: DesignTokens.iconSize
-                            sourceSize.height: DesignTokens.iconSize
-                            width: DesignTokens.iconSize
-                            height: DesignTokens.iconSize
-                            anchors.centerIn: parent
-                            rotation: -90
-                        }
                     }
                 }
             }
@@ -680,67 +708,59 @@ ApplicationWindow {
 
             ToolBar {
                 id: projectToolbar
+                objectName: "workspaceRibbon"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 34
                 contentItem: RowLayout {
                     spacing: DesignTokens.space1
-                    ToolButton {
-                        text: qsTr("New")
-                        font.pixelSize: DesignTokens.typeCaption
-                        Accessible.name: qsTr("Create new project")
-                        onClicked: newProjectDialog.open()
-                    }
-                    ToolButton {
-                        text: qsTr("Open")
-                        font.pixelSize: DesignTokens.typeCaption
-                        Accessible.name: qsTr("Open project")
-                        onClicked: openProjectFolderDialog.open()
-                    }
-                    ToolButton {
-                        text: qsTr("Close")
-                        font.pixelSize: DesignTokens.typeCaption
-                        Accessible.name: qsTr("Close project")
-                        onClicked: backend.closeProject()
-                    }
-                    ToolButton {
-                        text: qsTr("Save")
-                        font.pixelSize: DesignTokens.typeCaption
-                        Accessible.name: qsTr("Save project")
-                        onClicked: backend.flushAllDocuments()
-                    }
-                    ToolButton {
-                        text: qsTr("Export")
-                        font.pixelSize: DesignTokens.typeCaption
-                        Accessible.name: qsTr("Export manuscript")
-                        enabled: !backend.export_in_progress
-                        onClicked: exportDialog.open()
-                    }
-                    ToolButton {
-                        visible: window.workspaceMode === 0
-                        checked: window.binderVisible
-                        checkable: true
-                        font.pixelSize: DesignTokens.typeCaption
-                        text: qsTr("Files")
-                        Accessible.name: checked ? qsTr("Hide file tree") : qsTr("Show file tree")
-                        onClicked: window.binderVisible = checked
-                    }
                     ButtonGroup { id: workspaceModeGroup }
-                    Item { Layout.preferredWidth: DesignTokens.space1 }
                     ToolButton {
+                        id: editorModeButton
+                        objectName: "editorModeButton"
                         text: qsTr("Editor")
                         font.pixelSize: DesignTokens.typeCaption
                         checkable: true
                         checked: window.workspaceMode === 0
                         ButtonGroup.group: workspaceModeGroup
+                        Accessible.name: qsTr("Show Editor")
                         onClicked: window.workspaceMode = 0
+                        contentItem: Label {
+                            text: editorModeButton.text
+                            font: editorModeButton.font
+                            color: editorModeButton.checked ? DesignTokens.accent
+                                                            : editorModeButton.palette.buttonText
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            color: editorModeButton.checked ? DesignTokens.accentContainer
+                                                            : "transparent"
+                            radius: DesignTokens.radiusSmall
+                        }
                     }
                     ToolButton {
+                        id: cardsModeButton
+                        objectName: "cardsModeButton"
                         text: qsTr("Cards")
                         font.pixelSize: DesignTokens.typeCaption
                         checkable: true
                         checked: window.workspaceMode === 1
                         ButtonGroup.group: workspaceModeGroup
+                        Accessible.name: qsTr("Show Cards")
                         onClicked: window.workspaceMode = 1
+                        contentItem: Label {
+                            text: cardsModeButton.text
+                            font: cardsModeButton.font
+                            color: cardsModeButton.checked ? DesignTokens.accent
+                                                           : cardsModeButton.palette.buttonText
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            color: cardsModeButton.checked ? DesignTokens.accentContainer
+                                                           : "transparent"
+                            radius: DesignTokens.radiusSmall
+                        }
                     }
                     Item { Layout.fillWidth: true }
                     TextField {
@@ -781,15 +801,18 @@ ApplicationWindow {
                         spacing: 0
                         BinderPane {
                             id: binderPane
-                            Layout.preferredWidth: window.binderVisible ? 268 : 0
+                            Layout.preferredWidth: window.binderVisible ? 268 : 32
+                            Layout.minimumWidth: Layout.preferredWidth
+                            Layout.maximumWidth: Layout.preferredWidth
                             Layout.fillHeight: true
-                            visible: window.binderVisible
+                            collapsed: !window.binderVisible
                             backend: backend
+                            onCollapseToggled: window.binderVisible = !window.binderVisible
                             onOpenInSplitRequested: function(nodeId) { editorWorkspace.splitPane(backend.focused_pane, "right", nodeId) }
                             model: outlineModel
                         }
                         Rectangle {
-                            Layout.preferredWidth: window.binderVisible ? 1 : 0
+                            Layout.preferredWidth: 1
                             Layout.fillHeight: true
                             color: DesignTokens.outline
                         }
