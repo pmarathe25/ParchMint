@@ -1,0 +1,2 @@
+screen_id,penpot_page_id,penpot_board_id,name,reference_width,reference_height,platform,theme,state,requirements,reference_image
+editor-single-default,,,Editor Single Pane Default,1440,900,shared,default,default,"WS-002|EDIT-001",references/editor-single-1440x900.png

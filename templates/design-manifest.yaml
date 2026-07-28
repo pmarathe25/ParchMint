@@ -1,0 +1,66 @@
+schema_version: 1
+handoff:
+  version: "1.0.0"
+  status: "draft" # draft | approved | superseded
+  exported_at_utc: "YYYY-MM-DDTHH:MM:SSZ"
+  product_spec_version: "1.0"
+  architecture_version: "1.0"
+  approved_by: null
+  approval_date: null
+penpot:
+  file_name: "ParchMint UI"
+  file_id: ""
+  penpot_version: ""
+  mcp_server: ""
+  pages:
+    - page_id: ""
+      name: "00 Cover & Decisions"
+artifacts:
+  penpot_file: "parchmint-ui.penpot"
+  tokens:
+    - "tokens/tokens.json"
+  component_matrix: "specs/component-matrix.csv"
+  screen_inventory: "specs/screen-inventory.csv"
+  interaction_spec: "specs/interaction-spec.md"
+  keyboard_focus_map: "specs/keyboard-focus-map.md"
+  cross_platform_variants: "specs/cross-platform-variants.md"
+  design_decisions: "specs/design-decisions.md"
+  known_deviations: "specs/known-deviations.md"
+  checksums: "checksums.sha256"
+token_sets:
+  - name: "global"
+    file: "tokens/tokens.json"
+    themes: []
+components:
+  - component_id: "PM/Button"
+    penpot_component_id: ""
+    variants: ["kind", "size", "state"]
+    requirements: []
+    implementation_target: null
+screens:
+  - screen_id: "editor-single-default"
+    penpot_page_id: ""
+    penpot_board_id: ""
+    name: "Editor / Single Pane / Default"
+    width: 1440
+    height: 900
+    scale: 1.0
+    platform: "shared"
+    state_fixture: "ui-editor-single-default"
+    requirements: ["WS-002", "EDIT-001"]
+    reference: true
+    reference_image: "references/editor-single-1440x900.png"
+flows:
+  - flow_id: "create-and-write"
+    name: "Create project and begin writing"
+    start_screen: "launcher-recent"
+    requirements: ["PRJ-003", "PRJ-005", "SAVE-002"]
+platform_variants:
+  - platform: "windows"
+    notes: ""
+  - platform: "macos"
+    notes: ""
+  - platform: "linux"
+    notes: ""
+known_deviations: []
+checksums_sha256: {}
