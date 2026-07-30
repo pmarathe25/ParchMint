@@ -1,63 +1,44 @@
 # ParchMint Penpot Design Brief
 
-**Status:** Final design-agent brief  
-**Version:** 1.0  
-**Date:** 2026-07-28
+**Status:** Current operational design brief
+**Version:** 2.0
+**Date:** 2026-07-30
 
-## 1. Copyable prompt for the design agent
+## 1. Authority and scope
 
-Use the following prompt with Codex connected to the Penpot MCP server:
+Use this brief to create or revise the ParchMint v1 Penpot design.
 
----
+Before changing Penpot, read:
 
-You are designing **ParchMint**, a cross-platform desktop application for solo novelists. Read `01-product-specification.md`, `AGENTS.md`, and `04-design-artifact-handoff-contract.md` completely before modifying Penpot.
+1. `AGENTS.md`
+2. `01-product-specification.md`
+3. `04-design-artifact-handoff-contract.md`
+4. The latest `design-manifest.yaml`
 
-Create a coherent, implementation-ready Penpot design system and full v1 desktop UI. ParchMint will be implemented with Tauri, React, and ProseMirror, but the design must describe semantic components, states, tokens, layout, focus, and interaction rather than framework-specific DOM structure.
+The product specification controls behavior. This brief controls visual language, layout, component composition, and interaction presentation where it does not conflict with the product specification. Record genuine ambiguity as a product question rather than resolving it silently.
 
-Do not change product scope. Do not add collaboration, AI writing, import, recursive pane splitting, regex search, source editing, attachment previews, a user-visible large-document mode, or other deferred features. Record unclear product behavior as a design question instead of inventing it.
+Do not add deferred features such as collaboration, AI writing, import, recursive pane splitting, regex search, source editing, attachment previews, or a user-visible large-document mode.
 
-Design for Windows, macOS, and Linux from the beginning. Use native OS title bars rather than a custom title bar. Keep the core content layout consistent while documenting platform-specific menu labels, shortcut notation, controls, and dialogs.
+Use stable `PM/` names and requirement IDs. Update shared component mains and their instances instead of patching individual screens. Keep only components and screens that demonstrate a required visual, interaction, accessibility, error, loading, or recovery state.
 
-Build the token system, component library, screens, error/empty/loading states, keyboard focus states, and prototype flows specified below. Everything should derive from tokens and reusable components. Use stable names beginning with `PM/`. Annotate components with requirement IDs from the PRD.
+The design and handoff inventory may be prepared before approval. Do not export the final handoff package until the product owner explicitly approves the design.
 
-The design should feel calm, editorial, precise, and suitable for long writing sessions. Prioritize prose legibility, hierarchy clarity, low visual noise, obvious focus, and efficient keyboard use. Avoid decorative skeuomorphism, excessive gradients, dense office-suite chrome, and floating controls that obscure prose.
+## 2. Design character
 
-Produce one fully specified default visual theme. Organize tokens so alternate themes can be added later without redesigning components. Do not make a second theme a v1 implementation requirement.
+ParchMint is a calm, editorial desktop application for sustained writing.
 
-At completion, prepare the full handoff described in `04-design-artifact-handoff-contract.md`, including the `.penpot` file, token JSON, SVG assets, reference images, design manifest, component matrix, interaction specification, decision log, and known deviations.
+- Keep prose visually dominant and application chrome quiet.
+- Use Material Design as the reference for interaction states and icon metaphors while retaining compact native-desktop density.
+- Prefer flat surfaces, restrained tonal state layers, 4 px corners, and minimal elevation.
+- Use one neutral palette with a restrained mint accent.
+- Distinguish application UI typography from project-controlled prose styles.
+- Use spacing, hierarchy, selection, and familiar icons before adding explanatory text.
+- Retain text for authored content, field labels, counts, unfamiliar actions, destructive actions, menus, and confirmations.
+- Make interactive, editable, selected, focused, disabled, and read-only states recognizable without relying on hover or color alone. `[WS-010, A11Y-002, A11Y-004]`
 
----
+## 3. Penpot file structure
 
-## 2. Design objectives
-
-1. Keep the editor visually dominant.
-2. Make project structure understandable at a glance.
-3. Let users switch between writing and structural planning without feeling they entered a different application.
-4. Make focus and active document unambiguous when the tree, two editor panes, and Inspector show different nodes.
-5. Keep comments and metadata available without covering prose.
-6. Make history/recovery feel approachable without exposing Git.
-7. Preserve large-project usability through virtualized, compact, information-dense list/card designs.
-8. Ensure every primary action has a keyboard path and visible focus state.
-9. Design one coherent shell that can adapt cleanly to Windows, macOS, and Linux conventions.
-
-## 3. Recommended visual direction
-
-The following is direction, not a mandatory brand lock:
-
-- Calm editorial surfaces with strong text hierarchy.
-- Neutral base colors with one restrained accent.
-- Comfortable prose measure and generous line-height.
-- Subtle borders and elevation used to clarify regions, not decorate them.
-- Minimal persistent toolbar chrome.
-- A clearly differentiated document canvas and application chrome.
-- Iconography should be simple, geometric, and readable at desktop toolbar sizes.
-- Do not imitate Word’s ribbon or Scrivener’s visual style directly.
-
-The design agent should propose typography and color tokens, then document the rationale. Body prose typography in the editor is controlled by project document styles and must remain conceptually separate from application UI typography.
-
-## 4. Penpot file organization
-
-Create these pages in order:
+Keep these pages in this order:
 
 1. `00 Cover & Decisions`
 2. `01 Foundations & Tokens`
@@ -76,360 +57,262 @@ Create these pages in order:
 15. `14 Prototype Flows`
 16. `15 Handoff Inventory`
 
-Use meaningful board names and stable layer names. Avoid names such as `Rectangle 34`, `Group 18`, or `Frame Copy` in approved components.
+Use stable screen names beginning with `PM / Screen /` and meaningful layer names. The Cover records current design status, unresolved product questions, and decisions not dictated by the PRD. Historical rationale belongs in the decision log, not in this brief.
 
-## 5. Design tokens
+## 4. Foundations and tokens
 
-At minimum, define token sets for:
+Create one fully specified default theme. Organize tokens so future themes, platforms, and densities can be added without changing component contracts.
 
 ### Color
 
-- Application canvas.
-- Sidebars and panels.
-- Document canvas.
-- Elevated surfaces and menus.
-- Primary/secondary/disabled text.
-- Borders and dividers.
-- Accent and accent-hover/pressed.
-- Selection, focus ring, search match, active search match.
-- Comment highlight and resolved/orphaned states.
-- Success/saving/warning/error.
-- Destructive actions.
+Define tokens for:
+
+- Application, sidebar, Inspector, document, elevated, and read-only surfaces.
+- Primary, secondary, disabled, inverse, path/code, and placeholder text.
+- Borders, short section separators, splitters, and focus rings.
+- Accent states, selection, focused and unfocused tabs, search matches, comments, save states, warnings, errors, and destructive actions.
 
 ### Typography
 
-- UI body, compact body, labels, headings, tabs, menus, code/path text.
-- Line heights and font weights.
-- Editor UI typography only; project prose styles are separate.
+Define UI body, compact body, label, heading, tab, menu, path/code, and status styles with explicit sizes, weights, and line heights. Project prose typography remains separate.
 
-### Spacing and size
+### Spacing and geometry
 
-- Spacing scale.
-- Panel padding.
-- Toolbar height.
-- Tab height.
-- Tree row heights.
-- Card density variants.
-- Icon sizes.
-- Minimum click targets.
-- Sidebar min/default/max widths.
-- Inspector min/default/max widths.
-- Companion-pane minimum width.
-- Corner radius.
-- Divider/splitter widths.
+Define:
 
-### Effects
+- A compact spacing scale and symmetric control padding.
+- Ribbon, toolbar, tab, status-bar, tree-row, menu-row, and card dimensions.
+- 20 px core icons in 32–36 px controls.
+- Minimum pointer targets and focus-ring offsets.
+- Sidebar, Inspector, companion-pane, and splitter limits.
+- 4 px default corner radius plus explicit menu/dialog exceptions.
 
-- Focus ring.
-- Menu/dialog shadows.
-- Selected/active/inactive elevation where used.
-- Motion durations and easing.
+### Effects and motion
 
-### Themes and modes
+Define focus, selected, pressed, menu, dialog, tooltip, and error effects. Honor reduced-motion preferences and avoid nonessential movement.
 
-Define token grouping so platform and density variants can be added. If one default theme is designed, do not create hard-coded colors outside tokens.
+Do not hard-code values outside tokens in approved components.
 
-## 6. Component library
+## 5. Shared design concepts
 
-Use stable component names beginning with `PM/`. Include all states and relevant variants.
+### 5.1 Workspace shell
 
-### Shell and navigation
+- Use one consistent top ribbon across all project destinations. Its order is Editor, Cards, Search, History, Recently Deleted, Export, and Settings. `[WS-001, WS-012]`
+- Render the destinations as one mutually exclusive selector. Inactive controls blend into the ribbon; the current destination uses a restrained mint state layer and indicator without a hard outline.
+- Use familiar icon-only controls for ribbon destinations. Recently Deleted uses the shared trash-can icon.
+- Place the workspace body immediately below the 52 px ribbon and extend it to the unchanged 32 px status bar.
+- Explorer occupies the left column, the working surface the middle column, and Inspector the right column. The formatting toolbar spans only editor panes; Explorer and Inspector extend to the ribbon. `[WS-002–006]`
+- Do not outline the focused editor pane. Communicate focus through tab-strip state.
+- Keep the Explorer visibility control at the left of the status bar and the Inspector visibility control at the far right under the Inspector. Place contextual document History in the status bar, not in a tab or at the end of the tab strip. `[WS-013, EDIT-011]`
+- Project Settings, Export, and ordinary empty/loading/error content use the available main pane with centered outer margins. Use nested containers only for true admonitions, dialogs, or confirmations.
 
-- `PM/ModeSwitch`
-- `PM/Sidebar`
-- `PM/Inspector`
-- `PM/Splitter`
-- `PM/Toolbar`
-- `PM/ToolbarGroup`
-- `PM/TabBar`
-- `PM/Tab`
-- `PM/StatusBar`
-- `PM/PanelHeader`
-- `PM/Breadcrumb`
+### 5.2 Controls, icons, and text
 
-### Explorer
+- Use symmetric horizontal and vertical padding. Icon-button bounds must not retain space from removed labels.
+- Use one Material-aligned monochrome icon family with consistent optical size, stroke weight, and vertical centering.
+- Use the same trash-can icon for Recently Deleted and every destructive row action.
+- Every icon-only control has an accessible name and tooltip. `[A11Y-001–004]`
+- Inactive icon buttons blend into their surface; selected, pressed, focused, or destructive states provide the visible control treatment.
+- Editable values use outlined text, multiline, select, checkbox, or radio controls. Plain text must not imply editability.
+- Placeholder text is grey and italic. Multiline fields wrap and grow or scroll intentionally; text must not clip.
+- Read-only information uses neutral styling that is visibly distinct from editable controls.
 
-- `PM/Tree`
-- `PM/TreeRow/Group`
-- `PM/TreeRow/Document`
-- `PM/TreeRow/Root`
-- `PM/Tree/InsertionMarker`
-- `PM/Tree/CutState`
-- `PM/Tree/MultiSelection`
-- `PM/InlineRename`
-- `PM/ContextMenu`
+### 5.3 Disclosure sections and lists
 
-### Editor
+`PM/InspectorSection` is the shared disclosure-section pattern for:
 
-- `PM/EditorPane`
-- `PM/EditorCanvas`
-- `PM/FormattingToolbar`
-- `PM/StyleSelect`
-- `PM/SelectionCommentAffordance`
-- `PM/LocalFindBar`
-- `PM/SearchMatch`
-- `PM/AtomicBreak/Scene`
-- `PM/AtomicBreak/Page`
-- `PM/EditorLoading`
-- `PM/SaveIndicator`
+- Inspector sections.
+- Manuscript and Research Explorer roots.
+- Grouped Search results.
+- Comparable Cards groups.
 
-The prose inside the editor should be represented with realistic semantic samples: title, body paragraphs, headings, block quotes, verse, lists, links, inline marks, literal tabs, scene breaks, page breaks, and comments.
+The pattern consists only of the disclosure row, necessary content, and a short bottom separator. It has no outer fill or outline, no top separator, and no bottom separator on the final item in a stack. Center the disclosure icon with its label and keep rows compact, non-overlapping, and unclipped. `[WS-015, TREE-001, SEARCH-010]`
 
-### Inspector and comments
+### 5.4 Menus and contextual actions
 
-- `PM/InspectorSection`
-- `PM/SynopsisEditor`
-- `PM/MetadataField`
-- `PM/CommentThread`
-- `PM/CommentMessage`
-- `PM/CommentReplyComposer`
-- `PM/CommentAnchorState`
-- `PM/OrphanedComment`
+- Editor, Explorer, and spelling context menus share type, icon family, row height, padding, elevation, and inset dividers.
+- Put a relevant icon before each menu label.
+- Use minimal symmetric padding while preserving pointer targets.
+- Menus always render above workspace content.
+- Use direct manipulation and contextual menus instead of permanent explanatory chrome where the action remains discoverable.
 
-### Cards
+## 6. Feature presentation rules
 
-- `PM/Card`
-- `PM/Card/Group`
-- `PM/Card/Document`
-- `PM/Card/DensityCompact`
-- `PM/Card/DensitySynopsis`
-- `PM/Card/DensityDetailed`
-- `PM/Card/InsertionMarker`
-- `PM/Card/MetadataValue`
+### 6.1 Editor, formatting, and tabs
 
-### Search and replacement
+- Keep one formatting toolbar above the editor panes and target the focused view. `[TOOL-001–004]`
+- The toolbar contains style selection, styled `B`, `I`, `U`, and `S` glyphs, a split list control, block quote, one chain-link icon, Scene Break, and Page Break. It does not contain Add Comment. `[TOOL-005, CMT-007]`
+- The list control applies bullets from its main action and exposes other list types from its arrow.
+- Every primary and companion pane shows a tab strip whenever it contains at least one tab, including a one-tab Research companion. `[EDIT-001–005, EDIT-012]`
+- Tabs are 32 px high. Their close controls align to the right; long titles truncate with an ellipsis.
+- Only the active tab in the focused pane uses mint. The active tab in an unfocused pane uses muted text and a neutral selected treatment; inactive tabs do not use mint.
+- Preserve preferred tab widths while they fit. On overflow, shrink every visible tab to the same width. The minimum is 58 px and preserves the first title character, ellipsis, and close control. The accessible name and tooltip retain the full title. `[EDIT-012]`
+- Local Find appears directly below the focused pane's tabs. Its close control is right-aligned.
+- Local Replace is collapsed initially behind a Show Replace icon. When expanded, that icon uses the selected mint treatment and reveals a replacement field and Replace action. Matches appear directly on editor text, not as result cards. `[SEARCH-001–005]`
+- Comment creation remains in the selection-end affordance and editor context menu. Comment anchors are actual text highlights, never explanatory placeholder labels. `[CMT-005–008]`
 
-- `PM/GlobalSearchPanel`
-- `PM/SearchScopeControl`
-- `PM/SearchResultGroup`
-- `PM/SearchResult`
-- `PM/ReplacePreview`
-- `PM/ReplacePreviewRow`
-- `PM/ReplacementSelectionControl`
+### 6.2 Explorer and Inspector
 
-### History and deletion
+- Use compact, non-overlapping tree rows without checkboxes or an active-document rail.
+- Reveal every pane's active document in Explorer. Use the stronger selected treatment for the focused pane's document and a quieter treatment for another pane's active document. `[TREE-019]`
+- Manuscript and Research are independent collapsible instances of the shared section pattern.
+- The Explorer context menu covers applicable create, open, open-in-companion, rename, copy, cut, and delete actions. `[TREE-020]`
+- The document Inspector always contains collapsible Synopsis, Metadata, and Comments sections.
+- Synopsis and every metadata value use separate outlined editable fields. Multiline Synopsis wraps.
+- Metadata field order follows Project Settings.
+- Comments shows actual threads or the text `No comments`; group Inspectors omit Comments. `[WS-004, WS-014, CMT-005]`
 
-- `PM/HistoryTimeline`
-- `PM/HistoryEntry`
-- `PM/NamedSnapshot`
-- `PM/HistoryPreview`
-- `PM/HistoryCompare`
-- `PM/RestoreDialog`
-- `PM/RecentlyDeletedList`
-- `PM/DeletedItem`
+### 6.3 Comments
 
-### Project/settings/export
+- Thread headers show an explicit Unresolved or Resolved state using text/icon treatment plus color.
+- Unresolved threads expose Resolve; resolved threads expose Reopen. The action remains available when replies are collapsed. `[CMT-002–003]`
+- One disclosure toggles replies open and closed.
+- Expanded threads render replies chronologically above an in-thread reply field and Send action.
+- Orphaned comments use a centered remediation admonition and remain navigable from Inspector. `[CMT-011–012]`
 
-- `PM/LauncherProjectCard`
-- `PM/NewProjectDialog`
-- `PM/SettingsNav`
-- `PM/StyleEditor`
-- `PM/MetadataDefinitionEditor`
-- `PM/ExportDialog`
-- `PM/ProgressState`
-- `PM/ErrorBanner`
-- `PM/RecoveryDialog`
+### 6.4 Cards
 
-### General controls
+- Cards is a compact vertical projection of the complete hierarchy. Use indentation for nesting and preserve the full list when groups expand or collapse. `[CARD-001–005, CARD-008]`
+- Group and document cards display title and Synopsis. Place Synopsis in the main left area and configured visible metadata in the available right area.
+- Metadata values are read-only in Cards and use short separators instead of chips, boxes, or colored tiles. Edit metadata in Inspector. `[CARD-006, META-005]`
+- Do not show an implicit `Status: Draft`. A Status value appears only when the project defines and exposes that metadata field. `[CARD-010]`
+- Card bodies and disclosures both expand or collapse groups. Use a clear insertion marker for drag destinations.
 
-Buttons, icon buttons, text fields, multiline fields, select, checkbox, radio, segmented control, disclosure, tooltip, menu, dialog, toast/banner, empty state, loading state, and focus-visible variants.
+### 6.5 Search and replacement
 
-## 7. Required screens and states
+- Global Search occupies the left pane and retains an explicit return to Explorer. `[SEARCH-006]`
+- Use a query field plus case-sensitive and whole-word icon toggles. An optional second field and Replace action start global replacement review.
+- Group results by document using the shared disclosure pattern. Separate document headings from result rows and use inline prefix, highlighted match, and suffix elements so highlights never cover adjacent text.
+- Activating a result focuses the relevant editor view, scrolls to the match, and highlights it. `[SEARCH-010, SEARCH-014]`
+- No-results preserves the current editor context and offers query/scope recovery. Scoped-subtree results name and honor the selected subtree.
+- Global Replace Preview fills the middle workspace pane while Search remains left and Inspector remains right. It is never a popup, modal, or floating card. `[SEARCH-011–013]`
+- Mirror the file-tree hierarchy and provide consistent selection controls for groups, documents, and matches, including indeterminate parent states.
 
-### Launcher
+### 6.6 History and Recently Deleted
 
-- First launch/no recent projects.
-- Recent projects.
-- Missing/moved project.
-- Locked/already-open project.
-- Create Project dialog.
-- Open Project native-dialog handoff.
+- History uses a list/detail layout. Selecting an entry directly updates a read-only, line-aligned side-by-side checkpoint/current comparison.
+- Highlight word-level changes inside changed lines. Do not add Preview, Compare, or per-entry leading icons. Restore buttons use text only. `[HIST-007]`
+- Restore confirmation includes a Document, Group subtree, or Entire project selector. Its impact summary and action label change with scope.
+- Recently Deleted reuses the list/detail structure but never shows a diff. The detail pane shows one formatted, read-only deleted-content preview plus separate restore-location information. `[DEL-004–005]`
 
-### Editor — single pane
+### 6.7 Settings, spellcheck, and export
 
-- Default project with Explorer and Inspector open.
-- Both sidebars collapsed.
-- Explorer collapsed only.
-- Inspector collapsed only.
-- Long document with comments.
-- Local search open.
-- Local replace expanded.
-- Toolbar collapsed and expanded.
+- Settings uses the full main pane with shared list/detail editors.
+- Custom style rows show one trailing trash action; reserved styles show `Reserved` in the same trailing column and no trash action. Do not label custom styles `Custom`. `[FMT-004–005, FMT-019]`
+- Metadata rows show a drag handle and trailing trash action. Their list order is display order. `[META-004, META-011]`
+- Dictionary settings use discrete language, dictionary, add-word, and remove-word controls.
+- Spellcheck decorates the misspelled word in place and anchors the spelling menu to it. Do not use a detached explanation card. `[SPELL-001–004]`
+- Export uses the full main pane with scope, inheritance controls, numbering, destination, progress, success, and failure states. Do not place the interface inside a second bordered card. `[EXP-001–010]`
 
-### Editor — companion pane
+### 6.8 Empty, loading, error, and recovery states
 
-- Manuscript left, Research right.
-- Two Manuscript documents.
-- Same document in both panes at different positions.
-- Focus in left versus focus in right; Inspector and toolbar target changes.
-- Companion final tab closing.
+- Use the full available application content region with centered outer margins.
+- Preserve the normal shell, pane context, and tab strip where the state occurs inside an editor.
+- Use nested surfaces only for warnings, recovery choices, destructive confirmation, or remediation.
+- Center admonitions and size them so text and actions are never clipped.
+- ParchMint is offline by design; do not create an offline warning or dialog.
 
-### Explorer states
+## 7. Component library
 
-- Deep nesting.
-- Multi-selection.
-- Range selection.
-- Cut state.
-- Dragging multiple nodes.
-- Valid/invalid drop targets.
-- Cross-section move.
-- Inline rename.
-- Empty Manuscript or Research root.
+The live Penpot library is the exhaustive source for component names and IDs; the approved handoff component matrix must mirror it. The required stable families are:
 
-### Cards
+| Area | Stable components |
+|---|---|
+| Shell | `PM/WorkspaceTopBar`, `PM/Sidebar`, `PM/Inspector`, `PM/Splitter`, `PM/StatusBar` |
+| Explorer | `PM/Tree`, `PM/TreeRow/Root`, `PM/TreeRow/Group`, `PM/TreeRow/Document`, `PM/Tree/InsertionMarker`, `PM/Tree/CutState`, `PM/Tree/MultiSelection`, `PM/InlineRename`, `PM/ContextMenu` |
+| Editor | `PM/EditorPane`, `PM/EditorPaneHeader`, `PM/Tab`, `PM/EditorCanvas`, `PM/FormattingToolbar`, `PM/StyleSelect`, `PM/LocalFindBar`, `PM/SearchMatch`, `PM/SelectionCommentAffordance`, `PM/EditorContextMenu`, `PM/SpellcheckUnderline`, `PM/SpellingContextMenu`, `PM/AtomicBreak/Scene`, `PM/AtomicBreak/Page` |
+| Inspector/comments | `PM/InspectorSection`, `PM/SynopsisEditor`, `PM/MetadataField`, `PM/CommentThread`, `PM/CommentMessage`, `PM/CommentReplyComposer`, `PM/CommentAnchorState`, `PM/OrphanedComment` |
+| Cards | `PM/Card/Group`, `PM/Card/Document`, `PM/Card/InsertionMarker`, `PM/Card/MetadataValue` |
+| Search | `PM/GlobalSearchPanel`, `PM/SearchScopeControl`, `PM/SearchResultGroup`, `PM/SearchResult`, `PM/ReplacePreview`, `PM/ReplacePreviewRow`, `PM/ReplacementSelectionControl` |
+| History/deletion | `PM/HistoryTimeline`, `PM/HistoryEntry`, `PM/NamedSnapshot`, `PM/HistoryPreview`, `PM/HistoryCompare`, `PM/RestoreDialog`, `PM/RecentlyDeletedList`, `PM/DeletedItem`, `PM/DeletedItemPreview` |
+| Settings/export/recovery | `PM/LauncherProjectCard`, `PM/NewProjectDialog`, `PM/SettingsNav`, `PM/StyleEditor`, `PM/MetadataDefinitionEditor`, `PM/DictionarySettings`, `PM/ExportDialog`, `PM/ProgressState`, `PM/ErrorBanner`, `PM/RecoveryDialog` |
+| Controls | `PM/Button`, `PM/IconButton`, `PM/TextField`, `PM/MultilineField`, `PM/Select`, `PM/Checkbox`, `PM/Radio`, `PM/Disclosure`, `PM/Tooltip`, `PM/Toast`, `PM/EmptyState`, `PM/LoadingState`, `PM/FocusVisible` |
 
-- Manuscript default.
-- Research selected.
-- Deep expanded hierarchy.
-- Collapsed groups.
-- All density levels.
-- Editing Synopsis/metadata.
-- Drag/reorder/multi-select.
+Library rules:
 
-### Comments and Inspector
+- All production instances derive from tokens.
+- Repeated shell and feature blocks use shared components.
+- Do not recreate generic parallel owners for component-specific menus, dialogs, toolbars, tab bars, banners, or ribbon selectors.
+- A zero-reference component is deleted only after checking whether a required host screen is missing.
+- Do not retain unused screen-local copies after their shared component is updated.
 
-- Unresolved thread.
-- Collapsed replies.
-- Expanded replies/composer.
-- Resolved thread filter.
-- Orphaned comment.
-- Group Inspector with no Comments panel.
-- Metadata definitions absent versus many fields.
+## 8. Required reference coverage
 
-### Search
+The live screen inventory remains authoritative. At minimum, preserve these distinct reference categories:
 
-- Query entry.
-- Streaming results.
-- No results.
-- Scoped subtree.
-- Search result navigation.
-- Global replacement preview with excluded matches/documents.
-- Stale/deleted result notification.
+| Page | Required coverage |
+|---|---|
+| 03 Launcher | First launch, recent projects, missing project, locked project, New Project, native Open handoff |
+| 04 Editor | Sidebar combinations, persistent toolbar, one and many tabs, equal-shrink overflow, long title, local Find/Replace, comment affordance, semantic content, companion focus, same document twice, companion closed |
+| 05 Cards | Manuscript, Research, deep/collapsed hierarchy, density variants, drag/multi-select, Synopsis and metadata presentation |
+| 06 Search | Query, streaming, no results, scoped subtree, highlighted grouped results, middle-pane replacement preview, stale result |
+| 07 Comments/Inspector | Unresolved, resolved, collapsed replies, expanded replies/composer, orphaned, no Comments, no metadata, many metadata fields |
+| 08 History/Deleted | History list and word-level comparison, named snapshot, restore scopes, Recently Deleted formatted preview and fallback location |
+| 09 Settings | General, Styles, style replacement, Metadata fields, Dictionary, spellcheck settings |
+| 10 Export/Save | Export scopes, inheritance, numbering, progress, success, failure, save status |
+| 11 Recovery states | History unavailable, index rebuild, migration, corrupt file, pasted image, lost anchor, document loading, save/recovery errors, minimum-window behavior |
+| 12 Accessibility | Focus order, semantic annotations, contrast/targets/motion, keyboard walkthrough |
+| 13 Platform/layout | 1280 × 720, 1440 × 900, 1920 × 1080, scaled 2560 × 1440, Windows, macOS, Linux conventions |
+| 14 Flows | The ten prototype flows below |
+| 15 Handoff | Current completion, questions, gaps, and re-export inventory |
 
-### Save/recovery/history
+Do not retain separate static screens for behavior that produces no distinct rendered state.
 
-- Dirty.
-- Saving.
-- Saved.
-- Save error with retry.
-- Recovered changes after crash.
-- History grouped by session/date.
-- Named snapshot.
-- Document restore.
-- Group restore.
-- Project restore.
-- Recently Deleted and fallback restore location.
+## 9. Layout and platform studies
 
-### Settings
+Design and annotate:
 
-- General project settings.
-- Styles list/editor and inheritance.
-- Delete unused custom style.
-- Replace in-use style before deletion.
-- Metadata field list/editor/applicability/Card visibility.
-- Global and project dictionaries if spellcheck is included.
-
-### Export
-
-- Entire manuscript.
-- Selected group.
-- Selected documents.
-- Inherited include/title/page-break controls.
-- Numbering option.
-- Successful export actions.
-- Export failure.
-
-### Error and edge states
-
-- History unavailable but current project readable.
-- Search index rebuilding.
-- Project format migration.
-- Corrupt canonical file.
-- Unsupported pasted image.
-- Lost comment anchor.
-- Window below recommended size.
-- Offline state should look normal because no network is required.
-
-## 8. Layout studies
-
-Design at least:
-
-- 1280 × 720 — minimum supported workspace study.
+- 1280 × 720 — minimum supported window.
 - 1440 × 900 — primary reference.
 - 1920 × 1080 — wide workspace.
-- 2560 × 1440 at scaled UI — high-DPI study.
+- 2560 × 1440 with scaled UI — high-DPI reference.
 
-Do not design a separate tablet/mobile layout.
+At narrow widths, preserve editor usability, allow sidebars to collapse, collapse Inspector before crushing prose, and keep the focused pane and toolbar operable. Do not introduce a tablet/mobile layout. `[WS-011, A11Y-005]`
 
-At narrow sizes:
+Document Windows/Linux Ctrl versus macOS Command notation, native menu placement, native dialog handoff, context-menu conventions, scrollbars, focus rings, and native title-bar exclusion. Use shared app components rather than three unrelated designs. `[PLAT-001–003]`
 
-1. Preserve a usable editor width.
-2. Allow sidebars to collapse.
-3. Collapse Inspector before crushing prose.
-4. Keep the focused pane and toolbar controls accessible.
-5. Do not convert the application into a mobile drawer/navigation pattern.
-
-Document exact min/default/max panel dimensions in annotations and tokens.
-
-## 9. Cross-platform variants
-
-Create a comparison board for:
-
-- Command notation: Ctrl on Windows/Linux, Command on macOS.
-- Native menu placement.
-- Native dialog handoff.
-- Context menu conventions.
-- Scrollbar expectations.
-- Window chrome exclusion.
-- Default focus-ring behavior.
-
-Use shared app components wherever possible. Do not create three unrelated visual designs.
-
-## 10. Accessibility requirements in the design
+## 10. Accessibility annotations
 
 Annotate:
 
-- Keyboard order.
-- Focus-visible states.
-- Accessible names for icon-only controls.
-- Tree levels/expanded/selected states.
-- Active versus selected distinction.
-- Tab semantics and close buttons.
-- Search-result counts and streamed updates.
+- Keyboard order and complete Editor plus History/Recently Deleted focus walkthroughs.
+- Focus-visible, selected, active, expanded, dirty, disabled, and error states.
+- Accessible names and tooltips for icon-only controls.
+- Tree levels, tablist/tab semantics, full tab titles, and named close controls.
+- Search result counts, streamed updates, match state, and replace-preview region.
 - Save/error announcements.
-- Comment anchor/thread relationship.
-- Dialog initial focus and destructive confirmation.
-- Minimum hit targets.
-- Text contrast.
-- Reduced-motion alternatives.
+- Comment anchor/thread relationship, resolution state, and Resolve/Reopen actions.
+- Dialog initial focus, Escape/cancel behavior, and destructive consequences.
+- Minimum targets, contrast, reduced motion, and 100–200% scaling behavior.
 
-Show at least one complete keyboard-focus walkthrough for Editor mode and one for History/Recently Deleted.
+Native assistive-technology validation remains an implementation/release requirement, not a Penpot pass. `[A11Y-001–008]`
 
 ## 11. Prototype flows
 
-Create clickable flows for:
+Maintain clickable flows for:
 
 1. Create project → initial document → type → Saved.
-2. Create nested group/document → drag reorder → cross-section move.
-3. Open Research in companion → focus panes → Inspector follows focus.
-4. Open same document twice → independent view positions.
-5. Select text → add comment → reply → resolve → navigate back.
+2. Create hierarchy → reorder → cross-section move.
+3. Open Research in companion → switch focus → Inspector and toolbar follow.
+4. Open the same document twice → preserve independent view positions.
+5. Select text → add comment → reply → Resolve → Reopen/navigate.
 6. Switch to Cards → edit Synopsis → reorder → return to Editor.
-7. Global search → open result → replacement preview → apply.
-8. Create named snapshot → delete group → Recently Deleted → restore.
+7. Global Search → open result → middle-pane replacement preview → apply.
+8. Create snapshot → delete group → Recently Deleted → restore.
 9. Export selected scope.
 10. Save failure → retry.
 
-## 12. Handoff quality gate
+## 12. Quality and handoff gate
 
-Before declaring design complete:
+Before requesting product-owner approval:
 
-- Every required screen/state is present or explicitly marked not applicable.
-- Every production component derives from tokens.
-- Approved components have stable names.
-- No unresolved generic layer names remain in exported production components.
-- Requirement IDs are attached to screens/components/interactions.
-- Keyboard/focus/error/loading states exist.
-- Cross-platform variants are documented.
-- The artifact package passes `04-design-artifact-handoff-contract.md`.
-- A design decision log records choices that are not directly dictated by the PRD.
+- Every required reference state is present or marked not applicable with a requirement-based explanation.
+- Components and screens retain stable `PM/` names and requirement metadata.
+- Repeated blocks are shared component instances and no required component has zero references.
+- No generic layer names, clipped content, accidental overlap, or hidden obsolete controls remain.
+- Keyboard, focus, empty, loading, error, recovery, and platform variants are documented.
+- The decision log contains only choices not already dictated by the PRD or this brief.
+- The draft handoff inventory identifies re-export scope, unresolved product questions, implementation-only validation gaps, and known deviations.
+- The final package satisfies `04-design-artifact-handoff-contract.md`.
+
+Do not export the final handoff package until explicit product-owner approval.

@@ -3,12 +3,12 @@ handoff:
   version: "1.0.0"
   status: "draft" # draft | approved | superseded
   exported_at_utc: "YYYY-MM-DDTHH:MM:SSZ"
-  product_spec_version: "1.0"
+  product_spec_version: "1.8"
   architecture_version: "1.0"
   approved_by: null
   approval_date: null
 penpot:
-  file_name: "ParchMint UI"
+  file_name: "ParchMint"
   file_id: ""
   penpot_version: ""
   mcp_server: ""
