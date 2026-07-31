@@ -1,8 +1,8 @@
 # ParchMint v1 Final Architecture
 
 **Status:** Final v1 architecture baseline  
-**Version:** 1.0  
-**Date:** 2026-07-28  
+**Version:** 1.2
+**Date:** 2026-07-31
 **Primary audience:** Implementation agents, architecture reviewers, maintainers
 
 ## 1. Decision summary
@@ -469,12 +469,14 @@ trait HistoryStore {
     fn initialize(&self, project: &ProjectPath) -> Result<()>;
     fn checkpoint(&self, input: CheckpointInput) -> Result<CheckpointId>;
     fn list(&self, query: HistoryPageQuery) -> Result<HistoryPage>;
-    fn preview(&self, checkpoint: CheckpointId, scope: RestoreScope) -> Result<SnapshotPreview>;
-    fn restore(&self, checkpoint: CheckpointId, scope: RestoreScope) -> Result<RestorePlan>;
+    fn preview(&self, checkpoint: CheckpointId) -> Result<SnapshotPreview>;
+    fn restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan>;
     fn verify(&self) -> Result<HistoryIntegrityReport>;
     fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport>;
 }
 ```
+
+`preview` and `restore` operate on the entire canonical project state captured by the checkpoint. The v1 domain port does not expose document, group, subtree, or other partial checkpoint restore scopes.
 
 Only `parchmint-history-git2` imports `git2`.
 
@@ -679,7 +681,7 @@ TextAnchor
 
 The ProseMirror adapter maps anchors through transaction mappings. The worker/canonical projection emits updated anchors as needed. On load after canonical/external transformations, reattachment is conservative; ambiguity produces an orphan.
 
-Comment UI geometry comes from the focused EditorView. The selection-end Add Comment affordance must be view-local and must not be persisted.
+Comment anchor geometry comes from the focused EditorView and remains view-local. Comment creation is invoked through semantic editor-context-menu or Inspector commands; transient UI geometry must not be persisted.
 
 ## 15. Title synchronization
 

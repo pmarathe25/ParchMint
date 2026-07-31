@@ -1,8 +1,8 @@
 # ParchMint Future Work
 
 **Status:** Deferred roadmap and extension constraints  
-**Version:** 1.0  
-**Date:** 2026-07-28
+**Version:** 1.2
+**Date:** 2026-07-31
 
 ## 1. How to use this document
 
@@ -95,6 +95,7 @@ These features should use `Importer` and `ContentHandler` ports, preview an impo
 
 ## 6. Search and analysis
 
+- User-selectable Global Search scopes for Manuscript, Research, both, or a selected subtree.
 - Regular-expression search/replace.
 - Saved searches.
 - Replacement in Synopsis/metadata.
@@ -106,6 +107,8 @@ Search-backend replacement remains possible through `SearchIndex`; current FTS5 
 
 ## 7. Export and publishing
 
+- Partial export scopes for a selected group/subtree or selected documents.
+- Per-group and per-document inclusion overrides with explicit inheritance and preview.
 - Generated table of contents.
 - In-app export preview.
 - DOCX.
@@ -121,6 +124,7 @@ Each new target implements `Exporter` over the neutral export model.
 
 ## 8. History, backup, and maintenance
 
+- Partial checkpoint restoration for a selected document, group, or subtree, including scope-specific impact previews.
 - Remote backup by pushing the app-managed history.
 - Restore project from remote.
 - Multiple backup destinations.

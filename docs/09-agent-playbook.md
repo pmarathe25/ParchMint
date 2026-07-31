@@ -47,7 +47,7 @@ Before approving the handoff, review:
 - Editor/companion/Inspector focus behavior.
 - Cards as the same data projection.
 - Deep tree and multi-selection states.
-- Comments and selection affordance.
+- Comments, editor-context-menu creation, and anchor indication.
 - Search and replacement preview.
 - History/Recently Deleted clarity.
 - Save/error/recovery states.

@@ -175,7 +175,7 @@ Tasks:
 - Create checkpoint categories and metadata.
 - Named snapshots including empty commits.
 - Bounded paging and filtering.
-- Preview and additive restore by scope.
+- Whole-checkpoint preview and additive whole-project restore.
 - Missing/corrupt history isolation.
 - Exclusive-owner stale lock recovery.
 - Low-priority pack/verify/cleanup maintenance.
@@ -317,7 +317,6 @@ Implement:
 
 - Anchor mapping.
 - Decorations.
-- Selection-end affordance geometry.
 - Context-menu creation.
 - Replies/resolve/orphan states through application services.
 

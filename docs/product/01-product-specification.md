@@ -1,8 +1,8 @@
 # ParchMint v1 Product Specification
 
 **Status:** Product-owner revised v1 product baseline
-**Version:** 1.8
-**Date:** 2026-07-30
+**Version:** 2.0
+**Date:** 2026-07-31
 **Primary audience:** Product owner, design agents, implementation agents, QA agents
 
 ## 1. Purpose
@@ -140,10 +140,12 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 - Research attachments and file previews.
 - Recursive editor splits or top/bottom companion layout.
 - Regex search.
+- User-selectable Global Search scopes.
 - Search over comments or a project-wide Comments view.
 - Generated table of contents.
 - In-app export preview.
 - DOCX, EPUB, PDF, Markdown, LaTeX, or print-ready export.
+- Partial manuscript export by group/document selection or per-node inclusion overrides.
 - Track changes, footnotes/endnotes, tables, embedded images, advanced page layout.
 - Project/style/metadata templates.
 - Remote history backup.
@@ -179,8 +181,8 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 - **WS-009:** Focusing or clicking an editor view sets the Inspector context to that editor’s document, even if the tree retains another selection.
 - **WS-010:** Focus, selection, open-tab state, and active context must be distinguishable, keyboard accessible, and programmatically exposed. Color alone is insufficient to communicate any of these states.
 - **WS-011:** The minimum supported application-window size is 1280 × 720 logical pixels. ParchMint must prevent resizing below that minimum rather than substituting a mobile layout or feature-reduced workspace.
-- **WS-012:** Every project workspace must provide persistent, mutually exclusive navigation to Editor, Cards, Global Search, project History, Recently Deleted, Export, and Project Settings. All destinations remain available while a project is open, and the current destination is exposed programmatically.
-- **WS-013:** The bottom status bar must provide keyboard-accessible controls to show or hide Explorer and Inspector in addition to word count, save status, and a contextual document-History action. The History action opens project History filtered to the focused pane's active document and is unavailable when no document is active.
+- **WS-012:** Every project workspace must provide persistent, mutually exclusive navigation to Editor, Cards, project History, Recently Deleted, Export, and Project Settings. Global Search is entered from the Search control in the Explorer header and replaces Explorer in the left sidebar. All top-level destinations remain available while a project is open, and the current destination or sidebar panel is exposed programmatically.
+- **WS-013:** The bottom status bar must provide keyboard-accessible controls to show or hide Explorer and Inspector in addition to word count, save status, and a contextual document-History action. Each pane-visibility control must expose pressed state and use a visible selected treatment while its pane is shown. The History action opens project History filtered to the focused pane's active document and is unavailable when no document is active.
 - **WS-014:** Applicable Synopsis and metadata values in the Inspector must be editable in place; Comments remain available only for document context.
 - **WS-015:** Inspector sections, Explorer section roots, grouped Global Search results, and comparable Cards groups must expose consistent expand/collapse behavior and state. Inspector sections and the Manuscript and Research roots may be collapsed independently without changing authored state.
 
@@ -250,7 +252,7 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 - **TOOL-002:** The formatting toolbar must remain visible whenever Editor mode is active and must not have a collapsed state in v1.
 - **TOOL-003:** Toolbar commands target the focused editor view.
 - **TOOL-004:** Interacting with the toolbar must not lose the active editor context for command and undo routing.
-- **TOOL-005:** The toolbar must expose style selection, common inline marks, lists/quote, links, Scene Break, and Page Break. Comment creation must not appear in the formatting toolbar; it remains available through the selection-end affordance and editor context menu defined by CMT-007.
+- **TOOL-005:** The toolbar must expose style selection, common inline marks, lists/quote, links, Scene Break, and Page Break. Comment creation must not appear in the formatting toolbar; it remains available through the editor context menu and Comments panel defined by CMT-007–008.
 
 ### 8.7 Titles
 
@@ -281,11 +283,11 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 
 - **CMT-001:** Documents must support range, cursor-position, and document-level comments.
 - **CMT-002:** A comment is a thread with a root message and collapsible replies. Expanding a thread must render its replies in chronological order inside that thread, and the same disclosure control must collapse them again. Every thread must visibly distinguish unresolved and resolved state without relying on color alone.
-- **CMT-003:** Each thread must provide an in-thread reply composer. Users must add replies, edit or delete individual messages, resolve unresolved threads, reopen resolved threads, and filter active-document threads by resolved state. Each visible thread must provide the action applicable to its current state.
+- **CMT-003:** Each thread must provide an in-thread reply composer. Users must add replies, edit or delete individual messages, resolve unresolved threads, and reopen resolved threads. All active-document threads appear in one list without separate resolved/unresolved sections; each visible thread retains its per-thread status and provides the action applicable to that state.
 - **CMT-004:** Comment bodies are plain text with paragraph breaks.
 - **CMT-005:** Comments must appear in the active document's Inspector and be indicated at their editor anchors. A document Inspector always includes Comments and shows either the document's actual threads or an explicit empty state.
 - **CMT-006:** Selecting a comment scrolls to and highlights its anchor in the last-focused view of that document.
-- **CMT-007:** Selecting text must expose an Add Comment affordance near the selection end, and the context menu must provide Add Comment.
+- **CMT-007:** The editor context menu must provide Add Comment for the current selection or cursor position. Selecting text must not add a floating or selection-end comment affordance.
 - **CMT-008:** With no selection, Add Comment creates a position comment; the Comments panel can create a document-level comment.
 - **CMT-009:** Comments must be stored in JSON sidecars outside the canonical HTML prose.
 - **CMT-010:** Text anchors must include stable block ID, range, quotation, and context sufficient for conservative reattachment.
@@ -314,8 +316,8 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 - **SEARCH-003:** Enter and Shift+Enter navigate results; Escape closes local search and returns focus. Replacement controls are collapsed initially and can be expanded to reveal a replacement field and Replace action.
 - **SEARCH-004:** Local search supports case-sensitive and whole-word matching and distinguishes every match from the active match.
 - **SEARCH-005:** Local replacement participates in document undo.
-- **SEARCH-006:** Global Search replaces Explorer in the left sidebar and provides an explicit return to Explorer. It supports query, case-sensitive and whole-word controls, plus an optional replacement field and Replace action. Replacement review temporarily replaces the normal editor content in the middle workspace pane.
-- **SEARCH-007:** Global scope supports Manuscript, Research, both, entire project, or selected subtree.
+- **SEARCH-006:** Global Search is opened from the Search control in the Explorer header, replaces Explorer in the left sidebar, and provides an explicit return to Explorer. It supports query, case-sensitive and whole-word controls, plus an optional replacement field and Replace action. Replacement review temporarily replaces the normal editor content in the middle workspace pane.
+- **SEARCH-007:** v1 Global Search always searches the entire project. User-selectable Manuscript, Research, combined, or subtree scopes are deferred, and v1 must not show a scope selector.
 - **SEARCH-008:** Searchable fields are document body, display title, Synopsis, and user-defined metadata.
 - **SEARCH-009:** Global search supports case-sensitive and whole-word modes. Regex is deferred.
 - **SEARCH-010:** Results stream, are virtualized, are grouped by document, identify the matched term in each excerpt, and navigate the focused editor view to the selected match.
@@ -357,7 +359,7 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 - **HIST-004:** Checkpoints include project manifest, documents, styles, metadata, Synopsis, annotations, and deletion tombstones, but exclude caches, indexes, recovery files, and workspace layout.
 - **HIST-005:** History distinguishes autosave, explicit save, structural, named snapshot, and restoration events.
 - **HIST-006:** Users may create named snapshots after pending changes are flushed, including a named marker when no content changed.
-- **HIST-007:** History must support chronological virtualized browsing, filtering to changes affecting the active document, a read-only side-by-side checkpoint-versus-current comparison with word-level changes, and document, group-subtree, or whole-project restoration. Selecting an entry updates the comparison directly. Restore confirmation must identify the selected scope and its impact; separate Preview and Compare actions are not required.
+- **HIST-007:** History must support chronological virtualized browsing, filtering to changes affecting the active document, a read-only side-by-side checkpoint-versus-current comparison with word-level changes, and restoration of the entire project to a selected checkpoint. Selecting an entry updates the comparison directly. Restore confirmation must identify the selected checkpoint and whole-project impact; separate Preview and Compare actions are not required. Document, group-subtree, and other partial checkpoint restoration are deferred.
 - **HIST-008:** Restoration creates a new checkpoint and never rewinds or rewrites existing history.
 - **HIST-009:** Current canonical project files must remain readable if Git history is missing or damaged; the user may reinitialize history from current state.
 - **HIST-010:** History maintenance runs only on background workers and must not compete perceptibly with active editing.
@@ -395,13 +397,13 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 ### 8.18 Export
 
 - **EXP-001:** v1 exports one self-contained HTML5 manuscript.
-- **EXP-002:** Export scope supports entire Manuscript, one group and descendants, or selected documents.
-- **EXP-003:** Project defaults, group overrides, and document overrides use Inherit/Enabled/Disabled for inclusion, title emission, and page-break behavior.
+- **EXP-002:** v1 always exports the entire Manuscript. Exporting one group, selected documents, or another partial scope is deferred.
+- **EXP-003:** Project defaults, group overrides, and document overrides use Inherit/Enabled/Disabled for title emission and page-break behavior. Per-node inclusion overrides are deferred so every Manuscript document is included in v1 export.
 - **EXP-004:** Numbering is an export-run option rather than arbitrary persistent per-node numbering.
 - **EXP-005:** Group titles may emit headings despite groups having no body.
 - **EXP-006:** The exporter must not duplicate existing document title content.
 - **EXP-007:** Research, comments, Synopsis, and metadata are excluded unless a future feature says otherwise.
-- **EXP-008:** The export dialog contains scope, output path/name, inclusion/title/page-break controls, numbering, and Export.
+- **EXP-008:** The export interface identifies Entire Manuscript as the fixed v1 scope and contains output path/name, title/page-break controls, numbering, and Export. It must not show scope selection or inclusion controls.
 - **EXP-009:** After export, the user may open the result or reveal it in the file manager.
 - **EXP-010:** Generated TOC and in-app preview are deferred.
 
@@ -468,11 +470,11 @@ A document has a title, semantic rich-text body, Synopsis, metadata, comments, o
 3. **Compare:** open Manuscript in primary, Research or another Manuscript document in companion, focus changes Inspector and toolbar target.
 4. **Same document twice:** open one document in both panes, use independent scroll/selection, edit and undo from either view.
 5. **Plan in Cards:** edit Synopsis/metadata, expand/collapse, reorder, open a document in Editor.
-6. **Comment:** select text, use selection-end affordance, reply, resolve, navigate, reopen.
-7. **Search/replace:** local search in one view; global search by scope; preview and apply body replacement.
+6. **Comment:** select text, use the editor context menu, reply, resolve, navigate, reopen.
+7. **Search/replace:** local search in one view; whole-project global search; preview and apply body replacement.
 8. **Recover:** force termination after unsaved input, replay recovery, verify canonical and history consistency.
-9. **Delete/restore:** delete subtree, continue editing, restore through Recently Deleted or History.
-10. **Export:** configure scope/inheritance and generate self-contained HTML.
+9. **Delete/restore:** delete subtree, continue editing, restore the deleted item through Recently Deleted or restore the entire project to a checkpoint through History.
+10. **Export:** configure title/page-break behavior and generate one self-contained HTML file for the entire Manuscript.
 11. **Move platform:** close cleanly, copy project between operating systems, reopen with identical hierarchy/content/history.
 
 ## 14. v1 release gates

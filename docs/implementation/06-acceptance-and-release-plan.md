@@ -125,7 +125,7 @@ Retain the validated V03 suite as a regression baseline:
 - Named empty snapshot.
 - Bounded paging.
 - Filtering and previews.
-- Document/subtree/project restore.
+- Whole-checkpoint project restore; document and subtree checkpoint restore remain unavailable.
 - Additive history.
 - Missing/corrupt object isolation.
 - Interrupted ref lock recovery.
@@ -300,7 +300,7 @@ Run on each supported platform/runtime:
 - Copy/paste across the two views.
 - Context menu.
 - Undo/redo around composition and paste.
-- Comment decorations/selection affordance during composition.
+- Comment decorations and context-menu creation during composition.
 
 Unknown is a failure for release.
 
