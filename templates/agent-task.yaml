@@ -1,0 +1,17 @@
+schema_version: 1
+task_id: ""
+title: ""
+wave_id: ""
+baseline_commit: ""
+instruction_file: agent-stages/12-feature-slice-agent.md
+requirements: []
+design_components: []
+design_screens: []
+dependencies: []
+ownership:
+  include: []
+  exclude: []
+acceptance: []
+commands: []
+platforms: []
+stop_conditions: []

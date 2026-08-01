@@ -1,0 +1,23 @@
+schema_version: 1
+pipeline_version: "1.2"
+status: initialized
+repository:
+  baseline_commit: ""
+  current_commit: ""
+governing_versions:
+  build_kit: "1.2"
+  product_spec: "2.0"
+  architecture: "1.2"
+  design_brief: "2.3"
+  design_handoff: ""
+  design_manifest_sha256: ""
+current_stage: S00
+accepted_handoffs: {}
+approval_gates:
+  G10_design_reconciliation: pending
+  G20_material_deviation: not_required
+  G90_release: not_started
+blocked_issues: []
+pending_stages:
+  - S00
+history: []

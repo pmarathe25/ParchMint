@@ -1,0 +1,19 @@
+schema_version: 1
+stage_id: ""
+run_id: ""
+accepted_commit: ""
+inputs:
+  baseline_commit: ""
+  dependency_handoffs: []
+outputs:
+  contracts: []
+  schemas: []
+  generated_bindings: []
+  fixtures: []
+  ports: []
+  implementations: []
+  commands: []
+  evidence: []
+versions: {}
+known_constraints: []
+consumer_notes: []

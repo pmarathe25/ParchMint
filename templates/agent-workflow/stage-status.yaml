@@ -1,0 +1,28 @@
+schema_version: 1
+stage_id: ""
+run_id: ""
+result: blocked # passed | failed | blocked | needs_approval
+baseline_commit: ""
+output_commit: ""
+started_at: ""
+completed_at: ""
+requirements: []
+design_components: []
+files_changed: []
+commands:
+  - command: ""
+    result: not_run
+platforms:
+  linux: not_required
+  windows: not_required
+  macos: not_required
+contracts_changed: []
+dependencies_added_or_changed: []
+product_changes: []
+architecture_changes: []
+design_deviations: []
+security_or_license_exceptions: []
+blocking_issues: []
+known_nonblocking_issues: []
+artifacts: []
+recommended_next_stages: []

@@ -1,0 +1,11 @@
+schema_version: 1
+gate_id: ""
+status: pending # pending | approved | rejected
+subject: ""
+source_commit: ""
+requested_at: ""
+resolved_at: ""
+approved_by: ""
+approved_option: ""
+waivers: []
+notes: ""

@@ -1,8 +1,8 @@
 # ParchMint Design Artifact Handoff Contract
 
 **Status:** Final handoff contract  
-**Version:** 1.0  
-**Date:** 2026-07-28
+**Version:** 1.1  
+**Date:** 2026-07-31
 
 ## 1. Purpose
 
@@ -229,7 +229,7 @@ The implementation agent must not paste generated design code wholesale into pro
 
 ## 7. Design reconciliation before implementation
 
-The first UI implementation deliverable is `docs/design/design-reconciliation.md` using the provided template.
+The first UI implementation deliverable is the versioned package under `docs/design/reconciliation/<handoff-version>/`, created from `templates/design-reconciliation/`.
 
 It must include:
 
@@ -245,7 +245,7 @@ It must include:
 10. Conflicts, omissions, and proposed resolutions.
 11. Intentional deviations requiring approval.
 
-No broad UI implementation should begin before this report is reviewed.
+No broad UI implementation should begin before `approval.yaml` is committed with `status: approved`. The automated Orchestrator Agent must stop at this G10 gate.
 
 ## 8. Token import pipeline
 

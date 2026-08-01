@@ -1,0 +1,12 @@
+schema_version: 1
+source:
+  product_spec_version: ""
+  architecture_version: ""
+  design_handoff_version: ""
+  design_manifest: ""
+components: []
+screens: []
+tokens: []
+assets: []
+interactions: []
+requirements: []

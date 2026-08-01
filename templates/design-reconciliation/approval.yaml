@@ -1,0 +1,12 @@
+schema_version: 1
+status: pending
+product_spec_version: ""
+architecture_version: ""
+design_handoff_version: ""
+approved_by: ""
+approved_at: ""
+reconciliation_commit: ""
+design_manifest_sha256: ""
+blocking_issues: []
+approved_nonblocking_issues: []
+notes: ""

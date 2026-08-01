@@ -1,8 +1,8 @@
 # ParchMint v1 Implementation Plan
 
 **Status:** Final execution plan  
-**Version:** 1.0  
-**Date:** 2026-07-28
+**Version:** 1.2  
+**Date:** 2026-07-31
 
 ## 1. Purpose
 
@@ -15,10 +15,11 @@ Do not build the entire product in one agent run. Each phase has explicit entry 
 Before implementation begins:
 
 - The complete build kit is committed.
-- The approved Penpot handoff passes `04-design-artifact-handoff-contract.md`.
+- The approved Penpot handoff passes `docs/design/04-design-artifact-handoff-contract.md`.
 - The design version is frozen and recorded.
 - Tauri/ProseMirror reference lock hashes are available under `evidence/reference-locks/`.
 - Windows, macOS, and Linux CI runners or native test hosts are available.
+- The design reconciliation package has been approved at G10 before broad implementation begins.
 
 ## 3. Engineering workflow
 
@@ -55,6 +56,12 @@ Every pull request must identify:
 
 Temporary development flags are allowed for incomplete vertical slices. No v1 requirement may remain hidden behind an undocumented release flag.
 
+### 3.4 Automated orchestration
+
+The authoritative execution workflow is `docs/09-agent-playbook.md` plus the files under `agent-stages/`. The Orchestrator Agent owns dispatch, independent gate verification, integration, accepted handoff pointers, and pipeline state. Stage agents do not merge their own work or rely on conversation history.
+
+Only G10 design reconciliation, G20 material deviations, and G90 release approval require product-owner review. Other phase gates may advance automatically when their objective criteria pass.
+
 ## 4. Phase 0 — Repository bootstrap and governance
 
 ### Goal
@@ -63,7 +70,7 @@ Create a reproducible monorepo with cross-platform CI, contracts, linting, depen
 
 ### Tasks
 
-1. Create the repository layout from `02-final-architecture.md`.
+1. Create the repository layout from `docs/architecture/02-final-architecture.md`.
 2. Add Rust and Node toolchain pin files.
 3. Bootstrap Tauri 2.11.5 and React/TypeScript.
 4. Import the exact ProseMirror package versions from the validated reference lock, then commit a new application lockfile.
@@ -193,7 +200,7 @@ Tasks:
 - FTS5 assertion.
 - Stable block/revision schema.
 - Body/title/Synopsis/metadata indexing.
-- Scope filtering.
+- Entire-project v1 query behavior; keep any internal future-scope hooks behind `SearchIndex` and do not expose section/subtree controls.
 - Escaped MATCH query generation.
 - Case-sensitive/whole-word post-filter.
 - Streaming batches/cancellation.
@@ -212,36 +219,33 @@ Tasks:
 - V03/V04 semantics are reproduced in the application workspace.
 - Background tasks do not run on the UI thread.
 
-## 8. Phase 4 — Design reconciliation and design-system import
+## 8. Phase 4 — Approved design-system import
 
 ### Goal
 
-Translate the approved Penpot source into an implementation plan before broad UI coding.
+Convert the already approved G10 reconciliation and Penpot handoff into deterministic implementation assets and test fixtures. Do not reinterpret the design.
 
 ### Tasks
 
-1. Validate the handoff manifest/checksums.
-2. Use Penpot MCP and/or `.penpot` inspection to inventory components/screens/tokens.
-3. Complete `templates/design-reconciliation-report.md`.
-4. Complete implementation targets in `component-matrix.csv`.
-5. Import tokens and generate CSS custom properties.
-6. Import/optimize SVG assets with stable names.
-7. Create deterministic UI fixtures matching reference images.
-8. Establish visual-regression capture sizes and tolerances.
-9. Record approved deviations or unresolved design questions.
+1. Revalidate the approved reconciliation commit and design-manifest checksum.
+2. Import tokens and generate CSS custom properties and TypeScript metadata.
+3. Import/optimize SVG assets with stable names and an asset manifest.
+4. Create deterministic UI fixtures matching approved reference images.
+5. Establish screenshot automation, capture sizes, and tolerances from the approved visual-regression plan.
+6. Populate implementation paths in the approved component map.
+7. Record any newly discovered design conflict as a G20 proposal rather than resolving it silently.
 
 ### Deliverables
 
-- `docs/design/design-reconciliation.md`.
 - `design/generated/tokens.css`.
 - `design/generated/token-metadata.ts`.
 - Imported assets and asset manifest.
-- Code component map.
-- Initial screenshot harness.
+- Updated implementation map with code targets.
+- Initial screenshot/accessibility fixture harness.
 
 ### Gate
 
-Product owner or designated reviewer approves the reconciliation report. Broad UI implementation does not precede this gate.
+The Orchestrator Agent advances automatically when generated output is deterministic, checksums and component mappings pass, and no unapproved deviation exists.
 
 ## 9. Phase 5 — Application shell
 
@@ -416,15 +420,15 @@ Integration agents should merge through contracts and fixture tests rather than 
 
 ## 14. Implementation reports
 
-At each phase, produce:
+At each stage, produce the standard versioned run package under `agent-workflow/runs/<stage-id>/<run-id>/`:
 
-- `status.yaml` based on the supplied template.
-- Requirement/design traceability updates.
-- Tests and benchmark results.
-- Cross-platform result matrix.
-- Known risks.
-- ADR list.
-- Screenshots for changed reference states.
+- `dispatch.yaml`.
+- `status.yaml`.
+- `handoff.yaml`.
+- `report.md`.
+- `evidence/` containing tests, benchmarks, platform results, screenshots, and relevant raw output.
+
+Also update requirement/design traceability and ADRs as required. The Orchestrator Agent independently verifies and records accepted handoffs.
 
 ## 15. Stop conditions
 

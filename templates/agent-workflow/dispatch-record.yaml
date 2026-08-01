@@ -1,0 +1,14 @@
+schema_version: 1
+stage_id: ""
+run_id: ""
+instruction_file: ""
+baseline_commit: ""
+dispatched_at: ""
+dependency_handoffs: []
+approved_gates: []
+ownership:
+  include: []
+  exclude: []
+required_commands: []
+required_platforms: []
+stop_conditions: []
