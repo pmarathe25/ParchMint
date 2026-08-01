@@ -1,22 +1,20 @@
-# S120 — Cross-Platform Release Hardening
+# S120 — Release Hardening
 
 ## Goal
 
-Produce installable, reproducible release candidates and complete platform-specific operational work.
+Produce installable, secured, supportable candidates on all target platforms.
 
 ## Tasks
 
-Follow Phase 8 and the acceptance plan:
-
-- Windows installer, WebView2 behavior, upgrade/uninstall, file locks, high DPI, shortcuts, clipboard/drag/drop, and screen reader.
-- macOS app/dmg, signing/notarization workflow, WKWebView, menus/dialogs, VoiceOver, scaling, path normalization.
-- Linux deb/runtime dependency matrix, X11/Wayland, WebKitGTK variants, clipboard/IME/drag/drop, Orca/AT-SPI; do not claim AppImage support unless separately proven.
-- Shared migration, clean-machine install/launch/uninstall, SBOM/notices/advisory scans, package provenance, and project interchange.
+- Windows installer/upgrade/uninstall/WebView2/project-lock/single-instance/native input/accessibility.
+- macOS app/DMG/signing/notarization/WKWebView/native menus/VoiceOver.
+- Linux `.deb`/supported WebKitGTK matrix/Wayland/X11/Orca. AppImage remains deferred.
+- Clean-machine install/launch/uninstall.
+- Cross-platform project interchange.
+- Migration/upgrade testing.
+- Exact locks, advisories, provenance, licenses/notices, SBOM, package hashes.
+- Final Light/Dark resources and offline spellcheck language/dictionary packages.
 
 ## External inputs
 
-When signing/notarization credentials are unavailable, finish all unsigned/reproducible work and produce an exact credential/input request. Do not fabricate signed evidence.
-
-## Pass criteria
-
-Release candidates install, launch, upgrade, migrate, and interchange correctly on all supported platforms; package provenance and notices are complete.
+Signing/notarization credentials or paid infrastructure may require an explicit external-input stop. Preserve completed evidence and state exactly what is needed.

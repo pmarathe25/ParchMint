@@ -2,24 +2,40 @@
 
 ## Goal
 
-Independently determine whether the release candidate satisfies every v1 requirement and release gate. Do not modify product requirements or production code during validation.
+Independently validate the release candidate and produce the G90 package. Do not change production behavior or acceptance criteria.
 
 ## Independence
 
-Use a fresh validation agent/session that did not implement the candidate. It may file defects but must not redefine pass criteria.
+Use an agent/session that did not implement the candidate. It may report defects but not alter governing documents or silently fix criteria.
 
 ## Tasks
 
-Create the complete release-evidence package from `docs/implementation/06-acceptance-and-release-plan.md`, including:
+- Re-run release-required Tier A/B/C gates from clean candidate artifacts.
+- Verify traceability and platform matrix.
+- Verify Light/Dark visual/accessibility/appearance behavior.
+- Verify shared editor/projection, spellcheck, project undo/recovery, history/search, packaging/security/provenance.
+- Verify package hashes and clean installs.
+- Record reproducible blockers and current known issues.
 
-- Requirement-by-requirement disposition.
-- Windows/macOS/Linux package and runtime results.
-- Ordinary and approximately 250,000-word one/two-view editor evidence.
-- IME, clipboard, accessibility, high-DPI, visual, performance, memory, and background-load evidence.
-- Save/recovery/fault, history/search scale, and cross-platform interchange evidence.
-- Security, license, notices, provenance, and SBOM results.
-- Known issues and proposed explicit waivers.
+## Required output
 
-## Output and stop
+```text
+release-evidence/<candidate-version>/
+├── requirement-disposition.csv
+├── platform-matrix.yaml
+├── visual/
+├── performance/
+├── accessibility/
+├── appearance/
+├── editor-projection/
+├── spellcheck/
+├── recovery-project-undo/
+├── history-search/
+├── packaging/
+├── security-licenses-sbom/
+├── package-hashes.txt
+├── known-issues.yaml
+└── release-approval.yaml
+```
 
-Write `release-evidence/<candidate-version>/release-approval.yaml` with `status: pending`. Set the stage result to `needs_approval` and stop at G90.
+Create `release-approval.yaml` with `status: pending` and return `needs_approval`. Stop at G90.

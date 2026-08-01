@@ -1,31 +1,31 @@
 # ParchMint v1 Implementation Plan
 
-**Status:** Final execution plan  
-**Version:** 1.2  
+**Status:** Current execution plan  
+**Version:** 1.3  
 **Date:** 2026-07-31
 
 ## 1. Purpose
 
-This plan turns the approved product specification, final architecture, and Penpot handoff into an implementation sequence suitable for coding agents. It emphasizes small vertical slices, early architecture-risk validation, contract tests, and safe parallel work.
+This plan turns the product specification, architecture, and approved Penpot handoff into an implementation sequence for coding agents. It uses bounded stages, early risk selection, generated contracts, native evidence, and safe parallel work.
 
-Do not build the entire product in one agent run. Each phase has explicit entry conditions, deliverables, and gates.
+Do not build the entire product in one agent run. Each stage has explicit entry conditions, outputs, gates, and ownership.
 
-## 2. Required inputs
+## 2. Entry conditions
 
-Before implementation begins:
+Before S00 can pass:
 
-- The complete build kit is committed.
-- The approved Penpot handoff passes `docs/design/04-design-artifact-handoff-contract.md`.
-- The design version is frozen and recorded.
-- Tauri/ProseMirror reference lock hashes are available under `evidence/reference-locks/`.
-- Windows, macOS, and Linux CI runners or native test hosts are available.
-- The design reconciliation package has been approved at G10 before broad implementation begins.
+- The complete current build kit is committed.
+- A product-owner-approved Penpot handoff exists at `design/handoff/<version>/`.
+- The handoff validates against `docs/design/04-design-artifact-handoff-contract.md`, including Light/Dark tokens, Appearance states, references, and checksums.
+- Windows, macOS, and Linux CI runners or native test hosts are identified.
 
-## 3. Engineering workflow
+Historical prototype lockfiles are not prerequisites. S20 creates the actual application lockfiles from the direct dependency baseline in the architecture.
+
+## 3. Workflow rules
 
 ### 3.1 Mainline and worktrees
 
-Use a protected main branch and short-lived feature branches/worktrees. Parallel agents may work on independent contracts/adapters after Phase 1 freezes their interfaces.
+Use a protected `main` branch and short-lived isolated branches/worktrees. Parallel agents may work only where contracts and file ownership do not overlap.
 
 Suggested workstreams:
 
@@ -34,413 +34,376 @@ Suggested workstreams:
 - `history-git2`
 - `search-sqlite`
 - `design-system-shell`
+- `editor-feasibility`
 - `editor-prosemirror`
+- `spellcheck-foundation`
 - `feature-slices`
 - `cross-platform-release`
 
-Do not run multiple agents against the same files without explicit ownership.
+### 3.2 Change reports
 
-### 3.2 Pull-request expectations
+Every pull request or stage reports:
 
-Every pull request must identify:
-
-- Requirement IDs addressed.
-- Design component/screen IDs addressed where applicable.
-- Architecture ports touched.
-- Tests and platforms run.
+- Requirement IDs.
+- Penpot component/screen IDs where applicable.
+- Architectural ports/state owners touched.
+- Tests/platforms run.
 - Performance/accessibility implications.
-- New dependencies or ADRs.
-- Known gaps.
+- New dependencies and supply-chain effects.
+- Known gaps or required G20 proposal.
 
-### 3.3 Feature flags
+### 3.3 Governing-document changes
 
-Temporary development flags are allowed for incomplete vertical slices. No v1 requirement may remain hidden behind an undocumented release flag.
+Agents do not create ADRs or changelog entries. A material change stops at G20. After product-owner approval, update the current product specification, architecture, implementation plan, acceptance plan, and design inputs directly before resuming.
 
-### 3.4 Automated orchestration
+### 3.4 Feature flags
 
-The authoritative execution workflow is `docs/09-agent-playbook.md` plus the files under `agent-stages/`. The Orchestrator Agent owns dispatch, independent gate verification, integration, accepted handoff pointers, and pipeline state. Stage agents do not merge their own work or rely on conversation history.
+Temporary development flags are allowed for incomplete slices. No v1 requirement may remain behind an undocumented release flag.
 
-Only G10 design reconciliation, G20 material deviations, and G90 release approval require product-owner review. Other phase gates may advance automatically when their objective criteria pass.
+### 3.5 Automated orchestration
 
-## 4. Phase 0 — Repository bootstrap and governance
+`docs/09-agent-playbook.md` and `agent-stages/` are authoritative for dispatch, independent verification, integration, accepted handoffs, and pipeline state.
+
+Only G10 design reconciliation, G20 material deviation, and G90 release approval normally require product-owner review.
+
+## 4. Stage graph
+
+```text
+S00 repository intake
+  └─ S10 design reconciliation
+       └─ G10 approval
+            └─ S20 repository bootstrap
+                 └─ S30 contracts/domain/format
+                      ├─ S40 persistence/recovery
+                      ├─ S50 design-system/shell
+                      └─ S55 editor feasibility
+                           └─ S60 editor foundation
+                                └─ S65 spellcheck foundation
+
+S40 ─┬─ S70 history
+     └─ S80 search
+
+S40 + S50 + S60 + S65 + S70 + S80
+  └─ S90 foundation integration
+       └─ S100 feature-wave planning/dispatch
+            └─ generated feature slices
+                 └─ S110 system integration/validation
+                      └─ S120 release hardening
+                           └─ S130 independent release validation
+                                └─ G90 release approval
+```
+
+S40, S50, and S55 may run in parallel after S30. S70/S80 may run in parallel after S40. S60 follows a passing S55 selection. S65 follows the editor contract/runtime foundation. Broad feature waves do not begin before S65.
+
+## 5. S20 — Repository bootstrap and governance
 
 ### Goal
 
-Create a reproducible monorepo with cross-platform CI, contracts, linting, dependency policy, and document placement.
+Create a reproducible monorepo, exact application locks, cross-platform CI, generated-contract drift guards, and empty application/headless shells.
 
 ### Tasks
 
-1. Create the repository layout from `docs/architecture/02-final-architecture.md`.
-2. Add Rust and Node toolchain pin files.
-3. Bootstrap Tauri 2.11.5 and React/TypeScript.
-4. Import the exact ProseMirror package versions from the validated reference lock, then commit a new application lockfile.
-5. Add `cargo fmt`, `clippy`, unit test, TypeScript typecheck, lint, frontend test, and build commands.
-6. Add CI jobs for Windows, macOS, and Linux from the first commit.
-7. Add license/advisory/SBOM tooling and policy.
-8. Add ADR directory and templates.
-9. Add JSON Schema contract generation/validation tooling.
-10. Add deterministic fixture generation and checksum commands.
-
-### Deliverables
-
-- Clean builds on all three platforms.
-- Repository `README` and developer setup.
-- Lockfiles and dependency inventory.
-- CI matrix.
-- Empty headless CLI and desktop shell.
-- ADR-0001 recording the accepted architecture.
+1. Create the repository layout from the architecture.
+2. Pin Rust, Node, package manager, Tauri, React, TypeScript, and build tools.
+3. Apply the direct git2/rusqlite/ProseMirror dependency baseline and create real application lockfiles.
+4. Assert vendored libgit2/static-zlib and bundled SQLite composition from the resolved lock/build metadata.
+5. Bootstrap an empty Tauri/React desktop shell and headless CLI.
+6. Prove one Rust↔TypeScript JSON Schema round trip.
+7. Add generated-contract commands and CI dirty-diff guard.
+8. Add format, lint, typecheck, unit-test, build, and package commands.
+9. Add Windows/macOS/Linux CI from the first implementation commit.
+10. Add dependency, advisory, license, provenance, SBOM, and native-notice tooling.
+11. Add deterministic fixture/checksum tooling.
+12. Add weekly supply-chain/provenance workflow.
 
 ### Gate
 
-No feature work begins until all three platform builds pass and the contract-generation strategy is proven by one round-trip type.
+- Clean builds on all three platforms.
+- Actual locks committed.
+- Dependency assertions pass.
+- Contract generation produces a clean diff and one cross-language round trip.
+- No product feature or final UI interpretation is introduced.
 
-## 5. Phase 1 — Contracts, domain, and canonical format
+## 6. S30 — Contracts, domain, and canonical format
 
 ### Goal
 
-Establish the durable architecture before GUI or backend details spread.
+Freeze durable state, project commands, and canonical formats before adapters/UI spread.
 
 ### Tasks
 
-1. Define stable ID types and project/node/style/metadata/comment entities.
-2. Implement group/document invariants and ordered-tree commands.
-3. Define versioned JSON Schemas for IPC/application commands.
-4. Define restricted HTML schema and canonical serializer/parser.
-5. Define `project.toml`, annotation JSON, and CSS formats.
-6. Implement format validation and `N → N+1` migration framework.
-7. Build golden fixtures for every block/mark, titles, comments, metadata, literal tabs, and structural breaks.
-8. Build the headless CLI commands:
-   - `create`
-   - `validate`
-   - `inspect`
-   - `roundtrip`
-9. Implement title synchronization as adapter-independent command logic.
-10. Implement pure word-count rules.
-
-### Parallelization
-
-- Domain/tree commands.
-- Canonical document codec.
-- Manifest/annotation/style codecs.
-- Contract schemas and generated bindings.
-- Fixture and property-test work.
-
-### Deliverables
-
-- `parchmint-domain`.
-- `parchmint-project-format`.
-- Golden fixture set.
-- Headless round-trip CLI.
-- Contract and property tests.
+- Stable IDs and project/node/style/metadata/comment entities.
+- Group/document invariants and ordered-tree commands.
+- `ProjectCommandDispatcher` and `ProjectUndoManager` contracts, including bounds/reset rules.
+- Composite-operation contract for global replacement.
+- Versioned IPC/application schemas and generated bindings.
+- Restricted deterministic HTML schema/codec.
+- `project.toml`, annotation JSON, style CSS, and `dictionary.txt` codecs.
+- Migrations.
+- Golden fixtures for blocks, marks, comments, metadata, literal tabs, breaks, dictionaries, and deletion tombstones.
+- Headless `create`, `validate`, `inspect`, `roundtrip`, and project-command/undo commands.
+- Adapter-independent title synchronization and word counting.
 
 ### Gate
 
 - Byte-identical canonical round trips.
 - Invalid structures rejected.
-- Windows/macOS/Linux path and Unicode fixture tests pass.
-- No frontend/backend dependency leaks into domain or format crates.
+- Randomized command/undo/redo sequences preserve invariants.
+- Unicode/path fixtures pass on Windows/macOS/Linux.
+- Generated contracts are clean.
+- No frontend/backend type leakage.
 
-## 6. Phase 2 — Project repository, save, and recovery skeleton
+## 7. S40 — Project repository, save, and recovery
 
 ### Goal
 
-Make current project data safe before adding history/search/UI complexity.
+Make current authored data safe before history, search, spellcheck, or broad UI integration.
 
 ### Tasks
 
-1. Implement `ProjectRepository`, `AtomicWriter`, and platform durability adapters.
-2. Create/open projects and load documents lazily.
-3. Implement one-writer project lock.
-4. Implement save transaction descriptors and atomic multi-file state machine.
-5. Implement recovery-journal port and a simple filesystem-backed versioned journal.
-6. Implement save queue, dirty-resource tracking, revisions, acknowledgement, and errors.
-7. Add forced-termination and partial-write fault harnesses.
-8. Add canonical-file readability tests with `.git`, SQLite, and recovery directories removed.
-
-### Deliverables
-
-- Headless create/open/save/recover workflows.
-- Fault-injection suite.
-- Structured save diagnostics.
+- `ProjectRepository`, `CanonicalCodec`, `AtomicWriter`, durability adapters.
+- Create/open/lazy-load.
+- One-writer project lock and application-process project-session routing.
+- Revisioned save queue and dirty-resource tracking.
+- Atomic multi-file save transaction.
+- Versioned recovery journal/replay.
+- Save acknowledgements/errors.
+- Project-undo persistence interactions.
+- Forced-termination, partial-write, disk-full/permission, stale-lock fault harnesses.
+- Readability when history/index/cache/recovery directories are removed.
 
 ### Gate
 
 - No partial canonical state after injected failures.
-- Recovery restores edits after process termination.
-- Current files remain usable without derived state.
-- Save tests run on all three operating systems.
+- Acknowledged edits are not lost.
+- Recovery restores uncheckpointed edits.
+- Recovery/migration/whole-restore reset interactive undo as specified.
+- Current project opens without derived state.
+- No filesystem/serialization work runs on UI thread.
 
-## 7. Phase 3 — Selected backend adapters
-
-### 7.1 History workstream
-
-Implement `parchmint-history-git2` using the validated composition and policies.
-
-Tasks:
-
-- Initialize app-managed `main`.
-- Create checkpoint categories and metadata.
-- Named snapshots including empty commits.
-- Bounded paging and filtering.
-- Whole-checkpoint preview and additive whole-project restore.
-- Missing/corrupt history isolation.
-- Exclusive-owner stale lock recovery.
-- Low-priority pack/verify/cleanup maintenance.
-- Static-zlib and vendoring guards.
-
-Do not add network features.
-
-### 7.2 Search workstream
-
-Implement `parchmint-search-sqlite` using the validated FTS5 design.
-
-Tasks:
-
-- Dedicated worker/connection.
-- FTS5 assertion.
-- Stable block/revision schema.
-- Body/title/Synopsis/metadata indexing.
-- Entire-project v1 query behavior; keep any internal future-scope hooks behind `SearchIndex` and do not expose section/subtree controls.
-- Escaped MATCH query generation.
-- Case-sensitive/whole-word post-filter.
-- Streaming batches/cancellation.
-- Revision revalidation.
-- Integrity check and deterministic rebuild.
-
-### Deliverables
-
-- Adapter contract suites.
-- CLI history/search commands.
-- Cross-platform smoke and scale baselines.
-
-### Gate
-
-- Contract tests pass without callers importing `git2`/`rusqlite` types.
-- V03/V04 semantics are reproduced in the application workspace.
-- Background tasks do not run on the UI thread.
-
-## 8. Phase 4 — Approved design-system import
+## 8. S50 — Approved design system and application shell
 
 ### Goal
 
-Convert the already approved G10 reconciliation and Penpot handoff into deterministic implementation assets and test fixtures. Do not reinterpret the design.
+Import the approved Light/Dark design deterministically and implement the navigable shell against mock application services.
 
 ### Tasks
 
-1. Revalidate the approved reconciliation commit and design-manifest checksum.
-2. Import tokens and generate CSS custom properties and TypeScript metadata.
-3. Import/optimize SVG assets with stable names and an asset manifest.
-4. Create deterministic UI fixtures matching approved reference images.
-5. Establish screenshot automation, capture sizes, and tolerances from the approved visual-regression plan.
-6. Populate implementation paths in the approved component map.
-7. Record any newly discovered design conflict as a G20 proposal rather than resolving it silently.
-
-### Deliverables
-
-- `design/generated/tokens.css`.
-- `design/generated/token-metadata.ts`.
-- Imported assets and asset manifest.
-- Updated implementation map with code targets.
-- Initial screenshot/accessibility fixture harness.
+1. Revalidate G10 reconciliation and manifest checksum.
+2. Generate semantic Light/Dark CSS and TypeScript metadata from approved tokens.
+3. Import/checksum approved assets.
+4. Add token-generation dirty-diff CI.
+5. Implement System/Light/Dark preference plumbing and live propagation across mock windows.
+6. Implement launcher, top navigation, Explorer/Search sidebar, editor/companion shell, Inspector, Cards, History, Recently Deleted, Settings, Export, status bar, dialogs, menus, empty/loading/error/recovery states.
+7. Implement tree/Card virtualization, selection, drag/drop, tabs, splitters, keyboard focus, and accessible semantics with fake services.
+8. Establish Light/Dark screenshot and accessibility fixtures.
 
 ### Gate
 
-The Orchestrator Agent advances automatically when generated output is deterministic, checksums and component mappings pass, and no unapproved deviation exists.
+- Generated output deterministic and complete for both themes.
+- No hard-coded theme-dependent production colors.
+- Approved references are acceptably reconciled.
+- Appearance switches all mock windows without project mutations.
+- Keyboard/focus/accessibility shell tests pass.
+- Native shell launches on all three platforms.
 
-## 9. Phase 5 — Application shell
+## 9. S55 — Shared editor and projection feasibility
 
 ### Goal
 
-Implement the full navigable shell with mocked/headless data, without the production editor yet.
+Select and prove the highest-risk editor state/projection architecture before production commitment.
+
+### Required alternatives
+
+At minimum compare:
+
+1. ProseMirror model/document mirror in a Web Worker.
+2. Neutral block/delta mirror in a Web Worker or Rust worker.
+3. Bounded incremental/idle projection without a persistent mirror.
+
+An alternative may be retired early only with concrete incompatibility evidence.
+
+### Probe scope
+
+- ProseMirror schema subset sufficient for representative prose, styles, comments, lists, breaks, and Unicode.
+- One shared document/history authority and two view sessions.
+- Independent selection/scroll/focus/local-search state.
+- Alternating edits/undo from both views.
+- Composition-sensitive behavior and stale transaction handling.
+- Ordinary and approximately 250,000-word fixtures.
+- Canonical projection, changed-block text, title, word count, annotation/recovery batch.
+- Bounded queues/coalescing, projection-target crash, snapshot resync.
+- Main/webview/worker memory and resource reclamation.
+
+### Measurements
+
+- First editable viewport, one/two views.
+- Input-to-frame beginning/middle/end.
+- View-to-view propagation.
+- Initial projection synchronization.
+- Per-edit and full canonical projection latency.
+- Queue depth/backlog during sustained typing.
+- Memory stabilization and close reclamation.
+- Canonical byte equality and recovery replay.
+- IME/clipboard/accessibility behavior on all three native webviews.
+
+### Gate
+
+Select a strategy only if it preserves the same features, meets the editor performance gates, does not block input, uses bounded/coalescing queues, recovers deterministically after projection-target failure, and has a credible cross-platform path.
+
+On pass, update the current architecture's projection section with the selected concrete implementation before S60. On failure, stop at G20 with fixtures/evidence; do not implement the original worker concept by default.
+
+## 10. S60 — Production editor foundation
+
+### Goal
+
+Implement the production ProseMirror adapter using the S55-selected topology/strategy.
 
 ### Tasks
 
-1. Launcher and project-creation flows.
-2. Mode switch.
-3. Resizable/collapsible Explorer, editor area, Inspector.
-4. Tabs and companion-pane shell.
-5. Tree rendering, deep virtualization, multi-selection, drag/drop, rename, cut/copy states.
-6. Cards projection and virtualized hierarchy.
-7. Inspector sections and settings shell.
-8. Search sidebar and replacement-preview shell.
-9. History and Recently Deleted shell.
-10. Native menus/dialog adapters and semantic command registry.
-11. Design reference screenshots and accessibility tree tests.
-
-Use fake project/application services behind the same contracts as production.
+- Complete v1 schema, stable block/style IDs, marks, lists, quotes, Scene/Page Breaks, literal tabs.
+- Canonical parse/serialize and paste sanitization.
+- `SharedEditorSession`, independent view sessions, shared history, selection mapping, composition handling.
+- One shared toolbar and attach/detach/restore.
+- Selected projection/recovery implementation and revision acknowledgements.
+- Foundational comments/anchors/decorations/context-menu/Comments-panel commands.
+- Local Find state/decorations.
+- Project-operation application boundary for global replacement/other composite operations.
+- Release-mode native editor gate on Windows, macOS, and Linux.
 
 ### Gate
 
-- Approved reference screens are acceptably reconciled.
-- Keyboard navigation and focus behavior pass.
-- Shell launches and works on all three platforms.
-- No domain logic is duplicated in React components.
+- Canonical fidelity.
+- Two-view correctness and shared undo.
+- Ordinary/250k same features.
+- Input/open/projection/memory budgets.
+- CJK IME, combining marks, emoji, Arabic/BiDi, tabs, rich/plain paste.
+- Native screen-reader editing and geometry.
+- Worker/projection failure recovery where applicable.
 
-## 10. Phase 6 — ProseMirror editor adapter
+Failure stops at G20; do not choose another frontend or reduce behavior independently.
+
+## 11. S65 — Spellcheck foundation
 
 ### Goal
 
-Implement the highest-risk application component before integrating every feature.
+Select and prove an offline `SpellcheckService` before broad feature waves.
 
-### 10.1 Schema and canonical adapter
+### Tasks
 
-Implement:
+1. Evaluate native-webview and custom/offline-engine options against the actual contract; do not accept red underlines alone as proof.
+2. Freeze the identical v1 language inventory for all platforms.
+3. Prove project/global dictionaries, add/remove, normalization, persistence, and invalidation.
+4. Prove token-level ranked suggestions and application-owned anchored context menu.
+5. Prove viewport/recent-change bounded checking, cancellation, stale-revision rejection, and typing noninterference.
+6. Audit dictionary/engine licenses, source provenance, package size, update method, and offline behavior.
+7. Decide whether native webview spellcheck must be disabled.
+8. Implement the selected adapter and shared contract suite.
 
-- Every v1 block and mark.
-- Stable block IDs.
-- Stable style IDs.
-- Atomic Scene/Page Break nodes.
-- Literal Tab preservation.
-- Paste sanitization and plain paste.
-- Canonical HTML parse/serialize tests.
+### Gate
 
-### 10.2 Shared session and dual views
+- Same language inventory and semantics across Windows/macOS/Linux.
+- Project/global dictionaries work identically.
+- Suggestions/menu/decorations are application controlled and accessible.
+- No network use.
+- 250k viewport-bounded checking does not violate typing/memory gates.
+- Failure remains visible/recoverable and never blocks save.
 
-Implement:
+If no strategy satisfies v1 requirements within bounded implementation, stop at G20 with options such as reducing the supported language inventory or changing the requirement; do not silently rely on inconsistent native spellcheck.
 
-- `SharedEditorSession`.
-- Independent per-view selection/scroll/search/focus.
-- Shared document transaction/history controller.
-- Selection mapping through transactions.
-- One shared toolbar targeting focused view.
-- View attach/detach/restore.
+## 12. S70 — History adapter
 
-### 10.3 Worker and save projection
+Implement `parchmint-history-git2` behind `HistoryStore`: linear app-managed main, checkpoint categories, named empty snapshots, bounded paging/filtering, whole-project preview/restore, corruption isolation, stale-lock recovery, background maintenance, and vendoring guards.
 
-Implement:
+Gate: contract/fault/scale/native continuation tests pass without leaking Git types.
 
-- Worker mirror.
-- Canonical projection.
-- Changed block text/word count/title projection.
-- Recovery batching.
-- Revision acknowledgements.
+## 13. S80 — Search adapter
 
-### 10.4 Comments
+Implement bundled SQLite FTS5 behind `SearchIndex`: dedicated worker, FTS5 assertion, stable IDs, body/title/Synopsis/metadata indexing, entire-project query semantics, safe escaping, post-filtering, streaming/cancellation, revalidation, integrity/rebuild.
 
-Implement:
+Do not expose section/subtree scope controls in v1.
 
-- Anchor mapping.
-- Decorations.
-- Context-menu creation.
-- Replies/resolve/orphan states through application services.
+Gate: contract/semantic/native parity tests pass; background work stays off UI thread.
 
-### 10.5 Early cross-platform runtime gate
+## 14. S90 — Foundation integration
 
-Before building later feature slices, run release-mode native tests on all three platforms for:
+Integrate S40/S50/S60/S65/S70/S80 into one working foundation:
 
-- One and two views of ordinary and 250,000-word fixtures.
-- First editable viewport.
-- Input-to-frame.
-- Shared undo/independent selections.
-- CJK IME, combining marks, emoji, Arabic/BiDi, literal Tab.
-- Rich/plain paste.
-- VoiceOver/Narrator-or-NVDA/Orca editing.
-- 100%, intermediate, and 200% scaling.
-- Memory stabilization and view close reclamation.
+- Open/create/save/recover through real services.
+- Mount editor inside approved shell.
+- Light/Dark/System across real windows.
+- Search/history/spellcheck/project undo wiring.
+- One process/multiple project windows and project-lock routing.
+- End-to-end revision/error/status flow.
 
-All features must remain available at 250,000 words. If this gate fails materially, stop and report evidence rather than introducing a special mode.
+No broad feature waves until integration gates pass on all three platforms.
 
-### Deliverables
+## 15. S100 — Vertical feature waves
 
-- Production editor package.
-- Editor contract test suite.
-- Cross-platform instrumentation report.
-- ADRs for any accepted optimization.
-
-## 11. Phase 7 — Vertical feature slices
-
-Implement complete end-to-end slices, each including domain/application/frontend/persistence/history/search/tests/design reconciliation.
-
-Recommended order:
+Generate bounded end-to-end slices. Recommended order:
 
 1. Create/open/rename/write/save/reopen.
-2. Group/document hierarchy and moves.
+2. Project command/undo and hierarchy moves/deletion.
 3. Styles and formatting toolbar.
 4. Synopsis/metadata and Inspector focus.
 5. Comments and replies.
 6. Cards editing/reordering.
 7. Local search/replace.
 8. Global search/navigation.
-9. Global replacement preview/apply/undo.
+9. Global replacement preview/apply/undo/checkpoint.
 10. History and named snapshots.
-11. Delete/Recently Deleted/restore.
-12. Word counts and conditional spellcheck.
-13. Export.
+11. Recently Deleted/restore.
+12. Word counts.
+13. Full spellcheck UI/dictionary settings on S65 foundation.
+14. Appearance settings final polish.
+15. Export.
 
-Each slice must be usable on all three platforms before moving from “implemented” to “complete.”
+Each task declares its test tier. “Complete” requires the applicable native evidence, not every expensive release workload on every pull request.
 
-## 12. Phase 8 — Cross-platform packaging and release hardening
+## 16. S110 — System integration and validation
+
+Run complete requirement, visual, accessibility, performance, recovery, project-undo, history, search, spellcheck, appearance, and cross-platform suites. Dispatch bounded repair tasks where no G20 change is required.
+
+## 17. S120 — Packaging and release hardening
 
 ### Windows
 
-- Installer selection and upgrade behavior.
-- WebView2 availability/update behavior.
-- File locks, clipboard, drag/drop, high DPI, native shortcuts, screen reader.
-- Long/unicode/case-conflict paths.
+Installer/upgrade/uninstall, WebView2 behavior, project locks/single-instance routing, clipboard/drag/drop/high-DPI/shortcuts/screen reader, long/Unicode/case paths.
 
 ### macOS
 
-- `.app`/`.dmg`, signing, notarization.
-- WKWebView behavior.
-- Native menu placement/shortcuts/dialogs.
-- VoiceOver and scaling.
-- Case-insensitive and normalization behavior.
+`.app`/`.dmg`, signing/notarization, WKWebView, menus/dialogs, VoiceOver, scaling, case/normalization behavior.
 
 ### Linux
 
-- `.deb` and declared WebKitGTK dependency matrix.
-- X11/Wayland clipboard/IME/drag/drop.
-- Orca/AT-SPI.
-- WebKitGTK versions across supported distributions.
-- AppImage remains deferred until separately proven.
+`.deb`, supported WebKitGTK dependency matrix, X11/Wayland clipboard/IME/drag/drop, Orca/AT-SPI. AppImage remains deferred.
 
 ### Shared
 
-- Upgrade/migration tests.
-- SBOM/notices/advisory scan.
-- Clean-machine install/launch/uninstall.
-- Project interchange sequence between all three platforms.
+Upgrade/migration, clean-machine install, SBOM/notices/advisories/provenance, project interchange Linux → Windows → macOS → Linux.
 
-## 13. Parallel-agent allocation
+## 18. S130 — Independent release validation
 
-After contracts freeze, safe parallel tasks include:
+A validation agent that did not implement the candidate produces the unified package defined in the acceptance plan and stops at G90.
 
-| Agent | Work | Must not modify |
-|---|---|---|
-| Core agent | Domain, format, CLI | Frontend/editor adapters |
-| Persistence agent | Repository/save/recovery | History/search internals |
-| History agent | `HistoryStore` adapter | Domain public model |
-| Search agent | `SearchIndex` adapter | Canonical format |
-| Design-system agent | Token import, shared UI components | Product behavior |
-| Editor agent | ProseMirror adapter/session | Canonical project store directly |
-| QA agent | Fixtures, contract tests, visual/performance harness | Production behavior without review |
-| Release agent | CI, packaging, signing | Domain/editor code except platform adapters |
+## 19. Test workload tiers
 
-Integration agents should merge through contracts and fixture tests rather than editing another agent’s internal module.
+- **Tier A — every affected pull request:** lint/type/unit/property/golden/contract tests; builds on all three OSes; generated-contract/token drift guards.
+- **Tier B — native affected-feature gate:** release-mode launch and focused native interaction on all three platforms for editor/input/clipboard/windowing/spellcheck/accessibility/packaging changes; selected 250k smoke for editor changes.
+- **Tier C — nightly/release-candidate:** full 250k matrix, exact 20M-word corpus, 1M-checkpoint longevity, extended IME/screen-reader/high-DPI/memory/fault/interchange/clean-install suites.
 
-## 14. Implementation reports
+One-million checkpoints and the 20-million-word corpus are not ordinary pull-request requirements. They remain mandatory nightly/release-candidate evidence.
 
-At each stage, produce the standard versioned run package under `agent-workflow/runs/<stage-id>/<run-id>/`:
+## 20. Stop conditions
 
-- `dispatch.yaml`.
-- `status.yaml`.
-- `handoff.yaml`.
-- `report.md`.
-- `evidence/` containing tests, benchmarks, platform results, screenshots, and relevant raw output.
+Stop rather than improvise when:
 
-Also update requirement/design traceability and ADRs as required. The Orchestrator Agent independently verifies and records accepted handoffs.
-
-## 15. Stop conditions
-
-An agent must stop and report rather than improvise when:
-
-- PRD and approved Penpot design conflict materially.
-- A required port cannot express the needed behavior.
-- A selected dependency requires a broad fork.
-- Tauri/ProseMirror cannot meet the same-feature 250,000-word requirement after bounded implementation optimization.
-- Cross-platform IME/accessibility is fundamentally blocked.
+- Product specification and approved design conflict materially.
+- A required port cannot express behavior.
+- A selected dependency requires a broad maintained fork.
+- No S55 strategy can meet the shared two-view/same-feature 250k requirement.
+- No S65 strategy can meet cross-platform spellcheck requirements.
+- Native IME/accessibility is fundamentally blocked.
 - Canonical data would depend on derived/proprietary state.
-- A save/recovery path can lose acknowledged edits.
-- A license/security issue changes distribution feasibility.
-
-Stopping with evidence is preferable to silently changing the product.
+- Save/recovery/project undo can lose or partially apply acknowledged operations.
+- A license/security/provenance issue changes distribution feasibility.

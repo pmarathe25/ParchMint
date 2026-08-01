@@ -1,423 +1,389 @@
 # ParchMint v1 Acceptance and Release Plan
 
-**Status:** Final validation baseline  
-**Version:** 1.0  
-**Date:** 2026-07-28
+**Status:** Current validation baseline  
+**Version:** 1.1  
+**Date:** 2026-07-31
 
 ## 1. Purpose
 
-This document defines how ParchMint v1 is validated against the PRD, approved Penpot handoff, final architecture, and cross-platform release obligations.
+This document defines how ParchMint v1 is validated against the product specification, approved Penpot handoff, architecture, and cross-platform obligations.
 
-Passing a unit test is not sufficient evidence for native input, accessibility, performance, packaging, or data durability. Evidence must match the claim.
+Evidence must match the claim. Unit tests do not prove native input, accessibility, spellcheck menu behavior, performance, packaging, or data durability.
 
 ## 2. Traceability
 
-Maintain `docs/traceability.csv` from the provided template. Every must-level PRD requirement must map to:
+Maintain `docs/traceability.csv`. Every must-level requirement maps to:
 
-- One or more implementation modules.
-- One or more automated tests where possible.
-- A Penpot screen/component where applicable.
-- A native manual/instrumented test where automation is insufficient.
-- A final disposition: pass, approved waiver, or blocked.
+- Implementation modules.
+- Automated tests where possible.
+- Penpot screen/component where applicable.
+- Native manual/instrumented test where automation is insufficient.
+- Current disposition: not started, in progress, pass, blocked, or product-owner-approved current-spec change.
 
-No requirement may be marked complete based only on code presence.
+No requirement is complete based only on code presence.
 
-## 3. Test layers
+## 3. Test tiers
 
-### 3.1 Domain unit and property tests
+### Tier A — every affected pull request
 
-Cover:
+- Format/lint/typecheck.
+- Unit/property/golden tests.
+- Shared adapter contract tests.
+- Windows/macOS/Linux build and applicable headless tests.
+- Generated Rust/TypeScript contract clean-diff check.
+- Generated design-token clean-diff check.
+- Small deterministic performance regression fixtures.
 
-- Tree invariants and cycle rejection.
-- Stable ordering.
+### Tier B — native affected-feature gate
+
+Required for changes touching editor input/view state, clipboard, menus, windows/project locking, spellcheck, accessibility, scaling, filesystem durability, or packaging:
+
+- Release-mode native checks on all three platforms.
+- Focused real interaction and accessibility evidence.
+- Selected 250k editor smoke for editor/projection/plugin changes.
+
+### Tier C — nightly and release candidate
+
+- Full one/two-view 250k matrix.
+- Exact 20-million-word search/project corpus.
+- 1,000,000-checkpoint history longevity.
+- Extended IME, screen-reader, high-DPI, memory, fault, project interchange, and clean-install suites.
+
+Tier C workloads remain mandatory before release but do not run on every pull request.
+
+## 4. Domain and project-command tests
+
+Property/randomized tests cover:
+
+- Tree invariants/cycle rejection/order.
 - Multi-selection normalization.
-- Move/copy/cut semantics.
+- Move/copy/cut/delete/restore.
 - Title synchronization.
-- Style inheritance and replacement.
-- Metadata applicability/default/deletion rules.
+- Style inheritance/replacement.
+- Metadata applicability/default/deletion.
 - Comment thread state.
 - Export-setting inheritance.
 - Word-count rules.
-- Undo command grouping.
+- Project-command grouping, inverse patches, bounded eviction, redo invalidation, and reset semantics.
+- Global replacement as one project undo and one checkpoint.
 
-Use generated/randomized trees and operation sequences to find invariant failures.
+Run random command/undo/redo sequences and prove invariants and canonical equivalence.
 
-### 3.2 Contract tests
+## 5. Contract tests
 
-Every replaceable port has one shared suite:
+Shared suites:
 
 - `ProjectRepositoryContract`
 - `CanonicalCodecContract`
 - `RecoveryJournalContract`
 - `HistoryStoreContract`
 - `SearchIndexContract`
+- `SpellcheckServiceContract`
 - `ExporterContract`
 - `EditorAdapterContract`
 - `PlatformServiceContract` where feasible
 
-An alternative backend or frontend adapter cannot be accepted until it passes the same suite.
+Alternative implementations pass the same suite without caller changes.
 
-### 3.3 Golden canonical-format tests
+## 6. Generated contract drift
 
-Maintain fixtures for:
+CI runs generators and then:
 
-- Every block/mark/style.
-- Lists and nested lists.
-- Literal tabs and whitespace.
-- Scene/Page Break nodes.
-- Links and sanitization.
-- Titles and title divergence.
-- Unicode, combining marks, emoji, CJK, Arabic/BiDi.
-- Comments/anchors sidecars.
-- Metadata/style manifests.
-- Deleted/restored subtrees.
+```text
+git diff --exit-code -- <generated Rust paths> <generated TypeScript paths>
+```
 
-Tests must prove:
+Golden fixtures serialize in Rust/deserialise in TypeScript and vice versa. Generated headers contain schema version/checksum.
 
-- Parse → serialize byte equality for canonical input.
-- Semantically equivalent input canonicalizes deterministically.
-- Unsupported/unsafe HTML is rejected or normalized safely.
-- No platform changes line endings, paths, or Unicode identity.
+## 7. Canonical format tests
 
-### 3.4 Editor semantic tests
+Fixtures cover every block/mark/style, lists, literal tabs/whitespace, Scene/Page Breaks, links/sanitization, titles/divergence, Unicode/combining/emoji/CJK/Arabic/BiDi, comments/anchors, metadata/styles, dictionary normalization, deletion/restoration.
 
-Run against the ProseMirror adapter without requiring the full app:
+Prove:
 
-- Each command and key behavior.
+- Canonical parse → serialize byte equality.
+- Equivalent input canonicalizes deterministically.
+- Unsafe/unsupported HTML is rejected/normalized.
+- No platform changes line endings, paths, Unicode identity, or dictionary sorting.
+
+## 8. Editor and projection tests
+
+Adapter tests cover:
+
+- Commands/key behavior.
 - Shared document/two-view changes.
-- Independent selection mapping.
-- Shared undo/redo.
+- Independent selection/scroll/local-search mapping.
+- Shared undo/redo from alternating views.
+- Stale transaction and IME composition handling.
 - Toolbar focus targeting.
-- Paste and Paste Without Formatting.
-- Comments and anchor mapping through insert/delete/split/join/undo.
-- Local search decorations.
-- Title synchronization events.
-- Worker projection and recovery replay.
+- Paste/Paste Without Formatting.
+- Comments/anchor mapping through insert/delete/split/join/undo.
+- Project-operation application boundary.
+- Projection/recovery revisions, bounded queues/coalescing, target crash/resync.
 - Canonical round trips.
 
-### 3.5 Persistence and fault tests
+S55 evidence compares projection alternatives; S60 evidence validates the selected production strategy.
 
-Inject failure/termination:
+## 9. Spellcheck tests
 
-- Before temporary file write.
-- During document write.
-- During manifest/style/annotation write.
-- Before/after flush.
-- Before/after atomic replace.
-- During history object/tree/ref update.
-- During pack/verification.
-- During recovery compaction.
-- With permission denial, disk-full simulation, and locked files where feasible.
+Contract and native tests cover:
+
+- Identical supported-language inventory on all platforms.
+- Project-default language changes.
+- Project/global dictionary add/remove/persistence/normalization.
+- Token-level ranked suggestions.
+- In-place decorations and correctly anchored application-owned menu.
+- Viewport/recent-change bounded checking.
+- Cancellation and stale-revision rejection.
+- Unicode word boundaries, contractions, hyphenation, apostrophes, combining marks, and mixed scripts.
+- Native webview spellcheck disabled or reconciled as selected.
+- Offline behavior and no prose network traffic.
+- Failure visibility/recovery without blocking typing/save.
+- License/provenance/package inventory.
+
+## 10. Appearance tests
+
+Automated and native tests cover:
+
+- System is default.
+- System follows operating-system changes while running.
+- Explicit Light/Dark overrides persist.
+- Every open window updates without restart.
+- Appearance creates no project command, dirty state, save, recovery, or history entry.
+- Canonical project files/export are byte-identical before/after appearance changes.
+- All approved Light/Dark reference states.
+- No hard-coded theme-dependent production values.
+- Dark manuscript canvas is fully dark.
+- Contrast/focus/selection/error/comment/search/spellcheck states in both themes.
+
+## 11. Persistence and fault tests
+
+Inject failure/termination before/during/after temporary write, flush, atomic replace, multi-file manifest/style/dictionary/annotation/document writes, history update, pack, recovery compaction, and composite global replacement.
 
 Verify:
 
 - Last acknowledged durable state remains valid.
 - UI never claims a failed revision is Saved.
-- Recovery can restore pending edits.
-- Current project files remain readable when history/search are broken.
-- A subsequent save/checkpoint succeeds after bounded recovery.
+- Recovery restores pending edits.
+- Project undo does not leave partially applied state.
+- Current files remain readable with history/search/cache broken.
+- Subsequent save/checkpoint succeeds after bounded recovery.
 
-### 3.6 History tests
+## 12. History tests
 
-Retain the validated V03 suite as a regression baseline:
-
-- Checkpoint categories.
-- Named empty snapshot.
-- Bounded paging.
-- Filtering and previews.
-- Whole-checkpoint project restore; document and subtree checkpoint restore remain unavailable.
+- Checkpoint categories and named empty snapshot.
+- Bounded paging/filtering/previews.
+- Whole-project restore only.
 - Additive history.
 - Missing/corrupt object isolation.
 - Interrupted ref lock recovery.
-- 250,000 and periodic 1,000,000 checkpoint longevity runs.
+- Project dictionary included; appearance/global dictionary/workspace excluded.
+- 250k and periodic 1M checkpoint longevity.
 - Cross-platform same-repository continuation.
-- Pack/verify/cleanup policy.
+- Pack/verify/cleanup.
 
-Full 1M runs may be scheduled nightly/release rather than on every pull request.
+Full 1M runs are Tier C nightly/release.
 
-### 3.7 Search tests
-
-Retain the validated V04 semantics:
+## 13. Search tests
 
 - FTS5 startup assertion.
-- Exact 20-million-word corpus.
-- Plain, phrase, case-sensitive, whole-word.
-- Field and section/subtree scopes.
+- Plain/phrase/case-sensitive/whole-word.
+- Body/title/Synopsis/metadata fields.
+- Entire-project v1 query behavior with no user scope selector.
 - Safe MATCH escaping.
-- Streaming and cancellation.
-- Snippets/ranking.
-- Small and 250k document replacement.
+- Streaming/cancellation/snippets/ranking.
+- Small/250k replacement projection updates.
 - Stale/deleted-result revalidation.
-- Index deletion/rebuild.
-- Integrity/quick check.
-- Identical corpus behavior across platforms.
+- Index deletion/rebuild/integrity.
+- Cross-platform corpus parity.
+- Exact 20M-word corpus as Tier C.
 
-### 3.8 Visual and interaction tests
+Do not require section/subtree search scopes in v1 acceptance.
 
-For every approved reference frame:
+## 14. Visual and interaction tests
 
-- Use the deterministic fixture/state in `design-manifest.yaml`.
-- Capture at the exact dimensions and scale.
-- Run automated image comparison.
-- Review focus, hierarchy, spacing, wrapping, panel dimensions, component states, and truncation.
-- Record approved platform-specific differences.
+For every approved reference:
 
-Interaction tests cover prototype flows from the Penpot design brief.
+- Load deterministic fixture/state.
+- Use exact dimensions, scale, platform, and theme.
+- Capture and compare.
+- Review focus, hierarchy, spacing, wrapping, panel dimensions, truncation, and component states.
+- Record current approved platform-specific deviations.
 
-### 3.9 Accessibility tests
+Prototype flows from the design brief become interaction tests.
+
+## 15. Accessibility tests
 
 Automated:
 
 - Roles/names/states.
-- Focus order.
-- Keyboard access.
-- Dialog focus trap/restoration.
-- Tree levels and expansion.
-- Tab and close semantics.
-- Live regions for save/search/error.
-- Contrast and minimum target checks where tooling allows.
+- Focus order and restoration.
+- Dialog focus trap.
+- Tree levels/expansion.
+- Tabs/close semantics.
+- Live regions for save/search/spellcheck/error.
+- Contrast/targets in Light/Dark.
 
-Native manual/instrumented:
+Native:
 
 - VoiceOver on macOS.
 - Narrator and/or NVDA on Windows.
 - Orca on Linux.
-- Editing, selection, formatting, comments, tree, Cards, search, history, dialogs.
+- Editing/selection/formatting/comments/tree/Cards/search/history/spellcheck/appearance/dialogs.
 
-A browser accessibility tree existing is not sufficient; usable editing transcripts and task completion are required.
+A browser accessibility tree alone is insufficient; record usable editing/task transcripts.
 
-## 4. Performance fixtures
+## 16. Performance fixtures
 
-### Project fixtures
+Projects:
 
-- `project-small`: 20 documents, 50k total words.
-- `project-medium`: 300 Manuscript + 25 Research documents, 5M words.
-- `project-max`: 500 Manuscript + 50 Research documents, 20M words.
+- `project-small`: 20 documents, 50k words.
+- `project-medium`: 300 Manuscript + 25 Research, 5M words.
+- `project-max`: 500 Manuscript + 50 Research, exactly 20M words.
 
-### Document fixtures
+Documents:
 
-- `doc-typical`: representative 5k–15k-word chapter.
-- `doc-large-100k`: mixed semantic blocks and comments.
-- `doc-max-250k`: approximately 250,000 words, about 1,900+ variable-height blocks, Unicode and comments.
-- `doc-pathological`: one extremely long paragraph; robustness test, not strongest latency guarantee.
+- `doc-typical`: 5k–15k words.
+- `doc-large-100k`.
+- `doc-max-250k`: approximately 250k words, 1,900+ variable-height blocks, Unicode/comments.
+- `doc-pathological`: one extremely long paragraph, robustness rather than strongest latency guarantee.
 
-All generated fixtures have deterministic seeds and checksums.
+All generated fixtures have deterministic seeds/checksums.
 
-## 5. Performance measurements
+## 17. Performance gates
 
-### 5.1 Input-to-frame
+### 17.1 Input-to-frame
 
-Instrument editor transaction start and next committed visual frame.
-
-Measure:
-
-- Beginning/middle/end.
-- One and two views.
-- Ordinary and 250k documents.
-- Formatting and comment operations.
-- Background autosave, word count, search updates, history checkpoint.
-
-Gate:
+Beginning/middle/end; one/two views; ordinary/250k; formatting/comments; save/search/history/spellcheck/projection background work.
 
 - p95 ≤16 ms target.
 - p99 ≤33 ms target.
 - No repeated multi-frame stalls under ordinary typing.
 
-### 5.2 First editable viewport
+### 17.2 First editable viewport
 
-Measure from document-open request to the point at which the editor is visible, focused on request, and accepts a real edit.
+- Ordinary warm: target ≤250 ms.
+- 250k: release gate ≤1 second on agreed hardware.
+- One/two views reported separately.
+- Same plugins/features enabled.
 
-- Ordinary documents: target ≤250 ms warm.
-- 250k document: release gate ≤1 second on agreed reference hardware.
-- Same functionality and plugins remain enabled.
+### 17.3 Projection
 
-Report one-view and two-view results separately; neither may be skipped.
+- UI-thread work remains within the 2 ms event-turn requirement.
+- Queues stay bounded/coalesced under sustained typing.
+- No unbounded revision lag.
+- Projection target crash/resync is deterministic.
+- Canonical projection becomes available in time for the autosave pipeline without blocking input.
 
-### 5.3 Project open
+S55 records strategy-specific budgets that are at least as strict as these observable constraints.
 
-Measure:
+### 17.4 Project open
 
-- Launcher selection to tree/metadata usable.
-- Bodies loaded at startup.
-- Cache current versus rebuild.
-- History with large checkpoint counts.
+Tree/metadata usable without reading every body. Measure cache current/rebuild and large history.
 
-Project open must not read every document body.
+### 17.5 Search
 
-### 5.4 Search
+Warm first result ≤200 ms. Measure cold/warm/rebuild/cancellation/search-while-editing.
 
-- Time to first batch and completion.
-- Cold index, warm index, rebuild.
-- Cancellation latency.
-- Search while editing.
+### 17.6 Spellcheck
 
-Warm first result gate: ≤200 ms; validated baseline is substantially faster.
+Measure changed visible block to decoration/suggestion availability, cancellation, scroll/viewport churn, and typing under dictionary load. No full-document synchronous check on open.
 
-### 5.5 Memory
+### 17.7 Memory
 
-Measure full process tree:
+Measure full process tree for empty app, typical one view, 250k one/two views, projection worker/neutral mirror, spellcheck engine/dictionaries, repeated cycles, companion/document/project close.
 
-- Empty app.
-- Typical document one view.
-- 250k document one view.
-- 250k same document two views.
-- Repeated open/edit/search/undo/close cycles.
-- After closing companion.
-- After closing document/project.
+Memory must stabilize and material resources must be reclaimed.
 
-Gate:
+## 18. Native input and clipboard matrix
 
-- Memory stabilizes.
-- Material editor resources are reclaimed after close.
-- No sustained monotonic growth attributable to leaked views/plugins/decorations.
-- No unusable swapping or native memory-pressure termination on reference machines.
+On every supported runtime:
 
-### 5.6 Background operations
-
-Measure typing while:
-
-- Saving canonical state.
-- Creating Git checkpoint.
-- Updating/rebuilding SQLite index.
-- Exporting.
-- Packing/verifying history.
-
-Maintenance must yield/cancel and not compete with active input.
-
-## 6. Native input and clipboard matrix
-
-Run on each supported platform/runtime:
-
-- Basic Latin and extended Latin.
-- Combining marks.
-- Emoji and variation sequences.
-- CJK IME composition and candidate selection.
-- Arabic and mixed BiDi.
+- Latin/extended Latin/combining marks/emoji.
+- CJK IME composition/candidates.
+- Arabic/mixed BiDi.
 - Grapheme cursor/backspace.
 - Literal Tab.
-- Rich paste from browser and word processor.
-- Plain paste/Paste Without Formatting.
-- Copy/paste across the two views.
-- Context menu.
-- Undo/redo around composition and paste.
-- Comment decorations and context-menu creation during composition.
+- Rich/plain paste from browser/word processor.
+- Copy/paste across two views.
+- Context menus.
+- Undo/redo around composition/paste.
+- Comment/spellcheck decorations and menus during composition.
 
-Unknown is a failure for release.
+Unknown is release failure.
 
-## 7. High-DPI and window matrix
+## 19. High-DPI and windows
 
-Validate:
+Validate 100%, 125/150% where available, 200%, mixed-DPI displays, resize, minimum 1280×720, fullscreen/maximized/title bar, splitters, caret/selection/comment/spellcheck/menu/drag geometry, and appearance propagation across multiple project windows.
 
-- 100%, 125%/150% where available, and 200%.
-- Multiple displays with different scale factors.
-- Window resize while editing.
-- Minimum 1280×720 study.
-- Fullscreen/maximized/native title bar.
-- Splitter hit targets.
-- Caret, selection, comment bubble, context menu, and drag/drop geometry.
+## 20. Cross-platform interchange
 
-## 8. Cross-platform project interchange
+Automated release sequence: Linux → Windows → macOS → Linux.
 
-Automated release test:
+Verify hierarchy/order/content/styles/metadata/comments/dictionary, clean reachable history, Unicode/filename normalization, no line-ending churn, equivalent search rebuild, and appropriate workspace differences.
 
-1. Create and edit project on Linux.
-2. Save/checkpoint and package/copy directory.
-3. Open and continue on Windows.
-4. Save/checkpoint and continue on macOS.
-5. Return to Linux.
-
-At every step verify:
-
-- Same hierarchy/order/content/styles/metadata/comments.
-- Clean history repository and reachable checkpoints.
-- Unicode and decomposed/composed filenames/metadata.
-- No line-ending churn.
-- Search rebuilds and returns equivalent semantics.
-- Workspace state may vary appropriately.
-
-## 9. Packaging gates
+## 21. Packaging gates
 
 ### Windows
 
-- Clean Windows install.
-- Installer upgrade and uninstall.
-- WebView2 runtime behavior.
-- File associations only if explicitly added.
-- No installed Git/SQLite requirement.
+Clean install/upgrade/uninstall, WebView2, no installed Git/SQLite, project lock/single-instance behavior.
 
 ### macOS
 
-- Signed/notarized application.
-- Gatekeeper clean launch.
-- Upgrade and uninstall guidance.
-- Native menus/shortcuts/dialogs.
+Signed/notarized clean Gatekeeper launch, upgrade/uninstall guidance, native menus/dialogs.
 
 ### Linux
 
-- `.deb` clean install on each supported distro/runtime target.
-- Declared WebKitGTK dependencies.
-- Wayland and X11 where supported.
-- AppImage is not required for v1.
+`.deb` clean install on supported distro/runtime matrix, Wayland/X11. AppImage not required.
 
-## 10. Design acceptance
+## 22. Security and dependency gates
 
-A design implementation passes when:
-
-- All reference screens/states exist.
-- Token values are generated from the approved handoff.
-- Component mapping is complete.
-- No unexplained major visual deviations remain.
-- Focus/keyboard/error/loading states match approved intent.
-- Responsive/collapsed behavior works at specified dimensions.
-- Native platform differences are documented and approved.
-
-Design acceptance does not override accessibility or native-control correctness.
-
-## 11. Security and dependency gates
-
-- Exact Cargo/npm locks committed.
-- Rust and npm advisory scans.
-- License/source inventory.
+- Exact application Cargo/npm locks.
+- Rust/npm advisory scans.
+- License/source/provenance inventory.
 - SBOM for each package.
-- Tauri capability audit and CSP test.
+- Tauri capability/CSP tests.
 - No remote privileged content.
 - No Git network features.
-- SQL injection/MATCH escaping tests.
+- SQL/MATCH escaping.
 - Paste sanitization fuzzing.
-- Path traversal/symlink/case collision tests.
+- Path traversal/symlink/case collision.
+- Offline spellcheck and dictionary license inventory.
+- Weekly and release-candidate provenance checks.
 
-## 12. Release evidence package
+## 23. Unified release evidence package
 
-Every release candidate produces:
+Every release candidate produces exactly:
 
 ```text
-release-evidence/<version>/
-├── requirement-traceability.csv
-├── design-reconciliation.md
-├── visual-diff-report/
+release-evidence/<candidate-version>/
+├── requirement-disposition.csv
+├── platform-matrix.yaml
+├── visual/
 ├── performance/
 ├── accessibility/
-├── platform/
-├── fault-tests/
-├── history/
-├── search/
-├── security/
-├── licenses/
-├── sbom/
+├── appearance/
+├── editor-projection/
+├── spellcheck/
+├── recovery-project-undo/
+├── history-search/
+├── packaging/
+├── security-licenses-sbom/
 ├── package-hashes.txt
-└── release-decision.md
+├── known-issues.yaml
+└── release-approval.yaml
 ```
 
-The release decision names every waiver and residual risk.
+`release-approval.yaml` starts with `status: pending`. This layout is authoritative for the playbook and S130.
 
-## 13. Failure handling
+## 24. Failure handling
 
-If the implementation cannot meet a normative requirement:
+If a mandatory requirement cannot be met:
 
-1. Preserve the failing reproducible fixture and raw evidence.
-2. Identify whether the issue is implementation, dependency, architecture, or product scope.
-3. Propose bounded alternatives and consequences.
+1. Preserve a reproducible fixture and raw evidence.
+2. Classify implementation, dependency, architecture, or product-scope cause.
+3. Propose bounded alternatives/consequences at G20.
 4. Stop before silently changing behavior.
-5. Obtain product-owner approval for any waiver or specification change.
+5. After approval, update current governing documents directly.
 
-In particular, failure at the 250,000-word fixture must not result in an unapproved feature-reduced mode.
+Failure at 250k, shared two-view, spellcheck, appearance accessibility, or data safety must not produce an unapproved reduced mode.

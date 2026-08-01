@@ -2,30 +2,20 @@
 
 ## Goal
 
-Translate the approved Penpot handoff into a durable, reviewable implementation interpretation. Do not create the Tauri application or production UI.
-
-## Inputs
-
-- Approved design handoff.
-- Product specification.
-- Final architecture.
-- Design handoff contract.
-- Implementation plan.
-- S00 handoff.
-- Templates under `templates/design-reconciliation/`.
+Translate the approved handoff into a durable implementation interpretation. Do not create the Tauri application or production UI.
 
 ## Tasks
 
-1. Validate the design manifest, paths, checksums, component IDs, screens, states, tokens, assets, accessibility annotations, and platform variants.
-2. Compare the approved design with every relevant product requirement.
-3. Map Penpot components and screens to proposed implementation components and workspace states.
-4. Define deterministic token and asset import plans.
-5. Define visual-regression fixtures, capture sizes, and tolerances.
-6. Identify conflicts, missing states, implementation ambiguities, and accessibility concerns.
-7. Produce a work breakdown aligned with the implementation plan.
-8. Do not silently resolve a product/design conflict.
+1. Validate manifest, checksums, component IDs, screens, states, Light/Dark tokens, assets, accessibility annotations, and platform variants.
+2. Compare design against every relevant requirement, including Appearance, word-count scope, and spellcheck settings.
+3. Map components/screens to implementation components/workspace states.
+4. Define deterministic token/asset import plans and generated-drift checks.
+5. Define Light/Dark visual-regression fixtures, sizes, scales, tolerances.
+6. Identify conflicts, missing states, hard-coded theme values, implementation ambiguities, and accessibility concerns.
+7. Produce work breakdown aligned with S50 and later feature slices.
+8. Do not silently resolve product/design conflicts.
 
-## Required repository outputs
+## Outputs
 
 ```text
 docs/design/reconciliation/<handoff-version>/
@@ -37,10 +27,4 @@ docs/design/reconciliation/<handoff-version>/
 └── approval.yaml
 ```
 
-Create `approval.yaml` with `status: pending`.
-
-## Stage result
-
-- Use `needs_approval` when the package is complete.
-- List every blocking issue by ID.
-- Stop at G10. Do not dispatch implementation stages.
+Create approval as `pending`; return `needs_approval`; stop at G10.

@@ -1,26 +1,22 @@
-# S110 — System Integration and Continuous Validation
+# S110 — System Integration and Validation
 
 ## Goal
 
-Demonstrate that all implemented v1 slices work together and satisfy the governing specifications before packaging hardening.
+Validate the complete integrated v1 application and dispatch bounded repairs that do not require G20.
 
 ## Tasks
 
-- Run requirement traceability and identify missing or ambiguous dispositions.
-- Run domain/property, contract, canonical golden, editor semantic, persistence/fault, history, search, visual, accessibility, performance, native input/clipboard, high-DPI, and cross-platform interchange suites.
-- Compare approved Penpot references with deterministic captures.
-- Exercise ordinary and approximately 250,000-word documents with identical visible features.
-- Run background save/history/search/word-count load during editing.
-- Inspect architecture boundaries, UI-thread blocking, dependency drift, and security/license status.
-- Dispatch bounded repair tasks automatically for defects that do not require G20.
-
-## Outputs
-
-- System validation report.
-- Updated requirement disposition and traceability.
-- Raw evidence paths.
-- Remaining known issues classified as blocking/nonblocking.
+- Complete requirement traceability.
+- Run all Tier A suites.
+- Run required Tier B native checks for every affected capability.
+- Run scheduled/release Tier C workloads: full 250k one/two-view matrix, exact 20M corpus, 1M checkpoints, extended IME/accessibility/high-DPI/memory/fault/interchange.
+- Validate project undo/global replacement/save/history consistency.
+- Validate spellcheck language/dictionaries/suggestions/menu/performance on all platforms.
+- Validate System/Light/Dark propagation, contrast, references, and zero canonical/history effects.
+- Validate no search subtree/scope control, no per-document spellcheck language, and no deferred aggregate word counts.
+- Run visual comparisons in both themes.
+- Dispatch one bounded repair per defect where contracts/scope remain valid.
 
 ## Pass criteria
 
-No mandatory v1 requirement is unknown or failed; no blocking design/accessibility/performance/data-integrity issue remains; all three native platforms have required evidence.
+Every requirement is pass or blocked for a G20/current-spec change; no unknown native result; no unexplained major design deviation; all mandatory Tier C release evidence is available or explicitly scheduled for S130 candidate rerun.

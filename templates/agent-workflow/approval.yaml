@@ -1,11 +1,9 @@
-schema_version: 1
+schema_version: 2
 gate_id: ""
 status: pending # pending | approved | rejected
-subject: ""
-source_commit: ""
-requested_at: ""
-resolved_at: ""
+baseline_commit: ""
+artifact_paths: []
+required_current_document_updates: []
 approved_by: ""
-approved_option: ""
-waivers: []
+approved_at: ""
 notes: ""

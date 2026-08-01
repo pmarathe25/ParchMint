@@ -1,198 +1,254 @@
 # ParchMint v1 Final Architecture
 
-**Status:** Final v1 architecture baseline  
-**Version:** 1.2
-**Date:** 2026-07-31
+**Status:** Current implementation architecture  
+**Version:** 1.3  
+**Date:** 2026-07-31  
 **Primary audience:** Implementation agents, architecture reviewers, maintainers
 
 ## 1. Decision summary
 
-ParchMint v1 will use:
+ParchMint v1 uses:
 
-- **Tauri 2.11.5** as the cross-platform desktop shell.
-- **TypeScript + React** for the application UI.
-- **ProseMirror** for semantic rich-text editing, exact-locked initially to the validated V02 dependency graph.
-- **Rust** for project/domain services, persistence coordination, recovery, history, search, export, and platform-independent application logic.
-- **Restricted deterministic HTML5, TOML, CSS, and JSON** as canonical authored data.
-- **`git2 =0.21.0` with vendored libgit2** as the initial `HistoryStore` adapter.
-- **`rusqlite =0.40.1` with bundled SQLite FTS5** as the initial `SearchIndex` adapter.
-- **A ports-and-adapters modular architecture** that makes each selected technology replaceable without changing the canonical project model.
+- Tauri 2.11.5 as the cross-platform desktop shell.
+- TypeScript and React for the application UI.
+- Exact-locked ProseMirror packages behind a ParchMint-owned editor contract.
+- Rust for domain/application services, persistence, recovery, history, search, spellcheck orchestration, export, and platform-independent logic.
+- Restricted deterministic HTML5, TOML, CSS, JSON, and UTF-8 text sidecars as canonical authored data.
+- `git2 =0.21.0` with vendored libgit2 behind `HistoryStore`.
+- `rusqlite =0.40.1` with bundled SQLite FTS5 behind `SearchIndex`.
+- A ParchMint-owned `SpellcheckService`; S65 selects and proves the initial offline engine/adapter.
+- Ports-and-adapters boundaries that allow GUI/editor, history, search, spellcheck, save/load, recovery, and exporters to evolve independently.
 
-The GPUI + `text-document` + `text-typeset` route is rejected for v1. No third frontend comparison is planned.
+The shared two-view editor topology is fixed at the contract level, but the canonical-projection implementation is intentionally selected by S55 rather than prescribed prematurely. A ProseMirror worker mirror, a neutral delta/block mirror, or bounded main-thread/idle projection may be selected only after measured native evidence.
 
-The V02-R report did not pass its strict native-runtime gates. Selecting Tauri/ProseMirror is therefore a deliberate product decision, not a claim that every performance/accessibility risk has already been proven. The implementation must validate those risks early and must not hide failure by adding a user-visible large-document mode. All supported documents receive the same functionality.
+All supported documents receive the same user-visible functionality. No implementation may hide failure by adding a user-visible large-document mode.
 
 ## 2. Architectural drivers
 
 1. Cross-platform parity from the first release.
-2. 10–20 million words per project without eager loading.
-3. Documents up to approximately 250,000 words with one consistent feature set.
-4. Low-latency typing and nonblocking autosave/history/search.
+2. 10–20 million words per project without eager document-body loading.
+3. Documents near 250,000 words with one consistent feature set.
+4. Low-latency typing and nonblocking save/history/search/spellcheck/export.
 5. Two views of one document with independent view state and shared content/undo.
-6. Open, Git-friendly, deterministic canonical data.
+6. Open, deterministic, Git-friendly current data.
 7. Complete checkpoint history and recoverability.
-8. Penpot-first design handoff with traceable implementation.
-9. Replaceability of GUI/editor, history, search, save/load, recovery, and exporters.
-10. Testability without initializing the GUI.
+8. Project-level interactive undo distinct from durable History.
+9. Light/Dark/System appearance with no authored-data effects.
+10. Penpot-first design handoff with traceable implementation.
+11. Testability of core behavior without initializing the GUI.
 
 ## 3. Architectural principles
 
-### 3.1 Canonical data and derived data are separate
+### 3.1 Canonical and derived state are separate
 
-Canonical authored state consists only of versioned HTML/TOML/CSS/JSON files. Git objects, SQLite indexes, editor JSON, recovery logs, and workspace state are implementation or derived data.
+Canonical authored state consists only of versioned project files. Git objects, SQLite indexes, editor state, spellcheck decorations, recovery logs, application preferences, and workspace state are implementation or derived data unless explicitly named otherwise.
 
 ### 3.2 Depend on ParchMint-owned contracts
 
-Domain/application modules depend on interfaces defined by ParchMint, never directly on Tauri, React, ProseMirror, `git2`, `rusqlite`, or operating-system APIs.
+Domain/application modules depend on interfaces and data types defined by ParchMint, never directly on Tauri, React, ProseMirror, `git2`, `rusqlite`, a spellcheck library, or an operating-system API.
 
 ### 3.3 One authority per state category
 
-At any moment, each state category has one authority:
+At any moment:
 
-- Project hierarchy, metadata definitions, styles, export settings, and persisted authored metadata: Rust application/domain core.
-- Active rich-text editor state: the document’s `EditorSession` in the ProseMirror adapter.
-- Per-view selection, scroll, focus, and local-search state: individual `EditorViewSession`s.
+- Project hierarchy, metadata definitions/values, style definitions, export settings, project dictionary, deletion tombstones, and project undo: Rust application/domain core.
+- Active rich-text document content and document undo: one `SharedEditorSession` per open document in the editor adapter.
+- Per-view selection, scroll, focus, composition, and local-search state: each `EditorViewSession`.
 - Durable current files: canonical project store after save acknowledgement.
 - Historical checkpoints: `HistoryStore`.
 - Search results: disposable `SearchIndex`, revalidated against current revisions.
+- Spellcheck results: disposable `SpellcheckService` results, revalidated against block/document revisions.
+- Appearance and global dictionary: application-preference store outside project history.
 - Pure layout/hover/animation state: frontend UI store.
 
-The Rust mirror of an actively edited document is a revisioned persistence/search mirror, not a competing interactive editor authority.
+A persistence/search/recovery projection is never a competing interactive editor authority.
 
-### 3.4 No synchronous persistence from input
+### 3.4 No synchronous persistence or analysis from input
 
-A keypress must not wait for Rust IPC, disk, Git, SQLite, export, or canonical serialization before painting. Editor transactions are applied locally and then propagated asynchronously through revisioned channels.
+A keypress must not wait for Rust IPC, disk, Git, SQLite, spellcheck, export, canonical serialization, or full-document analysis before painting. High-frequency changes are applied locally and propagated through bounded, revisioned, asynchronous channels.
 
-### 3.5 Coarse, durable replaceability beats generic widgets
+### 3.5 Replace coarse capabilities, not generic widgets
 
-ParchMint will not build a generic cross-framework widget toolkit. Replaceability occurs at stable service and editor-adapter boundaries. Replacing the GUI still requires rewriting widgets and editor rendering, but must retain project format, domain logic, persistence, history, search, export, and headless tests.
+ParchMint does not build a cross-framework widget toolkit. Replacement occurs at service and editor boundaries. A GUI/editor replacement rewrites widgets and input integration but retains canonical format, application logic, history/search/save/recovery/export contracts, and headless tests.
 
-### 3.6 Cross-platform behavior is proven natively
+### 3.6 Native claims require native evidence
 
-Package creation and headless tests are not substitutes for native runtime validation of IME, clipboard, accessibility, scaling, filesystem durability, or packaging.
+Packaging and headless tests do not prove IME, clipboard, accessibility, spellcheck menu behavior, scaling, filesystem durability, or interactive performance. Those claims require native release-mode evidence on Windows, macOS, and Linux.
 
-## 4. System context
+### 3.7 Current documents are authoritative
+
+When an approved architecture change occurs, update this document and dependent contracts directly. Do not retain a parallel architecture-decision log or treat historical prototypes as governing inputs.
+
+## 4. Process, windows, and project sessions
+
+ParchMint uses one normal application process with zero or more project windows.
 
 ```text
-┌──────────────────────────────── Desktop process ───────────────────────────────┐
-│                                                                                │
-│  Tauri webview frontend                                                        │
-│  ┌──────────────────────────────────────────────────────────────────────────┐  │
-│  │ React shell                                                              │  │
-│  │ ├── Launcher / workspace / Explorer / Cards / Inspector / History        │  │
-│  │ ├── Design-token CSS and exported SVG assets                             │  │
-│  │ ├── ProseMirror editor adapter                                           │  │
-│  │ ├── EditorSession + two EditorViewSessions                               │  │
-│  │ └── Editor worker mirror / canonical projection                          │  │
-│  └────────────────────────────────┬─────────────────────────────────────────┘  │
-│                                   │ versioned typed commands/events             │
-│  Rust application core            ▼                                             │
-│  ┌──────────────────────────────────────────────────────────────────────────┐  │
-│  │ Domain + application services                                            │  │
-│  │ ├── ProjectService / HierarchyService / MetadataService                  │  │
-│  │ ├── SaveCoordinator / RecoveryCoordinator                                │  │
-│  │ ├── HistoryService → HistoryStore                                        │  │
-│  │ ├── SearchService → SearchIndex                                           │  │
-│  │ ├── ExportService → Exporter                                              │  │
-│  │ └── PlatformService / ProjectLock                                         │  │
-│  └─────────────────────┬──────────────────┬──────────────────┬───────────────┘  │
-│                        │                  │                  │                  │
-│                 ProjectRepository   GitHistoryStore   SqliteFtsIndex           │
-└────────────────────────┼──────────────────┼──────────────────┼──────────────────┘
-                         ▼                  ▼                  ▼
-                Canonical project files   .git/       .parchmint/cache/search.db
+ApplicationProcess
+├── ApplicationPreferences
+│   ├── appearance: system | light | dark
+│   └── global_dictionary
+├── PlatformServiceRegistry
+├── WindowRegistry
+└── ProjectSessionRegistry
+    └── ProjectSession per open project
+        ├── one writable project lock
+        ├── project/domain state
+        ├── save/recovery/history/search services
+        └── one or more windows only if a future feature explicitly allows it
 ```
+
+For v1, one project maps to one project window. A process may own multiple different project windows.
+
+A single-instance platform adapter receives later process-launch requests where the platform/runtime supports it and routes an open-project request to the existing process. The project lock remains authoritative for independently started binaries, crashes, and unsupported focus paths. If an existing window cannot be focused safely, the second attempt shows a locked-project message.
+
+Window focus, geometry, appearance, and recent-project lists are application/workspace state, not authored project history.
 
 ## 5. Repository and module layout
 
-Recommended monorepo structure:
+Recommended structure:
 
 ```text
 ParchMint/
 ├── apps/
-│   ├── desktop-ui/                      # React/TypeScript frontend
+│   ├── desktop-ui/
 │   │   ├── src/app/
 │   │   ├── src/components/
 │   │   ├── src/features/
 │   │   ├── src/editor/
 │   │   ├── src/design-tokens/
 │   │   └── src/generated-contracts/
-│   └── desktop-tauri/                   # Tauri configuration and Rust adapter
+│   └── desktop-tauri/
 │       └── src-tauri/
 ├── packages/
-│   ├── ui-contract/                     # JSON Schemas and generated TS/Rust types
-│   ├── editor-contract/                 # Editor adapter interfaces and fixtures
-│   ├── editor-prosemirror/              # All ProseMirror-specific code
-│   ├── design-system/                   # Tokens, CSS variables, shared web components
-│   └── test-fixtures/                   # Canonical documents and operation traces
+│   ├── ui-contract/
+│   ├── editor-contract/
+│   ├── editor-prosemirror/
+│   ├── design-system/
+│   └── test-fixtures/
 ├── crates/
-│   ├── parchmint-domain/                # Pure entities, invariants, IDs
-│   ├── parchmint-application/           # Use cases and orchestration
-│   ├── parchmint-project-format/        # TOML/HTML/CSS/JSON schemas and migrations
-│   ├── parchmint-project-repository/    # ProjectRepository port
-│   ├── parchmint-project-fs/            # Filesystem implementation
-│   ├── parchmint-save/                  # SaveCoordinator and atomic transaction plan
-│   ├── parchmint-recovery-api/          # RecoveryJournal port
-│   ├── parchmint-recovery-fs/           # Initial recovery implementation
-│   ├── parchmint-history-api/            # HistoryStore port
-│   ├── parchmint-history-git2/           # Selected git2 implementation
-│   ├── parchmint-search-api/             # SearchIndex port and query/result types
-│   ├── parchmint-search-sqlite/          # Selected FTS5 implementation
-│   ├── parchmint-export-api/             # Exporter contract and neutral export model
-│   ├── parchmint-export-html/            # v1 self-contained HTML exporter
-│   ├── parchmint-platform-api/           # Dialog/menu/clipboard/path/lock abstractions
-│   ├── parchmint-tauri-adapter/          # Commands/events/platform implementations
-│   ├── parchmint-core-cli/               # Headless validate/search/history/export tool
-│   └── parchmint-test-support/           # Fault injection, clocks, IDs, fixtures
-├── contracts/                            # Versioned JSON Schemas
+│   ├── parchmint-domain/
+│   ├── parchmint-application/
+│   ├── parchmint-project-format/
+│   ├── parchmint-project-repository/
+│   ├── parchmint-project-fs/
+│   ├── parchmint-save/
+│   ├── parchmint-recovery-api/
+│   ├── parchmint-recovery-fs/
+│   ├── parchmint-history-api/
+│   ├── parchmint-history-git2/
+│   ├── parchmint-search-api/
+│   ├── parchmint-search-sqlite/
+│   ├── parchmint-spellcheck-api/
+│   ├── parchmint-spellcheck-<selected>/
+│   ├── parchmint-export-api/
+│   ├── parchmint-export-html/
+│   ├── parchmint-platform-api/
+│   ├── parchmint-tauri-adapter/
+│   ├── parchmint-core-cli/
+│   └── parchmint-test-support/
+├── contracts/
 ├── design/
-│   ├── source/                            # Approved .penpot and token exports
-│   ├── handoff/<version>/                 # Frozen implementation handoff
-│   └── generated/                         # Generated token CSS and asset manifests
+│   ├── source/
+│   ├── handoff/<version>/
+│   └── generated/
 ├── docs/
 ├── scripts/
 └── tests/
 ```
 
-Only adapters import external framework/backend types. Public signatures in domain/application ports use ParchMint-owned types.
+Only adapters import external framework/backend types. Public domain/application signatures use ParchMint-owned types.
 
-## 6. Contract and type strategy
+## 6. Dependency baseline and supply-chain controls
 
-### 6.1 Versioned schemas
+### 6.1 Selected direct dependencies
 
-The source of truth for Tauri IPC payloads and design manifests is versioned JSON Schema under `contracts/`. Rust and TypeScript types must be generated from or validated against the same schemas; they must not be independently maintained by hand.
+Bootstrap begins with these accepted selections:
+
+```toml
+git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
+```
+
+Initial ProseMirror direct versions:
+
+```text
+prosemirror-commands      1.7.1
+prosemirror-history       1.5.0
+prosemirror-inputrules    1.5.1
+prosemirror-keymap        1.2.3
+prosemirror-model         1.25.11
+prosemirror-schema-basic  1.2.4
+prosemirror-schema-list   1.5.1
+prosemirror-state         1.4.4
+prosemirror-transform     1.12.0
+prosemirror-view          1.42.2
+```
+
+S20 creates the actual application lockfiles. Those application lockfiles, not historical prototype locks, become authoritative.
+
+### 6.2 Lock assertions
+
+CI must assert:
+
+- Direct versions match the approved baseline until a G20-approved update changes it.
+- `git2 =0.21.0` resolves to the expected vendored `libgit2-sys`/libgit2 family or the stage stops for review.
+- No system libgit2, installed Git executable, or system SQLite is silently selected.
+- ProseMirror packages resolve from npm with expected integrity data.
+- The canonical ProseMirror source host is the active upstream under `code.haverbeke.berlin/prosemirror/`; archived GitHub repositories are not treated as current provenance.
+
+### 6.3 Scheduled provenance checks
+
+Run on lockfile changes, weekly, and for every release candidate:
+
+- Rust/npm advisory scans.
+- License inventory.
+- Package integrity/provenance where available.
+- Canonical source availability and source/license changes.
+- Unexpected registry maintainer/ownership changes.
+- SBOM generation.
+
+A new upstream release alone does not require G20. Missing or irreconcilable source, a material license/security issue, a required maintained fork, or a boundary-changing replacement does.
+
+## 7. Contracts and type generation
+
+### 7.1 Versioned schemas
+
+Tauri command/event payloads, editor-neutral payloads where shared across languages, and design manifests use versioned JSON Schema under `contracts/`.
+
+Rust and TypeScript types are generated from or validated against the same schemas. They are not maintained independently by hand.
 
 Every command/event envelope includes:
 
 ```text
 schema_version
 request_id or event_id
-project_id
+project_id where applicable
 expected_project_revision where applicable
 payload
 ```
 
-### 6.2 Compatibility
+### 7.2 Drift guard
 
-- Additive fields are preferred.
+CI runs contract generation and fails if generated Rust/TypeScript files change:
+
+```text
+generate-contracts
+git diff --exit-code -- <generated-rust> <generated-typescript>
+```
+
+Generated headers contain schema version and source checksum. Cross-language golden fixtures must serialize/deserialize in both directions.
+
+### 7.3 Compatibility
+
+- Prefer additive fields.
 - Removed/renamed fields require a schema-version bump and migration.
 - Unknown noncritical fields are ignored safely.
-- Contract tests serialize in Rust, deserialize in TypeScript, and vice versa.
+- High-frequency keystrokes do not cross Tauri IPC individually.
 
-### 6.3 Command categories
+## 8. Domain model and canonical format
 
-- Project/hierarchy commands.
-- Metadata/style commands.
-- Save/recovery commands.
-- History/search/export requests.
-- Workspace/platform commands.
-- Editor snapshot/change notifications.
-
-High-frequency keystrokes do not cross Tauri IPC individually.
-
-## 7. Domain model
-
-Core entities use stable opaque IDs:
+Core IDs are opaque and stable:
 
 ```text
 ProjectId
@@ -207,34 +263,18 @@ BlockId
 RevisionId
 CheckpointId
 ViewId
+ProjectOperationId
+UndoEntryId
 ```
 
-Core authored aggregate:
-
-```text
-Project
-├── project metadata
-├── fixed Manuscript root
-├── fixed Research root
-├── ordered Node graph
-├── StyleCatalog
-├── MetadataSchema
-├── node metadata values
-├── export settings
-└── annotation registry/index
-```
-
-Group and Document invariants are enforced in `parchmint-domain`; the frontend may not create invalid trees and rely on later repair.
-
-## 8. Canonical project format
-
-Illustrative layout:
+Canonical layout:
 
 ```text
 my-novel/
 ├── .git/
 ├── project.toml
 ├── styles.css
+├── dictionary.txt
 ├── manuscript/
 │   └── part-one--<id>/
 │       └── chapter-one--<id>.html
@@ -247,95 +287,97 @@ my-novel/
     ├── format-version
     ├── recovery/
     ├── cache/
-    │   └── search.sqlite
+    │   ├── search.sqlite
+    │   └── word-counts.json
     └── workspace.json
 ```
 
-### 8.1 `project.toml`
+`project.toml` is authoritative for project identity, ordered nodes, relative paths, display titles, Synopsis/metadata, field definitions, style semantic metadata, export settings, language, and deletion tombstones.
 
-Contains:
+`dictionary.txt` is deterministic UTF-8/LF, one normalized project word per line in stable sort order. Its normalization rules are versioned. The global dictionary uses the same logical format in the application-preference directory but does not enter project save/history.
 
-- Format/schema version.
-- Project ID, display title, optional author, language.
-- Ordered node records with stable IDs and relative paths.
-- Display titles, section, type, parent/order.
-- Synopsis and metadata values or references to partitioned metadata files if later required.
-- Metadata-field definitions.
-- Style semantic metadata not representable in CSS alone.
-- Export defaults/overrides.
-- Deletion tombstones.
+### 8.1 Restricted HTML
 
-The manifest is authoritative for order and identity. Filesystem directory enumeration is never order.
+Allowed blocks include paragraph, Document Title/headings, block quote, ordered/unordered lists, Verse, Scene Break, and Page Break. Allowed marks include strong, emphasis, underline, strikethrough, small caps, superscript, subscript, and link.
 
-### 8.2 Restricted HTML profile
+Every addressable block has a stable `data-pm-id`. Semantic style references use stable IDs. Scripts, event handlers, arbitrary inline styles, unsupported elements, and remote embeds are forbidden.
 
-Canonical documents use standard HTML plus `data-pm-*` attributes where necessary.
-
-Allowed block concepts include:
-
-- Paragraph.
-- Document Title and heading levels.
-- Block quote.
-- Ordered/unordered list and list item.
-- Verse/line-preserving block.
-- Atomic scene break.
-- Atomic page break.
-
-Allowed inline concepts include:
-
-- Text.
-- Strong/emphasis/underline/strikethrough.
-- Small caps.
-- Superscript/subscript.
-- Link.
-
-Every addressable block has a stable `data-pm-id`. Semantic style references use stable IDs, not visible style names. Scripts, event handlers, arbitrary inline styles, unsupported elements, and remote embeds are forbidden.
-
-### 8.3 Deterministic serialization
+### 8.2 Deterministic serialization
 
 - UTF-8 and LF.
-- Stable attribute order.
-- Stable class and ID generation.
-- One deterministic representation for equivalent documents.
+- Stable attribute and record order.
+- Stable class/ID generation.
+- One representation for equivalent documents.
 - No formatter-driven paragraph rewrapping.
 - No rewriting unchanged documents.
 - Sanitize before canonicalization.
 - Golden byte-equality tests.
 
-### 8.4 Migrations
+### 8.3 Migrations
 
-`parchmint-project-format` owns explicit `N → N+1` migrations. A migration:
+Format migrations:
 
-1. Takes a pre-migration checkpoint when history is available.
-2. Writes through the atomic save pipeline.
-3. Preserves stable IDs where possible.
-4. Is tested on real fixture projects from every prior supported version.
-5. Never relies on SQLite or frontend state.
+1. Validate the source project.
+2. Take a pre-migration checkpoint when history is available.
+3. Write through the atomic save pipeline.
+4. Preserve stable IDs where possible.
+5. Test every supported prior format fixture.
+6. Reset interactive undo/redo after successful migration.
+7. Never depend on SQLite or frontend state.
 
-## 9. Frontend and editor architecture
+## 9. Application command and project-undo architecture
 
-### 9.1 React shell
+All project-authoring mutations execute through `ProjectCommandDispatcher`.
 
-React implements the application shell and consumes approved Penpot tokens/assets. It is divided by feature, not by visual page alone.
+```rust
+trait ProjectCommandDispatcher {
+    fn execute(&self, command: ProjectCommand) -> Result<ProjectCommandResult>;
+    fn undo(&self) -> Result<ProjectCommandResult>;
+    fn redo(&self) -> Result<ProjectCommandResult>;
+    fn state(&self) -> ProjectUndoState;
+    fn reset(&self, reason: UndoResetReason);
+}
+```
 
-Framework-specific frontend state remains in `apps/desktop-ui`. Domain decisions are requested through typed application commands.
+A project command is validated against expected project/resource revisions and produces an atomic application result plus an inverse representation.
 
-CSS strategy:
+### 9.1 Undo entry
 
-- Penpot token JSON is transformed into versioned CSS custom properties.
-- Component styles use CSS Modules or equally scoped static CSS.
-- Avoid runtime CSS-in-JS as the baseline.
-- Native platform variations use explicit token/theme or component variants, not scattered user-agent checks.
+```text
+ProjectUndoEntry
+├── operation_id
+├── label
+├── forward_command or forward_patch
+├── inverse_command or inverse_patch
+├── expected_start/end revisions
+├── affected resources/documents
+├── approximate byte cost
+└── checkpoint_group_id
+```
 
-### 9.2 ProseMirror isolation
+Initial bounds are explicit constants: 100 complete logical operations and 64 MiB of in-memory inverse payload. The implementation may spill large inverse payloads to a transient session file. Eviction removes only complete oldest operations.
 
-All ProseMirror imports live in `packages/editor-prosemirror`. Other frontend code sees only the ParchMint editor contract.
+- A new project command clears redo.
+- Undo/redo applies as a new authored state and saves/checkpoints normally.
+- Project close/reopen resets project undo/redo.
+- Whole-project History restore, accepted recovery replay, and migration reset project and open-document undo/redo.
+- Text-input native undo remains local to focused text inputs and does not bypass project commands on commit.
 
-ProseMirror JSON, plugin keys, selections, steps, and DOM nodes must not cross into Rust domain APIs or canonical files.
+### 9.2 Global replacement
 
-### 9.3 `EditorAdapter` contract
+Global replacement is a composite project command:
 
-Conceptual TypeScript interface:
+1. Revalidate selected matches against current revisions.
+2. Build the complete inverse patch before applying changes.
+3. Apply to open `SharedEditorSession`s and closed canonical documents under one operation ID.
+4. Suppress independent document-history entries for the same composite operation; editor sessions receive a project-command boundary.
+5. Stage every affected canonical resource in one save transaction.
+6. Create one history checkpoint after the complete durable write succeeds.
+7. On failure, roll back/recover as one operation rather than leaving a partial replacement.
+
+## 10. Editor contract
+
+Only `packages/editor-prosemirror` imports ProseMirror. Other code sees ParchMint types.
 
 ```ts
 interface EditorAdapter {
@@ -343,10 +385,12 @@ interface EditorAdapter {
   attachView(session: EditorSessionHandle, view: ViewId, host: HTMLElement): void;
   detachView(session: EditorSessionHandle, view: ViewId): ViewState;
   executeCommand(session: EditorSessionHandle, view: ViewId, command: EditorCommand): void;
+  applyProjectOperation(session: EditorSessionHandle, operation: ProjectDocumentOperation): Promise<void>;
   getSelection(session: EditorSessionHandle, view: ViewId): EditorSelection;
   getSelectionGeometry(session: EditorSessionHandle, view: ViewId): SelectionGeometry | null;
   setStyleCatalog(session: EditorSessionHandle, styles: StyleCatalogProjection): void;
   setSearchDecorations(session: EditorSessionHandle, view: ViewId, matches: SearchDecoration[]): void;
+  setSpellcheckDecorations(session: EditorSessionHandle, view: ViewId, results: SpellcheckDecoration[]): void;
   requestCanonicalProjection(session: EditorSessionHandle, throughRevision: number): Promise<CanonicalProjection>;
   subscribe(listener: EditorEventListener): Unsubscribe;
   closeDocument(session: EditorSessionHandle): Promise<void>;
@@ -354,85 +398,172 @@ interface EditorAdapter {
 }
 ```
 
-The implementation may use more granular APIs internally. Tests target externally observable behavior.
+ProseMirror nodes, steps, selections, plugin keys, and DOM nodes do not cross into Rust domain APIs or canonical files.
 
-### 9.4 One document, two views
+## 11. Shared document and two-view state topology
 
-ProseMirror normally associates selection/history with an `EditorState`; ParchMint therefore needs a session controller rather than two unrelated editors.
-
-Recommended design:
+Each open document has one `SharedEditorSession`:
 
 ```text
 SharedEditorSession
-├── canonical ProseMirror doc state
-├── shared transaction log/history controller
-├── style/plugin configuration
-├── comments/anchor mapper
+├── shared document value
+├── shared document-history controller
+├── shared semantic plugin state
+├── shared comments/anchor mapping
 ├── editor revision
-├── worker mirror
+├── projection channel
 └── ViewSession A / ViewSession B
     ├── independent selection
-    ├── scroll anchor
+    ├── stored marks when view-local
+    ├── scroll/viewport anchor
     ├── local search
     ├── focus
+    ├── IME/composition state
     └── mounted EditorView
 ```
 
-Transaction dispatch:
+Plugin state is classified before implementation:
 
-1. The focused view produces a ProseMirror transaction.
-2. `SharedEditorSession` applies document-changing steps once to the shared document/history authority.
-3. Each view’s selection is mapped independently through the step mapping.
-4. Both views receive the resulting document state; the originating view receives its requested selection, the other retains its mapped selection.
-5. The toolbar and Inspector target the focused `ViewSession`.
-6. Undo/redo operates on the shared history and then maps both selections.
-7. A revisioned change notification is sent to the worker mirror and Rust services.
+- **Shared semantic state:** history, document-level comments/anchors, document revision, schema/style configuration.
+- **View-local state:** selection, local search, focus, scroll/viewport, transient menu geometry, composition.
+- **Derived replicated state:** decorations that can be recreated from shared or view-local inputs.
 
-Do not use two independent ProseMirror history plugins and attempt to reconcile them.
+Two ordinary independent ProseMirror history plugins are prohibited.
 
-### 9.5 Editor worker mirror
+Transaction flow:
 
-A Web Worker inside `editor-prosemirror` maintains a transient mirror sufficient to:
+1. The focused view creates a transaction against its current session revision.
+2. The session controller validates/rebases or rejects stale transactions; composition-sensitive transactions are never silently replayed across incompatible state.
+3. Document-changing steps apply once to the shared document/history authority.
+4. Each view's selection maps independently through the step mapping.
+5. The originating view receives its requested valid selection; the other retains its mapped selection.
+6. Shared semantic plugins update once; view-local plugins update per view.
+7. Both views receive the resulting document by the next rendered frame under normal load.
+8. A revisioned, coalescible change batch is sent to projection/recovery/search/spellcheck services.
+9. Undo/redo uses shared document history and maps both selections.
 
-- Project editor state into deterministic canonical HTML.
-- Extract changed block text, title, and word-count deltas.
-- Batch recovery records.
-- Avoid expensive serialization on the webview main thread.
+S55 must prove this topology with real IME and accessibility-sensitive behavior before S60 production implementation.
 
-The worker may use exact-locked ProseMirror packages as implementation data. Its output to Rust is ParchMint-owned:
+## 12. Canonical projection and recovery channel
+
+The editor publishes ParchMint-owned revisioned change batches:
+
+```text
+EditorChangeBatch
+├── document_id
+├── base_revision
+├── through_revision
+├── changed_block_ids
+├── neutral text/structure deltas or adapter payload
+├── title observation
+└── annotation changes
+```
+
+The projection implementation selected by S55 must provide:
 
 ```text
 CanonicalProjection
 ├── document_id
 ├── editor_revision
-├── html_bytes
-├── block_text_projection[]
+├── html_bytes or deterministic resource stream
+├── changed_block_text[]
 ├── observed_content_title
 ├── word_count
 └── annotation_projection/version
 ```
 
-If worker APIs or webview limitations make a mirror impractical, an ADR may replace it with a Rust-side neutral-delta mirror, but the UI-thread and canonical-boundary requirements remain.
+Allowed implementation strategies:
 
-### 9.6 No size-based behavior
+1. A Web Worker with a ProseMirror document/model mirror.
+2. A Web Worker or Rust worker with a neutral block/delta mirror.
+3. Bounded incremental/idle projection without a persistent mirror.
 
-The adapter must not expose a `large_document_mode` capability in v1. The same schema, plugins, comments, two-view behavior, search, and formatting apply throughout the supported range.
+Selection criteria include one/two-view correctness, input-to-frame, projection latency, queue depth, initial synchronization, memory, worker failure recovery, canonical fidelity, and platform support.
 
-Transparent optimizations are allowed:
+Regardless of strategy:
 
-- Incremental decorations.
-- Viewport-aware spellchecking.
-- CSS `content-visibility` when correctness is preserved.
-- Lazy offscreen measurements.
-- Worker-based projection.
-- Plugin throttling/debouncing.
-- Future internal bounded rendering that preserves full behavior.
+- The UI thread never performs an unbounded full serialization during input.
+- Queues are bounded and coalesce superseded revisions.
+- A lagging/crashed projection target resynchronizes from a revisioned snapshot.
+- Save acknowledgements name the projected editor revision.
+- Recovery records can replay to the same canonical result.
+- Projection failure does not corrupt or become interactive editor authority.
 
-Any optimization that changes selection, accessibility, search, comments, or clipboard semantics requires dedicated compatibility tests.
+## 13. Spellcheck architecture
 
-## 10. Application services and replaceable ports
+`SpellcheckService` is a ParchMint-owned asynchronous port:
 
-### 10.1 Project repository
+```rust
+trait SpellcheckService {
+    fn available_languages(&self) -> Result<Vec<SpellcheckLanguage>>;
+    fn check(&self, request: SpellcheckRequest, sink: SpellcheckBatchSink) -> Result<SpellcheckHandle>;
+    fn suggest(&self, request: SuggestionRequest) -> Result<Vec<SpellingSuggestion>>;
+    fn cancel(&self, handle: SpellcheckHandle);
+    fn reload_project_dictionary(&self, project: ProjectId, revision: RevisionId) -> Result<()>;
+    fn reload_global_dictionary(&self, revision: RevisionId) -> Result<()>;
+}
+```
+
+Requests contain language, document/block revisions, text ranges, and generation ID. Results contain token range, normalized token, rule/category, and confidence/ranking metadata owned by ParchMint.
+
+### 13.1 Ownership
+
+- Project-default language: `project.toml`; project undo/save/history.
+- Project dictionary: `dictionary.txt`; project undo/save/history.
+- Global dictionary: application preferences; application-level undo is not required, but changes are immediately persistent and reversible through settings actions.
+- Misspelling/suggestion results: disposable view/editor state.
+- Language packages: bundled/offline implementation resources, not project data.
+
+### 13.2 Runtime behavior
+
+- Check only visible/recently changed blocks plus bounded lookaround.
+- Cancel stale generations and reject results for mismatched revisions.
+- Do not block typing, save, or close.
+- Use one application-owned spelling context-menu model across platforms.
+- Disable native webview spellcheck if it duplicates or conflicts with selected decorations/menus.
+- Suggestions are token-level spelling suggestions, not grammar or semantic writing assistance.
+
+S65 freezes the v1 language inventory, selects/proves the engine, audits licenses/package size, and validates all three webviews before feature waves.
+
+## 14. Save and recovery
+
+Revisions:
+
+- `editor_revision`: monotonically increasing per open document session.
+- `project_revision`: monotonically increasing for authored project changes.
+- `durable_revision`: latest canonical state successfully written.
+- `checkpoint_id`: identity of a completed durable checkpoint.
+
+Save flow:
+
+```text
+Editor/project command
+  → immediate interactive state update
+  → revisioned projection/recovery batch
+  → SaveCoordinator queues one project transaction
+  → serialize dirty manifest/style/dictionary/annotation/document resources
+  → write temporary files
+  → flush and atomically replace
+  → HistoryStore checkpoint
+  → SearchIndex and derived word-count update
+  → acknowledge durable revisions to UI
+```
+
+Search/word-count update failure does not invalidate canonical save; derived state is marked stale. History checkpoint failure leaves current canonical files valid but surfaces an error and retains enough recovery/context to retry.
+
+A save transaction records target/expected revisions, files to create/replace/delete, hashes, temporary paths, and commit stage. Restart finishes or rolls back incomplete filesystem stages before editing.
+
+Backpressure:
+
+- One canonical writer per project.
+- New changes coalesce behind current save.
+- Explicit Save raises priority without creating another writer.
+- Projection, recovery, history, search, and spellcheck use bounded queues.
+- Maintenance yields to active input.
+
+## 15. Replaceable application ports
+
+### 15.1 Project repository
 
 ```rust
 trait ProjectRepository {
@@ -445,24 +576,11 @@ trait ProjectRepository {
 }
 ```
 
-`parchmint-project-fs` is the v1 implementation. A future packaged/cloud store can implement the port without changing domain use cases.
+### 15.2 Canonical codec
 
-### 10.2 Canonical codec
+Parsing, serialization, migration, and validation are separate from filesystem access.
 
-```rust
-trait CanonicalCodec {
-    fn parse_project(...);
-    fn serialize_project(...);
-    fn parse_document(...);
-    fn serialize_document(...);
-    fn migrate(...);
-    fn validate(...);
-}
-```
-
-The codec is separate from filesystem access so format tests are pure and alternate stores reuse it.
-
-### 10.3 History store
+### 15.3 History store
 
 ```rust
 trait HistoryStore {
@@ -476,11 +594,9 @@ trait HistoryStore {
 }
 ```
 
-`preview` and `restore` operate on the entire canonical project state captured by the checkpoint. The v1 domain port does not expose document, group, subtree, or other partial checkpoint restore scopes.
+Preview and restore operate on the entire canonical project state. Only the git2 adapter imports `git2`.
 
-Only `parchmint-history-git2` imports `git2`.
-
-### 10.4 Search index
+### 15.4 Search index
 
 ```rust
 trait SearchIndex {
@@ -494,105 +610,21 @@ trait SearchIndex {
 }
 ```
 
-Only `parchmint-search-sqlite` imports `rusqlite`.
+v1 queries the entire project; section/subtree scope controls are not part of the v1 contract surface. Only the SQLite adapter imports `rusqlite`.
 
-### 10.5 Recovery journal
+### 15.5 Recovery journal
 
-```rust
-trait RecoveryJournal {
-    fn begin_session(&self, document: DocumentId, base: DurableRevision) -> Result<RecoverySession>;
-    fn append(&self, session: RecoverySession, record: RecoveryRecord) -> Result<()>;
-    fn load_pending(&self, project: ProjectId) -> Result<Vec<PendingRecovery>>;
-    fn mark_durable(&self, session: RecoverySession, through: EditorRevision) -> Result<()>;
-    fn discard_completed(&self, session: RecoverySession) -> Result<()>;
-}
-```
+Recovery is versioned and adapter-specific; completed canonical content is unaffected by editor replacement.
 
-Recovery records may be ProseMirror-adapter-specific, but they are versioned and isolated under this port. A GUI/editor replacement can add a new recovery implementation without migrating canonical files.
+### 15.6 Exporter
 
-### 10.6 Exporter
+The neutral export plan contains ordered semantic blocks, styles, and title decisions rather than editor nodes.
 
-```rust
-trait Exporter {
-    fn id(&self) -> ExporterId;
-    fn capabilities(&self) -> ExportCapabilities;
-    fn plan(&self, project: &ProjectSnapshot, options: &ExportOptions) -> Result<ExportPlan>;
-    fn render(&self, plan: ExportPlan, output: &mut dyn Write) -> Result<ExportReport>;
-}
-```
+### 15.7 Platform services
 
-The neutral `ExportPlan` contains ordered semantic blocks, styles, and title decisions rather than HTML editor nodes.
+Ports cover dialogs, menus, clipboard extensions, reveal/open external file, project locking, paths/directories, notifications, window state, single-instance routing, system appearance, and application preferences.
 
-### 10.7 Platform services
-
-Ports cover:
-
-- Native dialogs.
-- Menus and command labels.
-- Clipboard extensions outside editor-native paths.
-- Reveal/open external file.
-- Project locking.
-- Paths and directories.
-- Notifications.
-- Window state.
-
-The web frontend requests semantic actions; platform adapters implement them.
-
-## 11. Save and recovery architecture
-
-### 11.1 Revisions
-
-- `editor_revision`: monotonically increasing per open document session.
-- `project_revision`: monotonically increasing for authored project changes.
-- `durable_revision`: latest canonical state successfully written.
-- `checkpoint_id`: history identity for a completed durable state.
-
-UI Saved status always names or internally tracks the acknowledged durable revision; it is never a timer-based guess.
-
-### 11.2 Save flow
-
-```text
-Editor transaction
-  → immediate ProseMirror render
-  → worker/recovery batch
-  → debounced canonical projection
-  → SaveCoordinator queues project transaction
-  → serialize dirty manifest/style/annotation/document resources
-  → write temporary files
-  → flush and atomically replace
-  → HistoryStore checkpoint
-  → SearchIndex replacement/update
-  → acknowledge durable revision to UI
-```
-
-Search update failure does not invalidate a canonical save; the index is marked stale and rebuilt/retried. History checkpoint failure leaves current canonical files valid but must surface an error and retain recovery/context sufficient to retry.
-
-### 11.3 Multi-file transaction descriptor
-
-A save transaction records:
-
-- Target project revision.
-- Expected previous durable revision.
-- Files to create/replace/delete.
-- Content hashes.
-- Temporary paths.
-- Commit stage.
-
-On restart, the recovery coordinator finishes or rolls back incomplete filesystem stages before opening the project for editing.
-
-### 11.4 Durability
-
-Implement and test platform-specific flush/rename semantics. The architecture must not assume identical `fsync`/rename behavior across Windows, macOS, and Linux.
-
-### 11.5 Backpressure
-
-- At most one canonical writer per project.
-- New changes coalesce behind the current save.
-- Explicit Save raises priority but does not create concurrent writers.
-- Search and history receive bounded queues.
-- Maintenance yields when editor activity increases.
-
-## 12. History architecture: selected `git2`
+## 16. History architecture
 
 Composition:
 
@@ -600,44 +632,29 @@ Composition:
 git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
 ```
 
-Lock and release controls:
+Controls:
 
-- Lock `libgit2-sys 0.18.7+1.9.6` unless an approved upgrade ADR changes it.
-- Set `LIBZ_SYS_STATIC=1` for reproducible release builds.
-- Prevent `LIBGIT2_NO_VENDOR` from silently selecting a system library.
-- Enable no HTTPS or SSH features in v1.
-- Include libgit2 linking exception and native notices in release artifacts.
+- Resolve and assert the accepted vendored libgit2 composition in the real application lockfile.
+- Set static zlib/reproducibility guards.
+- Prevent environment variables from silently selecting a system library.
+- Enable no HTTPS/SSH features in v1.
+- Include required native notices.
 
-Repository policy:
+Policy:
 
 - Project root is repository root.
 - One linear app-managed `main`.
-- Normalize LF, disable autocrlf, executable-mode tracking, and symlink tracking.
-- Reject absolute/traversal paths.
+- Normalize LF and disable autocrlf, executable-mode tracking, and symlink tracking.
+- Reject traversal/absolute paths.
 - Use bounded unsorted revwalk paging with opaque cursors.
 - Named snapshots may use empty commits.
 - Restore is additive and creates a new commit.
 - Missing/corrupt history never makes current canonical files unreadable.
+- Project dictionary is included; application appearance/global dictionary/workspace state are excluded.
 
-Fault recovery:
+Maintenance runs in a low-priority worker, is cancellable/yielding, verifies new packs, and never prunes reachable checkpoints.
 
-- Interrupted ref transactions may leave `.git/refs/heads/main.lock`.
-- Remove it only after restart, verified exclusive project ownership, and repository validation.
-- Verify the previous completed `main` before proceeding.
-
-Maintenance:
-
-- ParchMint schedules pack creation and reachable verification.
-- Maintenance runs in a dedicated low-priority worker.
-- Do not prune reachable checkpoints.
-- Verify newly created packs before deleting redundant loose objects.
-- Long maintenance is cancellable/yielding and never blocks close/save acknowledgements.
-
-Backend replacement:
-
-A future backend must implement `HistoryStore`. Migration occurs through exported logical checkpoint streams and canonical snapshots, not by exposing Git object IDs to application code.
-
-## 13. Search architecture: selected SQLite FTS5
+## 17. Search architecture
 
 Composition:
 
@@ -645,28 +662,23 @@ Composition:
 rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 ```
 
-- Assert FTS5 at worker startup by creating/validating the actual table.
-- Use one dedicated SQLite connection on a named worker.
-- Never expose the connection across threads or to UI code.
+- Assert FTS5 at worker startup.
+- Use one dedicated connection on a named worker.
 - Index stable project/document/block/revision IDs.
 - Index body, title, Synopsis, and metadata with field-aware weighting.
-- Use external-content FTS5 tables and triggers or equally verified consistency logic.
+- Use verified external-content consistency logic.
 - Tokenizer baseline: `unicode61 remove_diacritics 2`.
-- User text is escaped/quoted; field names come only from allow lists.
-- Case-sensitive and Unicode whole-word semantics are post-filtered against stored field text.
-- Stream result batches and support generation-based cancellation.
-- Revalidate result revision/text before navigation or replacement.
+- Escape/quote user text; allow-list fields.
+- Post-filter case-sensitive and Unicode whole-word semantics.
+- Stream batches and support generation cancellation.
+- Revalidate revision/text before navigation or replacement.
 - Rebuild deterministically after deletion/corruption/schema change.
 
-Backend replacement:
+The index is disposable and does not migrate when the backend changes.
 
-SQLite files are derived state. A different `SearchIndex` implementation requires no project migration; it rebuilds from canonical projections.
-
-## 14. Comments and anchors
+## 18. Comments and anchors
 
 Canonical comments are stored in `annotations/<document-id>.json`.
-
-Anchor model:
 
 ```text
 TextAnchor
@@ -679,18 +691,13 @@ TextAnchor
 └── anchor_revision
 ```
 
-The ProseMirror adapter maps anchors through transaction mappings. The worker/canonical projection emits updated anchors as needed. On load after canonical/external transformations, reattachment is conservative; ambiguity produces an orphan.
+The editor maps anchors through transaction mappings. Canonical projection emits updated anchors. Reattachment after transformation is conservative; ambiguity creates an orphan.
 
-Comment anchor geometry comes from the focused EditorView and remains view-local. Comment creation is invoked through semantic editor-context-menu or Inspector commands; transient UI geometry must not be persisted.
+Anchor geometry comes from the focused view and is view-local. Comment creation uses editor context-menu or Comments-panel commands; transient geometry is never persisted.
 
-## 15. Title synchronization
+## 19. Title synchronization
 
-The application stores:
-
-```text
-display_title
-last_observed_content_title
-```
+The application stores `display_title` and `last_observed_content_title`.
 
 When the first reserved title block changes:
 
@@ -700,193 +707,120 @@ if display_title == previous_content_title:
 last_observed_content_title = new_content_title
 ```
 
-Tree/Card renames update only `display_title`. This rule belongs in a shared application/editor command service and is covered by adapter-independent tests.
+Tree/Card rename changes only `display_title`. This rule is adapter-independent and tested outside the GUI.
 
-## 16. UI and Penpot integration
+## 20. Appearance and design-token architecture
 
-### 16.1 Design artifact intake
-
-The approved handoff contains:
-
-- `.penpot` source export.
-- Token JSON.
-- SVG assets.
-- Reference PNGs.
-- `design-manifest.yaml`.
-- Component and interaction maps.
-
-### 16.2 Token pipeline
+Application preferences store:
 
 ```text
-Penpot token JSON
-  → validate/import script
-  → normalized design-token JSON
-  → generated CSS custom properties
-  → component CSS modules
+appearance_mode = system | light | dark
 ```
 
-Generated token output is committed; the source token export is also committed for traceability. Manual edits to generated CSS are prohibited.
+The platform adapter emits system-appearance changes. A resolved appearance (`light` or `dark`) is distributed to every window. Appearance updates never cross project command/save/history boundaries.
 
-### 16.3 Component mapping
+Token pipeline:
 
-Penpot component names and IDs map to implementation component IDs in `design-component-map.yaml`. Refactoring code names is allowed only if the mapping is updated.
+```text
+Approved Penpot token JSON
+  → deterministic validator/normalizer
+  → semantic token model
+  → generated Light/Dark CSS custom properties
+  → generated TypeScript token metadata
+  → components
+```
 
-### 16.4 Generated code policy
+Components consume semantic tokens such as application/sidebar/inspector/document/elevated surfaces, text roles, borders, focus, selection, comments, search, warnings, errors, and save states. They do not branch on arbitrary hard-coded colors.
 
-Penpot MCP-generated HTML/CSS may be used to understand layout or bootstrap a disposable prototype. Production code must satisfy semantic HTML, accessibility, maintainability, component reuse, and application state requirements. Generated output is never accepted merely because it visually resembles the design.
+Project prose styles remain a separate CSS/style projection. The app may adapt editor-only background/foreground presentation while preserving authored semantic style values and export output.
 
-## 17. Cross-platform architecture
+Generated token files are committed and never edited manually. CI regenerates and fails on drift.
+
+## 21. Penpot integration
+
+The approved handoff contains `.penpot`, Light/Dark token JSON, assets, deterministic references, manifest, component/interaction maps, focus/keyboard map, appearance matrix, platform variants, known deviations, and checksums.
+
+The first UI deliverable is `docs/design/reconciliation/<version>/`. Production code must satisfy semantic HTML, accessibility, maintainability, component reuse, application state, and both themes; generated design code is never accepted solely for visual resemblance.
+
+## 22. Cross-platform architecture
 
 ### Windows
 
-- WebView2 runtime.
-- Native menus, dialogs, clipboard, file locking, and high-DPI validation.
-- MSI or NSIS package selected before beta.
-- No dependency on installed Git or SQLite.
+- WebView2.
+- Native menus/dialogs/clipboard/file locking/high-DPI validation.
+- Narrator/NVDA.
+- MSI or NSIS selected before beta.
+- No installed Git/SQLite dependency.
 
 ### macOS
 
 - WKWebView.
-- Native menu placement/shortcuts, dialogs, clipboard, VoiceOver, signing and notarization.
-- `.app` plus `.dmg` distribution baseline.
+- Native menu placement, dialogs, clipboard, VoiceOver, signing/notarization.
+- `.app` plus `.dmg` baseline.
 
 ### Linux
 
 - WebKitGTK 4.1 runtime closure.
-- Native X11 and Wayland input/clipboard validation on supported distributions.
-- `.deb` is the initial required package. AppImage is deferred until its GLib/GVFS/EGL runtime path is proven.
-- Orca/AT-SPI validation.
+- X11 and Wayland input/clipboard validation on supported distributions.
+- `.deb` required initially.
+- AppImage deferred until its runtime path is proven.
+- Orca/AT-SPI.
 
-Platform code stays in adapter crates/modules. Product commands use semantic names such as `Save`, `Find`, `AddComment`, and `CloseTab`, with platform-specific accelerators assigned centrally.
+Product commands use semantic names and platform accelerators are assigned centrally.
 
-## 18. Security architecture
+## 23. Security and diagnostics
 
-- Local bundled frontend only; no remote origin privileged access.
-- Strict CSP; no `eval`; least-privilege Tauri capability files.
-- Validate all project paths and normalize before file operations.
-- Sanitize pasted/imported HTML.
-- No Git network features in v1.
-- No arbitrary SQL construction from user input.
-- Dependency locks, SBOM, advisory scan, license inventory, and native notices required for release.
-- Secrets are not expected in project files; future remote backup requires a separate threat model.
+Security:
 
-## 19. Observability
+- Bundled local frontend only.
+- Strict CSP; no `eval`; least-privilege Tauri capabilities.
+- Validate and normalize project paths.
+- Sanitize pasted HTML.
+- No Git network features.
+- No arbitrary SQL from user input.
+- Offline spellcheck only; prose is not sent to a service.
+- Dependency locks, SBOM, advisory/provenance scans, license inventory, and native notices.
 
-Local, privacy-preserving diagnostics include:
+Privacy-preserving diagnostics include save/projection/history/search/spellcheck durations, queue depths, open-to-editable and input-to-frame metrics, memory where available, and structured errors with revision IDs. Diagnostic bundles redact project prose unless explicitly included.
 
-- Save queue and duration.
-- Canonical projection duration.
-- Git checkpoint/maintenance duration.
-- Search query/update/rebuild duration.
-- Document open-to-editable and input-to-frame metrics in test/instrumented builds.
-- Memory by process where platforms permit.
-- Structured errors with operation and revision IDs.
-
-Telemetry is disabled by default and is not required for diagnostics. User-exportable diagnostic bundles must redact project prose unless explicitly included.
-
-## 20. Testing architecture
+## 24. Testing architecture
 
 ### Headless core
 
-`parchmint-core-cli` must be able to:
+`parchmint-core-cli` creates/opens/validates/migrates projects; applies project commands/undo; saves/recovers; operates history/search; validates dictionaries; and exports HTML.
 
-- Create/open/validate/migrate projects.
-- Parse and serialize documents.
-- Apply hierarchy/metadata/style commands.
-- Save and recover fixtures.
-- Create/list/preview/restore history.
-- Build/query/rebuild search.
-- Export HTML.
+### Shared contract suites
 
-This is the principal proof that core behavior has not leaked into the GUI.
-
-### Adapter contracts
-
-Each replaceable port has a shared contract suite. Alternative implementations must pass it without changing callers.
+Contracts cover ProjectRepository, CanonicalCodec, RecoveryJournal, HistoryStore, SearchIndex, SpellcheckService, Exporter, EditorAdapter, and PlatformService where feasible.
 
 ### Editor fixtures
 
-Shared fixtures cover:
-
-- Every block/mark type.
-- Titles.
-- Comments/anchors.
-- Literal tabs.
-- Unicode/IME-representative text.
-- Paste normalization.
-- Shared two-view transactions and selections.
-- 250,000-word document.
+Cover blocks/marks, titles, comments, tabs, Unicode/IME text, paste, shared two-view operations, selection mapping, shared undo, projection/recovery, spellcheck decorations, and 250,000 words.
 
 ### Visual validation
 
-Approved Penpot reference frames are compared to deterministic application screenshots at specified window sizes and states. Pixel differences are reviewed in context; accessibility or native-control correctness may justify documented deviations.
+Compare deterministic application screenshots to approved Light and Dark Penpot references. Accessibility/native-control correctness may justify documented differences.
 
-## 21. Replacement scenarios
+## 25. Replacement scenarios
 
-### Replace the GUI/editor
+### GUI/editor
 
-Retained:
+Retain canonical format, Rust application services, port implementations, contracts, design tokens, and fixtures. Rewrite widgets, windows, input/IME/accessibility integration, rendering, and frontend state.
 
-- Canonical format.
-- Rust domain/application services.
-- History/search/save/recovery/export ports and implementations.
-- IPC/application command schemas, possibly adapted to a new transport.
-- Penpot design tokens, interaction specs, and acceptance fixtures.
+### History/search/spellcheck
 
-Rewritten:
+Implement the corresponding port and shared contract suite. History migration uses logical checkpoints; search rebuilds from canonical state; spellcheck dictionaries remain in ParchMint-owned formats.
 
-- Widgets, windows, focus, drag/drop, menus.
-- Editor rendering/input/IME/accessibility integration.
-- Frontend-specific state and tests.
+### Save/load/recovery
 
-A replacement editor must load/save the same canonical HTML and pass `editor-contract` fixtures.
+Implement repository/codec/writer or recovery contracts. Canonical format changes require explicit migrations and G20 approval.
 
-### Replace history
+### Export
 
-Implement `HistoryStore`, pass the contract and longevity/fault suite, and provide logical checkpoint import/export. No caller sees Git hashes.
+Implement `Exporter` over the neutral export plan.
 
-### Replace search
+## 26. Architecture-change policy
 
-Implement `SearchIndex`, pass query semantics/scale/rebuild tests, and rebuild from canonical project state. No authored migration is needed.
+The selected architecture remains current unless implementation evidence shows a mandatory requirement cannot be met. In that case, stop at G20 with reproducible evidence and bounded alternatives.
 
-### Replace save/load
-
-Implement `ProjectRepository`, `CanonicalCodec`, and `AtomicWriter` contracts. Canonical format changes require explicit migrations and ADRs.
-
-### Replace recovery
-
-Implement `RecoveryJournal`; recovery data is versioned and adapter-specific, while completed canonical content is unaffected.
-
-### Add exporters
-
-Implement `Exporter` over the neutral export plan. Editor internals are not available to exporters.
-
-## 22. Implementation sequence
-
-1. Lock contracts, IDs, canonical schemas, and fixtures.
-2. Build headless domain/project-format/CLI.
-3. Build atomic project repository and recovery skeleton.
-4. Integrate selected `git2` and SQLite adapters behind contracts.
-5. Import approved Penpot tokens/assets and implement shell components.
-6. Implement ProseMirror schema/adapter and canonical round trips.
-7. Implement two-view session controller and shared undo.
-8. Add metadata/comments/search/history/Cards feature slices.
-9. Add export.
-10. Complete cross-platform packaging, native input, accessibility, and performance gates.
-
-Detailed work packages are in `05-implementation-plan.md`.
-
-## 23. Architecture governance
-
-An ADR is mandatory for:
-
-- Frontend/editor or major runtime change.
-- Backend replacement.
-- Canonical schema change.
-- New persistent store.
-- Change in state ownership.
-- New process/thread architecture.
-- New dependency with material license/security/package consequences.
-- Performance optimization that changes editor semantics.
-
-The selected architecture is final for v1 unless implementation evidence shows a normative requirement cannot be met. In that case, the agent returns evidence and alternatives to the product owner; it does not silently change product behavior or reopen a framework search.
+After approval, update this architecture, the product specification, implementation plan, acceptance plan, and relevant contracts directly. Do not add a permanent ADR or preserve superseded architecture as a competing source of truth.

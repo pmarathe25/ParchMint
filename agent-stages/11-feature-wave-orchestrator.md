@@ -2,38 +2,31 @@
 
 ## Goal
 
-Convert the approved work breakdown and remaining v1 traceability gaps into bounded, dependency-aware feature-slice tasks, then dispatch them automatically.
+Generate and dispatch bounded vertical slices after every foundation, including spellcheck, is accepted.
 
 ## Inputs
 
-- Accepted S90 foundation.
-- Approved reconciliation `work-breakdown.md` and `implementation-map.yaml`.
-- PRD, Penpot manifest, implementation plan, acceptance plan, and current traceability matrix.
+- Accepted S90 handoff and dependency handoffs.
+- Product/architecture/implementation/acceptance documents.
+- Approved reconciliation/work breakdown.
+- Traceability matrix.
+- Current code and test inventory.
 
 ## Tasks
 
-1. Identify every unimplemented v1 requirement and required design state.
-2. Group work into vertical slices that can be completed and tested end to end.
-3. Define dependencies and exclusive file/contract ownership.
-4. Write one generated task per slice under `agent-workflow/generated-tasks/<wave-id>/` using the supplied task template.
-5. Dispatch independent slices using `agent-stages/12-feature-slice-agent.md`.
-6. Verify and integrate slices using the Orchestrator Agent’s normal acceptance rules.
-7. Recompute traceability and create additional waves until all v1 requirements are implemented or blocked.
+1. Compute remaining must-level requirements.
+2. Group work into end-to-end slices with explicit ownership and dependencies.
+3. Ensure project-command/undo, save/history/search/spellcheck/appearance implications are included where applicable.
+4. Assign test tier and native platforms to each task.
+5. Generate tasks under `agent-workflow/generated-tasks/<wave-id>/` using `templates/agent-task.yaml`.
+6. Do not dispatch overlapping file/public-contract ownership in parallel.
+7. Dispatch independent tasks using `agent-stages/12-feature-slice-agent.md`.
+8. Replan after accepted slices without changing governing scope.
 
-## Suggested slice families
+## Required slice coverage
 
-Use these only when they fit the approved design/work breakdown:
+Include global replacement as one project undo/checkpoint; word counts limited to selection/active document/Manuscript; full spellcheck UI on S65; Appearance final integration; and entire-Manuscript export.
 
-- Project launcher/create/open and workspace restoration state.
-- Explorer hierarchy operations, multi-selection, drag/drop, cut/copy/paste.
-- Cards full-hierarchy projection, title/Synopsis editing, and read-only metadata presentation; metadata values are edited through Inspector.
-- Inspector Synopsis/metadata and field-definition settings.
-- Rich formatting/style management.
-- Comments and replies.
-- Local search/replace.
-- Entire-project Global Search from the Explorer header, with no v1 scope selector, plus central replacement preview.
-- History with whole-project checkpoint restore, plus Recently Deleted subtree restoration.
-- Entire-Manuscript HTML export with no partial-scope or per-node inclusion controls.
-- Word counts and conditional spellcheck.
+## Stop conditions
 
-Do not place two agents on the same public contract or source files concurrently.
+Stop at G20 when remaining work requires a governing/public-boundary change, broad fork, or weakened mandatory gate.

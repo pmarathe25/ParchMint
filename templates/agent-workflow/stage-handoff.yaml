@@ -1,19 +1,14 @@
-schema_version: 1
+schema_version: 2
 stage_id: ""
 run_id: ""
-accepted_commit: ""
-inputs:
-  baseline_commit: ""
-  dependency_handoffs: []
-outputs:
-  contracts: []
-  schemas: []
-  generated_bindings: []
-  fixtures: []
-  ports: []
-  implementations: []
-  commands: []
-  evidence: []
-versions: {}
-known_constraints: []
-consumer_notes: []
+output_commit: ""
+contracts_and_schema_versions: {}
+ports: []
+implementations: []
+generated_bindings: []
+fixtures: []
+test_locations: []
+commands: []
+native_evidence: []
+known_approved_limitations: []
+artifact_paths: []

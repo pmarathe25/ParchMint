@@ -1,12 +1,14 @@
-schema_version: 1
-source:
-  product_spec_version: ""
-  architecture_version: ""
-  design_handoff_version: ""
-  design_manifest: ""
+schema_version: 2
+handoff_version: ""
+themes:
+  light_token_set: ""
+  dark_token_set: ""
+  system_resolution_adapter: ""
+  generated_css_target: ""
+  generated_typescript_target: ""
 components: []
 screens: []
-tokens: []
-assets: []
 interactions: []
-requirements: []
+accessibility: []
+platform_variants: []
+assets: []

@@ -1,2 +1,5 @@
 screen_id,penpot_page_id,penpot_board_id,name,reference_width,reference_height,platform,theme,state,requirements,reference_image
-editor-single-default,,,Editor Single Pane Default,1440,900,shared,default,default,"WS-002|EDIT-001",references/editor-single-1440x900.png
+launcher-light,,,Launcher,1440,900,shared,light,default,"PRJ-001|APPR-006",references/light/launcher-1440x900.png
+launcher-dark,,,Launcher,1440,900,shared,dark,default,"PRJ-001|APPR-005|APPR-006",references/dark/launcher-1440x900.png
+editor-single-light,,,Editor Single Pane,1440,900,shared,light,default,"WS-002|EDIT-001|APPR-006",references/light/editor-single-1440x900.png
+editor-single-dark,,,Editor Single Pane,1440,900,shared,dark,default,"WS-002|EDIT-001|APPR-005|APPR-006",references/dark/editor-single-1440x900.png

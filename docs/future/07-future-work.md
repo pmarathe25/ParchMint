@@ -1,201 +1,160 @@
 # ParchMint Future Work
 
-**Status:** Deferred roadmap and extension constraints  
-**Version:** 1.2
+**Status:** Explicitly deferred capabilities and extension constraints  
+**Version:** 1.3  
 **Date:** 2026-07-31
 
 ## 1. How to use this document
 
-Nothing in this document is v1 scope unless it is promoted through a PRD update, design revision, architecture review, and acceptance-plan change.
+Nothing here is v1 scope unless promoted through direct updates to the product specification, design, architecture, implementation plan, and acceptance plan.
 
-The v1 architecture must keep credible extension paths, but implementation agents must not build speculative features or broaden interfaces without a concrete need.
+The v1 architecture keeps credible extension paths, but agents must not build speculative features or broaden contracts without a concrete promoted requirement.
 
 ## 2. Editor and workspace
 
-### Recursive split panes
+- Recursive left/right/top/bottom editor groups.
+- Top/bottom companion orientation.
+- Group copy and keyboard cut.
+- Cross-project copy with style/metadata/comment mapping.
+- Quick document switcher and back/forward navigation.
+- Focus/typewriter modes.
+- Visible whitespace and per-view zoom.
+- Transparent editor optimizations that preserve full behavior.
+- Alternative GUI/editor implementing the same canonical and application/editor contracts.
 
-Allow arbitrary left/right/top/bottom editor groups using a binary layout tree. Retain shared `EditorSession` and independent `ViewSession` semantics.
+A feature-reduced or segmented large-document mode requires an explicit future product decision and is not implied by transparent optimization.
 
-### Top/bottom companion layout
+## 3. Appearance and preferences
 
-Offer an orientation switch before or independently of recursive splits.
+- Toolbar/status-bar appearance quick toggle.
+- Additional themes beyond Light/Dark.
+- User-authored themes.
+- Density choices.
+- Roaming preferences.
+- Per-project appearance overrides.
 
-### Group copy and keyboard cut
+Appearance must remain separate from authored document style/export semantics.
 
-Extend structured clipboard operations to complete group subtrees.
+## 4. Import and Research resources
 
-### Cross-project copy
-
-Map styles, metadata schemas, comments, links, and future assets between projects.
-
-### Quick document switcher and recent navigation
-
-Add fuzzy title/hierarchy navigation and back/forward history.
-
-### Focus and typewriter modes
-
-Hide chrome and maintain active-line positioning without changing document layout/export.
-
-### Visible whitespace and per-view zoom
-
-Render editor-only whitespace marks and independent display scaling.
-
-### Transparent large-document optimization
-
-Optimize ProseMirror rendering internally while preserving the same feature set. Candidate directions include decoration reduction, incremental plugin work, content visibility, block-windowed rendering, or a replacement editor adapter.
-
-A feature-reduced or segmented large-document mode requires a new product decision; it is not implied by this roadmap.
-
-### Alternative GUI/editor
-
-A future frontend may replace Tauri/React/ProseMirror by implementing the same application/editor contracts and canonical format. Reassess Rust-native frameworks only when they can demonstrate one geometry authority, real IME, accessibility, two-view behavior, and large-prose performance.
-
-## 3. Import and Research resources
-
-- Plain-text import.
-- Markdown import.
-- HTML import.
-- DOCX import.
-- Bulk manuscript hierarchy import.
+- Plain text, Markdown, HTML, DOCX, and hierarchy import.
 - Research note import/conversion.
-- Read-only text/Markdown preview.
-- Image preview.
-- PDF preview.
-- Arbitrary attachments.
-- Web bookmarks and saved snapshots.
+- Text/Markdown/image/PDF preview.
+- Arbitrary attachments, bookmarks, snapshots.
 - Copy-into-project and link-in-place policies.
-- PDF/image annotations using content-handler-specific anchors.
+- PDF/image annotations.
 
-These features should use `Importer` and `ContentHandler` ports, preview an import plan, and apply as one undoable/history operation.
+Future imports should use `Importer`/`ContentHandler`, preview a plan, and apply as one project-undo/history operation.
 
-## 4. Cards and planning
+## 5. Cards and planning
 
 - Multi-column corkboard.
 - Saved filters/views.
 - Typed metadata such as status, POV, dates, tags, target word count.
-- Timeline and relationship views.
-- Multiple independent planning arrangements that do not silently alter manuscript order.
+- Timeline/relationship views.
+- Independent planning arrangements that do not silently alter manuscript order.
 
-## 5. Rich text and review
+## 6. Rich text and review
 
 - Footnotes/endnotes.
-- Tables.
-- Embedded images with assets, captions, and alt text.
-- Arbitrary highlights/colors.
-- Per-selection font/size overrides.
-- Drop caps.
-- Multi-column layout.
-- Advanced sections/page numbering/headers/footers.
-- Track changes with accept/reject.
-- Snapshot-to-snapshot document/project comparisons.
-- Review display modes.
-- Search comments.
-- Project-wide All Comments view.
-- Comment authors and asynchronous review exchange.
+- Tables and embedded images.
+- Arbitrary highlights/colors and per-selection fonts/sizes.
+- Drop caps, columns, sections, page numbering, headers/footers.
+- Track changes and review display modes.
+- Snapshot comparisons.
+- Search comments and project-wide All Comments.
+- Comment authors/asynchronous review exchange.
 
-## 6. Search and analysis
+## 7. Search and analysis
 
-- User-selectable Global Search scopes for Manuscript, Research, both, or a selected subtree.
-- Regular-expression search/replace.
+- User-selectable Manuscript/Research/subtree search scopes.
+- Regex search/replace.
 - Saved searches.
 - Replacement in Synopsis/metadata.
-- Structural queries such as missing Synopsis or orphaned comments.
-- Language-aware stemming/diacritics options.
+- Structural queries.
+- Language-aware stemming/diacritic options.
 - Repetition, sentence, style, and readability analysis.
 
-Search-backend replacement remains possible through `SearchIndex`; current FTS5 indexes are disposable.
+Search backend replacement remains possible through `SearchIndex`; indexes remain disposable.
 
-## 7. Export and publishing
+## 8. Word counts and goals
 
-- Partial export scopes for a selected group/subtree or selected documents.
-- Per-group and per-document inclusion overrides with explicit inheritance and preview.
-- Generated table of contents.
-- In-app export preview.
-- DOCX.
-- EPUB.
-- PDF.
-- Markdown, plain text, and LaTeX.
-- Submission manuscript templates.
-- Print-ready book layout.
-- Saved export profiles.
-- Cover/front/back matter tooling.
+- Group totals.
+- Research totals.
+- Whole-project totals distinct from Manuscript total.
+- Target word counts, sessions, goals, progress analytics.
+- Historical writing statistics.
 
-Each new target implements `Exporter` over the neutral export model.
+## 9. Spellcheck and writing aids
 
-## 8. History, backup, and maintenance
-
-- Partial checkpoint restoration for a selected document, group, or subtree, including scope-specific impact previews.
-- Remote backup by pushing the app-managed history.
-- Restore project from remote.
-- Multiple backup destinations.
-- Integrity verification/repair UI.
-- History size reporting.
-- Optional compaction policies only after a new explicit product decision.
-
-Current requirements deliberately exclude automatic pruning, permanent purge, Duplicate Project, Archive Project, and general Git UI.
-
-A future history backend may replace `git2` behind `HistoryStore`, with logical checkpoint migration and no Git IDs exposed to product code.
-
-## 9. Writing aids
-
-- Smart quotes and language-aware punctuation.
-- Automatic em/en dash and ellipsis rules.
-- Special-character palette.
+- Per-document language override.
+- Mixed-language spans.
 - Grammar checking.
-- Goals, sessions, and progress analytics.
-- Distraction-free session tools.
-- AI-assisted writing only after explicit privacy, provenance, offline/network, and user-control decisions.
+- Context-sensitive or semantic writing suggestions.
+- Smart quotes and language-aware punctuation.
+- Automatic dash/ellipsis rules.
+- Special-character palette.
 
-## 10. Templates
+Future language features continue through ParchMint-owned contracts and require explicit privacy, offline/network, licensing, performance, and cross-platform decisions.
+
+## 10. Export and publishing
+
+- Partial selected group/document scopes.
+- Per-node inclusion overrides.
+- Generated TOC and in-app preview.
+- DOCX, EPUB, PDF, Markdown, plain text, LaTeX.
+- Submission/print-ready templates, saved profiles, cover/front/back matter.
+
+Each new target implements `Exporter` over the neutral export plan.
+
+## 11. History, backup, and maintenance
+
+- Partial checkpoint restore for document/group/subtree.
+- Remote backup/restore and multiple destinations.
+- Integrity repair UI and history size reporting.
+- Optional compaction/pruning only after an explicit product decision.
+
+Current requirements exclude automatic pruning, permanent purge, Duplicate Project, Archive Project, and general Git UI.
+
+## 12. Templates
 
 - Project templates.
 - Style templates.
 - Metadata-field templates.
 - Export-profile templates.
 
-Templates must generate new IDs and no copied history.
+Templates generate fresh IDs and no copied history.
 
-## 11. Distribution and platform
+## 13. Distribution and platform
 
 - Automatic updates.
 - App-store distribution.
 - Additional CPU architectures.
 - Expanded Linux packages, including AppImage only after runtime compatibility is proven.
 - Automatic workspace reopening.
-- Roaming nonproject preferences.
 - Lower production MSRV/toolchain where feasible.
 
-## 12. Collaboration and other clients
+## 14. Collaboration and other clients
 
-- Asynchronous review packages may be considered before real-time collaboration.
-- Real-time collaboration would require identity, permissions, presence, CRDT/OT, offline reconciliation, and history integration.
-- Mobile/web clients require a separate product and architecture review and must not weaken desktop-first open-file behavior.
+- Asynchronous review packages before real-time collaboration.
+- Real-time collaboration with identity, permissions, presence, CRDT/OT, offline reconciliation, and history integration.
+- Mobile/web clients after a separate product/architecture review.
+- AI-assisted writing only after explicit privacy, provenance, offline/network, and user-control decisions.
 
-## 13. Promotion checklist
+## 15. Promotion checklist
 
 Before promoting a feature:
 
-1. Add normative workflows and requirement IDs to the PRD.
+1. Add normative workflows/requirement IDs to the product specification.
 2. Update Penpot screens/components/states.
-3. Identify canonical format and migration impact.
-4. Confirm port/interface changes.
-5. Define undo, save, recovery, history, search, export, and accessibility semantics.
+3. Define canonical/migration impact.
+4. Confirm port/state-owner changes.
+5. Define project/document undo, save, recovery, history, search, export, spellcheck, appearance, and accessibility semantics as applicable.
 6. Add scale/performance budgets.
 7. Add cross-platform tests.
 8. Update implementation and acceptance plans.
-9. Record retained deferrals.
+9. Remove the item from this future-work document.
 
-## 14. Features not to infer
+## 16. Features not to infer
 
-Do not infer that ParchMint will add:
-
-- Raw HTML source editing.
-- User-facing Git controls.
-- Permanent purge/history erasure.
-- Automatic history pruning.
-- Duplicate Project or Archive Project.
-- Real-time collaboration.
-- Mobile/web clients.
-- AI generation.
-- Automatic external rich-text merge.
-- A proprietary binary project database as the only source of current content.
+Do not infer raw HTML editing, user-facing Git, permanent purge/history erasure, automatic pruning, Duplicate/Archive Project, real-time collaboration, mobile/web, AI generation, automatic external rich-text merge, or a proprietary binary database as the sole current-content store.

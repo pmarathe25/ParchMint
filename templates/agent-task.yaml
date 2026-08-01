@@ -1,17 +1,32 @@
-schema_version: 1
+schema_version: 2
 task_id: ""
 title: ""
 wave_id: ""
 baseline_commit: ""
-instruction_file: agent-stages/12-feature-slice-agent.md
 requirements: []
-design_components: []
 design_screens: []
+design_components: []
 dependencies: []
 ownership:
   include: []
   exclude: []
-acceptance: []
+contracts_and_state_owners: []
+work:
+  domain: []
+  application: []
+  adapters: []
+  frontend: []
+  persistence: []
+  history: []
+  search: []
+  spellcheck: []
+  appearance: []
+  tests: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
 commands: []
-platforms: []
 stop_conditions: []
+required_evidence: []

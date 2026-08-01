@@ -1,14 +1,17 @@
-schema_version: 1
+schema_version: 2
 stage_id: ""
 run_id: ""
-instruction_file: ""
 baseline_commit: ""
-dispatched_at: ""
+instruction_file: ""
 dependency_handoffs: []
 approved_gates: []
 ownership:
   include: []
   exclude: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
 required_commands: []
-required_platforms: []
-stop_conditions: []
+resource_constraints: []

@@ -2,34 +2,29 @@
 
 ## Goal
 
-Implement Phase 0 of the implementation plan only.
-
-## Entry conditions
-
-- G10 reconciliation approval is committed and checksum-consistent with the design handoff.
-- S00 and S10 handoffs are accepted.
+Create the reproducible application workspace and CI only. Do not implement product features or final UI.
 
 ## Tasks
 
-1. Create the monorepo layout from the final architecture.
-2. Pin Rust, Node, package-manager, Tauri, React, and exact ProseMirror dependencies.
-3. Bootstrap an empty Tauri/React desktop shell and empty headless CLI.
-4. Prove one generated/validated Rust↔TypeScript JSON Schema contract round trip.
-5. Add format, lint, typecheck, unit-test, build, and package commands.
-6. Add Windows, macOS, and Linux CI from the first implementation commit.
-7. Add dependency, license, advisory, provenance, and SBOM tooling.
-8. Add ADR directory/templates and repository contribution/setup instructions.
-9. Add deterministic fixture/checksum tooling.
-10. Do not implement product features or final UI components.
-
-## Required outputs
-
-- Clean native builds on all three platforms or documented native runner evidence required by the plan.
-- Exact application lockfiles and dependency inventory.
-- CI matrix.
-- ADR-0001 capturing the accepted architecture.
-- Stage report and handoff with canonical commands.
+1. Create architecture monorepo layout.
+2. Pin Rust/Node/package manager/Tauri/React/TypeScript and build tools.
+3. Apply direct dependency baseline and create actual application locks.
+4. Assert `git2`/vendored libgit2/static-zlib and rusqlite/bundled SQLite composition from real resolution.
+5. Pin initial ProseMirror direct versions and verify npm integrity/source metadata.
+6. Bootstrap empty Tauri/React shell and headless CLI.
+7. Prove one generated/validated Rust↔TypeScript JSON Schema round trip.
+8. Add contract generation plus CI dirty-diff guard.
+9. Add format/lint/typecheck/test/build/package commands.
+10. Add Windows/macOS/Linux CI.
+11. Add advisory/license/provenance/SBOM/native-notice tooling and weekly scheduled checks.
+12. Add deterministic fixture/checksum tooling and developer setup.
 
 ## Pass criteria
 
-All Phase 0 gate commands pass; one contract round trip works; no feature behavior or design interpretation was introduced.
+- Clean builds on all three platforms.
+- Actual locks and dependency inventory committed.
+- Composition/provenance assertions pass.
+- One contract round trip and clean generated diff.
+- No feature behavior/design interpretation.
+
+Do not create a bootstrap architecture-decision record or changelog; the current architecture document is authoritative.

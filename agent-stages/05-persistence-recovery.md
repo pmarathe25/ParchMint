@@ -2,32 +2,25 @@
 
 ## Goal
 
-Make current authored data safe before history, search, and broad UI integration.
+Make current authored data safe before derived backends and broad UI integration.
 
 ## Tasks
 
-Implement Phase 2:
-
-- `ProjectRepository`, `CanonicalCodec`, `AtomicWriter`, and platform durability adapters.
-- Create/open/lazy-load workflows.
-- One-writer project lock.
-- Revisioned save queue and dirty-resource tracking.
-- Atomic multi-file save transaction.
-- Versioned recovery journal and replay.
-- Save acknowledgements and error states.
-- Forced-termination, partial-write, disk-full/permission, and stale-lock fault harnesses where feasible.
-- Current-file readability when history, index, cache, and recovery directories are removed.
-
-## Required outputs
-
-- Stable persistence/recovery port implementations.
-- Fault evidence on all three platforms.
-- Handoff describing save/revision semantics for history, search, and editor agents.
+- Repository/codec/atomic-writer/durability adapters.
+- Create/open/lazy-load.
+- One-writer project lock and process project-session routing.
+- Revisioned save queue, dirty resources, atomic multi-file state machine.
+- Recovery journal/replay.
+- Save acknowledgements/errors.
+- Project-undo and composite-operation save semantics.
+- Fault harnesses for termination, partial write, disk full/permission, stale lock.
+- Readability without history/index/cache/recovery.
 
 ## Pass criteria
 
-- No partial canonical state after injected failures.
-- Acknowledged edits are not lost.
-- Recovery restores uncheckpointed edits after termination.
-- Current project opens without derived state.
-- No filesystem or serialization work runs on the UI thread.
+- No partial canonical state after failures.
+- Acknowledged edits not lost.
+- Recovery restores pending edits.
+- Composite project operations do not persist partially.
+- Recovery/migration/whole restore resets interactive undo as specified.
+- No filesystem/serialization work on UI thread.

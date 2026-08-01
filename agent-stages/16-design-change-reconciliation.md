@@ -2,23 +2,15 @@
 
 ## Goal
 
-Safely consume a new approved Penpot handoff after implementation has begun.
+Reconcile a new immutable approved Penpot handoff against the currently implemented handoff and generate bounded implementation tasks.
 
 ## Tasks
 
-1. Validate the new immutable handoff and checksums.
-2. Compare old/new manifests, tokens, assets, components, screens, states, interactions, accessibility annotations, and snapshots.
-3. Map changes to product requirements, implementation components, visual baselines, and current feature branches.
-4. Classify each change as compatible implementation detail, implementation task, product conflict, architecture impact, or deferred feature.
-5. Produce:
-   - design-diff report;
-   - updated implementation map;
-   - impact/task graph;
-   - updated visual-regression plan;
-   - open issues;
-   - pending approval file.
-6. Do not modify production code before approval.
+- Validate new manifest/checksums/governing versions.
+- Compare tokens/themes/components/screens/references/interactions/accessibility/platform variants.
+- Identify Light/Dark semantic-token changes and Appearance behavior impact.
+- Map affected code/tests/fixtures/requirements/workstreams.
+- Produce design-diff report, impact map, generated tasks, and pending approval.
+- Pause only affected workstreams.
 
-## Stop
-
-Stop for approval when the new handoff changes approved behavior or visual baselines. After approval, the Orchestrator Agent dispatches generated tasks through the normal feature pipeline.
+Do not maintain a permanent design-decision history. After approval, update current design/governing inputs and execute generated tasks.

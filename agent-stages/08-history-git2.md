@@ -2,24 +2,27 @@
 
 ## Goal
 
-Implement `HistoryStore` using the selected exact `git2 =0.21.0` composition and validated policies.
+Implement `HistoryStore` using `git2 =0.21.0` with the current architecture policies.
 
 ## Tasks
 
-- Initialize and maintain the app-managed linear `main` history.
+- Initialize/maintain app-managed linear `main`.
 - Create autosave, explicit-save, structural, named-snapshot, and restoration checkpoints.
 - Support empty named snapshots.
-- Implement bounded paging/filtering, whole-checkpoint preview, comparison inputs, and additive whole-project restore. Do not expose partial document/group/subtree restore in v1.
-- Isolate missing/corrupt history from current canonical files.
+- Implement bounded paging/filtering, whole-checkpoint preview/comparison inputs, and additive whole-project restore. No partial document/group/subtree restore.
+- Include canonical project dictionary; exclude appearance/global dictionary/workspace/derived state.
+- Isolate missing/corrupt history from current files.
 - Implement exclusive-owner stale-lock recovery.
-- Implement low-priority pack, verify, and redundant loose-object cleanup without pruning reachable checkpoints.
-- Enforce vendored libgit2/static-zlib and no network features.
-- Reproduce V03 functional, fault, longevity, and cross-platform interchange semantics.
+- Implement low-priority pack/verify/redundant-loose-object cleanup without pruning reachable checkpoints.
+- Enforce vendored libgit2/static-zlib/no network and resolved-lock assertions.
 
 ## Boundary rules
 
-No Git IDs/types escape `HistoryStore`. No history work runs on the UI thread.
+No Git IDs/types escape `HistoryStore`; no history work runs on UI thread.
 
 ## Pass criteria
 
-Adapter contract tests, 250k/1M longevity regressions, fault tests, maintenance scheduling, and Linux→Windows→macOS repository-continuation pass within the architecture’s operating constraints.
+- Shared adapter contract and fault tests.
+- Tier A/B native functional/continuation tests on all platforms.
+- Stage-scale checkpoint tests sufficient to catch regressions.
+- Full 1,000,000-checkpoint longevity/pack/memory run is scheduled as Tier C nightly/release evidence rather than required on every stage repair or pull request.

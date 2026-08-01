@@ -1,32 +1,25 @@
-# ParchMint Agent Stage Instructions
+# ParchMint Agent Stages
 
-Use `00-orchestrator.md` for the lead agent. The lead agent dispatches the remaining files according to `docs/09-agent-playbook.md` and repository-backed pipeline state.
+The Orchestrator dispatches one stage instruction per isolated run.
 
-Do not ask a stage agent to infer its task from a prior agent’s chat. Give it:
+Order:
 
-- its stage instruction file;
-- the generated `dispatch.yaml`;
-- the baseline commit;
-- dependency `handoff.yaml` files;
-- approved gate files;
-- repository access.
+1. S00 repository intake
+2. S10 design reconciliation and G10
+3. S20 bootstrap
+4. S30 contracts/domain/project undo/format
+5. S40 persistence/recovery
+6. S50 design system/shell
+7. S55 editor feasibility
+8. S60 production editor foundation
+9. S65 spellcheck foundation
+10. S70 history and S80 search
+11. S90 foundation integration
+12. S100 generated feature waves
+13. S110 integration validation
+14. S120 release hardening
+15. S130 independent validation and G90
 
-| File | Purpose |
-|---|---|
-| `00-orchestrator.md` | Pipeline controller and automatic dispatch/integration rules |
-| `01-repository-intake.md` | Baseline and handoff validation |
-| `02-design-reconciliation.md` | Versioned implementation interpretation; stops at G10 |
-| `03-repository-bootstrap.md` | Monorepo, locks, shell, CI, governance |
-| `04-contracts-domain-format.md` | Durable contracts, domain, canonical formats |
-| `05-persistence-recovery.md` | Atomic save, project repository, recovery |
-| `06-design-system-shell.md` | Approved tokens/assets and application shell |
-| `07-editor-foundation.md` | ProseMirror adapter and early native gate |
-| `08-history-git2.md` | Git-backed HistoryStore |
-| `09-search-sqlite.md` | SQLite FTS5 SearchIndex |
-| `10-foundation-integration.md` | Integrate foundations and freeze slice extension points |
-| `11-feature-wave-orchestrator.md` | Generate and dispatch feature-slice tasks |
-| `12-feature-slice-agent.md` | Generic instruction for one vertical slice |
-| `13-system-integration-validation.md` | Full integrated validation and bounded repair loop |
-| `14-release-hardening.md` | Packaging, signing workflow, platform hardening |
-| `15-release-validation.md` | Independent release evidence; stops at G90 |
-| `16-design-change-reconciliation.md` | Versioned Penpot changes after implementation begins |
+S40, S50, and S55 may run in parallel after S30. S60 follows S55; S65 follows S60. S90 waits for S40/S50/S60/S65/S70/S80.
+
+Stage agents do not merge themselves, change governing scope, or rely on chat history. Every run produces `dispatch.yaml`, `status.yaml`, `handoff.yaml`, `report.md`, and `evidence/`.

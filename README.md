@@ -1,39 +1,25 @@
 # ParchMint v1 Build Kit
 
-**Status:** Reconciled design-and-implementation baseline  
-**Build-kit workflow version:** 1.2  
-**Reconciled:** 2026-07-31  
-**Repository baseline:** `pmarathe25/ParchMint@4fe7976acd526faf0faf4e5fa3834bfb3bc2f742`
+**Status:** Implementation planning is current; final design handoff is pending.
 
-This repository contains the governing documents and automated agent workflow for the first cross-platform release of **ParchMint**, a local-first novel-writing desktop application.
+This repository contains the governing product, architecture, design-handoff, implementation, and validation documents for the first cross-platform release of ParchMint.
 
-This workflow revision was reconciled against the product-owner changes already present on `main`. It intentionally preserves the repository versions of the product specification, final architecture, Penpot design brief, acceptance plan, future-work record, decisions/evidence record, and `templates/design-manifest.yaml`.
+ParchMint is a local-first desktop application for planning and writing novels. The first release targets Windows, macOS, and Linux and uses Tauri, React, ProseMirror, Rust application services, open canonical project files, app-managed Git history, and a disposable SQLite FTS5 search index.
 
-## Current governing versions
+## Current implementation decisions
 
-- Product specification: `docs/product/01-product-specification.md` — **2.0**
-- Final architecture: `docs/architecture/02-final-architecture.md` — **1.2**
-- Penpot design brief: `docs/design/03-penpot-design-brief.md` — **2.3**
-- Design handoff contract: `docs/design/04-design-artifact-handoff-contract.md` — **1.1**
-- Implementation plan: `docs/implementation/05-implementation-plan.md` — **1.2**
-- Acceptance plan: `docs/implementation/06-acceptance-and-release-plan.md` — **1.0**
-- Future work: `docs/future/07-future-work.md` — **1.2**
-- Decisions and evidence: `docs/evidence/08-decisions-and-evidence.md` — **1.0**
-- Automated agent playbook: `docs/09-agent-playbook.md` — **1.2**
+- Desktop shell: Tauri 2.11.5.
+- Application UI: TypeScript and React in the platform webview.
+- Rich-text editor: exact-locked ProseMirror packages behind a ParchMint-owned editor contract.
+- Application services: Rust.
+- Canonical authored data: restricted deterministic HTML5, TOML, CSS, and JSON/text sidecars.
+- History: `git2 =0.21.0` with vendored libgit2 behind `HistoryStore`.
+- Search: `rusqlite =0.40.1` with bundled SQLite FTS5 behind `SearchIndex`.
+- Export: one self-contained HTML5 export of the entire Manuscript.
+- Appearance: System, Light, and Dark. Dark uses fully dark application and manuscript surfaces with a charcoal-and-mint visual system.
+- First-class platforms: Windows, macOS, and Linux from v1.
 
-## Final technology decisions
-
-- Desktop shell: **Tauri 2.11.5**
-- UI: **TypeScript + React**, rendered in the platform webview
-- Rich-text editor: **exact-locked ProseMirror packages**, isolated behind a ParchMint editor adapter
-- Core application services: **Rust**
-- Canonical project data: **restricted deterministic HTML5 + TOML + CSS + JSON**
-- History: **`git2 =0.21.0` with vendored libgit2**, hidden behind `HistoryStore`
-- Search: **`rusqlite =0.40.1` with bundled SQLite FTS5**, hidden behind `SearchIndex`
-- Initial export: **one self-contained HTML5 export of the entire Manuscript**
-- First-class platforms: **Windows, macOS, and Linux from v1**
-
-All supported documents, including documents near 250,000 words, retain the same product features. Internal optimizations may vary transparently, but agents may not introduce a user-visible large-document mode or reduce editing, comments, search, formatting, or dual-view behavior by size.
+All supported documents, including documents near 250,000 words, retain the same user-visible features. Internal optimizations may vary transparently, but implementation agents may not introduce a large-document mode or reduce editing, comments, formatting, search, spellcheck, or two-view behavior by document size.
 
 ## Source-of-truth order
 
@@ -41,51 +27,63 @@ When materials conflict, use this precedence:
 
 1. `docs/product/01-product-specification.md`
 2. `docs/architecture/02-final-architecture.md`
-3. The latest product-owner-approved Penpot handoff identified by `design/handoff/<version>/design-manifest.yaml`
-4. `docs/design/03-penpot-design-brief.md` for visual language and approved presentation rules
+3. The latest product-owner-approved handoff at `design/handoff/<version>/design-manifest.yaml`
+4. `docs/design/03-penpot-design-brief.md`
 5. `docs/design/04-design-artifact-handoff-contract.md`
 6. `docs/implementation/05-implementation-plan.md`
 7. `docs/implementation/06-acceptance-and-release-plan.md`
 8. `docs/future/07-future-work.md`
-9. Historical evidence and rejected alternatives
+9. `docs/09-agent-playbook.md` and `agent-stages/` for execution mechanics
 
-A design artifact may clarify layout and interaction but may not silently change product behavior. A coding agent must record a conflict and route it through G20 instead of choosing its own interpretation.
+A design artifact may clarify layout and interaction but may not silently change product behavior. A coding agent must route a material conflict through G20 instead of choosing its own interpretation.
 
-## Automated workflow
+## Current entry condition
 
-The design-agent and product-owner design-review stages are already complete. Begin with the approved handoff committed under:
+The implementation pipeline must not start until a product-owner-approved, checksum-valid handoff is committed under:
 
 ```text
 design/handoff/<version>/
 ```
 
-Then start one lead coding agent with:
+The final handoff must include the remediated Light and Dark designs and the Appearance setting. Until that directory exists and validates, S00 must report `blocked`.
+
+## Automated workflow
+
+After the approved handoff is committed, start one lead coding agent with:
 
 - `AGENTS.md`
 - `docs/09-agent-playbook.md`
 - `agent-stages/00-orchestrator.md`
 
-The Orchestrator Agent initializes repository-backed pipeline state, dispatches design reconciliation, and stops at G10. After G10 approval, it automatically dispatches, verifies, and integrates routine stages. Product-owner review is required only for:
+The Orchestrator Agent initializes repository-backed pipeline state, dispatches design reconciliation, and stops at G10. After G10 approval it advances routine stages automatically and stops only at:
 
-- **G10:** approved design-to-implementation reconciliation
-- **G20:** material product, design, architecture, licensing, security, or mandatory-requirement deviation
-- **G90:** final release approval
+- **G20:** a material product, design, architecture, licensing, security, or mandatory-requirement change is required.
+- **G90:** the release candidate is ready for product-owner approval.
+- A defined external-input requirement such as signing credentials or a human-only native accessibility session.
 
-All stage communication is committed under `agent-workflow/`; later agents must not depend on earlier chat transcripts.
+The highest-risk foundations are selected and proven before broad feature work:
 
-## Workflow files
+- S55: shared two-view editor and projection feasibility.
+- S60: production editor foundation using the proven strategy.
+- S65: cross-platform spellcheck foundation.
+
+Agents communicate through committed run artifacts under `agent-workflow/`; later agents must not depend on earlier chat transcripts.
+
+## Governing files
 
 | Path | Purpose |
 |---|---|
-| `AGENTS.md` | Repository-wide rules for all agents |
-| `docs/09-agent-playbook.md` | How to start, approve, resume, and govern the automated pipeline |
-| `agent-stages/00-orchestrator.md` | Lead-agent execution contract |
-| `agent-stages/01-16*.md` | Bounded stage instructions |
-| `templates/agent-workflow/` | Pipeline, dispatch, status, handoff, and gate templates |
-| `templates/design-reconciliation/` | G10 reconciliation package templates |
-| `templates/agent-task.yaml` | Generated feature-slice task template |
-| `docs/evidence/build-kit-v1.2-reconciliation.md` | Exact preservation and merge record |
+| `AGENTS.md` | Repository-wide implementation rules |
+| `docs/product/01-product-specification.md` | Normative v1 product behavior |
+| `docs/architecture/02-final-architecture.md` | State ownership, module boundaries, and implementation architecture |
+| `docs/design/03-penpot-design-brief.md` | Current visual and interaction brief |
+| `docs/design/04-design-artifact-handoff-contract.md` | Required immutable Penpot handoff |
+| `docs/implementation/05-implementation-plan.md` | Ordered implementation stages and risk gates |
+| `docs/implementation/06-acceptance-and-release-plan.md` | Test tiers and release gates |
+| `docs/future/07-future-work.md` | Explicitly deferred capabilities |
+| `docs/09-agent-playbook.md` | Pipeline operation and approval instructions |
+| `agent-stages/` | Bounded stage-agent contracts |
 
-## Important residual risk
+## Documentation policy
 
-The selected Tauri/ProseMirror stack still requires early release-mode native validation on Windows, macOS, and Linux for IME, clipboard, accessibility, high DPI, memory, and the same-feature 250,000-word requirement. Failure must stop at G20 with evidence; an agent may not introduce a special large-document mode or choose a different frontend independently.
+These documents exist to drive the current implementation. Do not add changelogs, architecture-decision logs, historical exploration reports, or superseded rationale to the governing set. When an approved change occurs, update the current source-of-truth documents directly. Temporary G20 proposals and stage evidence may exist while work is active, but they do not become an alternate product or architecture history.

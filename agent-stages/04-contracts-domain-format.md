@@ -1,37 +1,31 @@
-# S30 — Contracts, Domain, and Canonical Format
+# S30 — Contracts, Domain, Project Commands, and Canonical Format
 
 ## Goal
 
-Freeze the durable model and format boundaries before adapters and UI spread.
+Freeze durable models, project undo, and format boundaries before adapters/UI spread.
 
 ## Tasks
 
-Implement Phase 1 of the implementation plan:
-
 - Stable IDs and project/node/style/metadata/comment entities.
-- Strict group/document hierarchy and ordered-tree commands.
+- Ordered-tree invariants and commands.
+- `ProjectCommandDispatcher`/`ProjectUndoManager` contracts and bounds/reset behavior.
+- Composite global-replacement operation/inverse contract.
 - Versioned IPC/application schemas and generated bindings.
-- Restricted deterministic HTML schema and codec.
-- `project.toml`, annotation JSON, and style CSS codecs.
+- Restricted deterministic HTML codec.
+- `project.toml`, annotation JSON, style CSS, and project `dictionary.txt` codecs.
 - Migrations.
-- Golden fixtures for all v1 blocks, marks, comments, metadata, literal tabs, and structural breaks.
-- Headless `create`, `validate`, `inspect`, and `roundtrip` commands.
+- Golden/property fixtures for blocks, marks, comments, metadata, tabs, breaks, dictionaries, tombstones.
+- Headless create/validate/inspect/roundtrip/project-command/undo commands.
 - Adapter-independent title synchronization and word counting.
 
-## Ownership rules
+## Restrictions
 
-Do not import React, DOM, Tauri, ProseMirror, `git2`, or `rusqlite` types into public domain/format APIs.
-
-## Required outputs
-
-- Domain and project-format crates/packages.
-- Versioned schemas and generated bindings.
-- Golden fixtures and property tests.
-- Contract/version manifest for dependent stages.
+No React, DOM, Tauri, ProseMirror, git2, rusqlite, or spellcheck-engine types in public APIs.
 
 ## Pass criteria
 
 - Byte-identical canonical round trips.
 - Invalid structures rejected.
-- Path/Unicode fixtures pass on Windows, macOS, and Linux.
-- Dependency-boundary checks pass.
+- Random command/undo/redo sequences preserve invariants.
+- Unicode/path tests pass on all three OSes.
+- Generated bindings are clean and cross-language fixtures pass.

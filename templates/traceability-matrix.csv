@@ -1,2 +1,5 @@
-requirement_id,requirement_summary,penpot_screen_ids,penpot_component_ids,implementation_modules,automated_tests,native_manual_tests,status,waiver_or_notes
-PRJ-001,Start at launcher,,,,,,not_started,
+requirement_id,requirement_summary,penpot_screen_ids,penpot_component_ids,implementation_modules,automated_tests,native_manual_tests,test_tier,status,current_notes
+APPR-001,System Light Dark appearance,,,,,,,not_started,
+EDIT-006,Shared document state across two views,,,,,,,not_started,
+SPELL-001,Cross-platform spellcheck,,,,,,,not_started,
+UNDO-003,Project undo domains,,,,,,,not_started,

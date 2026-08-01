@@ -1,31 +1,55 @@
 # ParchMint Design Reconciliation
 
-## Source versions
+**Handoff version:**  
+**Product specification version:**  
+**Architecture version:**  
+**Design brief version:**  
+**Manifest checksum:**  
 
-- Product specification:
-- Architecture:
-- Design handoff:
-- Design manifest checksum:
+## 1. Validation result
 
-## Handoff validation
+- Manifest/schema:
+- All paths/checksums:
+- Governing versions:
+- `.penpot` source:
+- Light token set complete:
+- Dark token set complete:
+- Semantic role parity:
+- Dark manuscript surface:
+- Appearance System/Light/Dark states:
+- Required Light/Dark references:
+- Assets/specs:
 
-## Requirement and design consistency
+## 2. Token import
 
-## Component mapping summary
+Describe normalization, semantic role map, Light/Dark generation, System resolution, generated headers, and CI dirty-diff guard.
 
-## Screen and state mapping summary
+## 3. Asset import
 
-## Token and asset import plan
+List source paths, implementation paths, checksum/optimization/accessibility handling, and theme-specific variants.
 
-## Interaction, focus, and accessibility interpretation
+## 4. Component and screen interpretation
 
-## Cross-platform variants
+Summarize implementation component/state mapping and reference `implementation-map.yaml`.
 
-## Visual-regression strategy
+## 5. Interaction interpretation
 
-## Conflicts and omissions
+Cover focus/context/toolbar, drag/drop, comments, search/replace, spellcheck, Appearance live propagation, dialogs, save/recovery, reduced motion.
 
-## Recommendation
+## 6. Accessibility interpretation
 
-- Status: ready_for_approval | blocked
-- Blocking issue IDs:
+Roles/names/states, focus order/restoration, keyboard, Light/Dark contrast/focus, native-screen-reader concerns.
+
+## 7. Visual regression
+
+Reference `visual-regression-plan.md`; identify deterministic fixtures, Light/Dark pairs, platforms, dimensions, tolerances.
+
+## 8. Conflicts and omissions
+
+List every product/design/architecture conflict or missing state. Do not resolve a material conflict silently.
+
+## 9. Readiness
+
+- Ready to implement:
+- Blocked pending design/product clarification:
+- Required handoff revision:

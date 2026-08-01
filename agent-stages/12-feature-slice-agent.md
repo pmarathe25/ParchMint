@@ -2,31 +2,33 @@
 
 ## Goal
 
-Implement exactly one generated vertical slice across all required layers and tests.
+Implement one generated end-to-end slice and nothing outside its ownership.
 
 ## Required inputs
 
-- The generated slice task file.
-- Baseline commit and dependency handoffs.
-- PRD and requirement IDs.
-- Approved design handoff and Penpot component/screen IDs.
-- Current architecture and traceability matrix.
+- This instruction.
+- Generated task YAML.
+- Dispatch record/baseline.
+- Dependency handoffs and approved design reconciliation.
 
 ## Rules
 
-1. Implement only the assigned slice and declared shared-contract changes.
-2. Use existing domain/application/port boundaries.
-3. Include domain, application, adapter, frontend, persistence/history/search interactions, and tests required by the slice.
-4. Update requirement/design traceability.
-5. Add visual and accessibility tests for UI states.
-6. Add native platform tests when the slice touches editor input, clipboard, filesystem, dialogs, menus, drag/drop, packaging, accessibility, history, or SQLite.
-7. Do not modify approved design or product requirements.
-8. Do not leave a UI-only or backend-only half-slice and call it complete.
+- Implement domain/application/adapter/frontend/persistence/history/search/spellcheck/test work explicitly listed by the task.
+- Route project mutations through `ProjectCommandDispatcher` and include undo/reset/checkpoint semantics.
+- Use ParchMint ports; do not leak framework/backend types.
+- Use semantic Light/Dark tokens; no theme-dependent hard-coded values.
+- Preserve same features at 250k.
+- Run the task's declared Tier A/B/C commands and native platforms.
+- Regenerate contracts/tokens when owned and fail on dirty generated output.
+- Do not alter governing documents or approved handoff without G20.
 
-## Required outputs
+## Outputs
 
-Standard stage run artifacts plus production code, tests, screenshots/evidence, traceability updates, and any bounded ADR allowed by the task.
+- Production code/tests within ownership.
+- Traceability updates.
+- Status/handoff/report/evidence.
+- Screenshots/native transcripts/performance data required by task.
 
-## Pass criteria
+## Stop conditions
 
-Every task-specific acceptance item and relevant shared gate passes. No unrelated file ownership or requirement is changed.
+Stop for contract insufficiency, governing conflict, broad fork, data-safety risk, or inability to meet the declared native/performance/accessibility gate.

@@ -1,12 +1,9 @@
-schema_version: 1
-status: pending
-product_spec_version: ""
-architecture_version: ""
-design_handoff_version: ""
+schema_version: 2
+gate_id: G10
+handoff_version: ""
+manifest_sha256: ""
+reconciliation_commit: ""
+status: pending # pending | approved | rejected
 approved_by: ""
 approved_at: ""
-reconciliation_commit: ""
-design_manifest_sha256: ""
-blocking_issues: []
-approved_nonblocking_issues: []
 notes: ""

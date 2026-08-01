@@ -2,25 +2,28 @@
 
 ## Goal
 
-Integrate the accepted persistence, shell, editor, history, and search foundations into one coherent application baseline before feature slices.
+Integrate persistence, design shell, production editor, spellcheck, history, and search into one working foundation before feature waves.
+
+## Entry conditions
+
+Accepted handoffs for S40, S50, S60, S65, S70, and S80.
 
 ## Tasks
 
-1. Merge accepted stage branches in dependency order through an integration branch.
-2. Resolve only mechanical conflicts; redispatch semantic conflicts.
-3. Connect production application ports without duplicating state in React or ProseMirror.
-4. Replace shell mocks with minimal real project/open/save/history/search/editor flows.
-5. Run the complete contract, canonical-format, save/recovery, history, search, editor, visual-smoke, accessibility-smoke, and native launch suites.
-6. Verify background work does not block the UI thread.
-7. Produce an ownership map for feature-slice work.
-
-## Required outputs
-
-- Integrated foundation commit.
-- Updated traceability matrix.
-- Stable extension points and public contract versions.
-- Integration handoff and file ownership map.
+- Wire real create/open/save/recovery into the approved shell.
+- Mount editor and shared toolbar; connect revision/error/save state.
+- Integrate project commands/undo with editor project-operation boundaries.
+- Integrate history/search/spellcheck through their ports.
+- Integrate System/Light/Dark across real windows with no project mutations.
+- Integrate one-process/multiple-project-window routing and project locks.
+- Run cross-platform end-to-end foundation flows and applicable Tier B gates.
+- Re-run generated contract/token drift checks.
 
 ## Pass criteria
 
-All foundation gates pass together on all three platforms and no selected adapter type leaks through public application/domain boundaries.
+- Create/open/edit/save/recover works through real services.
+- Two-view/editor/spellcheck/search/history/project undo coexist without state-owner conflicts.
+- Appearance updates every open window and leaves canonical files unchanged.
+- No UI-thread I/O/analysis regressions.
+- Windows/macOS/Linux foundation smoke passes.
+- No unresolved material deviation.

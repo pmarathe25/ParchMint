@@ -1,108 +1,113 @@
 # ParchMint Agent Playbook
 
-**Status:** Final automated workflow  
-**Version:** 1.2  
+**Status:** Current automated workflow  
+**Version:** 1.3  
 **Date:** 2026-07-31
 
 ## 1. Overview
 
-ParchMint uses a review-gated agent pipeline rather than a sequence of loosely connected chat prompts.
+ParchMint uses a review-gated repository pipeline rather than loosely connected prompts.
 
-Use four agent roles:
+Roles:
 
-1. **Design Agent:** creates and iterates the Penpot design.
-2. **Orchestrator Agent:** owns pipeline state, dispatches bounded stage agents, verifies gates, integrates passing work, and stops only at defined approval boundaries.
-3. **Stage Agents:** implement one bounded stage or feature slice from a dedicated instruction file.
-4. **Validation Agent:** independently evaluates integrated work and produces release evidence.
+1. **Design Agent:** creates/remediates Penpot and exports the immutable handoff.
+2. **Orchestrator Agent:** owns pipeline state, dispatch, independent verification, integration, and approval stops.
+3. **Stage Agents:** execute one bounded stage or generated slice.
+4. **Validation Agent:** independently evaluates the integrated release candidate.
 
-The product owner remains the authority for product behavior, approved design versions, material architecture changes, distribution/licensing exceptions, and final release approval.
+The product owner controls product behavior, approved design versions, material architecture changes, distribution/licensing/security exceptions, and final release approval.
 
-### Review gates
+## 2. Review gates
 
-Only these events require product-owner review or approval:
+- **G10 — Design reconciliation approval:** implementation interpretation of the approved handoff.
+- **G20 — Material deviation approval:** product/design/selected technology/canonical format/state ownership/licensing/security/mandatory requirement must change.
+- **G90 — Release approval:** independent release evidence.
 
-- **G10 — Design reconciliation approval.** The implementation interpretation of the approved Penpot handoff must be reviewed before broad UI work.
-- **G20 — Material deviation approval.** Required only when an agent identifies a conflict with the PRD or approved design, proposes a selected-framework/backend change, changes a canonical format or architectural boundary, introduces a material licensing/security exception, or cannot satisfy a mandatory product requirement.
-- **G90 — Release approval.** The independent release-evidence package is reviewed before release.
+All other objective stage gates may advance automatically.
 
-All other phase gates may be evaluated and advanced automatically by the Orchestrator Agent when their objective criteria pass.
+## 3. Durable communication
 
-### Durable communication rule
+Agents communicate through committed repository artifacts, not remembered conversation context. Every stage receives a baseline commit and dependency handoffs and produces a versioned status, handoff, report, and evidence directory.
 
-Agents communicate through committed repository artifacts, not through remembered conversation context. Every stage receives a baseline commit and prior handoff files, and produces a versioned status, handoff, report, and evidence directory. A subsequent agent must be able to proceed in a fresh session using only the repository.
+Current governing documents are updated directly after approved changes. Do not create changelogs, ADRs, historical exploration records, or alternate decision logs.
 
-## 2. Design-agent setup
+## 4. Current design status
 
-In this repository, the governing inputs are located under `docs/product/`, `docs/design/`, and `templates/`; the filenames below remain the design-agent handoff labels.
+The implementation pipeline is not ready until a final product-owner-approved handoff is committed under:
+
+```text
+design/handoff/<version>/
+```
+
+The approved handoff must include:
+
+- Remediated Light and Dark token sets/components/references.
+- System/Light/Dark Appearance setting and behavior.
+- Fully dark manuscript canvas in Dark.
+- All files required by the handoff contract.
+- Valid checksums and matching governing versions.
+
+S00 must block rather than infer approval from a live Penpot file or previous conversation.
+
+## 5. Design-agent setup
 
 Give the Design Agent:
 
 - `AGENTS.md`
-- `01-product-specification.md`
-- `03-penpot-design-brief.md`
-- `04-design-artifact-handoff-contract.md`
+- `docs/product/01-product-specification.md`
+- `docs/design/03-penpot-design-brief.md`
+- `docs/design/04-design-artifact-handoff-contract.md`
 - `templates/design-manifest.yaml`
 - `templates/traceability-matrix.csv`
 
-Connect Codex to Penpot MCP using current Penpot and Codex MCP instructions. Prefer a project-scoped MCP configuration when the environment supports it.
+### Initial/remediation prompt
 
-### Design-agent initial prompt
-
-> Read all supplied ParchMint documents before changing Penpot. Use `03-penpot-design-brief.md` as the operational brief and `01-product-specification.md` as the product source of truth. Connect to the open Penpot file through MCP. Create the file structure, tokens, components, screens, states, accessibility annotations, and prototype flows in the brief. Do not add deferred features or resolve product ambiguities silently. Use stable `PM/` names and cite requirement IDs. At the end of each pass, report completed pages, unresolved product questions, design decisions, and handoff gaps. Do not export the final handoff until I explicitly approve the design.
+> Read all supplied ParchMint documents before changing Penpot. Use the design brief as the operational brief and the product specification as the behavior source of truth. Connect to the open Penpot file. Complete or remediate the semantic Light/Dark token system, System/Light/Dark Appearance setting, shared components, screens, states, accessibility annotations, and prototype flows. Dark must use fully dark application and manuscript surfaces. Do not add deferred features or resolve product conflicts silently. Use stable PM names and requirement IDs. Report current blockers and handoff gaps. Do not mark or export an approved final handoff until the product owner approves the design.
 
 ### Iteration prompt
 
-> Apply the approved feedback to the existing Penpot design without breaking stable component IDs/names unnecessarily. Update components and instances rather than patching individual boards. Update the design decision log and identify any screens/reference images that must be re-exported. Do not make unrelated visual or product changes.
+> Apply only approved feedback to the existing Penpot design. Update component mains and instances rather than isolated boards. Preserve stable IDs/names where practical. Update affected screens, Light/Dark references, appearance matrix, and handoff inventory. Do not make unrelated product changes.
 
 ### Final handoff prompt
 
-> Freeze the approved ParchMint design as version `<VERSION>`. Produce every artifact required by `04-design-artifact-handoff-contract.md`: `.penpot`, token JSON, used SVG assets, deterministic reference PNGs, `design-manifest.yaml`, interaction specification, component matrix, screen inventory, keyboard/focus map, cross-platform variants, design decisions, known deviations, and SHA-256 checksums. Validate that all manifest paths exist and that the product-spec version matches. Report any incomplete item rather than omitting it.
+> Freeze the approved ParchMint design as `<VERSION>` and produce every artifact required by the handoff contract: `.penpot`, complete Light/Dark token JSON, used assets, deterministic Light/Dark reference PNGs, manifest, interaction specification, component matrix, screen inventory, keyboard/focus map, appearance matrix, cross-platform variants, known deviations, and SHA-256 checksums. Validate all paths/checksums and governing versions. Report incomplete items instead of omitting them.
 
-## 3. Product-owner design review
+## 6. Product-owner design review
 
-Before approving the handoff, review:
+Review:
 
-- Core layout and information architecture.
-- Editor/companion/Inspector focus behavior.
-- Cards as the same data projection.
-- Deep tree and multi-selection states.
-- Comments, editor-context-menu creation, and anchor indication.
-- Search and replacement preview.
-- History/Recently Deleted clarity.
-- Save/error/recovery states.
-- Keyboard/focus/accessibility boards.
-- 1280×720 and high-DPI studies.
-- Cross-platform variants.
+- Core information architecture and shell.
+- Editor/companion/Inspector focus.
+- Cards as the same hierarchy projection.
+- Deep tree/multi-selection.
+- Comments and context-menu creation.
+- Search/replace preview.
+- History/Recently Deleted.
+- Save/error/recovery.
+- Appearance System/Light/Dark and fully dark canvas.
+- Light/Dark focus/contrast/state treatment.
+- Spellcheck/dictionary settings presentation.
+- Keyboard/focus/accessibility.
+- 1280×720/high-DPI/cross-platform variants.
 
-Approval should identify a design version; do not approve an unversioned live file.
+Approval identifies an immutable handoff version.
 
-## 4. Start the automated implementation pipeline
+## 7. Start the pipeline
 
-After the approved Penpot handoff is committed under `design/handoff/<version>/`, give one lead agent:
+After the approved handoff is committed, give one lead agent:
 
-- The complete build kit.
+- Complete repository/build kit.
 - Repository access.
-- The approved design handoff.
-- Native or CI access for Windows, macOS, and Linux.
-- `agent-stages/00-orchestrator.md` as its operational instruction.
+- Native/CI access for Windows, macOS, Linux.
+- `agent-stages/00-orchestrator.md`.
 
-Use this initial prompt:
+Prompt:
 
-> Read `AGENTS.md`, `docs/09-agent-playbook.md`, and `agent-stages/00-orchestrator.md`. Initialize the repository-backed agent pipeline and execute it from Stage S00. Use fresh stage agents or isolated worktrees where supported. Do not rely on prior chat context. Stop only at an approval gate, a defined stop condition, or an external credential/input requirement that cannot be resolved from the repository.
+> Read `AGENTS.md`, `docs/09-agent-playbook.md`, and `agent-stages/00-orchestrator.md`. Initialize the repository-backed pipeline and execute from S00. Use isolated branches/worktrees and fresh stage agents where supported. Do not rely on prior chat context. Stop only at G10, G20, G90, a defined stop condition, or an external credential/input requirement.
 
-The Orchestrator Agent will:
+## 8. Approve/resume G10
 
-1. Validate repository intake and initialize `agent-workflow/` state.
-2. Dispatch the design-reconciliation stage.
-3. Stop at **G10** with a versioned reconciliation package.
-4. After G10 approval, automatically dispatch, verify, integrate, and advance all stages that do not require product-owner review.
-5. Stop at a material deviation, unrecoverable gate failure, or final release approval.
-
-If the environment cannot create subagents, the Orchestrator Agent may execute stage files sequentially itself, but it must still use isolated branches/worktrees, stage artifacts, and the same gate rules.
-
-## 5. Approve and resume after design reconciliation
-
-The reconciliation stage writes:
+S10 writes:
 
 ```text
 docs/design/reconciliation/<handoff-version>/
@@ -114,57 +119,49 @@ docs/design/reconciliation/<handoff-version>/
 └── approval.yaml
 ```
 
-It also writes its stage evidence under:
+Review it, resolve blockers, set `approval.yaml` to `approved`, and commit.
 
-```text
-agent-workflow/runs/S10-design-reconciliation/<run-id>/
-```
+Resume prompt:
 
-Review the reconciliation package. Resolve blocking issues, then change `approval.yaml` from `pending` to `approved` and commit the approval, or instruct the Orchestrator Agent to prepare that exact approval commit for you.
+> Resume from the approved G10 reconciliation. Revalidate its commit, handoff checksum, theme coverage, and continue automatically. Stop only at G20, G90, a defined stop condition, or unresolved external input.
 
-Resume with:
+## 9. Stage index
 
-> Resume the pipeline from the approved G10 reconciliation gate. Revalidate the approval commit and continue automatically according to `agent-stages/00-orchestrator.md`. Stop only at G20, G90, a defined stop condition, or an unresolved external credential/input requirement.
-
-A new Orchestrator Agent session may be used. Pipeline state must come from the repository, so no conversation handoff is required.
-
-## 6. Stage instruction index
-
-The Orchestrator Agent dispatches these instruction files. Do not paste informal summaries in place of them.
-
-| Stage | Instruction file | Default behavior | Dependencies |
+| Stage | Instruction file | Behavior | Dependencies |
 |---|---|---|---|
-| S00 | `agent-stages/01-repository-intake.md` | Automatic | Approved design handoff |
-| S10 | `agent-stages/02-design-reconciliation.md` | Stops for G10 approval | S00 |
-| S20 | `agent-stages/03-repository-bootstrap.md` | Automatic | G10 approved |
+| S00 | `agent-stages/01-repository-intake.md` | Automatic or blocked | Approved handoff |
+| S10 | `agent-stages/02-design-reconciliation.md` | Stops at G10 | S00 |
+| S20 | `agent-stages/03-repository-bootstrap.md` | Automatic | G10 |
 | S30 | `agent-stages/04-contracts-domain-format.md` | Automatic | S20 |
 | S40 | `agent-stages/05-persistence-recovery.md` | Automatic | S30 |
-| S50 | `agent-stages/06-design-system-shell.md` | Automatic, parallel-capable | S30, G10 |
-| S60 | `agent-stages/07-editor-foundation.md` | Automatic unless runtime gate fails | S30, G10 |
-| S70 | `agent-stages/08-history-git2.md` | Automatic, parallel-capable | S40 |
-| S80 | `agent-stages/09-search-sqlite.md` | Automatic, parallel-capable | S40 |
-| S90 | `agent-stages/10-foundation-integration.md` | Automatic | S40, S50, S60, S70, S80 |
-| S100 | `agent-stages/11-feature-wave-orchestrator.md` | Automatically plans and dispatches slices | S90 |
-| Slice | `agent-stages/12-feature-slice-agent.md` | Automatic per bounded slice | Generated task |
-| S110 | `agent-stages/13-system-integration-validation.md` | Automatic repair loop within scope | All v1 slices |
-| S120 | `agent-stages/14-release-hardening.md` | Automatic; may request signing credentials | S110 |
-| S130 | `agent-stages/15-release-validation.md` | Produces G90 package, then stops | S120 |
-| Change | `agent-stages/16-design-change-reconciliation.md` | Stops only when a new design needs approval | New Penpot handoff |
+| S50 | `agent-stages/06-design-system-shell.md` | Parallel-capable | S30, G10 |
+| S55 | `agent-stages/07-editor-feasibility.md` | Selects strategy or G20 | S30 |
+| S60 | `agent-stages/07a-editor-foundation.md` | Native gate or G20 | S55, G10 |
+| S65 | `agent-stages/07b-spellcheck-foundation.md` | Selects/proves engine or G20 | S60 |
+| S70 | `agent-stages/08-history-git2.md` | Parallel-capable | S40 |
+| S80 | `agent-stages/09-search-sqlite.md` | Parallel-capable | S40 |
+| S90 | `agent-stages/10-foundation-integration.md` | Automatic | S40, S50, S60, S65, S70, S80 |
+| S100 | `agent-stages/11-feature-wave-orchestrator.md` | Generates/dispatches slices | S90 |
+| Slice | `agent-stages/12-feature-slice-agent.md` | Automatic per task | Generated task |
+| S110 | `agent-stages/13-system-integration-validation.md` | Repair loop within scope | All v1 slices |
+| S120 | `agent-stages/14-release-hardening.md` | May request credentials | S110 |
+| S130 | `agent-stages/15-release-validation.md` | Produces G90 package | S120 |
+| Change | `agent-stages/16-design-change-reconciliation.md` | Stops when approval needed | New handoff |
 
-The stage numbers describe dependencies, not necessarily wall-clock order. After S30, independent stages may use parallel worktrees where their ownership maps do not overlap.
+After S30, S40/S50/S55 may run in parallel. S70/S80 follow S40. S60 follows S55. S65 follows S60. Broad slices follow S90.
 
-## 7. Repository-backed handoff contract
+## 10. Stage handoff contract
 
 Every dispatched stage receives:
 
-- A baseline commit SHA.
-- Its stage instruction file.
+- Baseline commit SHA.
+- Stage instruction.
 - `agent-workflow/pipeline-state.yaml`.
-- Approved gate files.
-- Handoff files from all declared dependencies.
-- The relevant PRD, architecture, design, and implementation documents.
+- Approved gates.
+- Dependency handoffs.
+- Relevant governing/design documents.
 
-Every stage must create:
+Every stage creates:
 
 ```text
 agent-workflow/runs/<stage-id>/<run-id>/
@@ -175,55 +172,32 @@ agent-workflow/runs/<stage-id>/<run-id>/
 └── evidence/
 ```
 
-The stage branch must also contain all production code, tests, ADRs, traceability updates, and design-reference changes produced by the stage.
+Allowed results: `passed`, `failed`, `blocked`, `needs_approval`.
 
-### `status.yaml`
+`status.yaml` records baseline/output commits, files, commands, platforms, requirements, blockers, deviations, and recommended next stages.
 
-Records the result, baseline and output commits, files changed, commands run, platforms tested, requirements addressed, blocking issues, deviations, dependencies, and recommended next stages.
+`handoff.yaml` records stable outputs: contract/schema versions, ports, generated bindings, fixtures/tests, commands, known approved limitations, and exact artifact paths.
 
-Allowed results:
+## 11. Automatic verification/integration
 
-- `passed`
-- `failed`
-- `blocked`
-- `needs_approval`
+The Orchestrator independently confirms:
 
-### `handoff.yaml`
+1. Correct baseline and clean branch.
+2. Required run artifacts parse.
+3. Diff stays inside ownership.
+4. Governing docs/approved handoff were not modified without G20.
+5. Mandatory commands and test tier pass.
+6. Required Windows/macOS/Linux evidence exists.
+7. Generated contract/token output is clean.
+8. No unapproved dependency/provenance/product/architecture deviation.
+9. Integration-branch post-merge tests pass.
+10. Pipeline state and accepted handoff pointers update atomically.
 
-Records stable outputs for later agents:
+One bounded repair attempt is allowed for an ordinary implementation/test defect. Repeated failure, broad fork, data-loss risk, or governing change stops at G20.
 
-- Contract/schema versions.
-- New ports and implementations.
-- Generated bindings.
-- Fixture and test locations.
-- Runtime or build commands.
-- Known limitations that remain within approved scope.
-- Exact artifact and evidence paths.
+## 12. G20 material deviation
 
-### `report.md`
-
-Provides the human-readable summary and rationale. Later agents may read it, but machine progression must rely on `status.yaml`, `handoff.yaml`, approved gates, tests, and repository state.
-
-## 8. Automatic verification and integration
-
-A stage is not automatically accepted merely because its agent reports success. The Orchestrator Agent must:
-
-1. Confirm the stage used the dispatched baseline.
-2. Confirm the branch is clean and contains the required run artifacts.
-3. Check that the diff stays within the stage ownership scope.
-4. Check that no governing document or approved design handoff was modified.
-5. Re-run the stage’s mandatory gate commands or dispatch an independent verifier.
-6. Confirm required Windows/macOS/Linux evidence where the stage demands it.
-7. Confirm no unapproved product, architecture, canonical-format, licensing, or security deviation is present.
-8. Merge through an integration branch and run the post-merge gate.
-9. Update `pipeline-state.yaml` and accepted handoff pointers.
-10. Dispatch newly unblocked stages.
-
-The Orchestrator Agent may automatically dispatch one bounded repair attempt for an implementation or test defect that does not change requirements or architecture. A repeated failure, broad fork, data-loss risk, or required product change must stop at G20.
-
-## 9. Material-deviation gate G20
-
-The Orchestrator Agent must stop and create a proposal under:
+Create a temporary proposal under:
 
 ```text
 agent-workflow/proposals/<proposal-id>/
@@ -233,100 +207,78 @@ agent-workflow/proposals/<proposal-id>/
 └── approval.yaml
 ```
 
-G20 is required when work would:
+G20 is required for a must-level behavior/design change; selected framework/backend/engine change; canonical/state-owner/public-boundary change; material licensing/security/privacy exception; or weakened save/recovery/performance/accessibility/cross-platform requirement.
 
-- Change a PRD requirement or user-visible behavior.
-- Conflict materially with the approved Penpot handoff.
-- Change Tauri, ProseMirror, `git2`, SQLite FTS5, or another selected architectural component.
-- Change a public architectural boundary or authoritative state owner.
-- Change canonical formats or migration guarantees beyond the approved architecture.
-- Add a material distribution, licensing, security, or privacy exception.
-- Weaken save/recovery, cross-platform, accessibility, performance, or 250,000-word requirements.
-- Require a broad maintained fork.
+The proposal presents reproducible evidence and bounded options. The agent does not choose for the product owner.
 
-The proposal must present evidence and bounded options. The agent must not select an option for the product owner.
+After approval:
 
-## 10. Feature-slice automation
+1. Update the current governing documents/contracts.
+2. Commit the approval and current-document updates together or in an explicitly linked sequence.
+3. Regenerate affected tasks.
+4. Resume from repository state.
 
-After S90, the Feature-Wave Orchestrator reads the approved reconciliation work breakdown, implementation plan, traceability matrix, and current code. It generates one task file per slice under:
+The proposal is pipeline working material, not a permanent alternate decision history.
 
-```text
-agent-workflow/generated-tasks/<wave-id>/
-```
+## 13. Feature-wave automation
 
-Each task identifies:
+S100 reads approved reconciliation, implementation plan, traceability, accepted foundation handoffs, and current code. It creates one task per bounded vertical slice under `agent-workflow/generated-tasks/<wave-id>/`.
 
-- Requirements and Penpot component/screen IDs.
-- Dependencies and file ownership.
-- Domain, application, adapter, frontend, persistence, history, search, and test work required.
-- Commands and native platforms required for completion.
-- Stop conditions.
+Each task includes requirements/design IDs, dependencies/ownership, domain/application/adapter/frontend/persistence/history/search/spellcheck work, test tier, commands/platforms, and stop conditions.
 
-Independent slices may run in parallel. The orchestrator must not dispatch two agents that own the same files or public contract. Each slice uses `agent-stages/12-feature-slice-agent.md` plus its generated task file.
+Do not dispatch overlapping file/public-contract ownership in parallel.
 
-## 11. Continuous validation
+## 14. Continuous validation
 
-Validation is not deferred until the end.
+- Stage agents test their changes.
+- Orchestrator reruns stage gates.
+- S110 runs complete integrated suites and bounded fixes.
+- S130 independently validates and produces the unified release package.
+- A validation agent never changes criteria to make a candidate pass.
 
-- Stage agents add tests with their work.
-- The Orchestrator Agent runs stage gates before integration.
-- S110 runs the complete requirement, visual, accessibility, performance, recovery, history, search, and cross-platform suites.
-- S110 may automatically dispatch bounded fix tasks for defects when the fix does not require G20.
-- S130 is performed by an independent validation agent and produces the release-evidence package.
+## 15. Release approval G90
 
-A validation agent must not alter the PRD, architecture, approved design, or acceptance criteria to make a build pass.
-
-## 12. Release approval G90
-
-The release-validation stage creates:
+S130 creates exactly:
 
 ```text
 release-evidence/<candidate-version>/
 ├── requirement-disposition.csv
 ├── platform-matrix.yaml
+├── visual/
 ├── performance/
 ├── accessibility/
-├── visual/
-├── recovery/
+├── appearance/
+├── editor-projection/
+├── spellcheck/
+├── recovery-project-undo/
 ├── history-search/
 ├── packaging/
 ├── security-licenses-sbom/
+├── package-hashes.txt
 ├── known-issues.yaml
 └── release-approval.yaml
 ```
 
-`release-approval.yaml` is created with `status: pending`. The Orchestrator Agent stops. The product owner reviews the evidence and either approves the release, records explicit waivers, or requests fixes.
+`release-approval.yaml` starts `pending`. The product owner approves, records current waivers by updating the current specification/release file, or requests fixes.
 
-## 13. Design revision after implementation starts
+## 16. Design revision after implementation starts
 
-When Penpot changes:
-
-1. Export a new immutable handoff version.
-2. Point an agent to `agent-stages/16-design-change-reconciliation.md`.
-3. The agent compares old/new manifests, tokens, components, screens, snapshots, and requirements.
-4. It produces a design-diff report, impact map, generated implementation tasks, and a pending approval file.
-5. The Orchestrator Agent pauses only affected workstreams.
-6. After approval, it dispatches the generated tasks through the normal pipeline.
+1. Export a new immutable handoff.
+2. Dispatch `agent-stages/16-design-change-reconciliation.md`.
+3. Compare manifests/tokens/themes/components/screens/references/requirements.
+4. Produce design diff, impact map, generated tasks, pending approval.
+5. Pause only affected workstreams.
+6. After approval, update current design/governing inputs and dispatch tasks.
 
 Do not continuously sync a mutable live Penpot file into production.
 
-## 14. Agent quality controls
+## 17. Quality controls
 
-- Use small, reviewable tasks and isolated branches/worktrees.
-- Require tests, raw evidence, and exact commands.
-- Separate prototypes from production code.
-- Prevent agents from changing both a public contract and all implementations without explicit gate verification.
-- Keep PRD/design/architecture conflicts visible.
-- Preserve exact dependency locks.
-- Require clean working trees and reproducible commands at handoff.
-- Stop rather than fabricate native runtime, accessibility, packaging, or performance evidence.
-- Do not rely on agent conversation memory for a later stage.
-
-## 15. Current Codex MCP references
-
-Codex supports user-level or project-scoped MCP configuration and shares MCP configuration across supported local Codex clients. Use current official instructions:
-
-- <https://developers.openai.com/codex/mcp>
-- <https://developers.openai.com/codex/config-basic>
-
-A project-scoped `.codex/config.toml` is preferred when the Penpot server configuration should travel with a trusted project, provided no secrets are committed. Verify active tools with the Codex MCP list before beginning design work.
+- Small reviewable tasks and isolated worktrees.
+- Exact commands/raw evidence.
+- Prototypes clearly separate from production.
+- Public-contract changes independently verified.
+- Exact application locks and scheduled provenance checks.
+- No fabricated native/runtime/accessibility/performance evidence.
+- No conversation-memory dependency.
+- No historical evidence document competing with current governing files.
