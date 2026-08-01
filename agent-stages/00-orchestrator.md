@@ -38,8 +38,8 @@ Never overwrite a prior active run. Use UTC run IDs `YYYYMMDDTHHMMSSZ-<short-id>
 
 ```text
 S00 → S10 → G10 → S20 → S30
-                       ├─ S40 → S70
-                       │      └→ S80
+                       ├─ S40 ─┬─ S70
+                       │       └─ S80
                        ├─ S50
                        └─ S55 → S60 → S65
 
@@ -71,6 +71,7 @@ Integrate only when:
 - Governing documents and approved handoff were not modified without G20.
 - Required Tier A/B/C commands and native evidence pass.
 - Generated contract/token guards are clean where applicable.
+- `docs/traceability.csv` remains complete, and the stage updated every requirement row it addressed with current mappings, evidence, test tier, and disposition.
 - No blocking issue, broad fork, unapproved deviation, or material new dependency exists.
 - Post-merge integration tests pass.
 

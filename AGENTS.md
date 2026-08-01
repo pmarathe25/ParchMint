@@ -85,6 +85,7 @@ When dispatched by the Orchestrator Agent:
 - Create the required `status.yaml`, `handoff.yaml`, `report.md`, and evidence directory.
 - Do not edit `agent-workflow/pipeline-state.yaml`, merge branches, or mark your own work accepted.
 - Do not modify governing documents or the approved handoff without a G20 proposal and product-owner approval.
+- Update `docs/traceability.csv` for every requirement addressed by the stage. S00 owns complete requirement-row initialization; S10 owns design mappings; later stages own implementation, test, tier, and disposition fields for their work.
 - Later agents must be able to proceed from committed artifacts without conversation history.
 
 ## Governing changes

@@ -1,2 +1,2 @@
-component_id,penpot_component_id,name,variants,states,requirements,implementation_target,notes
-PM/Button,,PM/Button,"kind|size","default|hover|pressed|disabled|focus",,,
+component_id,penpot_component_id,name,variants,states,themes,requirements,implementation_target,notes
+PM/Button,,PM/Button,"kind|size","default|hover|pressed|disabled|focus","light|dark",,,
