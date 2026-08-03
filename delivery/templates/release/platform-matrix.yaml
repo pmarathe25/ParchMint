@@ -1,0 +1,18 @@
+schema_version: 1
+candidate_version: ""
+platforms:
+  windows:
+    supported_versions: []
+    package_paths: []
+    evidence_paths: []
+    status: pending
+  macos:
+    supported_versions: []
+    package_paths: []
+    evidence_paths: []
+    status: pending
+  linux:
+    supported_versions: []
+    package_paths: []
+    evidence_paths: []
+    status: pending

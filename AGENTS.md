@@ -2,18 +2,20 @@
 
 These instructions apply to every design, coding, testing, orchestration, and review agent working on ParchMint.
 
+`docs/` contains maintained product, architecture, and design knowledge. `delivery/` contains temporary v1 implementation machinery and evidence. A lasting behavior, boundary, visual rule, test obligation, or operating procedure must be promoted to its maintained owner before the temporary delivery artifact is retired; it must not remain authoritative only in a stage report or handoff.
+
 ## Read before changing anything
 
 Read, in order:
 
 1. `README.md`
-2. `docs/product/01-product-specification.md`
-3. `docs/architecture/02-final-architecture.md`
-4. `docs/09-agent-playbook.md` when participating in the automated pipeline
-5. The dispatched file under `agent-stages/` and the run's `dispatch.yaml`
-6. `docs/design/03-penpot-design-brief.md` and the approved `design/handoff/<version>/design-manifest.yaml` for UI work
+2. `docs/product/product-specification.md`
+3. `docs/architecture/architecture.md`
+4. `delivery/agent-playbook.md` when participating in the automated pipeline
+5. The dispatched file under `delivery/stages/` and the run's `dispatch.yaml`
+6. `docs/design/penpot-design-brief.md` and the approved `delivery/design-handoff/<version>/design-manifest.yaml` for UI work
 
-Do not infer v1 scope from extension hooks. `docs/future/07-future-work.md` is not v1 scope.
+Do not infer v1 scope from extension hooks or `docs/product/future-work.md`. The product specification's Included and Explicitly deferred sections are the complete v1 scope boundary.
 
 ## Authority
 
@@ -50,7 +52,7 @@ Do not infer v1 scope from extension hooks. `docs/future/07-future-work.md` is n
 
 ## Editor-risk rule
 
-Do not implement a worker mirror merely because an earlier concept named one. S55 must compare the allowed projection strategies and prove the shared two-view state topology. S60 must implement the selected strategy. A shared document/history authority, independent per-view selection/scroll/search/focus, and nonblocking canonical projection are mandatory; the mirror mechanism is not predetermined.
+Do not implement a worker mirror merely because an earlier concept named one. S55 must compare concrete shared-state mechanisms and the allowed projection strategies, then prove the selected pair. S60 must implement that pair. A shared document/history authority, independent per-view selection/scroll/search/focus/composition, and nonblocking canonical projection are mandatory; neither the sharing mechanism nor mirror mechanism is predetermined.
 
 ## Project undo rule
 
@@ -68,8 +70,8 @@ All project-authoring mutations go through `ProjectCommandDispatcher`. Do not le
 
 Before broad UI implementation:
 
-1. Validate the frozen handoff against `docs/design/04-design-artifact-handoff-contract.md`.
-2. Produce the versioned reconciliation package under `docs/design/reconciliation/<handoff-version>/`.
+1. Validate the frozen handoff against `delivery/design-handoff-contract.md`.
+2. Produce the versioned reconciliation package under `delivery/design-reconciliation/<handoff-version>/`.
 3. Obtain committed G10 approval.
 4. Produce stable Penpot-to-code component and screen mappings.
 5. Import Light and Dark tokens into generated CSS custom properties and typed metadata.
@@ -80,12 +82,12 @@ Before broad UI implementation:
 
 When dispatched by the Orchestrator Agent:
 
-- Read the stage instruction and `agent-workflow/runs/<stage-id>/<run-id>/dispatch.yaml` before changing files.
+- Read the stage instruction and `delivery/runs/<stage-id>/<run-id>/dispatch.yaml` before changing files.
 - Work only from the dispatched baseline and declared ownership scope.
 - Create the required `status.yaml`, `handoff.yaml`, `report.md`, and evidence directory.
-- Do not edit `agent-workflow/pipeline-state.yaml`, merge branches, or mark your own work accepted.
-- Do not modify governing documents or the approved handoff without a G20 proposal and product-owner approval.
-- Update `docs/traceability.csv` for every requirement addressed by the stage. S00 owns complete requirement-row initialization; S10 owns design mappings; later stages own implementation, test, tier, and disposition fields for their work.
+- Do not edit `delivery/state.yaml`, merge branches, or mark your own work accepted.
+- Do not modify governing documents or the approved handoff without a G20 proposal and product-owner approval, except for the pre-authorized S55 concretization described below.
+- Update `delivery/traceability.csv` for every requirement addressed by the stage. S00 owns complete requirement-row initialization; S10 owns design mappings; later stages own implementation, test, tier, and disposition fields for their work.
 - Later agents must be able to proceed from committed artifacts without conversation history.
 
 ## Governing changes
@@ -99,6 +101,8 @@ G20 is required before changing:
 - A mandatory performance, accessibility, data-safety, or cross-platform gate.
 
 After approval, update the current governing documents directly. Do not add a historical ADR or changelog entry merely to preserve old reasoning.
+
+S55 is the only pre-authorized governing-document concretization: after its shared-state mechanism and projection strategy pass the declared native gates, the stage records the exact architecture patch in its handoff. The Orchestrator independently verifies the evidence and applies or accepts that bounded projection-section update. Any framework, public-boundary, state-owner, requirement, or gate change still requires G20.
 
 ## Testing
 

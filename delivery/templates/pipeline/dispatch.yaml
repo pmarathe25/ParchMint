@@ -1,0 +1,27 @@
+schema_version: 2
+stage_id: ""
+run_id: ""
+baseline_commit: ""
+instruction_file: ""
+pipeline_state:
+  path: "delivery/state.yaml"
+  commit: ""
+approved_design_handoff:
+  path: ""
+  version: ""
+  manifest_sha256: ""
+  checksums_file_sha256: ""
+governing_inputs: [] # path, version, sha256
+dependency_handoffs: []
+approved_gates: []
+ownership:
+  include: []
+  exclude: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands: []
+required_evidence: []
+resource_constraints: []

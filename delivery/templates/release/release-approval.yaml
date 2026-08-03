@@ -1,0 +1,10 @@
+schema_version: 1
+candidate_version: ""
+candidate_commit: ""
+package_hashes_sha256: ""
+requirement_disposition_sha256: ""
+platform_matrix_sha256: ""
+status: pending # pending | approved | rejected
+approved_by: ""
+approved_at: ""
+notes: ""
