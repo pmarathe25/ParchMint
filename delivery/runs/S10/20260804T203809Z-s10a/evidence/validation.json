@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "stage_id": "S10",
+  "run_id": "20260804T203809Z-s10a",
+  "candidate_commit": "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb",
+  "handoff_version": "1.0.0",
+  "manifest_sha256": "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3",
+  "checksums": "passed",
+  "traceability": {
+    "rows": 259,
+    "requirement_id_sequence_sha256": "3e45235bfb66349ae9f0967e2e7a6c81c3159cbe7e37f6ab7cf60b0a55703169",
+    "applicable_requirements": 185,
+    "screen_mapped_requirements": 178,
+    "component_mapped_requirements": 132
+  },
+  "inventories": {
+    "component_rows": 79,
+    "unique_penpot_component_ids": 79,
+    "screen_rows": 80,
+    "unique_penpot_board_ids": 70,
+    "baseline_light_dark_pairs": 10,
+    "baseline_reference_pngs": 20,
+    "reference_dimensions": "1440x900",
+    "indexed_svg_icons": 980
+  },
+  "approval": "pending G10",
+  "blocking_issue_ids": ["ISSUE-001", "ISSUE-002", "ISSUE-003", "ISSUE-004", "ISSUE-005"],
+  "commands": [
+    "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify",
+    "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py",
+    "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py",
+    "git diff --check"
+  ],
+  "limits": [
+    "No live Penpot connection was used.",
+    "No native interactive platform behavior is claimed from static reference inspection."
+  ]
+}

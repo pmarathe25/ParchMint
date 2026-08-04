@@ -58,6 +58,8 @@ def main() -> int:
     implementation = load(RECON / "implementation-map.yaml")
     issues = load(RECON / "open-issues.yaml")
     approval = load(RECON / "approval.yaml")
+    status = load(ROOT / "delivery/runs/S10/20260804T203809Z-s10a/status.yaml")
+    handoff = load(ROOT / "delivery/runs/S10/20260804T203809Z-s10a/handoff.yaml")
     if implementation["schema_version"] != 2 or implementation["handoff_version"] != "1.0.0":
         fail("implementation map shape/version invalid")
     if issues["schema_version"] != 2 or issues["handoff_version"] != "1.0.0":
@@ -67,6 +69,10 @@ def main() -> int:
         fail("all five material handoff conflicts must remain recorded")
     if approval["gate_id"] != "G10" or approval["status"] != "pending" or approval["manifest_sha256"] != manifest_hash:
         fail("G10 approval must be pending and bound to the frozen manifest")
+    if status["result"] != "needs_approval" or status["stage_id"] != "S10" or handoff["stage_id"] != "S10":
+        fail("S10 run artifact shape/result invalid")
+    if status["candidate_commit"] != handoff["candidate_commit"] or not (ROOT / "delivery/runs/S10/20260804T203809Z-s10a/report.md").is_file():
+        fail("S10 candidate provenance or report path invalid")
     with (HANDOFF / "specs/screen-inventory.csv").open(newline="", encoding="utf-8") as handle:
         screens = list(csv.DictReader(handle))
     with (HANDOFF / "specs/component-matrix.csv").open(newline="", encoding="utf-8") as handle:

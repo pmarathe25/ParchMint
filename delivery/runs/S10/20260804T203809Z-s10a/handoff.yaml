@@ -2,22 +2,37 @@ schema_version: 3
 run_role: implementation
 stage_id: S10
 run_id: 20260804T203809Z-s10a
-candidate_commit: ""
+candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
 output_commit: ""
-contracts_and_schema_versions: {}
+contracts_and_schema_versions:
+  reconciliation: "2"
+  approved_handoff: "1.0.0"
 ports: []
 implementations: []
 generated_bindings: []
-fixtures: []
+fixtures:
+  - "20 frozen Light/Dark PNG baselines, 10 paired fixtures at 1440x900 scale 1"
+  - "visual-regression-plan.md"
 test_provenance:
-  developer_test_locations: []
+  developer_test_locations:
+    - delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py
   independent_test_locations: []
   test_charter_run_id: ""
   independent_test_run_id: ""
   charter_path: ""
   charter_commit: ""
-  candidate_commit: ""
-commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+  candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py"
+  - "git diff --check"
+native_evidence: ["None: S10 is non-production reconciliation; reference PNG inspection does not prove native interactive behavior."]
+known_approved_limitations:
+  - "S10 is independent-test exempt because it creates no shipped behavior."
+  - "G10 remains pending; ISSUE-001 through ISSUE-005 require product-owner disposition."
+artifact_paths:
+  - delivery/design-reconciliation/1.0.0/
+  - delivery/traceability.csv
+  - delivery/runs/S10/20260804T203809Z-s10a/evidence/validation.json
+  - delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py

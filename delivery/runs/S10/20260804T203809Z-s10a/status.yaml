@@ -2,25 +2,34 @@ schema_version: 3
 run_role: implementation
 stage_id: S10
 run_id: 20260804T203809Z-s10a
-result: blocked
+result: needs_approval
 baseline_commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
-candidate_commit: ""
+candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
 output_commit: ""
 charter_commit: ""
-related_run_ids:
-  - 20260804T194924Z-s00a
-  - 20260804T201339Z-s00v
-files_changed: []
-commands_run: []
-platforms_tested: []
-test_tiers_completed: []
-developer_tests_added: []
+related_run_ids: [S00/20260804T194924Z-s00a, S00/20260804T201339Z-s00v]
+files_changed:
+  - delivery/design-reconciliation/1.0.0/
+  - delivery/traceability.csv
+  - delivery/runs/S10/20260804T203809Z-s10a/evidence/
+  - delivery/runs/S10/20260804T203809Z-s10a/status.yaml
+  - delivery/runs/S10/20260804T203809Z-s10a/handoff.yaml
+  - delivery/runs/S10/20260804T203809Z-s10a/report.md
+commands_run:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py"
+  - "git diff --check"
+platforms_tested: [headless artifact validation]
+test_tiers_completed: [tier_a]
+developer_tests_added: ["read-only reconciliation validator"]
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: ["185 frozen-handoff-applicable requirements mapped exactly in delivery/traceability.csv"]
+design_ids_addressed: ["79 Penpot component UUIDs", "70 unique Penpot board UUIDs", "20 Light/Dark baseline PNGs"]
 contracts_changed: []
-blocking_issues:
-  - implementation agent has not completed reconciliation
-deviations: []
-dependencies: []
-recommended_next_stages: []
+blocking_issues: [ISSUE-001, ISSUE-002, ISSUE-003, ISSUE-004, ISSUE-005]
+deviations: [ISSUE-006, ISSUE-007]
+dependencies:
+  - "approved design handoff 1.0.0"
+  - "S00 implementation and validation handoffs"
+recommended_next_stages: ["G10 product-owner review; no S20 dispatch until approved"]
