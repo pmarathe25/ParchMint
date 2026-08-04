@@ -8,16 +8,27 @@ candidate_commit: ""
 output_commit: ""
 charter_commit: ""
 related_run_ids: [20260804T224650Z-s10x, 20260804T205500Z-s10v]
-files_changed: []
-commands_run: []
-platforms_tested: []
-test_tiers_completed: []
+files_changed:
+  - delivery/runs/S10/20260804T230332Z-s10p/status.yaml
+  - delivery/runs/S10/20260804T230332Z-s10p/handoff.yaml
+  - delivery/runs/S10/20260804T230332Z-s10p/report.md
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/editor-dual-light.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/editor-dual-dark.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/error-recovery-light.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/error-recovery-dark.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/penpot_repair.json
+commands_run:
+  - "Penpot execute_code minimal probe, bounded shape mutation, theme-switched PNG exports, currentFile.validate"
+  - "file exports/*.png"
+  - "sha256sum exports/*.png"
+platforms_tested: [Penpot-live]
+test_tiers_completed: [design-structure, visual-inspection]
 developer_tests_added: []
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: [EDIT-001, EDIT-002, EDIT-003, EDIT-004, EDIT-005, WS-006, SAVE-011, SAVE-012, SAVE-013]
+design_ids_addressed: [e96ec683-a782-802c-8008-65f886281b72, e96ec683-a782-802c-8008-65fb6192c697]
 contracts_changed: []
-blocking_issues: [repair-pending]
+blocking_issues: [native-source-export-unavailable]
 deviations: []
 dependencies: [connected-ParchMint-Penpot-file, G20-S10-handoff-1.0.1-repair]
 recommended_next_stages: [S10-handoff-1.0.1-candidate]

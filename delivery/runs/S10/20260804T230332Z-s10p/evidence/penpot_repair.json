@@ -1,0 +1,24 @@
+{
+  "active_file": {"id": "2be68822-842f-8175-8008-65eef13b0227", "name": "ParchMint", "revn": 1539},
+  "board": {"id": "e96ec683-a782-802c-8008-65f886281b72", "name": "PM / Screen / editor-dual-two-manuscript", "dimensions": [1440, 900]},
+  "validation": [],
+  "mutation": {
+    "strategy": "hide existing mismatched Research/Harbor Notes content; preserve PM instances and all manuscript content",
+    "shapes": [
+      {"id": "039701d9-7e2b-8031-8008-67b6372f8819", "name": "PM / Sidebar / Section / Research", "hidden": true},
+      {"id": "039701d9-7e2b-8031-8008-67b6372f445b", "name": "PM / Sidebar / Row / Harbor Notes", "hidden": true},
+      {"id": "039701d9-7e2b-8031-8008-67ab4a5407a6", "name": "PM / EditorPaneHeader / Tab / Harbor Notes", "hidden": true},
+      {"id": "039701d9-7e2b-8031-8008-67ab4a5c9a97", "name": "PM / EditorPaneHeader / Tab / Harbor Notes", "hidden": true}
+    ],
+    "visible_manuscript_documents": ["Chapter One", "Chapter Two"],
+    "visible_research_content": false
+  },
+  "theme_restored": "Appearance/Dark",
+  "exports": {
+    "editor-dual-light.png": {"dimensions": [1440, 900], "sha256": "a2cde6fb572ae5a02e83fe8c11d5d1acd63ffcf52c83621ee320df3fe6900418"},
+    "editor-dual-dark.png": {"dimensions": [1440, 900], "sha256": "d069e89e1595ee017f122e27998e9be55a4f36bb9fd33e4217e85bf87883b616"},
+    "error-recovery-light.png": {"dimensions": [1440, 900], "sha256": "af3fc78b83975471b604884bee9b147e1a03ca21bc16f2a1dd31668ae37980ad"},
+    "error-recovery-dark.png": {"dimensions": [1440, 900], "sha256": "c09a16bac930ff42a87c12f9c7acb3f0081b780280fbe86244cc7fab1960a94e"}
+  },
+  "source_export": {"available": false, "error": "No matching clause from File.export('penpot'/'zip')"}
+}

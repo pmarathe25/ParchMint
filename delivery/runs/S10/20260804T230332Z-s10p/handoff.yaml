@@ -18,6 +18,15 @@ test_provenance:
   charter_commit: ""
   candidate_commit: ""
 commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+native_evidence:
+  - "Live Penpot file 2be68822-842f-8175-8008-65eef13b0227 revn 1539; currentFile.validate()=[]"
+  - "Board e96ec683-a782-802c-8008-65f886281b72 remains 1440x900; four existing Harbor/Research shapes hidden only"
+  - "PNG exports are exact 1440x900 scale-1 and directly inspected"
+known_approved_limitations:
+  - "File.export('penpot'/'zip') returned No matching clause in connected plugin; native source not produced"
+artifact_paths:
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/editor-dual-light.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/editor-dual-dark.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/error-recovery-light.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/exports/error-recovery-dark.png
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/penpot_repair.json
