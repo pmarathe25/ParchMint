@@ -18,7 +18,7 @@ files_changed:
 commands_run:
   - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
   - "python3 delivery/runs/S00/20260804T194924Z-s00a/evidence/validate_s00.py"
-  - "git diff --check"
+  - "git diff --check 6b29a978430ead47528e63b1e410e870c806dc11..HEAD"
 platforms_tested: [linux]
 test_tiers_completed: [tier_a]
 developer_tests_added: []

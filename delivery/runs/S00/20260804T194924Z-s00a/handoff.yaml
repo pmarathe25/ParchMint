@@ -20,7 +20,7 @@ test_provenance:
 commands:
   - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
   - "python3 delivery/runs/S00/20260804T194924Z-s00a/evidence/validate_s00.py"
-  - "git diff --check"
+  - "git diff --check 6b29a978430ead47528e63b1e410e870c806dc11..HEAD"
 native_evidence:
   - "GitHub-hosted Windows/macOS/Linux runners are available per pipeline state; native-interactive evidence remains unconfirmed."
 known_approved_limitations:

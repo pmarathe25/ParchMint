@@ -46,10 +46,14 @@ def main():
     for line in text.splitlines():
         ids += re.findall(r"\b[A-Z][A-Z0-9]*-\d{3}\b", line)
     assert len(ids)==len(set(ids))
-    with (ROOT/"delivery/traceability.csv").open(newline="") as f: rows=list(csv.DictReader(f))
+    traceability_path = ROOT / "delivery/traceability.csv"
+    raw_traceability = traceability_path.read_bytes()
+    assert b"\r" not in raw_traceability
+    with traceability_path.open(newline="") as f:
+        rows = list(csv.DictReader(f))
     listed=[r["requirement_id"] for r in rows]
     assert listed==ids and len(listed)==259 and all(r["status"]=="not_started" for r in rows)
     assert not (ROOT/"delivery/design-reconciliation/1.0.0").exists()
-    result={"manifest_schema":"passed","governing_hashes":"passed","handoff_checksums":"passed","theme_appearance":"passed","references_specs_assets_fonts":"passed","requirements_exact":259,"traceability":"passed","reconciliation":"absent","runner_availability":"github-hosted windows/macos/linux available; native interactive unconfirmed","evidence_limit":"automation does not prove native IME, screen-reader, clipboard, accessibility, or interactive performance","immutable_handoff":"content paths excluded; only approved metadata files changed"}
+    result={"manifest_schema":"passed","governing_hashes":"passed","handoff_checksums":"passed","theme_appearance":"passed","references_specs_assets_fonts":"passed","requirements_exact":259,"traceability":"passed","traceability_line_endings":"lf","reconciliation":"absent","runner_availability":"github-hosted windows/macos/linux available; native interactive unconfirmed","evidence_limit":"automation does not prove native IME, screen-reader, clipboard, accessibility, or interactive performance","immutable_handoff":"content paths excluded; only approved metadata files changed"}
     print(json.dumps(result,indent=2,sort_keys=True))
 if __name__ == "__main__": main()

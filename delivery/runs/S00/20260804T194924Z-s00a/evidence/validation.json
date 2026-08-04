@@ -9,5 +9,6 @@
   "requirements_exact": 259,
   "runner_availability": "github-hosted windows/macos/linux available; native interactive unconfirmed",
   "theme_appearance": "passed",
-  "traceability": "passed"
+  "traceability": "passed",
+  "traceability_line_endings": "lf"
 }
