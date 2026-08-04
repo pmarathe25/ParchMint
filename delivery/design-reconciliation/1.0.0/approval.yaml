@@ -1,0 +1,9 @@
+schema_version: 2
+gate_id: G10
+handoff_version: "1.0.0"
+manifest_sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"
+reconciliation_commit: ""
+status: pending
+approved_by: ""
+approved_at: ""
+notes: "Pending product-owner disposition of ISSUE-001 through ISSUE-005 and review of the reconciliation package."

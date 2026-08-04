@@ -1,0 +1,114 @@
+schema_version: 2
+handoff_version: "1.0.0"
+source:
+  manifest: delivery/design-handoff/1.0.0/design-manifest.yaml
+  component_matrix: delivery/design-handoff/1.0.0/specs/component-matrix.csv
+  screen_inventory: delivery/design-handoff/1.0.0/specs/screen-inventory.csv
+  interaction_spec: delivery/design-handoff/1.0.0/specs/interaction-spec.md
+themes:
+  light_token_set: "PM/Semantic/Light (dc55a0ad-9907-801d-8008-6a1fb40bcf7a)"
+  dark_token_set: "PM/Semantic/Dark (469ffc7d-964a-806d-8008-6c323f6d3396)"
+  system_resolution_adapter: "AppearancePreferenceAdapter resolves System from the platform appearance service; it selects Light or Dark and is not a third token set."
+  generated_css_target: packages/design-system/src/generated/penpot-tokens.css
+  generated_typescript_target: packages/design-system/src/generated/penpot-tokens.ts
+  import_contract:
+    source: delivery/design-handoff/1.0.0/tokens/tokens.json
+    command: "scripts/design/import-penpot-tokens --handoff 1.0.0"
+    rules:
+      - Resolve DTCG aliases set-local then PM/Core; reject unresolved references and duplicate normalized names.
+      - Emit source version and SHA-256 headers; sort normalized names; preserve descriptions and token type.
+      - Normalize the legacy sourcesanspro identifier to Source Sans 3 only in generated UI-token metadata.
+      - Emit complete semantic Light and Dark roles plus common/layout/motion metadata; reject role-parity or dark-canvas failures.
+      - Generated outputs are committed, never edited manually; CI reruns the command and fails on a dirty diff.
+components:
+  - family: primitives-and-feedback
+    penpot_components: [PM/Button, PM/Checkbox, PM/ContextMenu, PM/ContextMenuDivider, PM/ContextMenuItem, PM/ContextMenuSurface, PM/FocusVisible, PM/LoadingState, PM/MultilineField, PM/ProgressState, PM/Select, PM/TextField, PM/Toast, PM/Tooltip]
+    code_target: packages/design-system/src/components/{Button,Checkbox,Menu,FocusRing,Fields,Feedback}.tsx
+    state_owner: React view state only; commands remain application-owned.
+  - family: workspace-shell
+    penpot_components: [PM/WorkspaceTopBar/Export, PM/Sidebar, PM/Splitter, PM/StatusBar, PM/Inspector, PM/InspectorSection, PM/AppearanceChoice]
+    code_target: apps/desktop-ui/src/features/workspace/{WorkspaceShell,Sidebar,Inspector,StatusBar,AppearanceChoice}.tsx
+    state_owner: Workspace state is rebuildable; appearance is ApplicationPreferenceStore-owned.
+  - family: hierarchy-and-cards
+    penpot_components: [PM/Tree, PM/TreeRow/Root, PM/TreeRow/Group, PM/TreeRow/ActiveDocument, PM/Tree/MultiSelection, PM/Tree/CutState, PM/InlineRename, PM/Disclosure, PM/Card/Document, PM/Card/MetadataValue, PM/Card/InsertionMarker]
+    code_target: apps/desktop-ui/src/features/hierarchy/{Tree,Cards,Selection,DragDrop}.tsx
+    state_owner: ProjectCommandDispatcher owns mutations; UI owns ephemeral selection, hover, and drag preview.
+  - family: editor
+    penpot_components: [PM/EditorPane, PM/EditorPaneHeader, PM/EditorCanvas, PM/Tab, PM/FormattingToolbar, PM/StyleSelect, PM/LocalFindBar, PM/SearchMatch, PM/EditorContextMenu, PM/AtomicBreak/Scene, PM/AtomicBreak/Page]
+    code_target: apps/desktop-ui/src/editor/{EditorPane,TabStrip,FormattingToolbar,LocalFind,EditorMenus}.tsx
+    state_owner: ParchMint editor contract owns document edits; each view owns focus, selection, scroll, composition, and local find state.
+  - family: comments-and-inspector-fields
+    penpot_components: [PM/SynopsisEditor, PM/MetadataField, PM/CommentAnchorState, PM/CommentThread, PM/CommentMessage, PM/CommentRepliesToggle, PM/CommentReplyComposer, PM/OrphanedComment]
+    code_target: apps/desktop-ui/src/features/{inspector,comments}/{Synopsis,Metadata,CommentThread}.tsx
+    state_owner: ProjectCommandDispatcher owns Synopsis, metadata, and comment mutations; anchors come through the editor contract.
+  - family: search-and-replace
+    penpot_components: [PM/GlobalSearchPanel, PM/SearchResultGroup, PM/SearchResult, PM/ReplacePreview, PM/ReplacePreviewRow, PM/ReplacementSelectionControl]
+    code_target: apps/desktop-ui/src/features/search/{GlobalSearch,ReplacePreview}.tsx
+    state_owner: SearchIndex is queried only through its port; query/results/preview selection are disposable workspace state.
+  - family: history-and-deletion
+    penpot_components: [PM/HistoryTimeline, PM/HistoryEntry, PM/HistoryPreview, PM/HistoryCompare, PM/NamedSnapshot, PM/RestoreDialog, PM/RecentlyDeletedList, PM/DeletedItem, PM/DeletedItemPreview]
+    code_target: apps/desktop-ui/src/features/{history,recently-deleted}/{History,RecentlyDeleted}.tsx
+    state_owner: HistoryStore owns checkpoints/restoration; tombstones are project data.
+  - family: settings-spellcheck-and-styles
+    penpot_components: [PM/SettingsNav, PM/StyleEditor, PM/StyleActionDialog, PM/MetadataDefinitionEditor, PM/DictionarySettings, PM/SpellcheckUnderline, PM/SpellingContextMenu]
+    code_target: apps/desktop-ui/src/features/settings/{Settings,Styles,Metadata,Dictionaries}.tsx
+    state_owner: ProjectCommandDispatcher owns project settings; SpellcheckService owns decorations/suggestions.
+  - family: launcher-export-and-recovery
+    penpot_components: [PM/LauncherProjectCard, PM/NewProjectDialog, PM/ExportDialog, PM/ErrorBanner, PM/EmptyState, PM/RecoveryDialog]
+    code_target: apps/desktop-ui/src/features/{launcher,export,recovery}/{Launcher,Export,Recovery}.tsx
+    state_owner: Platform service owns native dialogs; save/recovery services own durable state and errors.
+screens:
+  - penpot_screen_ids: [launcher-recent, launcher-first-launch, create-project-dialog, launcher-locked-project, launcher-missing-project]
+    workspace_state: launcher
+    code_target: apps/desktop-ui/src/features/launcher/LauncherRoute.tsx
+  - penpot_screen_ids: [editor-single-default, editor-dual-two-manuscript, editor-same-document-two-views, editor-local-find, editor-local-replace, editor-context-menu-add-comment, editor-spellcheck-suggestions]
+    workspace_state: editor
+    code_target: apps/desktop-ui/src/features/workspace/EditorWorkspace.tsx
+  - penpot_screen_ids: [cards-manuscript-default, cards-deep-expanded, cards-drag-multiselect, cards-research-selected]
+    workspace_state: cards
+    code_target: apps/desktop-ui/src/features/cards/CardsWorkspace.tsx
+  - penpot_screen_ids: [search-query-entry, search-streaming-results, search-result-navigation, search-no-results, global-replace-preview-exclusions]
+    workspace_state: global-search-and-replace-preview
+    code_target: apps/desktop-ui/src/features/search/SearchWorkspace.tsx
+  - penpot_screen_ids: [comments-unresolved-thread, comments-replies-collapsed, comments-replies-expanded-composer, comments-resolved-thread, comments-orphaned]
+    workspace_state: document-inspector-comments
+    code_target: apps/desktop-ui/src/features/comments/CommentsPanel.tsx
+  - penpot_screen_ids: [history-session-date-grouped, history-named-snapshot, history-restore-checkpoint, recently-deleted, recently-deleted-fallback-location]
+    workspace_state: history-or-recently-deleted
+    code_target: apps/desktop-ui/src/features/history/HistoryWorkspace.tsx
+  - penpot_screen_ids: [settings-appearance-system, settings-appearance-dark-override, settings-appearance-light-override, settings-dictionaries, settings-styles-inheritance, settings-metadata-fields]
+    workspace_state: project-settings
+    code_target: apps/desktop-ui/src/features/settings/SettingsWorkspace.tsx
+  - penpot_screen_ids: [export-entire-manuscript, export-project-output-controls, export-progress, export-success, export-failure]
+    workspace_state: export
+    code_target: apps/desktop-ui/src/features/export/ExportWorkspace.tsx
+  - penpot_screen_ids: [recovered-after-crash, editor-document-loading, empty-manuscript-research-roots, corrupt-canonical-file, project-format-migration, lost-comment-anchor]
+    workspace_state: editor-or-full-pane-state
+    code_target: apps/desktop-ui/src/features/recovery/RecoveryStates.tsx
+interactions:
+  - id: companion-focus
+    interpretation: Toolbar and Inspector target only the focused view; shared content/history is distinct from each view's independent selection, scroll, focus, composition, and local-search state.
+  - id: global-search-replace
+    interpretation: Search replaces Explorer and targets the entire project; replace preview occupies the middle workspace rather than a modal.
+  - id: appearance-cycle
+    interpretation: System follows the OS; explicit choices override it; every open window updates without authored-state mutation, undo, save, or history.
+  - id: history-restore
+    interpretation: Only complete-project checkpoint restore is valid in v1; see ISSUE-003 for contradictory component variants.
+  - id: export-entire-manuscript
+    interpretation: One self-contained HTML export covers the entire Manuscript; native destination selection is a platform adapter concern.
+accessibility:
+  - Global F6 order is mode switch, toolbar, Explorer, active tab, focused editor, Inspector, status bar; retain the documented per-surface tab order and restoration.
+  - Use semantic buttons, menus, dialogs, tabs, tree levels, radios, disclosure state, live regions, names, and pressed/expanded/selected state; icon-only controls require names and tooltips.
+  - Focus/selection/disabled/error/search/comment/save states need non-color cues and tokenized focus rings in both themes; focused editor-pane indication is tab-strip/accessibility state, not an outline.
+  - Native screen-reader, file-picker, menu, IME, and spellcheck behavior remains a Windows/macOS/Linux native validation obligation, not proven by screenshots.
+platform_variants:
+  - Windows/macOS/Linux share screens and canonical content; platform adapters own native menus/accelerators, file dialogs, title-bar/chrome, additive modifier, system appearance, and native spelling surfaces.
+  - Enforce the 1280x720 logical-pixel minimum without a reduced/mobile layout; validate 1440x900, 1920x1080, and 2560x1440 layout references later.
+assets:
+  source: delivery/design-handoff/1.0.0/assets/icons/icon-index.json
+  generated_target: packages/design-system/src/generated/penpot-icons/
+  import_contract:
+    - Verify each icon-index SHA-256 and SVG viewBox before copying; reject unindexed, missing, or checksum-mismatched assets.
+    - Preserve source SVG and accessibility intent; do not rasterize or optimize destructively during import.
+    - Resolve token-colored fill at render time; no theme-specific icon swap is approved.
+    - Emit a sorted manifest with source checksum/version and make CI regenerate/copy then fail on a dirty diff.

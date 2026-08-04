@@ -1,0 +1,52 @@
+schema_version: 2
+handoff_version: "1.0.0"
+issues:
+  - id: ISSUE-001
+    severity: blocking
+    gate: G10
+    requirements: [SEARCH-006, SEARCH-007]
+    source: "specs/component-matrix.csv: PM/GlobalSearchPanel states=scopedsubtree"
+    conflict: "A scoped-subtree state contradicts the product requirement that v1 Global Search always searches the entire project and shows no scope selector."
+    required_decision: "Product owner must remove/correct the state in a revised approved handoff, or approve a governing change through G20. S50 must not expose or implement it."
+  - id: ISSUE-002
+    severity: blocking
+    gate: G10
+    requirements: [EXP-001, EXP-002]
+    source: "specs/component-matrix.csv: PM/ExportDialog states=group,selected-documents"
+    conflict: "Partial export states contradict the fixed Entire Manuscript export scope and the ban on partial-scope/inclusion controls."
+    required_decision: "Product owner must remove/correct the states in a revised approved handoff, or approve a governing change through G20. S50 must not implement them."
+  - id: ISSUE-003
+    severity: blocking
+    gate: G10
+    requirements: [HIST-007, HIST-008]
+    source: "specs/component-matrix.csv: PM/RestoreDialog states=document,group-subtree,whole-project"
+    conflict: "Document and group-subtree History restore are deferred; v1 restore is a complete project checkpoint only."
+    required_decision: "Product owner must remove/correct the variants in a revised approved handoff, or approve a governing change through G20. S50/S70 must expose only whole-project restoration."
+  - id: ISSUE-004
+    severity: blocking
+    gate: G10
+    requirements: [SPELL-001, SPELL-002, SPELL-003]
+    source: "specs/component-matrix.csv: PM/SpellcheckUnderline state=disabledperdocument"
+    conflict: "The state name implies a per-document spellcheck/language control, while v1 uses only one project-default language and forbids per-document language controls."
+    required_decision: "Product owner must either document a non-language meaning for this state or remove/rename it in a revised approved handoff. S50/S65 must not add per-document language behavior."
+  - id: ISSUE-005
+    severity: blocking
+    gate: G10
+    requirements: [CMT-002, CMT-003]
+    source: "screen-inventory.csv: comments-resolved-filter-light; interaction-spec.md: comments-resolved-thread shows a resolved filter"
+    conflict: "The product and design brief require one continuous thread list without separate resolved/unresolved sections. The word 'filter' is ambiguous: it could narrow the single list or create forbidden state-separated sections."
+    required_decision: "Product owner must clarify the interaction in a revised approved handoff. S50 must preserve one continuous list and may not infer a resolved/unresolved sectioned UI."
+  - id: ISSUE-006
+    severity: nonblocking
+    gate: G10
+    requirements: [APPR-002, APPR-007]
+    source: "specs/known-deviations.md DEV-002, DEV-003, DEV-005"
+    conflict: "Legacy sourcesanspro needs deterministic normalization; design-only boards are Light-only; System has no third screenshot."
+    required_decision: "Apply the manifest-approved import and behavioral validation rules recorded in implementation-map.yaml; no visual behavior change is authorized."
+  - id: ISSUE-007
+    severity: nonblocking
+    gate: G10
+    requirements: [PLAT-001, A11Y-001, A11Y-002, A11Y-003]
+    source: "specs/cross-platform-variants.md and specs/reference-fixtures.md"
+    conflict: "Static shared-platform references do not prove native menus, file dialogs, screen readers, IME, fonts, or OS spelling behavior."
+    required_decision: "Retain these as later native-platform gates; do not claim native acceptance from S10 evidence."
