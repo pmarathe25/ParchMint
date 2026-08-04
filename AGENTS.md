@@ -87,7 +87,7 @@ When dispatched by the Orchestrator Agent:
 - Create the required `status.yaml`, `handoff.yaml`, `report.md`, and evidence directory.
 - Do not edit `delivery/state.yaml`, merge branches, or mark your own work accepted.
 - Do not modify governing documents or the approved handoff without a G20 proposal and product-owner approval, except for the pre-authorized S55 concretization described below.
-- Update `delivery/traceability.csv` for every requirement addressed by the stage. S00 owns complete requirement-row initialization; S10 owns design mappings; later stages own implementation, test, tier, and disposition fields for their work.
+- Update `delivery/traceability.csv` for every requirement addressed by the stage. S00 owns complete requirement-row initialization; S10 owns design mappings; implementation agents own implementation/developer-test fields for their work. Independent Test Agents report mappings in their run artifacts, and the Orchestrator atomically records independent-test provenance, exemptions, tier, and accepted disposition.
 - Later agents must be able to proceed from committed artifacts without conversation history.
 
 ## Governing changes
@@ -106,7 +106,13 @@ S55 is the only pre-authorized governing-document concretization: after its shar
 
 ## Testing
 
-- Add tests with every functional change.
+- The implementation agent adds developer tests with every functional change; the independent test challenge supplements rather than replaces them.
+- Every production-behavior dispatch declares whether an independent test challenge is required. An exemption must name the non-production reason.
+- The Independent Test Agent starts from requirements, public contracts, acceptance criteria, and the stage task. It seals its test charter before receiving the candidate commit or any implementation report, conversation, or diff explanation.
+- After sealing the charter, the Independent Test Agent may use the candidate's public interfaces, generated schemas, test-support surfaces, and build/test failures to implement tests. Production implementation bodies must not become the test oracle.
+- The Independent Test Agent owns only dispatched test, fixture, and run-artifact paths. It must not change production code, governing documents, acceptance criteria, or the approved handoff.
+- An implementation agent must not weaken or remove an independently authored test to make its change pass. Return a disputed test to the Independent Test Agent or Orchestrator with evidence.
+- Do not add shipped test-only behavior or broaden a public boundary solely to make testing convenient. Report a missing observation seam; a material public-boundary change still requires G20.
 - Use golden fixtures for canonical HTML/TOML/JSON/CSS/text.
 - Add shared contract tests for every replaceable port.
 - Add visual-reference tests for Penpot-mapped components in Light and Dark.

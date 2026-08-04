@@ -21,6 +21,7 @@ Create the reproducible application workspace and CI only. Do not implement prod
 13. Commit a machine-readable supply-chain policy covering licenses, advisory thresholds, provenance changes, bounded exceptions, and hashes for bundled native/font/dictionary artifacts.
 14. Commit a deny-by-default Tauri threat model/capability matrix; bind privileged commands to server-verified window/project sessions and scoped path handles.
 15. Build and launch a minimal packaged release artifact on Windows, macOS, and Linux; prove bundled asset load and one privileged IPC round trip without a development server.
+16. Expose the provisional public test commands, fixture tooling, and package/IPC observation surfaces needed for the independently chartered S20 challenge; do not add shipped test-only behavior.
 
 ## Pass criteria
 
@@ -30,6 +31,7 @@ Create the reproducible application workspace and CI only. Do not implement prod
 - One contract round trip and clean generated diff.
 - Packaged release smoke passes on all three platforms with evidence labelled separately from development-webview checks.
 - CSP/capability/navigation/session-isolation and supply-chain policy checks pass.
+- The sealed independent charter is implemented against the provisional harness and its paired challenge passes.
 - No feature behavior/design interpretation.
 
 Do not create a bootstrap architecture-decision record or changelog; the current architecture document is authoritative.

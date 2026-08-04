@@ -1,8 +1,8 @@
 # ParchMint v1 Acceptance and Release Plan
 
 **Status:** Current validation baseline
-**Version:** 1.2
-**Date:** 2026-08-02
+**Version:** 1.3
+**Date:** 2026-08-04
 
 ## 1. Purpose
 
@@ -17,12 +17,15 @@ Every runtime result is labelled `headless`, `development webview`, `packaged ex
 Maintain `delivery/traceability.csv`. Every must-level requirement maps to:
 
 - Implementation modules.
-- Automated tests where possible.
+- Developer-authored automated tests where possible.
+- Independently authored automated tests for production-behavior stages, or a recorded non-production exemption.
 - Penpot screen/component where applicable.
 - Native manual/instrumented test where automation is insufficient.
 - Current disposition: not started, in progress, pass, blocked, or product-owner-approved current-spec change.
 
 No requirement is complete based only on code presence.
+
+Traceability names the implementation run, independent-test run, charter commit, candidate commit, and test locations needed to establish provenance. Test authorship remains distinct from evidence strength.
 
 ## 3. Test tiers
 
@@ -52,6 +55,16 @@ Required for changes touching editor input/view state, clipboard, menus, windows
 - Extended IME, screen-reader, high-DPI, memory, fault, project interchange, and clean-install suites.
 
 Tier C workloads remain mandatory before release but do not run on every pull request.
+
+### Test authorship and independence
+
+Implementation agents add developer tests for fast feedback, internal invariants, and regression protection. A separate Independent Test Agent challenges observable behavior, public contracts, negative/fault cases, and cross-component integration before applicable stage acceptance.
+
+The independent charter is committed before the agent receives the candidate, implementation report, implementation conversation, or diff explanation. After sealing, the agent may use public interfaces, generated schemas, test-support surfaces, and build/test failures to implement its cases, but production bodies are not the expected-behavior oracle. The independent agent changes only dispatched tests, fixtures, and run artifacts.
+
+A required challenge may be exempt only for a run that produces no production behavior, with the reason recorded in dispatch and traceability. Stage applicability and special cases are owned by the implementation plan. S130 candidate validation remains independently executed and is not replaced by stage-level independent authorship.
+
+When an independent test fails, preserve it while production is repaired. The implementation agent may not weaken it. An incorrect or ambiguous test is corrected by the Independent Test Agent or through recorded Orchestrator adjudication against governing inputs.
 
 ## 4. Domain and project-command tests
 

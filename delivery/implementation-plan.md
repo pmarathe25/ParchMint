@@ -1,8 +1,8 @@
 # ParchMint v1 Implementation Plan
 
 **Status:** Current execution plan
-**Version:** 1.4
-**Date:** 2026-08-02
+**Version:** 1.5
+**Date:** 2026-08-04
 
 ## 1. Purpose
 
@@ -38,6 +38,7 @@ Suggested workstreams:
 - `editor-prosemirror`
 - `spellcheck-foundation`
 - `feature-slices`
+- `independent-test-challenges`
 - `cross-platform-release`
 
 ### 3.2 Change reports
@@ -65,6 +66,14 @@ Temporary development flags are allowed for incomplete slices. No v1 requirement
 `delivery/agent-playbook.md` and `delivery/stages/` are authoritative for dispatch, independent verification, integration, accepted handoffs, and pipeline state.
 
 Only G10 design reconciliation, G20 material deviation, and G90 release approval normally require product-owner review.
+
+### 3.6 Requirements-first independent test challenge
+
+Implementation agents keep responsibility for developer tests. Each production-behavior run also receives a separate independent test challenge unless its dispatch records a non-production exemption.
+
+The Independent Test Agent seals a charter from requirements, public contracts, acceptance criteria, and the stage task before receiving the candidate or implementation-agent material. It then adds test-only changes against public observation surfaces. Stage acceptance requires the implementation and independent-test commits to pass together. A detected production defect is repaired against the preserved test; a disputed test returns to the Independent Test Agent or Orchestrator rather than being weakened by the implementation agent.
+
+The default required stages are S30, S40, S50, S60, S65, S70, S80, S90, generated feature slices, functional S110 repairs, and S120 work that changes installers, security configuration, bundled resources, upgrade behavior, or other shipped package behavior. S20 is challenged after its provisional harness exists. S55 uses an independent oracle/benchmark charter and post-selection regression tests. Intake, reconciliation, planning, validation-only, and evidence-only runs—including an S120 evidence rerun with no shipped change—may be exempt with a recorded reason.
 
 ## 4. Stage graph
 
@@ -94,6 +103,8 @@ S40 + S50 + S60 + S65 + S70 + S80
 ```
 
 S40, S50, and S55 may run in parallel after S30. S70/S80 may run in parallel after S40. S60 follows a passing S55 selection. S65 follows the editor contract/runtime foundation. Broad feature waves do not begin before S65.
+
+A production-behavior stage shown in the graph is not accepted until its required independent test challenge passes with its candidate. The challenge is a paired run, not another numbered product stage or approval gate.
 
 ## 5. S20 — Repository bootstrap and governance
 
@@ -265,6 +276,8 @@ Select a shared-state mechanism and projection strategy only if the pair preserv
 
 On pass, record the exact bounded architecture patch in the S55 handoff. The Orchestrator independently verifies the evidence and accepts the pre-authorized projection-section concretization before S60. On failure, stop at G20 with fixtures/evidence; do not implement the original worker concept by default.
 
+Before candidate access, an Independent Test Agent seals the observable correctness/performance/native oracle and fixture plan. After selection, it codifies mechanism-neutral regression tests where the selected public contract permits; it does not independently choose the architecture.
+
 ## 10. S60 — Production editor foundation
 
 ### Goal
@@ -370,11 +383,11 @@ Generate bounded end-to-end slices. Recommended order:
 14. Appearance settings final polish.
 15. Export.
 
-Each task declares its test tier. “Complete” requires the applicable native evidence, not every expensive release workload on every pull request.
+Each task declares developer-test work, independent-test requirement or exemption, test tier, and separate production/test ownership. “Complete” requires the paired independent challenge and applicable native evidence, not every expensive release workload on every pull request.
 
 ## 16. S110 — System integration and validation
 
-Run complete requirement, visual, accessibility, performance, recovery, project-undo, history, search, spellcheck, appearance, and cross-platform suites. Dispatch bounded repair tasks where no G20 change is required.
+Run complete requirement, visual, accessibility, performance, recovery, project-undo, history, search, spellcheck, appearance, and cross-platform suites. Dispatch bounded repair tasks where no G20 change is required; functional repairs retain or receive an independent test challenge.
 
 ## 17. S120 — Packaging and release hardening
 
@@ -405,6 +418,8 @@ A validation agent that did not implement the candidate produces the unified pac
 - **Tier C — nightly/release-candidate:** full 250k matrix, exact 20M-word corpus, 1M-checkpoint longevity, extended IME/screen-reader/high-DPI/memory/fault/interchange/clean-install suites.
 
 One-million checkpoints and the 20-million-word corpus are not ordinary pull-request requirements. They remain mandatory nightly/release-candidate evidence.
+
+Test tier and test authorship are separate claims. Developer tests and independently authored tests may use the same tier, but traceability records their locations and producing runs separately. Independent authorship does not upgrade headless evidence into a native claim.
 
 ## 20. Stop conditions
 

@@ -25,14 +25,17 @@ S10 copies all files under `delivery/templates/design-reconciliation/` to `deliv
 |---|---|---|
 | `pipeline/state.yaml` | Orchestrator | `delivery/state.yaml` |
 | `pipeline/dispatch.yaml` | Orchestrator | `delivery/runs/<stage-id>/<run-id>/dispatch.yaml` |
-| `pipeline/status.yaml` | Stage agent | `delivery/runs/<stage-id>/<run-id>/status.yaml` |
-| `pipeline/handoff.yaml` | Stage agent | `delivery/runs/<stage-id>/<run-id>/handoff.yaml` |
-| `pipeline/report.md` | Stage agent | `delivery/runs/<stage-id>/<run-id>/report.md` |
+| `pipeline/status.yaml` | Dispatched agent | `delivery/runs/<stage-id>/<run-id>/status.yaml` |
+| `pipeline/handoff.yaml` | Dispatched agent | `delivery/runs/<stage-id>/<run-id>/handoff.yaml` |
+| `pipeline/report.md` | Dispatched agent | `delivery/runs/<stage-id>/<run-id>/report.md` |
+| `pipeline/test-charter.yaml` | Independent Test Agent | `delivery/runs/<stage-id>/<run-id>/test-charter.yaml` |
 | `pipeline/approval.yaml` | Orchestrator/product owner | The applicable `delivery/gates/` or proposal approval path |
 | `pipeline/task.yaml` | S100 | `delivery/generated-tasks/<wave-id>/<task-id>.yaml` |
 | `pipeline/traceability.csv` | S00 | `delivery/traceability.csv` |
 
-The run's instantiated `dispatch.yaml`, not the template, controls a stage agent's ownership and required evidence.
+The run's instantiated `dispatch.yaml`, not the template, controls an agent's production/test ownership, knowledge boundary, independent-test requirement or exemption, and required evidence. An Independent Test Agent commits its instantiated charter before receiving the implementation candidate.
+
+Pipeline YAML templates use schema version 3. The Orchestrator validates role-specific required fields: a `test_charter` dispatch has no candidate; an `independent_test` dispatch links the candidate and sealed charter and owns only test paths; an exempt implementation dispatch supplies a nonempty reason.
 
 ## Release
 

@@ -36,6 +36,7 @@ At least one shared-state/projection pair preserves required semantics/features,
 
 - Selected shared-state mechanism, projection strategy, and exact production contract changes.
 - Raw comparative evidence.
+- An independently sealed oracle/benchmark charter and mechanism-neutral regression tests for the selected public behavior where feasible.
 - Exact bounded patch for the current architecture projection section; the Orchestrator applies or accepts it only after independent verification.
 
 If none passes, stop at G20. Do not default to the original worker-mirror concept.

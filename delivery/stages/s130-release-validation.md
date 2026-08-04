@@ -12,6 +12,7 @@ Use an agent/session that did not implement the candidate. It may report defects
 
 - Re-run release-required Tier A/B/C gates from clean candidate artifacts.
 - Verify traceability and platform matrix.
+- Verify required stage-level independent-test charters predate candidate access; linked independent-test dispatches and handoffs name the tested candidate commits; independent-test diffs stay within test ownership; and traceability distinguishes independent from developer tests.
 - Verify Light/Dark visual/accessibility/appearance behavior.
 - Verify shared editor/projection, spellcheck, project undo/recovery, history/search, packaging/security/provenance.
 - Verify package hashes and clean installs.

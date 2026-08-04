@@ -15,7 +15,7 @@ Validate the complete integrated v1 application and dispatch bounded repairs tha
 - Validate System/Light/Dark propagation, contrast, references, and zero canonical/history effects.
 - Validate no search subtree/scope control, no per-document spellcheck language, and no deferred aggregate word counts.
 - Run visual comparisons in both themes.
-- Dispatch one bounded repair per defect where contracts/scope remain valid.
+- Preserve independently authored failing tests and dispatch one bounded production repair per defect where contracts/scope remain valid. Functional repairs receive a paired independent test challenge when the existing test does not already cover the repaired behavior.
 
 ## Pass criteria
 

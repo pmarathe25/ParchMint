@@ -1,0 +1,25 @@
+schema_version: 3
+stage_id: ""
+run_id: ""
+baseline_commit: ""
+governing_inputs: [] # path, version, sha256
+requirements: []
+design_ids: []
+observable_behaviors: []
+public_observation_surfaces: []
+test_kinds: [] # unit | property | golden | contract | fault | integration | black_box | visual | native
+behavior_cases: [] # id, requirement_ids, preconditions, action, expected, test_kind
+negative_and_fault_cases: []
+fixture_requirements: []
+native_evidence_requirements: []
+test_ownership:
+  include: []
+  exclude: []
+withheld_until_sealed:
+  - implementation_candidate
+  - implementation_report
+  - implementation_conversation
+  - implementation_diff_explanation
+ambiguities: []
+explicit_non_goals: []
+stop_conditions: []

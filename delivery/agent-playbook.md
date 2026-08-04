@@ -1,8 +1,8 @@
 # ParchMint Agent Playbook
 
 **Status:** Current automated workflow
-**Version:** 1.4
-**Date:** 2026-08-02
+**Version:** 1.5
+**Date:** 2026-08-04
 
 ## 1. Overview
 
@@ -13,7 +13,8 @@ Roles:
 1. **Design Agent:** creates/remediates Penpot and exports the immutable handoff.
 2. **Orchestrator Agent:** owns pipeline state, dispatch, independent verification, integration, and approval stops.
 3. **Stage Agents:** execute one bounded stage or generated slice.
-4. **Validation Agent:** independently evaluates the integrated release candidate.
+4. **Independent Test Agent:** seals a requirements-first charter, then authors test-only changes against a candidate without using implementation reasoning as its oracle.
+5. **Validation Agent:** independently evaluates the integrated release candidate.
 
 The product owner controls product behavior, approved design versions, material architecture changes, distribution/licensing/security exceptions, and final release approval.
 
@@ -103,7 +104,7 @@ After the approved handoff is committed, give one lead agent:
 
 Prompt:
 
-> Read `AGENTS.md`, `delivery/agent-playbook.md`, and `delivery/stages/orchestrator.md`. Initialize the repository-backed pipeline and execute from S00. Automatically delegate each bounded stage and independent non-overlapping workstream to fresh subagents using isolated branches/worktrees where supported; retain orchestration, verification, integration, and approval decisions in the primary agent. Do not rely on prior chat context. Stop only at G10, G20, G90, a defined stop condition, or an external credential/input requirement.
+> Read `AGENTS.md`, `delivery/agent-playbook.md`, and `delivery/stages/orchestrator.md`. Initialize the repository-backed pipeline and execute from S00. Automatically delegate each bounded stage and independent non-overlapping workstream to fresh subagents using isolated branches/worktrees where supported. Pair each production-behavior run with the requirements-first independent test challenge defined by the playbook; retain orchestration, verification, integration, and approval decisions in the primary agent. Do not rely on prior chat context. Stop only at G10, G20, G90, a defined stop condition, or an external credential/input requirement.
 
 ## 8. Approve/resume G10
 
@@ -148,6 +149,7 @@ The canonical ordering and dependencies are in `delivery/implementation-plan.md`
 | S110 | `delivery/stages/s110-system-integration-validation.md` |
 | S120 | `delivery/stages/s120-release-hardening.md` |
 | S130 | `delivery/stages/s130-release-validation.md` |
+| Test | `delivery/stages/independent-test-author.md` |
 | Change | `delivery/stages/design-change-reconciliation.md` |
 
 ## 10. Stage handoff contract
@@ -172,13 +174,32 @@ delivery/runs/<stage-id>/<run-id>/
 └── evidence/
 ```
 
+A `test_charter` run also creates `test-charter.yaml` from the pipeline template and commits it before candidate access.
+
 Allowed results: `passed`, `failed`, `blocked`, `needs_approval`.
 
 `status.yaml` records baseline/output commits, files, commands, platforms, requirements, blockers, deviations, and recommended next stages.
 
 `handoff.yaml` records stable outputs: contract/schema versions, ports, generated bindings, fixtures/tests, commands, known approved limitations, and exact artifact paths.
 
-## 11. Automatic verification/integration
+## 11. Independent test challenge
+
+Every dispatch that produces production behavior declares `independent_test.required`. `delivery/implementation-plan.md` owns the default stage applicability and exception list. A non-production exemption always requires a recorded reason.
+
+The Orchestrator runs the challenge as two linked repository runs:
+
+1. Dispatch a fresh `test_charter` run from the governing inputs, dependency handoffs, acceptance criteria, stage instruction, and task. Withhold the candidate, implementation report, implementation conversation, and diff explanation.
+2. The agent writes and commits `test-charter.yaml` with the standard run artifacts. The charter records observable behaviors, public surfaces, test levels, negative/fault cases, fixtures, native evidence, ambiguities, and test ownership.
+3. The implementation agent produces a candidate plus developer tests on its isolated branch.
+4. Dispatch a linked `independent_test` run to a fresh or resumed Independent Test Agent with both `baseline_commit` and `candidate_commit` set to the implementation output commit, plus the sealed charter, public contracts/generated schemas, test-support surfaces, and required commands. Do not give it the implementation agent's reasoning.
+5. The Independent Test Agent commits only dispatched tests, fixtures, and run artifacts. Its tests may be public-API unit tests, shared contract tests, property/golden/fault tests, or cross-component/black-box integration tests. It does not edit production code or acceptance criteria.
+6. Run the candidate and independent-test commits together on a temporary integration candidate. Mainline acceptance waits until the paired commits and applicable tiers pass.
+
+Independence is procedural, not a claim of filesystem isolation. Production bodies must not be used as the expected-behavior oracle. If a test cannot observe required behavior through an existing contract or harness, the agent reports a testability gap rather than adding shipped test-only behavior or changing a public boundary.
+
+When an independent test exposes a defect, preserve the failed run and test commit and dispatch a production repair with the test commit as its baseline. The implementation or repair agent may not edit that test. After repair, dispatch a linked `independent_test` verification run against the repaired candidate and preserved tests; only the passing verification run is accepted. If the test is wrong or the governing input is ambiguous, return it to the Independent Test Agent or Orchestrator; record the correction and evidence instead of silently weakening the assertion.
+
+## 12. Automatic verification/integration
 
 The Orchestrator independently confirms:
 
@@ -191,11 +212,12 @@ The Orchestrator independently confirms:
 7. Generated contract/token output is clean.
 8. No unapproved dependency/provenance/product/architecture deviation.
 9. Integration-branch post-merge tests pass.
-10. Pipeline state and accepted handoff pointers update atomically.
+10. Every required `test_charter` run completed without candidate access, the linked independent-test diff stays within test ownership, and the paired candidate/test commits pass together.
+11. Independent-test traceability fields, pipeline state, and accepted implementation/test handoff pointers update atomically in the Orchestrator's acceptance commit.
 
 One bounded repair attempt is allowed for an ordinary implementation/test defect. Repeated failure, broad fork, data-loss risk, or governing change stops at G20.
 
-## 12. G20 material deviation
+## 13. G20 material deviation
 
 Create a temporary proposal under:
 
@@ -220,23 +242,24 @@ After approval:
 
 The proposal is pipeline working material, not a permanent alternate decision history.
 
-## 13. Feature-wave automation
+## 14. Feature-wave automation
 
 S100 reads approved reconciliation, implementation plan, traceability, accepted foundation handoffs, and current code. It creates one task per bounded vertical slice under `delivery/generated-tasks/<wave-id>/`.
 
-Each task includes requirements/design IDs, dependencies/ownership, domain/application/adapter/frontend/persistence/history/search/spellcheck work, test tier, commands/platforms, and stop conditions.
+Each task includes requirements/design IDs, dependencies/ownership, domain/application/adapter/frontend/persistence/history/search/spellcheck work, developer-test work, independent-test requirement or exemption, test tier, commands/platforms, and stop conditions.
 
 Do not dispatch overlapping file/public-contract ownership in parallel.
 
-## 14. Continuous validation
+## 15. Continuous validation
 
 - Stage agents test their changes.
+- Independent Test Agents add requirements-first tests before applicable stage acceptance.
 - Orchestrator reruns stage gates.
 - S110 runs complete integrated suites and bounded fixes.
 - S130 independently validates and produces the unified release package.
 - A validation agent never changes criteria to make a candidate pass.
 
-## 15. Release approval G90
+## 16. Release approval G90
 
 S130 creates exactly:
 
@@ -261,7 +284,7 @@ delivery/release-evidence/<candidate-version>/
 
 `release-approval.yaml` starts `pending`. The product owner approves, records current waivers by updating the current specification/release file, or requests fixes.
 
-## 16. Design revision after implementation starts
+## 17. Design revision after implementation starts
 
 1. Export a candidate handoff beside the active immutable handoff.
 2. Dispatch `delivery/stages/design-change-reconciliation.md`.
@@ -272,9 +295,10 @@ delivery/release-evidence/<candidate-version>/
 
 Do not continuously sync a mutable live Penpot file into production.
 
-## 17. Quality controls
+## 18. Quality controls
 
 - Small reviewable tasks and isolated worktrees.
+- Sealed test charters and separate production/test ownership for required challenges.
 - Exact commands/raw evidence.
 - Prototypes clearly separate from production.
 - Public-contract changes independently verified.

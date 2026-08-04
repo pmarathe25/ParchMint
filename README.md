@@ -1,6 +1,6 @@
 # ParchMint v1 Build Kit
 
-**Status:** Implementation planning is current; final design handoff is pending.
+**Status:** Implementation planning is current; an approved design handoff is committed.
 
 This repository separates maintained product/architecture/design knowledge under `docs/` from the temporary v1 implementation and validation kit under `delivery/`.
 
@@ -56,7 +56,7 @@ After the approved handoff is committed, start one lead coding agent with:
 - `delivery/agent-playbook.md`
 - `delivery/stages/orchestrator.md`
 
-The Orchestrator Agent initializes repository-backed pipeline state, dispatches fresh bounded agents where work can safely be separated, verifies their committed artifacts, and stops at G10. After G10 approval it advances routine stages automatically and stops only at:
+The Orchestrator Agent initializes repository-backed pipeline state, dispatches fresh bounded agents where work can safely be separated, pairs production-behavior stages with requirements-first independent test challenges, verifies their committed artifacts, and stops at G10. After G10 approval it advances routine stages automatically and stops only at:
 
 - **G20:** a material product, design, architecture, licensing, security, or mandatory-requirement change is required.
 - **G90:** the release candidate is ready for product-owner approval.

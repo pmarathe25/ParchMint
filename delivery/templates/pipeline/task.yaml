@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: 3
 task_id: ""
 title: ""
 wave_id: ""
@@ -21,7 +21,16 @@ work:
   search: []
   spellcheck: []
   appearance: []
-  tests: []
+  developer_tests: []
+independent_test:
+  required: true
+  exemption_reason: ""
+  public_surfaces: []
+  required_test_kinds: []
+  adversarial_focus: []
+  ownership:
+    include: []
+    exclude: []
 test_tier:
   tier_a: true
   tier_b_required: false

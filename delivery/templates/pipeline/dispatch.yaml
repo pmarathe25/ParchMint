@@ -1,7 +1,15 @@
-schema_version: 2
+schema_version: 3
+run_role: "" # orchestration | implementation | test_charter | independent_test | repair | validation
 stage_id: ""
 run_id: ""
 baseline_commit: ""
+candidate_commit: ""
+related_runs:
+  implementation_run_id: ""
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: ""
+  verification_of_run_id: ""
 instruction_file: ""
 pipeline_state:
   path: "delivery/state.yaml"
@@ -17,6 +25,14 @@ approved_gates: []
 ownership:
   include: []
   exclude: []
+independent_test:
+  required: false
+  exemption_reason: ""
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs: []
+    withheld_inputs: []
 test_tier:
   tier_a: true
   tier_b_required: false

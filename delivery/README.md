@@ -18,13 +18,13 @@ This directory exists to turn the maintained product, architecture, and design d
 - `design-handoff-contract.md` — defines the one approved Penpot package required to start implementation.
 - `implementation-plan.md` — current v1 stage graph and implementation sequence.
 - `acceptance-and-release-plan.md` — temporary delivery gates that must become executable tests, CI checks, or maintained release procedures.
-- `agent-playbook.md` — orchestrator and approval workflow.
-- `stages/` — bounded instructions for implementation agents.
+- `agent-playbook.md` — orchestrator, independent-test, and approval workflow.
+- `stages/` — bounded instructions for implementation and independent test agents.
 - `templates/` — blueprints for handoff, reconciliation, pipeline, and release artifacts.
 
 ## Generated during delivery
 
-The pipeline creates `design-handoff/`, `design-reconciliation/`, `state.yaml`, `traceability.csv`, `runs/`, `gates/`, `proposals/`, `generated-tasks/`, `accepted-handoffs/`, and `release-evidence/` here. These artifacts support current execution and evidence; they do not become maintained product documentation merely because they are committed.
+The pipeline creates `design-handoff/`, `design-reconciliation/`, `state.yaml`, `traceability.csv`, `runs/`, `gates/`, `proposals/`, `generated-tasks/`, `accepted-handoffs/`, and `release-evidence/` here. Runs include sealed independent-test charters where required. These artifacts support current execution and evidence; they do not become maintained product documentation merely because they are committed.
 
 ## Promotion before retirement
 

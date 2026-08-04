@@ -4,7 +4,7 @@ handoff:
   status: "draft" # draft | approved
   product_spec_version: "2.2"
   architecture_version: "1.4"
-  design_brief_version: "2.4"
+  design_brief_version: "2.5"
   handoff_contract_version: "1.3"
   created_at: ""
   approved_at: ""

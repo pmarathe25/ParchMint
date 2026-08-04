@@ -18,3 +18,5 @@ Produce installable, secured, supportable candidates on all target platforms.
 ## External inputs
 
 Signing/notarization credentials or paid infrastructure may require an explicit external-input stop. Preserve completed evidence and state exactly what is needed.
+
+An S120 run that changes installers, security configuration, bundled resources, upgrade behavior, or any other shipped package behavior requires the paired independent test challenge. A pure evidence rerun may be exempt only when dispatch records that no shipped artifact or behavior changes.
