@@ -58,33 +58,113 @@ components:
     code_target: apps/desktop-ui/src/features/{launcher,export,recovery}/{Launcher,Export,Recovery}.tsx
     state_owner: Platform service owns native dialogs; save/recovery services own durable state and errors.
 screens:
-  - penpot_screen_ids: [launcher-recent, launcher-first-launch, create-project-dialog, launcher-locked-project, launcher-missing-project]
-    workspace_state: launcher
-    code_target: apps/desktop-ui/src/features/launcher/LauncherRoute.tsx
-  - penpot_screen_ids: [editor-single-default, editor-dual-two-manuscript, editor-same-document-two-views, editor-local-find, editor-local-replace, editor-context-menu-add-comment, editor-spellcheck-suggestions]
-    workspace_state: editor
-    code_target: apps/desktop-ui/src/features/workspace/EditorWorkspace.tsx
-  - penpot_screen_ids: [cards-manuscript-default, cards-deep-expanded, cards-drag-multiselect, cards-research-selected]
-    workspace_state: cards
+  - workspace_state: cards
     code_target: apps/desktop-ui/src/features/cards/CardsWorkspace.tsx
-  - penpot_screen_ids: [search-query-entry, search-streaming-results, search-result-navigation, search-no-results, global-replace-preview-exclusions]
-    workspace_state: global-search-and-replace-preview
+    inventory_screens:
+      - {screen_id: cards-collapsed-groups-light, penpot_board_id: e96ec683-a782-802c-8008-65f92923c1da}
+      - {screen_id: cards-deep-expanded-light, penpot_board_id: e96ec683-a782-802c-8008-65f91ad51384}
+      - {screen_id: cards-density-compact-light, penpot_board_id: e96ec683-a782-802c-8008-65f93f232290}
+      - {screen_id: cards-drag-multiselect-light, penpot_board_id: e96ec683-a782-802c-8008-65f95dbbe446}
+      - {screen_id: cards-dark, penpot_board_id: e96ec683-a782-802c-8008-65f906f35093}
+      - {screen_id: cards-light, penpot_board_id: e96ec683-a782-802c-8008-65f906f35093}
+      - {screen_id: cards-research-selected-light, penpot_board_id: e96ec683-a782-802c-8008-65f9119c4804}
+  - workspace_state: launcher
+    code_target: apps/desktop-ui/src/features/launcher/LauncherRoute.tsx
+    inventory_screens:
+      - {screen_id: create-project-dialog-light, penpot_board_id: e96ec683-a782-802c-8008-65f78b1ad42a}
+      - {screen_id: launcher-first-launch-light, penpot_board_id: e96ec683-a782-802c-8008-65f7642df84d}
+      - {screen_id: launcher-locked-project-light, penpot_board_id: e96ec683-a782-802c-8008-65f770ca73a0}
+      - {screen_id: launcher-missing-project-light, penpot_board_id: e96ec683-a782-802c-8008-65f76cdbc050}
+      - {screen_id: launcher-dark, penpot_board_id: e96ec683-a782-802c-8008-65f767f20cfd}
+      - {screen_id: launcher-light, penpot_board_id: e96ec683-a782-802c-8008-65f767f20cfd}
+  - workspace_state: editor
+    code_target: apps/desktop-ui/src/features/workspace/EditorWorkspace.tsx
+    inventory_screens:
+      - {screen_id: editor-both-sidebars-collapsed-light, penpot_board_id: e96ec683-a782-802c-8008-65f80715d743}
+      - {screen_id: editor-context-menu-add-comment-light, penpot_board_id: e96ec683-a782-802c-8008-660965c89f60}
+      - {screen_id: editor-dual-manuscript-research-left-focus-light, penpot_board_id: e96ec683-a782-802c-8008-65f86db30e62}
+      - {screen_id: editor-dual-manuscript-research-right-focus-light, penpot_board_id: e96ec683-a782-802c-8008-65f879cd4b83}
+      - {screen_id: editor-dual-dark, penpot_board_id: e96ec683-a782-802c-8008-65f886281b72}
+      - {screen_id: editor-dual-light, penpot_board_id: e96ec683-a782-802c-8008-65f886281b72}
+      - {screen_id: editor-explorer-collapsed-light, penpot_board_id: e96ec683-a782-802c-8008-65f80de435f3}
+      - {screen_id: editor-inspector-collapsed-light, penpot_board_id: e96ec683-a782-802c-8008-65f815dec29f}
+      - {screen_id: editor-local-find-light, penpot_board_id: e96ec683-a782-802c-8008-65f8414ccd0f}
+      - {screen_id: editor-local-replace-light, penpot_board_id: e96ec683-a782-802c-8008-65f84b13b6c6}
+      - {screen_id: editor-long-comments-light, penpot_board_id: e96ec683-a782-802c-8008-65f83837a5e5}
+      - {screen_id: editor-same-document-two-views-light, penpot_board_id: e96ec683-a782-802c-8008-65f89294547e}
+      - {screen_id: editor-semantic-content-and-breaks-light, penpot_board_id: c6b492ab-8095-8078-8008-6701b08cbb40}
+      - {screen_id: editor-single-dark, penpot_board_id: e96ec683-a782-802c-8008-65f7fdf858b9}
+      - {screen_id: editor-single-light, penpot_board_id: e96ec683-a782-802c-8008-65f7fdf858b9}
+      - {screen_id: editor-spellcheck-suggestions-light, penpot_board_id: e96ec683-a782-802c-8008-6609938011df}
+      - {screen_id: empty-manuscript-research-roots-light, penpot_board_id: e96ec683-a782-802c-8008-65fb64349f88}
+      - {screen_id: explorer-context-menu-actions-light, penpot_board_id: e96ec683-a782-802c-8008-660966256515}
+  - workspace_state: search-and-replace
     code_target: apps/desktop-ui/src/features/search/SearchWorkspace.tsx
-  - penpot_screen_ids: [comments-unresolved-thread, comments-replies-collapsed, comments-replies-expanded-composer, comments-resolved-thread, comments-orphaned]
-    workspace_state: document-inspector-comments
+    inventory_screens:
+      - {screen_id: global-replace-preview-exclusions-light, penpot_board_id: e96ec683-a782-802c-8008-65f9c16a2709}
+      - {screen_id: global-search-dark, penpot_board_id: e96ec683-a782-802c-8008-65f9972c44e6}
+      - {screen_id: global-search-light, penpot_board_id: e96ec683-a782-802c-8008-65f9972c44e6}
+      - {screen_id: search-index-rebuilding-light, penpot_board_id: e96ec683-a782-802c-8008-65fb4efce34b}
+      - {screen_id: search-no-results-light, penpot_board_id: e96ec683-a782-802c-8008-65f9a2cffacf}
+      - {screen_id: search-result-navigation-light, penpot_board_id: e96ec683-a782-802c-8008-65f9bbc1b569}
+      - {screen_id: search-stale-deleted-results-light, penpot_board_id: e96ec683-a782-802c-8008-65f9c73f12a6}
+      - {screen_id: search-streaming-results-light, penpot_board_id: e96ec683-a782-802c-8008-65f99d3542bd}
+  - workspace_state: comments-and-inspector
     code_target: apps/desktop-ui/src/features/comments/CommentsPanel.tsx
-  - penpot_screen_ids: [history-session-date-grouped, history-named-snapshot, history-restore-checkpoint, recently-deleted, recently-deleted-fallback-location]
-    workspace_state: history-or-recently-deleted
+    inventory_screens:
+      - {screen_id: comments-orphaned-light, penpot_board_id: e96ec683-a782-802c-8008-65fa19493512}
+      - {screen_id: comments-replies-collapsed-light, penpot_board_id: e96ec683-a782-802c-8008-65f9fa8f73f4}
+      - {screen_id: comments-replies-expanded-composer-light, penpot_board_id: e96ec683-a782-802c-8008-65fa002ff390}
+      - {screen_id: comments-resolved-filter-light, penpot_board_id: e96ec683-a782-802c-8008-65fa061c369c}
+      - {screen_id: comments-unresolved-thread-light, penpot_board_id: e96ec683-a782-802c-8008-65f9f48c32a9}
+      - {screen_id: inspector-group-no-comments-light, penpot_board_id: e96ec683-a782-802c-8008-65fa1f2ce4b0}
+      - {screen_id: inspector-many-metadata-fields-light, penpot_board_id: e96ec683-a782-802c-8008-65fa2a7463fd}
+      - {screen_id: inspector-no-metadata-fields-light, penpot_board_id: e96ec683-a782-802c-8008-65fa24b8839c}
+      - {screen_id: lost-comment-anchor-light, penpot_board_id: e96ec683-a782-802c-8008-65fb59b02e93}
+  - workspace_state: history-and-recently-deleted
     code_target: apps/desktop-ui/src/features/history/HistoryWorkspace.tsx
-  - penpot_screen_ids: [settings-appearance-system, settings-appearance-dark-override, settings-appearance-light-override, settings-dictionaries, settings-styles-inheritance, settings-metadata-fields]
-    workspace_state: project-settings
+    inventory_screens:
+      - {screen_id: history-named-snapshot-light, penpot_board_id: e96ec683-a782-802c-8008-65fa5be73781}
+      - {screen_id: history-restore-project-light, penpot_board_id: e96ec683-a782-802c-8008-65fa75e1d788}
+      - {screen_id: history-dark, penpot_board_id: e96ec683-a782-802c-8008-65fa56f4c808}
+      - {screen_id: history-light, penpot_board_id: e96ec683-a782-802c-8008-65fa56f4c808}
+      - {screen_id: history-unavailable-light, penpot_board_id: e96ec683-a782-802c-8008-65fb4bdc4cf4}
+      - {screen_id: recently-deleted-dark, penpot_board_id: e96ec683-a782-802c-8008-65fa7a7978c7}
+      - {screen_id: recently-deleted-light, penpot_board_id: e96ec683-a782-802c-8008-65fa7a7978c7}
+      - {screen_id: recently-deleted-fallback-location-light, penpot_board_id: e96ec683-a782-802c-8008-65fa7f1e374c}
+  - workspace_state: project-settings
     code_target: apps/desktop-ui/src/features/settings/SettingsWorkspace.tsx
-  - penpot_screen_ids: [export-entire-manuscript, export-project-output-controls, export-progress, export-success, export-failure]
-    workspace_state: export
+    inventory_screens:
+      - {screen_id: settings-appearance-dark-override-light, penpot_board_id: 469ffc7d-964a-806d-8008-6c33b6cca37b}
+      - {screen_id: settings-appearance-light-override-light, penpot_board_id: a75ba61d-99f5-8033-8008-6d4dd58f3557}
+      - {screen_id: settings-appearance-dark, penpot_board_id: 469ffc7d-964a-806d-8008-6c33b32674a9}
+      - {screen_id: settings-appearance-light, penpot_board_id: 469ffc7d-964a-806d-8008-6c33b32674a9}
+      - {screen_id: settings-delete-unused-style-light, penpot_board_id: e96ec683-a782-802c-8008-65fab0e9731e}
+      - {screen_id: settings-dictionaries-light, penpot_board_id: e96ec683-a782-802c-8008-65fac637bfea}
+      - {screen_id: settings-general-light, penpot_board_id: e96ec683-a782-802c-8008-65faa931a6ee}
+      - {screen_id: settings-metadata-fields-light, penpot_board_id: e96ec683-a782-802c-8008-65fac2af3c48}
+      - {screen_id: settings-replace-in-use-style-light, penpot_board_id: e96ec683-a782-802c-8008-65fab46a9e2b}
+      - {screen_id: settings-styles-inheritance-light, penpot_board_id: e96ec683-a782-802c-8008-65faad3d6d8c}
+  - workspace_state: export
     code_target: apps/desktop-ui/src/features/export/ExportWorkspace.tsx
-  - penpot_screen_ids: [recovered-after-crash, editor-document-loading, empty-manuscript-research-roots, corrupt-canonical-file, project-format-migration, lost-comment-anchor]
-    workspace_state: editor-or-full-pane-state
+    inventory_screens:
+      - {screen_id: close-save-failure-light, penpot_board_id: e96ec683-a782-802c-8008-65fb28e7bd3d}
+      - {screen_id: export-entire-manuscript-light, penpot_board_id: e96ec683-a782-802c-8008-65faeaa3e09e}
+      - {screen_id: export-failure-light, penpot_board_id: e96ec683-a782-802c-8008-65fb074b023d}
+      - {screen_id: export-numbering-light, penpot_board_id: e96ec683-a782-802c-8008-65fb01630314}
+      - {screen_id: export-progress-light, penpot_board_id: c5362ef2-ec03-8060-8008-68aaf1104250}
+      - {screen_id: export-project-output-controls-dark, penpot_board_id: e96ec683-a782-802c-8008-65faf34784d8}
+      - {screen_id: export-project-output-controls-light, penpot_board_id: e96ec683-a782-802c-8008-65faf34784d8}
+      - {screen_id: export-success-light, penpot_board_id: e96ec683-a782-802c-8008-65fb047acc6d}
+  - workspace_state: recovery-and-error
     code_target: apps/desktop-ui/src/features/recovery/RecoveryStates.tsx
+    inventory_screens:
+      - {screen_id: corrupt-canonical-file-light, penpot_board_id: e96ec683-a782-802c-8008-65fb5463b665}
+      - {screen_id: editor-document-loading-light, penpot_board_id: c6b492ab-8095-8078-8008-6702042ef83c}
+      - {screen_id: project-format-migration-light, penpot_board_id: e96ec683-a782-802c-8008-65fb51954307}
+      - {screen_id: error-recovery-dark, penpot_board_id: e96ec683-a782-802c-8008-65fb6192c697}
+      - {screen_id: error-recovery-light, penpot_board_id: e96ec683-a782-802c-8008-65fb6192c697}
+      - {screen_id: unsupported-pasted-image-light, penpot_board_id: e96ec683-a782-802c-8008-65fb56ee8f75}
 interactions:
   - id: companion-focus
     interpretation: Toolbar and Inspector target only the focused view; shared content/history is distinct from each view's independent selection, scroll, focus, composition, and local-search state.

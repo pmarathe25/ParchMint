@@ -81,6 +81,24 @@ def main() -> int:
     component_ids = {row["penpot_component_id"] for row in components}
     if len(screens) != 80 or len(components) != 79 or not all(UUID.fullmatch(x) for x in screen_ids | component_ids):
         fail("frozen screen/component inventories are incomplete or contain invalid IDs")
+    mapped_screens = {}
+    for group in implementation["screens"]:
+        if not isinstance(group.get("code_target"), str) or not group["code_target"]:
+            fail("every implementation screen group requires a stable code target")
+        for mapping in group.get("inventory_screens", []):
+            screen_id = mapping.get("screen_id")
+            board_id = mapping.get("penpot_board_id")
+            if screen_id in mapped_screens:
+                fail(f"duplicate implementation screen mapping: {screen_id}")
+            if not UUID.fullmatch(str(board_id)):
+                fail(f"invalid implementation board association for {screen_id}")
+            mapped_screens[screen_id] = board_id
+    inventory_screens = {row["screen_id"]: row["penpot_board_id"] for row in screens}
+    if mapped_screens != inventory_screens:
+        missing = sorted(set(inventory_screens) - set(mapped_screens))
+        extra = sorted(set(mapped_screens) - set(inventory_screens))
+        incorrect = sorted(screen_id for screen_id in set(mapped_screens) & set(inventory_screens) if mapped_screens[screen_id] != inventory_screens[screen_id])
+        fail(f"implementation screen inventory coverage mismatch: missing={missing}, extra={extra}, incorrect={incorrect}")
     by_fixture = {}
     for row in screens:
         if row["baseline_status"] == "baseline":
