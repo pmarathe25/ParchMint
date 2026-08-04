@@ -1,0 +1,84 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260804T224650Z-s10x
+baseline_commit: "de4e778f885118b536d524da89510b011a6262d9"
+candidate_commit: ""
+related_runs:
+  implementation_run_id: 20260804T203809Z-s10a
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: 20260804T203809Z-s10a
+  verification_of_run_id: 20260804T205500Z-s10v
+instruction_file: delivery/stages/design-change-reconciliation.md
+pipeline_state:
+  path: delivery/state.yaml
+  commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
+approved_design_handoff:
+  path: delivery/design-handoff/1.0.0
+  version: "1.0.0"
+  manifest_sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"
+  checksums_file_sha256: "0dfe85a871ac9db19ee2f3dcae390e8f40c14a3f2df198b51e349ceb43a3b1bf"
+governing_inputs:
+  - {path: docs/product/product-specification.md, version: "2.2", sha256: "16870f6517ee65864e08761fd271f7618704225c6b7dd082505cf8bfeb611499"}
+  - {path: docs/architecture/architecture.md, version: "1.4", sha256: "b4422602ba539ba5cf975808e53b4f5b8c902bdc9ccebc4b26adc18df84f5b33"}
+  - {path: docs/design/penpot-design-brief.md, version: "2.5", sha256: "8919684a1c4bbc82198774d96ae691a38f8290ad7f5f968c6a2b436baa620c67"}
+  - {path: delivery/design-handoff/1.0.0/design-manifest.yaml, version: "1.0.0", sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"}
+  - {path: delivery/runs/S10/20260804T205500Z-s10v/evidence/validation.json, version: current, sha256: "12292593ab7f75a29c0a98bbf18204f03650587edec368d2ca4756cb4c0f2708"}
+dependency_handoffs:
+  - delivery/runs/S10/20260804T203809Z-s10a/handoff.yaml
+  - delivery/runs/S10/20260804T205500Z-s10v/handoff.yaml
+approved_gates:
+  - product-owner-approved-product-requirements-as-canonical
+  - product-owner-approved-S10-repair-direction
+ownership:
+  include:
+    - delivery/runs/S10/20260804T224650Z-s10x/status.yaml
+    - delivery/runs/S10/20260804T224650Z-s10x/handoff.yaml
+    - delivery/runs/S10/20260804T224650Z-s10x/report.md
+    - delivery/runs/S10/20260804T224650Z-s10x/evidence/**
+  exclude:
+    - delivery/design-handoff/**
+    - delivery/design-reconciliation/**
+    - delivery/traceability.csv
+    - delivery/state.yaml
+    - docs/**
+    - src/**
+    - packages/**
+    - apps/**
+independent_test:
+  required: false
+  exemption_reason: "Penpot reference export only; no shipped behavior or repository interpretation is implemented."
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs:
+      - approved product requirements and design brief
+      - frozen handoff 1.0.0 and committed Penpot source
+      - failed S10 validation evidence
+      - live connected ParchMint Penpot file
+    withheld_inputs: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands:
+  - "file delivery/runs/S10/20260804T224650Z-s10x/evidence/exports/*.png"
+  - "identify delivery/runs/S10/20260804T224650Z-s10x/evidence/exports/*.png"
+  - "git diff --check"
+required_evidence:
+  - active-file identity and minimal read-only probe before export
+  - source board identity, dimensions, and exact board IDs
+  - Light and Dark export method with original token/theme activation restored afterward
+  - four 1440x900 PNGs exported from the existing authoritative boards
+  - direct visible confirmation that recovery depicts recovered changes and dual editor depicts two Manuscript documents
+  - before/after Penpot file validation and no authored-content mutation
+  - SHA-256 and PNG-dimension inventory
+resource_constraints:
+  - Penpot calls are owned by this worker to isolate large tool output from the Orchestrator
+  - begin with the Penpot high-level overview and a minimal active-file read-only probe
+  - if a Penpot call stalls, verify partial state before retrying and use bounded board-local calls
+  - do not fabricate, redraw, image-generate, relabel, or post-process the reference content
+  - do not edit the frozen handoff or reconciliation package
+  - commit only owned run artifacts; no push, branch, merge, rebase, reset, or worktree operations

@@ -1,0 +1,23 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260804T224650Z-s10x
+candidate_commit: ""
+output_commit: ""
+contracts_and_schema_versions: {}
+ports: []
+implementations: []
+generated_bindings: []
+fixtures: []
+test_provenance:
+  developer_test_locations: []
+  independent_test_locations: []
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  charter_path: ""
+  charter_commit: ""
+  candidate_commit: ""
+commands: []
+native_evidence: []
+known_approved_limitations: []
+artifact_paths: []
