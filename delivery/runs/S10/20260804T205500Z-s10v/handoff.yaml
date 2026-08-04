@@ -1,0 +1,23 @@
+schema_version: 3
+run_role: validation
+stage_id: S10
+run_id: 20260804T205500Z-s10v
+candidate_commit: "378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
+output_commit: ""
+contracts_and_schema_versions: {}
+ports: []
+implementations: []
+generated_bindings: []
+fixtures: []
+test_provenance:
+  developer_test_locations: []
+  independent_test_locations: []
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  charter_path: ""
+  charter_commit: ""
+  candidate_commit: "378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
+commands: []
+native_evidence: []
+known_approved_limitations: []
+artifact_paths: []
