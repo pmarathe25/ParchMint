@@ -1,0 +1,23 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260804T232745Z-s10r
+result: blocked
+baseline_commit: "e779b0c292a2481d57c988e563d1baffc9f4927d"
+candidate_commit: ""
+output_commit: ""
+charter_commit: ""
+related_run_ids: [20260804T203809Z-s10a, 20260804T205500Z-s10v, 20260804T230332Z-s10p]
+files_changed: []
+commands_run: []
+platforms_tested: []
+test_tiers_completed: []
+developer_tests_added: []
+independent_tests_added: []
+requirements_addressed: []
+design_ids_addressed: []
+contracts_changed: []
+blocking_issues: [repair-pending]
+deviations: []
+dependencies: [G20-S10-handoff-1.0.1-repair, user-exported-native-Penpot-source]
+recommended_next_stages: [exact-candidate-approval]

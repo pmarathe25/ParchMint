@@ -1,0 +1,100 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260804T232745Z-s10r
+baseline_commit: "e779b0c292a2481d57c988e563d1baffc9f4927d"
+candidate_commit: ""
+related_runs:
+  implementation_run_id: 20260804T203809Z-s10a
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: 20260804T203809Z-s10a
+  verification_of_run_id: 20260804T205500Z-s10v
+instruction_file: delivery/stages/design-change-reconciliation.md
+pipeline_state:
+  path: delivery/state.yaml
+  commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
+approved_design_handoff:
+  path: delivery/design-handoff/1.0.0
+  version: "1.0.0"
+  manifest_sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"
+  checksums_file_sha256: "0dfe85a871ac9db19ee2f3dcae390e8f40c14a3f2df198b51e349ceb43a3b1bf"
+governing_inputs:
+  - {path: docs/product/product-specification.md, version: "2.2", sha256: "16870f6517ee65864e08761fd271f7618704225c6b7dd082505cf8bfeb611499"}
+  - {path: docs/architecture/architecture.md, version: "1.4", sha256: "b4422602ba539ba5cf975808e53b4f5b8c902bdc9ccebc4b26adc18df84f5b33"}
+  - {path: docs/design/penpot-design-brief.md, version: "2.5", sha256: "8919684a1c4bbc82198774d96ae691a38f8290ad7f5f968c6a2b436baa620c67"}
+  - {path: delivery/design-handoff-contract.md, version: "1.3", sha256: "bf3b176241082ca664468c832b95df303c2a8e7375b79d6c42a4d8f229e691e6"}
+  - {path: delivery/proposals/G20-S10-handoff-1.0.1-repair/approval.yaml, version: approved, sha256: "6a11b3e725d698ae06c49640203a0774b24cd14be1c8f8c1b6d8e9732ec02342"}
+  - {path: delivery/runs/S10/20260804T205500Z-s10v/evidence/validation.json, version: current, sha256: "12292593ab7f75a29c0a98bbf18204f03650587edec368d2ca4756cb4c0f2708"}
+  - {path: delivery/runs/S10/20260804T230332Z-s10p/evidence/penpot_repair.json, version: current, sha256: "8d53abcf7fdcf06ec52979dee9ea56de6f5a379a7b610282affc9f00743cbeb0"}
+  - {path: delivery/runs/S10/20260804T230332Z-s10p/evidence/source/parchmint-ui.penpot, version: user-exported-current, sha256: "f6b14e4447f33ea6d7262ec69ddee2a6794a2c4cf33f4a9fa9012668914bf3eb"}
+dependency_handoffs:
+  - delivery/runs/S10/20260804T203809Z-s10a/handoff.yaml
+  - delivery/runs/S10/20260804T205500Z-s10v/handoff.yaml
+  - delivery/runs/S10/20260804T230332Z-s10p/handoff.yaml
+approved_gates:
+  - G20-S10-handoff-1.0.1-repair
+ownership:
+  include:
+    - delivery/runs/S10/20260804T230332Z-s10p/evidence/source/parchmint-ui.penpot
+    - delivery/design-handoff/1.0.1/**
+    - delivery/design-reconciliation/1.0.1/**
+    - delivery/traceability.csv
+    - delivery/runs/S10/20260804T232745Z-s10r/status.yaml
+    - delivery/runs/S10/20260804T232745Z-s10r/handoff.yaml
+    - delivery/runs/S10/20260804T232745Z-s10r/report.md
+    - delivery/runs/S10/20260804T232745Z-s10r/evidence/**
+  exclude:
+    - delivery/design-handoff/1.0.0/**
+    - delivery/design-reconciliation/1.0.0/**
+    - delivery/state.yaml
+    - delivery/proposals/**
+    - delivery/runs/S10/20260804T203809Z-s10a/**
+    - delivery/runs/S10/20260804T205500Z-s10v/**
+    - docs/**
+    - src/**
+    - packages/**
+    - apps/**
+independent_test:
+  required: false
+  exemption_reason: "Versioned design-handoff and reconciliation repair only; no shipped production behavior."
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs:
+      - canonical product, architecture, and design requirements
+      - immutable approved handoff 1.0.0
+      - failed validation and approved G20 repair direction
+      - authoritative corrected PNG exports and user-exported native Penpot source
+    withheld_inputs: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+  - "python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py"
+  - "git diff --check"
+required_evidence:
+  - complete draft handoff 1.0.1 beside immutable 1.0.0, never a delta
+  - native source ZIP/file identity and repaired-board structural validation with autosave revision drift allowed
+  - exact four exported PNG provenance, hashes, 1440x900 dimensions, and handoff placement
+  - removal of unsupported Search/Export/History/spellcheck component states
+  - comments clarification as one continuous unsectioned list and Entire Manuscript typo correction
+  - manifest, README, inventories, fixtures, deviations, schema, path, asset, and checksum consistency
+  - complete design-change reconciliation 1.0.1 with exact candidate approval pending
+  - all 79 components and 80 screen mappings retained unless explicitly justified
+  - traceability changes limited to exact design mappings, with no change when IDs remain stable
+  - proof approved 1.0.0 and governing documents are unchanged
+  - exact product-owner approval action and evidence limits
+resource_constraints:
+  - no Penpot calls; consume only the committed/user-supplied export evidence
+  - use feature-worker scope for the complete multi-file versioned package and reconciliation
+  - product requirements are canonical; do not preserve contradictory component states
+  - create 1.0.1 as draft and leave reconciliation approval pending; do not activate it or edit delivery/state.yaml
+  - preserve all stable Penpot board/component IDs and source SVG assets
+  - do not fabricate missing exports or claim native/interactive evidence
+  - work only in owned paths; preserve others' work
+  - commit owned paths only; no amend, push, branch, merge, rebase, reset, or worktree operations
+  - leave output_commit blank for Orchestrator finalization
