@@ -1,6 +1,6 @@
 # ParchMint Penpot Design Brief
 
-**Status:** Current operational design brief; final handoff pending  
+**Status:** Current operational design brief; final handoff approved
 **Version:** 2.5
 **Date:** 2026-08-04
 
