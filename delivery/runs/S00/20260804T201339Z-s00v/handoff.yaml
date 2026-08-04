@@ -17,7 +17,16 @@ test_provenance:
   charter_path: ""
   charter_commit: ""
   candidate_commit: "b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
-commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S00/20260804T194924Z-s00a/evidence/validate_s00.py"
+  - "git diff --check 8bb34bd7fe733ca198404aee56d7af827bb3af77..b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+  - "gh pr view 1 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup"
+  - "gh pr checks 1"
+native_evidence:
+  - "No native-interactive evidence applies to non-production S00; GitHub-hosted runner availability was not presented as execution."
+known_approved_limitations:
+  - "No GitHub Actions workflows/checks exist before S20."
+  - "S00 is non-production and independent-test exempt."
+artifact_paths:
+  - delivery/runs/S00/20260804T201339Z-s00v/evidence/validation.json
