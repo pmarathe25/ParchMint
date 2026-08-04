@@ -2,22 +2,31 @@ schema_version: 3
 run_role: validation
 stage_id: S10
 run_id: 20260804T205500Z-s10v
-result: blocked
+result: failed
 baseline_commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
 candidate_commit: "378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
 output_commit: ""
 charter_commit: ""
 related_run_ids: [20260804T203809Z-s10a]
-files_changed: []
-commands_run: []
-platforms_tested: []
-test_tiers_completed: []
+files_changed:
+  - delivery/runs/S10/20260804T205500Z-s10v/evidence/validation.json
+  - delivery/runs/S10/20260804T205500Z-s10v/status.yaml
+  - delivery/runs/S10/20260804T205500Z-s10v/handoff.yaml
+  - delivery/runs/S10/20260804T205500Z-s10v/report.md
+commands_run:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py"
+  - "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
+  - "gh pr view 2 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup"
+platforms_tested: [linux-hosted-static-evidence]
+test_tiers_completed: [tier_a]
 developer_tests_added: []
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: ["185 handoff-applicable requirements; focused adjudication of SAVE-011 through SAVE-013, EDIT-001 through EDIT-012, WS-006, TREE-017, SEARCH-006/007, EXP-001/002, HIST-007/008, SPELL-001 through SPELL-003, CMT-002/003, and APPR-005"]
+design_ids_addressed: ["all 79 component IDs", "all 80 screen inventory rows / 70 Penpot boards", "all 20 approved Light/Dark reference PNGs"]
 contracts_changed: []
-blocking_issues: [validation-pending]
-deviations: []
+blocking_issues: [ISSUE-008-missing-recovery-baseline-conflict, ISSUE-009-missing-dual-editor-baseline-conflict, implementation-output-provenance-incomplete]
+deviations: ["interaction-spec editorial text: Entire Manual centroid"]
 dependencies: [20260804T203809Z-s10a, PR-2]
-recommended_next_stages: [G10-product-owner-review]
+recommended_next_stages: [S10-repair-after-product-owner-direction]

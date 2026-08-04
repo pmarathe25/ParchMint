@@ -17,7 +17,17 @@ test_provenance:
   charter_path: ""
   charter_commit: ""
   candidate_commit: "378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
-commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py"
+  - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py"
+  - "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..378150aadf5a4cca04c9c7a4a5634dfc6c238b20"
+native_evidence: ["None: direct inspection covered static approved PNG references only."]
+known_approved_limitations:
+  - "PR #2 has no check rollup because CI workflows do not exist before S20."
+  - "Static references do not prove focus behavior, contrast metrics, screen readers, IME, native dialogs, spellcheck, or platform behavior."
+  - "ISSUE-005 is a material ambiguity, not a proven conflict: a one-list filter may satisfy CMT-003, but separate status sections do not."
+artifact_paths:
+  - delivery/runs/S10/20260804T205500Z-s10v/evidence/validation.json
+  - delivery/design-reconciliation/1.0.0/open-issues.yaml
+  - delivery/design-reconciliation/1.0.0/visual-regression-plan.md

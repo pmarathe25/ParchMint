@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "stage_id": "S10",
+  "run_id": "20260804T205500Z-s10v",
+  "result": "failed",
+  "validator": {
+    "agent_role": "analyst",
+    "model_tier": "Terra",
+    "procedure": "ui-review",
+    "write_mode": "read-only"
+  },
+  "commits": {
+    "baseline": "1594f396fd0fa4f60ec235e396104f949b42376b",
+    "substantive_candidate": "83fc7ac072213e88cfb3e95aba418c3ca5f90e80",
+    "implementation_run_output_reviewed": "378150aadf5a4cca04c9c7a4a5634dfc6c238b20",
+    "pr_head_with_validation_dispatch": "c3378fa27c8cd89f3782f41204c4f0ea81f21674"
+  },
+  "pull_request": {
+    "number": 2,
+    "url": "https://github.com/pmarathe25/ParchMint/pull/2",
+    "state": "OPEN",
+    "draft": true,
+    "merge_state": "CLEAN",
+    "checks": [],
+    "checks_note": "No workflows exist before S20; no CI or native claim is made."
+  },
+  "commands": [
+    {"command": "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify", "result": "passed"},
+    {"command": "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/validate_s10.py", "result": "passed: 185 applicable requirements, 79 components, 80 screen mappings across 70 boards, 10 Light/Dark pairs"},
+    {"command": "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py", "result": "passed: 0 pending updates"},
+    {"command": "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..378150aadf5a4cca04c9c7a4a5634dfc6c238b20", "result": "passed"}
+  ],
+  "visible_evidence": {
+    "directly_inspected_pngs": [
+      "references/light/launcher-light.png",
+      "references/dark/launcher-dark.png",
+      "references/light/editor-single-light.png",
+      "references/dark/editor-single-dark.png",
+      "references/light/editor-dual-light.png",
+      "references/dark/editor-dual-dark.png",
+      "references/light/cards-light.png",
+      "references/dark/cards-dark.png",
+      "references/light/global-search-light.png",
+      "references/dark/global-search-dark.png",
+      "references/light/history-light.png",
+      "references/dark/history-dark.png",
+      "references/light/settings-appearance-light.png",
+      "references/dark/settings-appearance-dark.png",
+      "references/light/export-light.png",
+      "references/dark/export-dark.png",
+      "references/light/error-recovery-light.png",
+      "references/dark/error-recovery-dark.png",
+      "references/light/recently-deleted-light.png",
+      "references/dark/recently-deleted-dark.png"
+    ],
+    "confirmed": [
+      "Ten references form coherent Light/Dark visual pairs.",
+      "Dark editor single and dual canvases are visibly dark, satisfying the visual intent of APPR-005.",
+      "Visible baselines show Global Search replacing Explorer without a scope selector, fixed Entire Manuscript export, System/Light/Dark choices, and whole-project History wording."
+    ],
+    "limits": [
+      "Static images do not prove keyboard/focus semantics, measured contrast, native dialogs, screen readers, IME, spellcheck, or platform behavior."
+    ]
+  },
+  "findings": [
+    {
+      "id": "ISSUE-008-proposed",
+      "severity": "blocking",
+      "kind": "missing handoff-reference conflict",
+      "requirements": ["SAVE-011", "SAVE-012", "SAVE-013"],
+      "source": "error-recovery Light/Dark PNGs versus design-manifest.yaml, screen-inventory.csv, and reference-fixtures.md",
+      "observation": "Both PNGs say A document could not be read and describe invalid canonical markup, with Close project and Open History actions.",
+      "conflict": "The catalog and fixture declare recovered-after-crash recovery-log acceptance rather than corrupt-canonical-document handling.",
+      "next_action": "Align/re-export the approved reference or revise its manifest/inventory/fixture identity, record the issue, and rerun reconciliation."
+    },
+    {
+      "id": "ISSUE-009-proposed",
+      "severity": "blocking",
+      "kind": "missing handoff-reference mapping discrepancy",
+      "requirements": ["TREE-017", "WS-006", "EDIT-001", "EDIT-002", "EDIT-003", "EDIT-004", "EDIT-005"],
+      "source": "editor-dual Light/Dark PNGs versus design-manifest.yaml, screen-inventory.csv, and reference-fixtures.md",
+      "observation": "Both PNGs show a Research companion named Harbor Notes and text stating Research is excluded from manuscript export.",
+      "conflict": "The manifest/inventory identify the state as two Manuscript documents; the fixture treats the visible Manuscript/Research state as an equivalent.",
+      "next_action": "Choose and align the authoritative baseline identity/fixture before visual regression is frozen."
+    },
+    {
+      "id": "provenance-incomplete",
+      "severity": "blocking",
+      "kind": "run artifact defect",
+      "observation": "Implementation status/handoff output_commit and pending approval reconciliation_commit are blank.",
+      "next_action": "Preserve candidate 83fc7ac; record implementation output and reconciliation commit 378150a; rerun validation after all repairs."
+    },
+    {
+      "id": "interaction-spec-editorial",
+      "severity": "nonblocking",
+      "kind": "editorial handoff defect",
+      "observation": "interaction-spec.md says Entire Manual centroid while governing text and visible references say Entire Manuscript.",
+      "next_action": "Correct in a revised handoff without changing export scope."
+    }
+  ],
+  "issue_adjudication": {
+    "ISSUE-001": "confirmed conflict",
+    "ISSUE-002": "confirmed conflict",
+    "ISSUE-003": "confirmed conflict",
+    "ISSUE-004": "confirmed conflict/unsupported per-document implication",
+    "ISSUE-005": "confirmed ambiguity, not a proven conflict; a one-list filter may satisfy CMT-003 but separate status sections do not",
+    "ISSUE-006": "confirmed nonblocking evidence limit",
+    "ISSUE-007": "confirmed nonblocking evidence limit"
+  },
+  "next_action": "Stop before G10; obtain product-owner direction, repair/revise the handoff and reconciliation, correct provenance, then rerun fresh S10 validation."
+}
