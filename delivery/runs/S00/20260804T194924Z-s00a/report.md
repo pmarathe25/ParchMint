@@ -6,7 +6,7 @@
 **Result:** passed
 **Baseline commit:** `6b29a978430ead47528e63b1e410e870c806dc11`
 **Candidate commit:** `e0239850893ea2e8880da2d8a0686ab1ee3fa322`
-**Output commit:** finalization commit (below)
+**Output commit:** `2e9b30d60f8801154db96c89c9fd35efc9eb25da`
 
 ## Scope and output
 
