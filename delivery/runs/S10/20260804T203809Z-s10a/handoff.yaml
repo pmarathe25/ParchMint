@@ -2,7 +2,7 @@ schema_version: 3
 run_role: implementation
 stage_id: S10
 run_id: 20260804T203809Z-s10a
-candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
+candidate_commit: "83fc7ac072213e88cfb3e95aba418c3ca5f90e80"
 output_commit: ""
 contracts_and_schema_versions:
   reconciliation: "2"
@@ -21,7 +21,7 @@ test_provenance:
   independent_test_run_id: ""
   charter_path: ""
   charter_commit: ""
-  candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
+  candidate_commit: "83fc7ac072213e88cfb3e95aba418c3ca5f90e80"
 commands:
   - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
   - "python3 delivery/runs/S10/20260804T203809Z-s10a/evidence/reconcile_traceability.py"

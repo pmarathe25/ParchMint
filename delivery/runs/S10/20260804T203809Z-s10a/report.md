@@ -5,13 +5,13 @@
 **Run role:** implementation
 **Result:** needs_approval
 **Baseline commit:** 1594f396fd0fa4f60ec235e396104f949b42376b
-**Candidate commit:** b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb
+**Candidate commit:** 83fc7ac072213e88cfb3e95aba418c3ca5f90e80
 **Output commit:** pending run-artifact finalization
 
 ## Scope and output
 
 - Files changed: the six-file `delivery/design-reconciliation/1.0.0/` package, the two S10-owned Penpot mapping columns in `delivery/traceability.csv`, and S10 evidence/run artifacts.
-- Requirements and design IDs: 185 frozen-handoff-applicable requirements receive traceable board/component UUID mappings; 79 component rows, 80 screen rows (70 unique board UUIDs), and all 20 Light/Dark baseline references were cross-checked.
+- Requirements and design IDs: 185 frozen-handoff-applicable requirements receive traceable board/component UUID mappings; all 79 component rows and all 80 exact screen rows have stable implementation targets and Penpot board associations (70 unique board UUIDs); all 20 Light/Dark baseline references were cross-checked.
 - Production, prototype, generated, or reference-only: non-production reconciliation and reference-only planning. No Tauri/application code or generated production output was added.
 
 ## Architecture

@@ -4,7 +4,7 @@ stage_id: S10
 run_id: 20260804T203809Z-s10a
 result: needs_approval
 baseline_commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
-candidate_commit: "b16e1a66c9e3f643c552bce9bb0dc9d01ec9e1bb"
+candidate_commit: "83fc7ac072213e88cfb3e95aba418c3ca5f90e80"
 output_commit: ""
 charter_commit: ""
 related_run_ids: [S00/20260804T194924Z-s00a, S00/20260804T201339Z-s00v]
@@ -25,7 +25,7 @@ test_tiers_completed: [tier_a]
 developer_tests_added: ["read-only reconciliation validator"]
 independent_tests_added: []
 requirements_addressed: ["185 frozen-handoff-applicable requirements mapped exactly in delivery/traceability.csv"]
-design_ids_addressed: ["79 Penpot component UUIDs", "70 unique Penpot board UUIDs", "20 Light/Dark baseline PNGs"]
+design_ids_addressed: ["79 Penpot component UUIDs", "80 exact screen-to-board mappings covering 70 unique Penpot board UUIDs", "20 Light/Dark baseline PNGs"]
 contracts_changed: []
 blocking_issues: [ISSUE-001, ISSUE-002, ISSUE-003, ISSUE-004, ISSUE-005]
 deviations: [ISSUE-006, ISSUE-007]
