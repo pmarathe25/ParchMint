@@ -1,0 +1,56 @@
+schema_version: 3
+pipeline_version: "1.6"
+status: active
+repository:
+  baseline_commit: "8bb34bd7fe733ca198404aee56d7af827bb3af77"
+  current_commit: "9d612258d03da09c1d91f5b1ccf93ffef7900eb5"
+governing_versions:
+  product_spec: "2.2"
+  architecture: "1.4"
+  design_brief: "2.5"
+  handoff_contract: "1.3"
+  implementation_plan: "1.5"
+  acceptance_plan: "1.3"
+  playbook: "1.6"
+approved_design_handoff:
+  path: "delivery/design-handoff/1.0.0"
+  version: "1.0.0"
+  manifest_sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"
+  checksums_file_sha256: "0dfe85a871ac9db19ee2f3dcae390e8f40c14a3f2df198b51e349ceb43a3b1bf"
+test_hosts:
+  windows:
+    github_hosted_runner: available
+    tier_b_automation: available
+    native_interactive: unconfirmed
+  macos:
+    github_hosted_runner: available
+    tier_b_automation: available
+    native_interactive: unconfirmed
+  linux:
+    github_hosted_runner: available
+    tier_b_automation: available
+    native_interactive: unconfirmed
+  evidence_limit: "GitHub-hosted automation is not native-interactive IME, screen-reader, clipboard, accessibility, or comparable evidence unless that interaction is actually performed and recorded."
+current_stage: S10
+accepted_handoffs:
+  S00:
+    status: accepted
+    implementation_run_id: 20260804T194924Z-s00a
+    implementation_candidate_commit: "b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+    implementation_handoff: delivery/runs/S00/20260804T194924Z-s00a/handoff.yaml
+    validation_run_id: 20260804T201339Z-s00v
+    validation_commit: "9d612258d03da09c1d91f5b1ccf93ffef7900eb5"
+    validation_handoff: delivery/runs/S00/20260804T201339Z-s00v/handoff.yaml
+    pull_request: "https://github.com/pmarathe25/ParchMint/pull/1"
+accepted_test_challenges:
+  S00:
+    required: false
+    exemption_reason: "S00 is non-production repository intake and creates no shipped behavior."
+    implementation_run_id: 20260804T194924Z-s00a
+approval_gates:
+  G10_design_reconciliation: pending
+  G20_material_deviation: not_required
+  G90_release: not_started
+blocked_issues: []
+pending_stages:
+  - S10

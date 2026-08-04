@@ -1,0 +1,14 @@
+{
+  "evidence_limit": "automation does not prove native IME, screen-reader, clipboard, accessibility, or interactive performance",
+  "governing_hashes": "passed",
+  "handoff_checksums": "passed",
+  "immutable_handoff": "content paths excluded; only approved metadata files changed",
+  "manifest_schema": "passed",
+  "reconciliation": "absent",
+  "references_specs_assets_fonts": "passed",
+  "requirements_exact": 259,
+  "runner_availability": "github-hosted windows/macos/linux available; native interactive unconfirmed",
+  "theme_appearance": "passed",
+  "traceability": "passed",
+  "traceability_line_endings": "lf"
+}

@@ -1,0 +1,92 @@
+schema_version: 3
+run_role: validation
+stage_id: S00
+run_id: 20260804T201339Z-s00v
+baseline_commit: "8bb34bd7fe733ca198404aee56d7af827bb3af77"
+candidate_commit: "b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+related_runs:
+  implementation_run_id: 20260804T194924Z-s00a
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: ""
+  verification_of_run_id: ""
+instruction_file: delivery/stage-agent-routing.md
+pipeline_state:
+  path: delivery/state.yaml
+  commit: "6b29a978430ead47528e63b1e410e870c806dc11"
+approved_design_handoff:
+  path: delivery/design-handoff/1.0.0
+  version: "1.0.0"
+  manifest_sha256: "8d24ec366280e5e411258d2f7877a9ef93b9b25a364e3a5b6560930be3d2f3d3"
+  checksums_file_sha256: "0dfe85a871ac9db19ee2f3dcae390e8f40c14a3f2df198b51e349ceb43a3b1bf"
+governing_inputs:
+  - path: README.md
+    version: current
+    sha256: "e0a2bdd2cff99c409fcb1388790dc67355d761b16e8e45a5c3b14a053d505d7a"
+  - path: docs/product/product-specification.md
+    version: "2.2"
+    sha256: "16870f6517ee65864e08761fd271f7618704225c6b7dd082505cf8bfeb611499"
+  - path: docs/architecture/architecture.md
+    version: "1.4"
+    sha256: "b4422602ba539ba5cf975808e53b4f5b8c902bdc9ccebc4b26adc18df84f5b33"
+  - path: docs/design/penpot-design-brief.md
+    version: "2.5"
+    sha256: "8919684a1c4bbc82198774d96ae691a38f8290ad7f5f968c6a2b436baa620c67"
+  - path: delivery/design-handoff-contract.md
+    version: "1.3"
+    sha256: "bf3b176241082ca664468c832b95df303c2a8e7375b79d6c42a4d8f229e691e6"
+  - path: delivery/implementation-plan.md
+    version: "1.5"
+    sha256: "7bd3bf589af619c0c051b61f6b641c3ea2e27322d3c704e286af33a8263ee449"
+  - path: delivery/acceptance-and-release-plan.md
+    version: "1.3"
+    sha256: "b73d49e8b65db9d9e856df8ec5a171f41821e428efdc66abc49ce75352a34adc"
+  - path: delivery/agent-playbook.md
+    version: "1.6"
+    sha256: "6491c93496dbb339c1da7f3b4c4dd9605cc25d12ff02a6dabda791c426046b36"
+  - path: delivery/stage-agent-routing.md
+    version: "1.0"
+    sha256: "3f7a5949f8108ce9de26bb3e01a16ce6667e3b182329dafc0a37142025e51a6d"
+  - path: delivery/stages/s00-repository-intake.md
+    version: current
+    sha256: "d4399bd995b0361d36066552d15495214cc2fdbf8774390d496ac4aed9b0e2d1"
+dependency_handoffs:
+  - delivery/runs/S00/20260804T194924Z-s00a/handoff.yaml
+approved_gates:
+  - product-owner-approved-design-handoff-1.0.0
+  - product-owner-authorized-handoff-approval-metadata-reconciliation
+ownership:
+  include: []
+  exclude:
+    - "**"
+independent_test:
+  required: false
+  exemption_reason: "Validation role; S00 implementation is non-production and independently-test exempt."
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs:
+      - integrated candidate and complete S00 run artifacts
+      - PR 1 metadata and check results
+      - governing inputs and approved frozen handoff
+    withheld_inputs: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S00/20260804T194924Z-s00a/evidence/validate_s00.py"
+  - "git diff --check 8bb34bd7fe733ca198404aee56d7af827bb3af77..b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+required_evidence:
+  - independent manifest/schema/checksum/theme/reference/inventory review
+  - independent requirement inventory and traceability review
+  - branch history and dispatched ownership review
+  - run-artifact schema/provenance and exemption review
+  - PR 1 head, draft state, merge state, and empty check rollup review
+  - exact evidence limitations and recommended disposition
+resource_constraints:
+  - validation-only; make no file or Git changes
+  - do not infer native or cross-platform execution from runner availability
+  - return pass, fail, blocked, or needs_approval with exact findings and next action

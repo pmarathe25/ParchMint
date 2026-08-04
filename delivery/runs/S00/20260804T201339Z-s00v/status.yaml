@@ -1,0 +1,34 @@
+schema_version: 3
+run_role: validation
+stage_id: S00
+run_id: 20260804T201339Z-s00v
+result: passed
+baseline_commit: "8bb34bd7fe733ca198404aee56d7af827bb3af77"
+candidate_commit: "b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+output_commit: "9d612258d03da09c1d91f5b1ccf93ffef7900eb5"
+charter_commit: ""
+related_run_ids: [20260804T194924Z-s00a]
+files_changed:
+  - delivery/runs/S00/20260804T201339Z-s00v/evidence/validation.json
+  - delivery/runs/S00/20260804T201339Z-s00v/status.yaml
+  - delivery/runs/S00/20260804T201339Z-s00v/handoff.yaml
+  - delivery/runs/S00/20260804T201339Z-s00v/report.md
+commands_run:
+  - "git diff --exit-code ed60454..b1b1e92 -- delivery/runs/S00/20260804T194924Z-s00a/dispatch.yaml"
+  - "git diff --name-only ed60454..b1b1e92"
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.0 --verify"
+  - "python3 delivery/runs/S00/20260804T194924Z-s00a/evidence/validate_s00.py"
+  - "git diff --check 8bb34bd7fe733ca198404aee56d7af827bb3af77..b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+  - "gh pr view 1 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup"
+  - "gh pr checks 1"
+platforms_tested: [linux]
+test_tiers_completed: [tier_a]
+developer_tests_added: []
+independent_tests_added: []
+requirements_addressed: ["all 259 current product requirement IDs checked for exact S00 traceability initialization"]
+design_ids_addressed: []
+contracts_changed: []
+blocking_issues: []
+deviations: []
+dependencies: []
+recommended_next_stages: [S10]
