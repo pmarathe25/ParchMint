@@ -5,7 +5,7 @@ run_id: 20260804T230332Z-s10p
 result: blocked
 baseline_commit: "951c0a05308e1047438c2efbe6066eb8942c1a54"
 candidate_commit: ""
-output_commit: ""
+output_commit: "72b85b66e23a5ab9c34a885699b4557133874abc"
 charter_commit: ""
 related_run_ids: [20260804T224650Z-s10x, 20260804T205500Z-s10v]
 files_changed:

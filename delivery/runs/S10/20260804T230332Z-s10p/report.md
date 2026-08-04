@@ -6,7 +6,7 @@
 **Result:** complete with native-source-export blocker
 **Baseline commit:** `951c0a05308e1047438c2efbe6066eb8942c1a54`
 **Candidate commit:** pending
-**Output commit:** pending Orchestrator finalization
+**Output commit:** `72b85b66e23a5ab9c34a885699b4557133874abc`
 
 ## Scope and output
 
