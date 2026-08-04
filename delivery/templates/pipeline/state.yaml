@@ -1,5 +1,5 @@
 schema_version: 3
-pipeline_version: "1.5"
+pipeline_version: "1.6"
 status: initialized
 repository:
   baseline_commit: ""
@@ -11,7 +11,7 @@ governing_versions:
   handoff_contract: "1.3"
   implementation_plan: "1.5"
   acceptance_plan: "1.3"
-  playbook: "1.5"
+  playbook: "1.6"
 approved_design_handoff:
   path: ""
   version: ""

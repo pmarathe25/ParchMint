@@ -19,6 +19,7 @@ This directory exists to turn the maintained product, architecture, and design d
 - `implementation-plan.md` — current v1 stage graph and implementation sequence.
 - `acceptance-and-release-plan.md` — temporary delivery gates that must become executable tests, CI checks, or maintained release procedures.
 - `agent-playbook.md` — orchestrator, independent-test, and approval workflow.
+- `stage-agent-routing.md` — authoritative per-stage implementation, independent-test, validation, worktree, and PR routing.
 - `stages/` — bounded instructions for implementation and independent test agents.
 - `templates/` — blueprints for handoff, reconciliation, pipeline, and release artifacts.
 

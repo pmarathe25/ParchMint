@@ -1,7 +1,7 @@
 # Orchestrator Agent Instructions
 
 **Stage role:** Pipeline controller  
-**Version:** 1.5
+**Version:** 1.6
 
 ## Mission
 
@@ -16,12 +16,13 @@ Read, in order:
 1. `AGENTS.md`
 2. `README.md`
 3. `delivery/agent-playbook.md`
-4. Product specification
-5. Architecture
-6. Implementation plan
-7. Acceptance plan
-8. Approved `delivery/design-handoff/<version>/design-manifest.yaml`
-9. All files in `delivery/stages/`
+4. `delivery/stage-agent-routing.md`
+5. Product specification
+6. Architecture
+7. Implementation plan
+8. Acceptance plan
+9. Approved `delivery/design-handoff/<version>/design-manifest.yaml`
+10. All files in `delivery/stages/`
 
 ## Initialize pipeline state
 
@@ -37,7 +38,7 @@ Never overwrite a prior active run. Use UTC run IDs `YYYYMMDDTHHMMSSZ-<short-id>
 
 ## Stage graph
 
-Use the canonical graph and dependencies in `delivery/implementation-plan.md`. Use the stage-file catalog in `delivery/agent-playbook.md`; do not maintain another copy here.
+Use the canonical graph and dependencies in `delivery/implementation-plan.md`, the stage-file catalog in `delivery/agent-playbook.md`, and the agent choices in `delivery/stage-agent-routing.md`; do not maintain another copy here.
 
 ## Dispatch protocol
 
@@ -62,6 +63,24 @@ For every production-behavior run:
 
 Apply the required/exempt stage classification and special cases from `delivery/implementation-plan.md`; do not maintain another list here.
 
+## Validation and PR protocol
+
+After the implementation candidate and applicable independent-test commit pass
+together:
+
+1. Combine them on a temporary integration branch.
+2. Push the branch and open a draft GitHub PR to protected `main`.
+3. Wait for the declared GitHub-hosted Windows/macOS/Linux checks.
+4. Dispatch a fresh validation agent using `delivery/stage-agent-routing.md`.
+5. Commit the validator's structured result and provenance in run evidence.
+6. Merge through the PR only when required CI and validation pass; never merge
+   directly into local `main`.
+
+The Orchestrator alone performs worktree management, integration Git operations,
+pushes, PR operations, and merges. Dispatched write agents may status/diff/add
+owned paths/commit only inside their assigned worktree. Validation analysts make
+no Git writes.
+
 ## Automatic acceptance
 
 Integrate only when:
@@ -75,6 +94,8 @@ Integrate only when:
 - Generated contract/token guards are clean where applicable.
 - `delivery/traceability.csv` remains complete; the implementation run updated its implementation/developer-test fields, and independent-test run artifacts provide the mappings the Orchestrator will record at acceptance.
 - Every required challenge has linked `test_charter` and `independent_test` runs; the latter names the implementation candidate and sealed charter, changes only test-owned paths, and passes with the candidate on the temporary integration branch.
+- A fresh validation agent selected by the routing file passed the integrated candidate, and its result/provenance is committed in run evidence.
+- The GitHub PR checks pass and integration occurs through the reviewed PR rather than a direct local merge.
 - No blocking issue, broad fork, unapproved deviation, or material new dependency exists.
 - Post-merge integration tests pass.
 

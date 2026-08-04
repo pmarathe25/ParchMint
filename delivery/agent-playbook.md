@@ -1,7 +1,7 @@
 # ParchMint Agent Playbook
 
 **Status:** Current automated workflow
-**Version:** 1.5
+**Version:** 1.6
 **Date:** 2026-08-04
 
 ## 1. Overview
@@ -14,9 +14,14 @@ Roles:
 2. **Orchestrator Agent:** owns pipeline state, dispatch, independent verification, integration, and approval stops.
 3. **Stage Agents:** execute one bounded stage or generated slice.
 4. **Independent Test Agent:** seals a requirements-first charter, then authors test-only changes against a candidate without using implementation reasoning as its oracle.
-5. **Validation Agent:** independently evaluates the integrated release candidate.
+5. **Validation Agent:** independently evaluates each integrated stage candidate and the final release candidate.
 
 The product owner controls product behavior, approved design versions, material architecture changes, distribution/licensing/security exceptions, and final release approval.
+
+`delivery/stage-agent-routing.md` is the source of truth for per-stage
+implementation, independent-test, and validation agent selection, plus worktree
+and pull-request restrictions. This playbook remains authoritative for pipeline
+mechanics.
 
 ## 2. Review gates
 
@@ -104,7 +109,7 @@ After the approved handoff is committed, give one lead agent:
 
 Prompt:
 
-> Read `AGENTS.md`, `delivery/agent-playbook.md`, and `delivery/stages/orchestrator.md`. Initialize the repository-backed pipeline and execute from S00. Automatically delegate each bounded stage and independent non-overlapping workstream to fresh subagents using isolated branches/worktrees where supported. Pair each production-behavior run with the requirements-first independent test challenge defined by the playbook; retain orchestration, verification, integration, and approval decisions in the primary agent. Do not rely on prior chat context. Stop only at G10, G20, G90, a defined stop condition, or an external credential/input requirement.
+> Read `AGENTS.md`, `delivery/agent-playbook.md`, `delivery/stage-agent-routing.md`, and `delivery/stages/orchestrator.md`. Initialize the repository-backed pipeline and execute from S00. Automatically delegate each bounded stage and independent non-overlapping workstream to fresh subagents using isolated branches/worktrees where supported. Pair each production-behavior run with the requirements-first independent test challenge defined by the playbook, then dispatch the separate validation pass defined by the routing file. Use GitHub pull requests and required CI checks for integration; retain orchestration, verification, integration, and approval decisions in the primary agent. Do not rely on prior chat context. Stop only at G10, G20, G90, a defined stop condition, or an external credential/input requirement.
 
 ## 8. Approve/resume G10
 
@@ -129,6 +134,7 @@ Resume prompt:
 ## 9. Stage instruction catalog
 
 The canonical ordering and dependencies are in `delivery/implementation-plan.md`.
+Agent selection and per-stage validation are in `delivery/stage-agent-routing.md`.
 
 | Stage | Instruction file |
 |---|---|
@@ -199,6 +205,19 @@ Independence is procedural, not a claim of filesystem isolation. Production bodi
 
 When an independent test exposes a defect, preserve the failed run and test commit and dispatch a production repair with the test commit as its baseline. The implementation or repair agent may not edit that test. After repair, dispatch a linked `independent_test` verification run against the repaired candidate and preserved tests; only the passing verification run is accepted. If the test is wrong or the governing input is ambiguous, return it to the Independent Test Agent or Orchestrator; record the correction and evidence instead of silently weakening the assertion.
 
+### 11.1 Separate stage validation
+
+After the implementation candidate and required independent-test commit pass
+together, dispatch a fresh validation agent selected by
+`delivery/stage-agent-routing.md`. The validator reviews the integrated candidate,
+PR/CI results, governing inputs, run artifacts, and applicable visible/native
+evidence. It does not implement fixes, edit tests, or change criteria.
+
+The Orchestrator commits the validator's structured result and provenance into
+the validation run evidence. A stage is not accepted until this separate
+validation passes. S130 is itself the final independent validation stage and
+does not require a second release validator.
+
 ## 12. Automatic verification/integration
 
 The Orchestrator independently confirms:
@@ -213,7 +232,9 @@ The Orchestrator independently confirms:
 8. No unapproved dependency/provenance/product/architecture deviation.
 9. Integration-branch post-merge tests pass.
 10. Every required `test_charter` run completed without candidate access, the linked independent-test diff stays within test ownership, and the paired candidate/test commits pass together.
-11. Independent-test traceability fields, pipeline state, and accepted implementation/test handoff pointers update atomically in the Orchestrator's acceptance commit.
+11. A separately selected validation agent passed the integrated candidate and its result/provenance is committed in run evidence.
+12. The GitHub PR checks pass and the PR is merged to protected `main`; no local direct merge substitutes for the reviewed PR path.
+13. Independent-test traceability fields, pipeline state, and accepted implementation/test/validation handoff pointers update atomically in the Orchestrator's acceptance commit.
 
 One bounded repair attempt is allowed for an ordinary implementation/test defect. Repeated failure, broad fork, data-loss risk, or governing change stops at G20.
 
@@ -254,6 +275,7 @@ Do not dispatch overlapping file/public-contract ownership in parallel.
 
 - Stage agents test their changes.
 - Independent Test Agents add requirements-first tests before applicable stage acceptance.
+- A separate Validation Agent checks every integrated stage candidate after applicable CI.
 - Orchestrator reruns stage gates.
 - S110 runs complete integrated suites and bounded fixes.
 - S130 independently validates and produces the unified release package.
