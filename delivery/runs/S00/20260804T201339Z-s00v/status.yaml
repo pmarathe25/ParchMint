@@ -1,0 +1,24 @@
+schema_version: 3
+run_role: validation
+stage_id: S00
+run_id: 20260804T201339Z-s00v
+result: blocked
+baseline_commit: "8bb34bd7fe733ca198404aee56d7af827bb3af77"
+candidate_commit: "b1b1e92bb59ba38c3f30a67dee995aa7b791256a"
+output_commit: ""
+charter_commit: ""
+related_run_ids: [20260804T194924Z-s00a]
+files_changed: []
+commands_run: []
+platforms_tested: []
+test_tiers_completed: []
+developer_tests_added: []
+independent_tests_added: []
+requirements_addressed: []
+design_ids_addressed: []
+contracts_changed: []
+blocking_issues:
+  - validation agent has not completed review
+deviations: []
+dependencies: []
+recommended_next_stages: []
