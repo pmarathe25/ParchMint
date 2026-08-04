@@ -1,8 +1,8 @@
 # ParchMint Penpot Design Brief
 
 **Status:** Current operational design brief; final handoff pending  
-**Version:** 2.4  
-**Date:** 2026-07-31
+**Version:** 2.5
+**Date:** 2026-08-04
 
 ## 1. Authority and scope
 
@@ -116,6 +116,8 @@ Define focus, selected, pressed, menu, dialog, tooltip, and error effects. Honor
 - Use familiar icon-only controls with accessible names/tooltips; Recently Deleted uses the shared trash icon.
 - Workspace body begins below the 52 px ribbon and ends above the 32 px status bar.
 - Explorer is left, working surface middle, Inspector right. The formatting toolbar spans editor panes only.
+- Explorer and Inspector are independently resizable between their semantic minimum and maximum width tokens. Their sections, fields, rows, and header content stretch to the available pane width; edge controls remain anchored to their semantic edge, including Global Search at the right edge of the Explorer header.
+- The central workspace consumes all width and height remaining after visible sidebars and splitters. Its active editor pane, tab strip, toolbar, and editor canvas resize with the window while the authored reading column remains bounded for readability.
 - Do not outline the focused editor pane. Communicate focus through tab-strip state and accessible state.
 - Status bar: Explorer visibility at left; Inspector visibility at far right; each uses selected mint treatment while shown. Contextual document History belongs in the status bar.
 - Settings, Export, and ordinary empty/loading/error states use the available main pane with centered outer margins; nested surfaces are reserved for true admonitions, dialogs, or confirmations.
