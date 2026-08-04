@@ -1,0 +1,16 @@
+schema_version: 3
+gate_id: G20
+status: approved
+baseline_commit: "de4e778f885118b536d524da89510b011a6262d9"
+artifact_paths:
+  - delivery/proposals/G20-S10-handoff-1.0.1-repair/proposal.md
+  - delivery/proposals/G20-S10-handoff-1.0.1-repair/options.yaml
+  - delivery/runs/S10/20260804T205500Z-s10v/evidence/validation.json
+  - delivery/runs/S10/20260804T224650Z-s10x/evidence/penpot_probe.json
+required_current_document_updates:
+  - delivery/design-handoff/1.0.1/
+  - delivery/design-reconciliation/1.0.1/
+  - delivery/state.yaml
+approved_by: product-owner
+approved_at: "2026-08-04T22:59:04Z"
+notes: "Product owner directed that v1 product requirements, not contradictory handoff component states, are canonical and approved the proposed repair direction. Exact handoff-candidate approval remains required before activation."

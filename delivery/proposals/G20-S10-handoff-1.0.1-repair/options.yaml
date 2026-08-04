@@ -1,0 +1,20 @@
+schema_version: 1
+proposal_id: G20-S10-handoff-1.0.1-repair
+options:
+  - id: product-canonical-repair
+    disposition: approved
+    description: "Keep v1 requirements unchanged; correct Penpot, handoff metadata, references, and reconciliation in immutable patch version 1.0.1."
+    consequences:
+      - "No product or architecture behavior changes."
+      - "Approved 1.0.0 remains immutable until exact 1.0.1 approval."
+      - "S10 and visual validation rerun against 1.0.1."
+  - id: expand-v1-to-component-variants
+    disposition: rejected
+    description: "Add scoped Search, partial Export, partial History restore, and per-document spellcheck behavior to v1."
+    consequences:
+      - "Would expand must-level product scope and require product/architecture/test changes."
+  - id: relabel-mismatched-references
+    disposition: rejected
+    description: "Keep the current mismatched PNG content and change only inventory labels."
+    consequences:
+      - "Would leave required crash-recovery and two-Manuscript visual evidence absent."
