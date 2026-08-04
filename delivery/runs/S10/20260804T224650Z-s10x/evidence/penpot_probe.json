@@ -1,0 +1,27 @@
+{
+  "active_file": {"id": "2be68822-842f-8175-8008-65eef13b0227", "name": "ParchMint", "revision": 1534},
+  "before_validation": [],
+  "after_validation": [],
+  "original_token_state": {
+    "penpot_theme": "dark",
+    "themes": [
+      {"id": "dc55a0ad-9907-801d-8008-6a1fb40bcf7a", "group": "Appearance", "name": "Light", "active": true, "active_sets": ["PM/Semantic/Light"]},
+      {"id": "469ffc7d-964a-806d-8008-6c323f6d3396", "group": "Appearance", "name": "Dark", "active": false, "active_sets": ["PM/Semantic/Dark"]},
+      {"id": "560a7e2f-3e5d-80c5-8008-6b976eddd033", "group": "Foundation", "name": "Default", "active": true, "active_sets": ["PM/Core", "PM/Motion", "PM/Layout/Desktop", "PM/Semantic/Common"]}
+    ],
+    "sets": [
+      {"id": "e96ec683-a782-802c-8008-65f345a6f8df", "name": "PM/Core", "active": true},
+      {"id": "e96ec683-a782-802c-8008-65f345a8a4ca", "name": "PM/Semantic/Light", "active": true},
+      {"id": "561e5da8-ffbd-8094-8008-69bfd1971676", "name": "PM/Semantic/Common", "active": true},
+      {"id": "469ffc7d-964a-806d-8008-6c323e81cfea", "name": "PM/Semantic/Dark", "active": false},
+      {"id": "e96ec683-a782-802c-8008-65f345a984cf", "name": "PM/Layout/Desktop", "active": true},
+      {"id": "e96ec683-a782-802c-8008-65f345aa4be8", "name": "PM/Motion", "active": true}
+    ]
+  },
+  "boards": [
+    {"id": "e96ec683-a782-802c-8008-65fb6192c697", "name": "PM / Screen / recovered-after-crash", "page": "11 Empty Loading Error Recovery States", "dimensions": [1440, 900], "visible_text": ["ParchMint recovered newer edits before opening the workspace.", "Recovered changes are ready", "RECOVERY SUMMARY", "37 recovered words · last edit 10:47 AM", "Discard", "Recover changes"], "identity_check": "pass"},
+    {"id": "e96ec683-a782-802c-8008-65f886281b72", "name": "PM / Screen / editor-dual-two-manuscript", "page": "04 Editor Workspace", "dimensions": [1440, 900], "visible_text": ["Chapter One", "Chapter Two", "Another manuscript document opens on the right.", "MANUSCRIPT", "RESEARCH", "Harbor Notes"], "identity_check": "fail: board visibly includes Research/Harbor Notes, not two Manuscript documents"
+    }
+  ],
+  "export": {"attempted": false, "reason": "Dispatch requires stopping before export when an authoritative board is wrong; no Penpot mutation or image post-processing performed."}
+}

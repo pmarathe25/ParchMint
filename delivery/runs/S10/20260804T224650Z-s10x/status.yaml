@@ -5,11 +5,18 @@ run_id: 20260804T224650Z-s10x
 result: blocked
 baseline_commit: "de4e778f885118b536d524da89510b011a6262d9"
 candidate_commit: ""
-output_commit: ""
+output_commit: "ff897b9217dd2c744c3b5b044cc9ac222c518053"
 charter_commit: ""
 related_run_ids: [20260804T203809Z-s10a, 20260804T205500Z-s10v]
-files_changed: []
-commands_run: []
+files_changed:
+  - delivery/runs/S10/20260804T224650Z-s10x/status.yaml
+  - delivery/runs/S10/20260804T224650Z-s10x/handoff.yaml
+  - delivery/runs/S10/20260804T224650Z-s10x/report.md
+  - delivery/runs/S10/20260804T224650Z-s10x/evidence/penpot_probe.json
+commands_run:
+  - "Penpot high-level overview"
+  - "Penpot execute_code minimal active-file probe"
+  - "Penpot execute_code bounded board identity/text probe"
 platforms_tested: []
 test_tiers_completed: []
 developer_tests_added: []
@@ -17,7 +24,7 @@ independent_tests_added: []
 requirements_addressed: []
 design_ids_addressed: []
 contracts_changed: []
-blocking_issues: [export-pending]
+blocking_issues: [editor-dual-board-identity-conflict]
 deviations: []
 dependencies: [connected-ParchMint-Penpot-file]
-recommended_next_stages: [S10-repair]
+recommended_next_stages: [S10-repair-after-board-correction]

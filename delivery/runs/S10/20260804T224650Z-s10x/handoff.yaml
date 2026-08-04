@@ -3,7 +3,7 @@ run_role: repair
 stage_id: S10
 run_id: 20260804T224650Z-s10x
 candidate_commit: ""
-output_commit: ""
+output_commit: "ff897b9217dd2c744c3b5b044cc9ac222c518053"
 contracts_and_schema_versions: {}
 ports: []
 implementations: []
@@ -17,7 +17,12 @@ test_provenance:
   charter_path: ""
   charter_commit: ""
   candidate_commit: ""
-commands: []
+commands:
+  - "Penpot high-level overview"
+  - "Penpot execute_code minimal active-file probe"
+  - "Penpot execute_code bounded board identity/text probe"
 native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+known_approved_limitations:
+  - "No PNG exports produced because the authoritative dual-editor board failed its required Manuscript identity check; dispatch explicitly forbids editing or exporting a wrong board."
+artifact_paths:
+  - delivery/runs/S10/20260804T224650Z-s10x/evidence/penpot_probe.json
