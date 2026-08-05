@@ -1,9 +1,9 @@
 schema_version: 2
 gate_id: G10
 handoff_version: "1.0.1"
-manifest_sha256: "0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14"
-reconciliation_commit: ""
-status: pending
-approved_by: ""
-approved_at: ""
-notes: "ISSUE-001 through ISSUE-005 and ISSUE-010 are resolved in this draft. Fresh independent Terra validation and product-owner approval of this exact checksum-valid 1.0.1 handoff and reconciliation remain required before G10 advances."
+manifest_sha256: "17e2cbe1b4dacd6b2c90b3e22a583ea525eec89d0b2aeea558c493289a28788f"
+reconciliation_commit: "bd238f6acd55c5008b13ce3eae1475b7f38c9b0a"
+status: approved
+approved_by: product-owner
+approved_at: "2026-08-05T05:37:06Z"
+notes: "Product owner approved exact candidate metadata commit bd238f6acd55c5008b13ce3eae1475b7f38c9b0a after fresh Terra validation evidence 5155460e9475c607ce7f6dd3596912ca6a972137 found no blocking defect. Later native, accessibility, contrast, performance, packaging, platform, and CI gates remain required."

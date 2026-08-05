@@ -1,14 +1,14 @@
 # ParchMint Design Reconciliation
 
-**Handoff version:** 1.0.1 (draft candidate; exact product-owner approval pending)
+**Handoff version:** 1.0.1 (approved)
 **Product specification version:** 2.2
 **Architecture version:** 1.4
 **Design brief version:** 2.5
-**Manifest checksum:** `0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14`
+**Manifest checksum:** `17e2cbe1b4dacd6b2c90b3e22a583ea525eec89d0b2aeea558c493289a28788f`
 
 ## 1. Validation result
 
-- Manifest/schema: parsed as schema version 2; status is draft and governing versions match the dispatch.
+- Manifest/schema: parsed as schema version 2; status is approved and governing versions match the accepted candidate.
 - All paths/checksums: regenerated after the refreshed native source and Light/Dark reference pair were installed.
 - `.penpot` source: refreshed user-exported archive from live file `2be68822-842f-8175-8008-65eef13b0227`, SHA-256 `2c41059ee5b6b5eb2099d1cc5e090dd42c91d0835ff97d66104b46610d20a35d`. ZIP integrity passes; Research and Harbor Notes are visible in Explorer while the two obsolete Harbor Notes pane tabs remain hidden.
 - Light/Dark tokens: complete; 57 semantic leaves per appearance with validated role parity, 282 total leaves, and no dangling aliases.
@@ -26,7 +26,7 @@ The icon index is the asset source; each of its 980 SVG checksums and viewBoxes 
 
 ## 4. Component and screen interpretation
 
-`implementation-map.yaml` maps all 79 component-matrix entries by stable family and target, and maps the 87 screen/reference inventory records to nine workspace-state families. It keeps project mutations with `ProjectCommandDispatcher`, history with `HistoryStore`, search with `SearchIndex`, spellcheck with `SpellcheckService`, editor content behind the ParchMint editor contract, and native dialogs/appearance/accelerators behind platform adapters. It expressly separates shared document/history authority from per-view cursor, selection, scroll, focus, composition, and local-find state.
+`implementation-map.yaml` maps all 79 component-matrix entries by stable family and target, and maps the 87 screen/reference inventory records to ten workspace-state families. It keeps project mutations with `ProjectCommandDispatcher`, history with `HistoryStore`, search with `SearchIndex`, spellcheck with `SpellcheckService`, editor content behind the ParchMint editor contract, and native dialogs/appearance/accelerators behind platform adapters. It expressly separates shared document/history authority from per-view cursor, selection, scroll, focus, composition, and local-find state.
 
 The traceability update contains only frozen Penpot board/component UUIDs, derives direct mappings from both inventories, and leaves all non-design columns and the 259 requirement IDs/order intact. Every remaining unmapped row has an explicit deferred, nonvisual/state, native/release, performance, or security disposition in the repair evidence; that does not assert a design mapping for a nonvisual system requirement.
 
@@ -44,7 +44,7 @@ Implement the declared F6 region order and surface tab orders; expose roles, nam
 
 ## 8. Conflicts and omissions
 
-## 1.0.0 → 1.0.1 candidate impact
+## 1.0.0 → 1.0.1 approved impact
 
 The complete 1.0.1 candidate retains the 79 component rows, expands the screen
 inventory to 87 rows to include the seven Page 13 reference boards, and keeps
@@ -55,17 +55,17 @@ unsupported Global Search, Export, History restore, and spellcheck states;
 defines the resolved-comments filter as narrowing one continuous unsectioned
 list; and corrects `Entire Manual centroid` to `Entire Manuscript`.
 
-ISSUE-001 through ISSUE-005 and ISSUE-010 are resolved in `open-issues.yaml`.
+All entries under `resolved_issues` are resolved in `open-issues.yaml`.
 The Explorer screen repair is source-verified and directly reviewed in the
 refreshed Light/Dark references. Source/font deviations and unproven native
-behavior remain nonblocking evidence limits. This
-reconciliation remains pending until the product owner approves this exact
-checksum-valid candidate.
+behavior remain nonblocking evidence limits assigned to later implementation
+and native-validation gates. Product-owner approval at G10 accepts this exact
+checksum-valid reconciliation without weakening those later gates.
 
 ## 9. Readiness
 
-- Ready to request fresh validation: deterministic token/asset import, shared shell mapping, workspace state decomposition, fixture plan, traceability mappings, and honest nonvisual dispositions are complete.
+- Approved for implementation: deterministic token/asset import, shared shell mapping, workspace state decomposition, fixture plan, traceability mappings, and honest nonvisual dispositions are complete.
 - Resolved design/product conflicts: ISSUE-001 through ISSUE-005; their rejected variants are not implementation instructions.
-- Required approval action: the product owner must review and approve this exact
-  checksum-valid 1.0.1 handoff and reconciliation, then set `approval.yaml` to
-  `approved` before G10 advances.
+- G10 approval: product owner approved exact candidate metadata commit
+  `bd238f6acd55c5008b13ce3eae1475b7f38c9b0a` after fresh Terra validation;
+  implementation may proceed subject to later stage gates and evidence limits.

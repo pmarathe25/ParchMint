@@ -28,4 +28,8 @@ All PM components are theme-sensitive because they consume semantic roles. Manda
 
 ## Remaining gate and evidence limits
 
-`open-issues.yaml` records ISSUE-001 through ISSUE-005 and ISSUE-010 as resolved in this candidate. ISSUE-006 and ISSUE-007 remain nonblocking evidence limits and later validation work, not permission to weaken requirements. G10 still requires fresh validation and product-owner approval of this exact 1.0.1 candidate.
+`open-issues.yaml` records the repaired conflicts as resolved. ISSUE-006 and
+ISSUE-007 remain nonblocking evidence limits assigned to later implementation
+and native-validation gates, not permission to weaken requirements. G10 is
+approved for exact candidate metadata commit
+`bd238f6acd55c5008b13ce3eae1475b7f38c9b0a`.
