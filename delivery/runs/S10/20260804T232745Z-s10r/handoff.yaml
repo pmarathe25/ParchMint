@@ -2,8 +2,8 @@ schema_version: 3
 run_role: repair
 stage_id: S10
 run_id: 20260804T232745Z-s10r
-candidate_commit: ""
-output_commit: ""
+candidate_commit: "238920eede91c1697e587ceed9d457a80818bfc4"
+output_commit: "238920eede91c1697e587ceed9d457a80818bfc4"
 contracts_and_schema_versions:
   design_handoff: "1.0.1-draft"
   reconciliation: "1.0.1-pending"
@@ -22,7 +22,7 @@ test_provenance:
   independent_test_run_id: ""
   charter_path: ""
   charter_commit: ""
-  candidate_commit: ""
+  candidate_commit: "238920eede91c1697e587ceed9d457a80818bfc4"
   exemption_reason: "Versioned design-handoff and reconciliation repair only; no shipped production behavior."
 commands:
   - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
