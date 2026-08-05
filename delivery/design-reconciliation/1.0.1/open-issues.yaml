@@ -1,0 +1,46 @@
+schema_version: 2
+handoff_version: "1.0.1"
+resolved_issues:
+  - id: ISSUE-001
+    requirements: [SEARCH-006, SEARCH-007]
+    disposition: resolved
+    resolution: "Removed the unsupported scopedsubtree state from PM/GlobalSearchPanel; Global Search remains project-wide with no scope selector."
+  - id: ISSUE-002
+    requirements: [EXP-001, EXP-002]
+    disposition: resolved
+    resolution: "Removed group and selected-documents states from PM/ExportDialog; Entire Manuscript is the fixed v1 scope."
+  - id: ISSUE-003
+    requirements: [HIST-007, HIST-008]
+    disposition: resolved
+    resolution: "Removed document and group-subtree states from PM/RestoreDialog; whole-project, restoring, and error remain."
+  - id: ISSUE-004
+    requirements: [SPELL-001, SPELL-002, SPELL-003]
+    disposition: resolved
+    resolution: "Removed disabledperdocument from PM/SpellcheckUnderline; the project-default language remains the only v1 language setting."
+  - id: ISSUE-005
+    requirements: [CMT-002, CMT-003]
+    disposition: resolved
+    resolution: "Defined the resolved filter as narrowing one continuous unsectioned thread list; the default is all threads and no status-separated sections exist."
+  - id: ISSUE-008-proposed
+    requirements: [SAVE-011, SAVE-012, SAVE-013]
+    disposition: resolved
+    resolution: "Replaced the Light/Dark error-recovery baselines with the authoritative recovered-after-crash repair exports while retaining their stable board and fixture IDs."
+  - id: ISSUE-009-proposed
+    requirements: [TREE-017, WS-006, EDIT-001, EDIT-002, EDIT-003, EDIT-004, EDIT-005]
+    disposition: resolved
+    resolution: "Replaced the Light/Dark editor-dual baselines and native source with the repaired two-Manuscript board; the four Research/Harbor Notes shapes are hidden."
+open_issues:
+  - id: ISSUE-006
+    severity: nonblocking
+    gate: G10
+    requirements: [APPR-002, APPR-007]
+    source: "specs/known-deviations.md DEV-002, DEV-003, DEV-005"
+    conflict: "Legacy sourcesanspro needs deterministic normalization; design-only boards are Light-only; System has no third screenshot."
+    required_decision: "Apply the manifest-approved import and behavioral validation rules recorded in implementation-map.yaml; no visual behavior change is authorized."
+  - id: ISSUE-007
+    severity: nonblocking
+    gate: G10
+    requirements: [PLAT-001, A11Y-001, A11Y-002, A11Y-003]
+    source: "specs/cross-platform-variants.md and specs/reference-fixtures.md"
+    conflict: "Static shared-platform references do not prove native menus, file dialogs, screen readers, IME, fonts, or OS spelling behavior."
+    required_decision: "Retain these as later native-platform gates; do not claim native acceptance from S10 evidence."

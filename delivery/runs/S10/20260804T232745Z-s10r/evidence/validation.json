@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "stage_id": "S10",
+  "run_id": "20260804T232745Z-s10r",
+  "result": "passed",
+  "checks": [
+    {
+      "name": "candidate-manifest-schema",
+      "result": "passed",
+      "detail": "schema v2"
+    },
+    {
+      "name": "complete-immutable-candidate",
+      "result": "passed",
+      "detail": "1.0.1 retains the complete 1.0.0 file topology"
+    },
+    {
+      "name": "candidate-checksums",
+      "result": "passed",
+      "detail": "1016 files covered"
+    },
+    {
+      "name": "approved-1.0.0-unchanged",
+      "result": "passed",
+      "detail": "1016 files covered"
+    },
+    {
+      "name": "draft-pending-approval",
+      "result": "passed",
+      "detail": "1.0.1 is draft with no approver or approval timestamp"
+    },
+    {
+      "name": "manifest-referenced-paths",
+      "result": "passed",
+      "detail": "35 referenced files exist"
+    },
+    {
+      "name": "native-source-zip-and-file-id",
+      "result": "passed",
+      "detail": "valid ZIP, expected file ID, and byte-identical user export"
+    },
+    {
+      "name": "authoritative-board-identity",
+      "result": "passed",
+      "detail": "two boards retain IDs, names, and 1440x900 dimensions"
+    },
+    {
+      "name": "approved-repair-shapes-hidden",
+      "result": "passed",
+      "detail": "four Research/Harbor Notes shapes are hidden"
+    },
+    {
+      "name": "no-material-archive-structural-drift",
+      "result": "passed",
+      "detail": "0 unexpected material shape changes; page identity stable=True"
+    },
+    {
+      "name": "four-repair-png-provenance",
+      "result": "passed",
+      "detail": "hashes, dimensions, and repair-run provenance match"
+    },
+    {
+      "name": "canonical-component-states",
+      "result": "passed",
+      "detail": "unsupported states removed; allowed RestoreDialog states retained"
+    },
+    {
+      "name": "comments-and-export-wording",
+      "result": "passed",
+      "detail": "canonical wording present"
+    },
+    {
+      "name": "stable-79-components-80-screens",
+      "result": "passed",
+      "detail": "mapping counts and Penpot IDs retained"
+    },
+    {
+      "name": "reconciliation-consistency",
+      "result": "passed",
+      "detail": "candidate paths/hash, mappings, resolved issues, and nonblocking limits agree"
+    },
+    {
+      "name": "traceability-integrity",
+      "result": "passed",
+      "detail": "259 rows parse and traceability is unchanged because stable IDs need no update"
+    },
+    {
+      "name": "lf-and-trailing-whitespace",
+      "result": "passed",
+      "detail": "22 text artifacts checked"
+    }
+  ],
+  "limits": [
+    "Static design/package evidence only; this does not prove native-interactive, accessibility, performance, or platform behavior."
+  ]
+}

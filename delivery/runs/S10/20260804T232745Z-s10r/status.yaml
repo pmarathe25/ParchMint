@@ -2,22 +2,46 @@ schema_version: 3
 run_role: repair
 stage_id: S10
 run_id: 20260804T232745Z-s10r
-result: blocked
+result: needs_approval
 baseline_commit: "e779b0c292a2481d57c988e563d1baffc9f4927d"
 candidate_commit: ""
 output_commit: ""
 charter_commit: ""
 related_run_ids: [20260804T203809Z-s10a, 20260804T205500Z-s10v, 20260804T230332Z-s10p]
-files_changed: []
-commands_run: []
+files_changed:
+  - .gitattributes
+  - delivery/design-handoff/1.0.1/
+  - delivery/design-reconciliation/1.0.1/
+  - delivery/runs/S10/20260804T230332Z-s10p/evidence/source/parchmint-ui.penpot
+  - delivery/runs/S10/20260804T232745Z-s10r/status.yaml
+  - delivery/runs/S10/20260804T232745Z-s10r/handoff.yaml
+  - delivery/runs/S10/20260804T232745Z-s10r/report.md
+  - delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py
+  - delivery/runs/S10/20260804T232745Z-s10r/evidence/validation.json
+commands_run:
+  - python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify
+  - python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py
+  - git diff --check
 platforms_tested: []
-test_tiers_completed: []
-developer_tests_added: []
+test_tiers_completed: [tier_a]
+developer_tests_added: [delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py]
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: [SEARCH-006, SEARCH-007, EXP-001, EXP-002, EXP-008, HIST-007, HIST-008, SPELL-001, SPELL-002, SPELL-003, CMT-002, CMT-003, SAVE-011, SAVE-012, SAVE-013, EDIT-001, EDIT-002, EDIT-003, EDIT-004, EDIT-005, TREE-017, WS-006]
+design_ids_addressed:
+  - PM/GlobalSearchPanel
+  - PM/ExportDialog
+  - PM/RestoreDialog
+  - PM/SpellcheckUnderline
+  - e96ec683-a782-802c-8008-65f886281b72
+  - e96ec683-a782-802c-8008-65fb6192c697
+  - 039701d9-7e2b-8031-8008-67b6372f8819
+  - 039701d9-7e2b-8031-8008-67b6372f445b
+  - 039701d9-7e2b-8031-8008-67ab4a5407a6
+  - 039701d9-7e2b-8031-8008-67ab4a5c9a97
 contracts_changed: []
-blocking_issues: [repair-pending]
-deviations: []
+blocking_issues: [exact-candidate-product-owner-approval]
+deviations:
+  - "Static design/package evidence only; native-interactive, accessibility, performance, and platform behavior remain unproven."
+  - "The 1.0.1 draft remains inactive; 1.0.0 is immutable and unchanged."
 dependencies: [G20-S10-handoff-1.0.1-repair, user-exported-native-Penpot-source]
-recommended_next_stages: [exact-candidate-approval]
+recommended_next_stages: [fresh-S10-validation, exact-candidate-approval]

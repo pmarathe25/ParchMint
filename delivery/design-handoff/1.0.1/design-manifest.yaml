@@ -1,0 +1,242 @@
+schema_version: 2
+handoff:
+  version: "1.0.1"
+  status: "draft" # draft | approved
+  product_spec_version: "2.2"
+  architecture_version: "1.4"
+  design_brief_version: "2.5"
+  handoff_contract_version: "1.3"
+  created_at: "2026-08-04T23:27:45Z"
+  approved_at: ""
+  approved_by: ""
+penpot:
+  version: "2.17.1-RC5"
+  file_id: "2be68822-842f-8175-8008-65eef13b0227"
+  source_file: "parchmint-ui.penpot"
+  pages:
+    - id: "2be68822-842f-8175-8008-65eef13b0228"
+      name: "00 Cover & Current Status"
+    - id: "e96ec683-a782-802c-8008-65f2d907cf6e"
+      name: "01 Foundations & Theme Tokens"
+    - id: "e96ec683-a782-802c-8008-65f2d90a9e10"
+      name: "02 Components"
+    - id: "e96ec683-a782-802c-8008-65f2d90ccb3e"
+      name: "03 Launcher & Project Creation"
+    - id: "e96ec683-a782-802c-8008-65f2d90f4b75"
+      name: "04 Editor Workspace"
+    - id: "e96ec683-a782-802c-8008-65f2d9112159"
+      name: "05 Cards Workspace"
+    - id: "e96ec683-a782-802c-8008-65f2d9128b15"
+      name: "06 Search & Replace"
+    - id: "e96ec683-a782-802c-8008-65f2d91405fb"
+      name: "07 Comments & Inspector"
+    - id: "e96ec683-a782-802c-8008-65f2d915ae69"
+      name: "08 History & Recently Deleted"
+    - id: "e96ec683-a782-802c-8008-65f2d9176c12"
+      name: "09 Project Settings & Appearance"
+    - id: "e96ec683-a782-802c-8008-65f2d9186d87"
+      name: "10 Export & Save States"
+    - id: "e96ec683-a782-802c-8008-65f2d91a23bd"
+      name: "11 Empty Loading Error Recovery States"
+    - id: "e96ec683-a782-802c-8008-65f2d91b53cc"
+      name: "12 Accessibility & Keyboard Focus"
+    - id: "e96ec683-a782-802c-8008-65f2d91ce9cd"
+      name: "13 Cross-Platform Variants"
+    - id: "e96ec683-a782-802c-8008-65f2d91f3376"
+      name: "14 Prototype Flows"
+    - id: "e96ec683-a782-802c-8008-65f2d92067d3"
+      name: "15 Handoff Inventory"
+themes:
+  system_behavior:
+    default: true
+    resolves_to: [light, dark]
+  sets:
+    - id: light
+      penpot_theme_id: "dc55a0ad-9907-801d-8008-6a1fb40bcf7a"
+      token_files: ["tokens/tokens.json"]
+      complete: true
+    - id: dark
+      penpot_theme_id: "469ffc7d-964a-806d-8008-6c323f6d3396"
+      token_files: ["tokens/tokens.json"]
+      complete: true
+  dark_manuscript_surface: true
+  semantic_role_parity_validated: true
+appearance:
+  settings_screen_id: "469ffc7d-964a-806d-8008-6c33b32674a9"
+  options: [system, light, dark]
+  live_open_window_update_specified: true
+  authored_content_unchanged_specified: true
+assets:
+  - file: "parchmint-ui.penpot"
+    kind: "penpot archive"
+    sha256: "f6b14e4447f33ea6d7262ec69ddee2a6794a2c4cf33f4a9fa9012668914bf3eb"
+  - file: "tokens/tokens.json"
+    kind: "design tokens"
+    sha256: "d0754fec54be1b9d4b10d85ce31c13ebee0466f9cf71035f6ab5376c5b92744e"
+  - file: "assets/icons/icon-index.json"
+    kind: "icon index"
+    note: "980 icon SVGs under assets/icons/; per-icon SHA-256 in the index"
+screens:
+  - id: launcher-default
+    screen: "launcher-recent"
+    page: "e96ec683-a782-802c-8008-65f2d90ccb3e"
+    board: "e96ec683-a782-802c-8008-65f767f20cfd"
+    themes: [light, dark]
+    references: ["references/light/launcher-light.png", "references/dark/launcher-dark.png"]
+  - id: editor-single-default
+    screen: "editor-single-default"
+    page: "e96ec683-a782-802c-8008-65f2d90f4b75"
+    board: "e96ec683-a782-802c-8008-65f7fdf858b9"
+    themes: [light, dark]
+    references: ["references/light/editor-single-light.png", "references/dark/editor-single-dark.png"]
+  - id: editor-dual-default
+    screen: "editor-dual-two-manuscript"
+    page: "e96ec683-a782-802c-8008-65f2d90f4b75"
+    board: "e96ec683-a782-802c-8008-65f886281b72"
+    themes: [light, dark]
+    references: ["references/light/editor-dual-light.png", "references/dark/editor-dual-dark.png"]
+  - id: cards-default
+    screen: "cards-manuscript-default"
+    page: "e96ec683-a782-802c-8008-65f2d9112159"
+    board: "e96ec683-a782-802c-8008-65f906f35093"
+    themes: [light, dark]
+    references: ["references/light/cards-light.png", "references/dark/cards-dark.png"]
+  - id: global-search-default
+    screen: "search-query-entry"
+    page: "e96ec683-a782-802c-8008-65f2d9128b15"
+    board: "e96ec683-a782-802c-8008-65f9972c44e6"
+    themes: [light, dark]
+    references: ["references/light/global-search-light.png", "references/dark/global-search-dark.png"]
+  - id: history-default
+    screen: "history-session-date-grouped"
+    page: "e96ec683-a782-802c-8008-65f2d915ae69"
+    board: "e96ec683-a782-802c-8008-65fa56f4c808"
+    themes: [light, dark]
+    references: ["references/light/history-light.png", "references/dark/history-dark.png"]
+  - id: settings-appearance-default
+    screen: "settings-appearance-system"
+    page: "e96ec683-a782-802c-8008-65f2d9176c12"
+    board: "469ffc7d-964a-806d-8008-6c33b32674a9"
+    themes: [light, dark]
+    references: ["references/light/settings-appearance-light.png", "references/dark/settings-appearance-dark.png"]
+  - id: export-default
+    screen: "export-project-output-controls"
+    page: "e96ec683-a782-802c-8008-65f2d9186d87"
+    board: "e96ec683-a782-802c-8008-65faf34784d8"
+    themes: [light, dark]
+    references: ["references/light/export-light.png", "references/dark/export-dark.png"]
+  - id: error-recovery-default
+    screen: "recovered-after-crash"
+    page: "e96ec683-a782-802c-8008-65f2d91a23bd"
+    board: "e96ec683-a782-802c-8008-65fb6192c697"
+    themes: [light, dark]
+    references: ["references/light/error-recovery-light.png", "references/dark/error-recovery-dark.png"]
+  - id: recently-deleted-default
+    screen: "recently-deleted"
+    page: "e96ec683-a782-802c-8008-65f2d915ae69"
+    board: "e96ec683-a782-802c-8008-65fa7a7978c7"
+    themes: [light, dark]
+    references: ["references/light/recently-deleted-light.png", "references/dark/recently-deleted-dark.png"]
+components:
+  - id: "PM/Button"
+    name: "Button"
+    penpot_component_id: "e96ec683-a782-802c-8008-65f522b059ea"
+    variants: ["Kind", "State"]
+    themes: [light, dark]
+  # The full 79-component matrix with archive IDs, variants, states, and
+  # requirement bindings lives in specs/component-matrix.csv.
+prototype_flows:
+  - id: appearance-cycle
+    name: "PM / Prototype Flow / appearance-cycle"
+  - id: comment-thread
+    name: "PM / Prototype Flow / comment-thread"
+  - id: companion-focus
+    name: "PM / Prototype Flow / companion-focus"
+  - id: create-and-write
+    name: "PM / Prototype Flow / create-and-write"
+  - id: delete-restore
+    name: "PM / Prototype Flow / delete-restore"
+  - id: export-entire-manuscript
+    name: "PM / Prototype Flow / export-entire-manuscript"
+  - id: global-search-replace
+    name: "PM / Prototype Flow / global-search-replace"
+  - id: history-restore
+    name: "PM / Prototype Flow / history-restore"
+  - id: organize-hierarchy
+    name: "PM / Prototype Flow / organize-hierarchy"
+  - id: save-failure-retry
+    name: "PM / Prototype Flow / save-failure-retry"
+  - id: spellcheck-dictionary
+    name: "PM / Prototype Flow / spellcheck-dictionary"
+platform_variants:
+  - id: windows
+    reference: "PM / Reference / Platform / Windows · linked"
+  - id: macos
+    reference: "PM / Reference / Platform / macOS · linked"
+  - id: linux
+    reference: "PM / Reference / Platform / Linux · linked"
+  - id: layout-1280x720
+    reference: "PM / Reference / Layout / layout-1280x720 · linked"
+  - id: layout-1440x900
+    reference: "PM / Reference / Layout / layout-1440x900 · linked"
+  - id: layout-1920x1080
+    reference: "PM / Reference / Layout / layout-1920x1080 · linked"
+  - id: layout-2560x1440
+    reference: "PM / Reference / Layout / layout-2560x1440 · linked"
+required_specs:
+  interaction_spec: "specs/interaction-spec.md"
+  component_matrix: "specs/component-matrix.csv"
+  screen_inventory: "specs/screen-inventory.csv"
+  keyboard_focus_map: "specs/keyboard-focus-map.md"
+  appearance_matrix: "specs/appearance-matrix.md"
+  cross_platform_variants: "specs/cross-platform-variants.md"
+  asset_inventory: "specs/asset-inventory.csv"
+  font_inventory: "specs/font-inventory.csv"
+  reference_fixtures: "specs/reference-fixtures.md"
+  known_deviations: "specs/known-deviations.md"
+reference_coverage:
+  required_core_screens:
+    - launcher
+    - editor-single
+    - editor-dual
+    - cards
+    - global-search
+    - history
+    - settings-appearance
+    - export
+    - error-recovery
+    - recently-deleted
+  light_complete: true
+  dark_complete: true
+known_deviations:
+  - id: DEV-001
+    title: "Reference plugin hashes vs packaged PNG bytes"
+    spec: "specs/known-deviations.md"
+    owner_action: "none for v1; packaged reference PNGs and their checksums are canonical"
+    severity: informational
+  - id: DEV-002
+    title: "Legacy sourcesanspro font id in component text"
+    spec: "specs/known-deviations.md"
+    owner_action: "normalize sourcesanspro to Source Sans 3 in the deterministic import pipeline"
+    severity: informational
+  - id: DEV-003
+    title: "Design-only screens authored once (Light)"
+    spec: "specs/known-deviations.md"
+    owner_action: "derive Dark visual references from semantic token resolution; no second board"
+    severity: informational
+  - id: DEV-004
+    title: "Prototype flows are page-local documentation, not a cross-page launcher"
+    spec: "specs/known-deviations.md"
+    owner_action: "validate interactions from interaction-spec.md and board metadata"
+    severity: informational
+  - id: DEV-005
+    title: "System appearance resolves at runtime; no System reference image"
+    spec: "specs/known-deviations.md"
+    owner_action: "matches APPR-001/002; no System screenshot"
+    severity: informational
+  - id: DEV-006
+    title: "Layout boards are reference-only, not production screens"
+    spec: "specs/known-deviations.md"
+    owner_action: "implement WS-011 layout contract from the reference boards"
+    severity: informational
+checksums_file: "checksums.sha256"

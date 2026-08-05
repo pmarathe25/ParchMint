@@ -4,20 +4,41 @@ stage_id: S10
 run_id: 20260804T232745Z-s10r
 candidate_commit: ""
 output_commit: ""
-contracts_and_schema_versions: {}
+contracts_and_schema_versions:
+  design_handoff: "1.0.1-draft"
+  reconciliation: "1.0.1-pending"
+  manifest_schema: "2"
+  reconciliation_schema: "2"
 ports: []
 implementations: []
 generated_bindings: []
-fixtures: []
+fixtures:
+  - "20 1440x900 Light/Dark references; four repaired baselines have S10 repair-run provenance."
 test_provenance:
-  developer_test_locations: []
+  developer_test_locations:
+    - delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py
   independent_test_locations: []
   test_charter_run_id: ""
   independent_test_run_id: ""
   charter_path: ""
   charter_commit: ""
   candidate_commit: ""
-commands: []
+  exemption_reason: "Versioned design-handoff and reconciliation repair only; no shipped production behavior."
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+  - "python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py"
+  - "git diff --check"
 native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+known_approved_limitations:
+  - "Static artifact validation cannot prove native dialogs, keyboard/focus behavior, screen readers, IME, spellcheck, performance, or platform behavior."
+  - "ISSUE-006 and ISSUE-007 remain nonblocking evidence limits."
+artifact_paths:
+  - delivery/design-handoff/1.0.1/
+  - delivery/design-reconciliation/1.0.1/
+  - delivery/runs/S10/20260804T232745Z-s10r/evidence/validation.json
+  - delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py
+candidate_provenance:
+  source_run: 20260804T230332Z-s10p
+  source_archive: delivery/runs/S10/20260804T230332Z-s10p/evidence/source/parchmint-ui.penpot
+  source_archive_sha256: f6b14e4447f33ea6d7262ec69ddee2a6794a2c4cf33f4a9fa9012668914bf3eb
+  exact_approval_action: "Product owner must approve this exact checksum-valid 1.0.1 handoff and reconciliation, then the Orchestrator may record G10 and activate the candidate."
