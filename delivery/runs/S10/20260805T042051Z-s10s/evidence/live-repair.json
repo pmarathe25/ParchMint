@@ -1,0 +1,41 @@
+{
+  "file": {"id": "2be68822-842f-8175-8008-65eef13b0227", "name": "ParchMint", "revision_before": 1541, "revision_after": 1545, "theme_restored": "Appearance/Dark", "validate_errors": 0},
+  "tree_invariant": "TREE-001",
+  "audit": {
+    "scope": "All PM / Screen production boards with an expanded Explorer, plus editor-same-document-two-views and both Manuscript/Research focus boards; Global Search and deliberately collapsed/hidden Explorer states excluded.",
+    "additional_root_violations": [],
+    "exceptions": ["Global Search replaces Explorer", "editor-both-sidebars-collapsed", "editor-explorer-collapsed"]
+  },
+  "boards": {
+    "editor-dual-two-manuscript": {
+      "id": "e96ec683-a782-802c-8008-65f886281b72", "bounds": "1440x900",
+      "roots": {"Manuscript": true, "Research": true},
+      "rows": {"Part One": true, "Chapter One": true, "Chapter Two": true, "Harbor Notes": true},
+      "pane_documents": {"primary": "Chapter One", "companion": "Chapter Two"},
+      "pane_tabs_hidden": ["039701d9-7e2b-8031-8008-67ab4a5407a6", "039701d9-7e2b-8031-8008-67ab4a5c9a97"],
+      "mutations": [
+        {"id": "039701d9-7e2b-8031-8008-67b6372f8819", "name": "PM / Sidebar / Section / Research", "before_hidden": true, "after_hidden": false},
+        {"id": "039701d9-7e2b-8031-8008-67b6372f445b", "name": "PM / Sidebar / Row / Harbor Notes", "before_hidden": true, "after_hidden": false}
+      ]
+    },
+    "editor-same-document-two-views": {
+      "id": "e96ec683-a782-802c-8008-65f89294547e", "bounds": "1440x900",
+      "roots": {"Manuscript": true, "Research": true}, "rows": {"Part One": true, "Chapter One": true, "Chapter Two": true, "Harbor Notes": true},
+      "pane_documents": {"primary": "Chapter One", "companion": "Chapter One"}, "mutations": []
+    },
+    "editor-dual-manuscript-research-left-focus": {
+      "id": "e96ec683-a782-802c-8008-65f86db30e62", "roots": {"Manuscript": true, "Research": true}, "rows": {"Part One": true, "Chapter One": true, "Chapter Two": true, "Harbor Notes": true}, "mutations": []
+    },
+    "editor-dual-manuscript-research-right-focus": {
+      "id": "e96ec683-a782-802c-8008-65f879cd4b83", "roots": {"Manuscript": true, "Research": true}, "rows": {"Part One": true, "Chapter One": true, "Chapter Two": true, "Harbor Notes": true}, "mutations": []
+    }
+  },
+  "visual_exports": {
+    "board": "editor-dual-two-manuscript", "size": "1440x900",
+    "dark": {"export_shape": "png", "direct_inspection": "both roots visible; Chapter One/Two separate panes; readable prose; fully dark surfaces"},
+    "light": {"export_shape": "png", "direct_inspection": "both roots visible; Chapter One/Two separate panes; readable prose"},
+    "native_source_export": {"status": "blocked", "error": "Error: No matching clause: ", "attempt": "File.export(\"penpot\") after mutation"},
+    "local_export_files": "not produced: connector returns image bytes in MCP response but no filesystem sink is exposed"
+  },
+  "mutation_scope": "Two hidden visibility flags only; no board, component, token, page, name, layout, or content mutation. Theme toggles used only for Light/Dark capture and restored to Dark."
+}

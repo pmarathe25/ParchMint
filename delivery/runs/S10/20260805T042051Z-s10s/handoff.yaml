@@ -18,6 +18,11 @@ test_provenance:
   charter_commit: ""
   candidate_commit: ""
 commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+native_evidence:
+  - "Penpot MCP live file revision 1545; File.validate() returned zero errors after mutation."
+  - "Direct connector image inspection for Light and Dark editor-dual-two-manuscript at 1440x900."
+  - "Both Explorer roots and separate Chapter One/Chapter Two panes visually confirmed; Dark surfaces fully dark."
+known_approved_limitations:
+  - "Native File.export(\"penpot\") remains unavailable in connected API; exact error recorded in evidence/live-repair.json."
+artifact_paths:
+  - delivery/runs/S10/20260805T042051Z-s10s/evidence/live-repair.json
