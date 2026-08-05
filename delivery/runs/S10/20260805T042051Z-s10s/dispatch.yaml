@@ -1,0 +1,101 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260805T042051Z-s10s
+baseline_commit: "8d345c32e6ff3b3358c605b16d4e53e75911a64e"
+candidate_commit: ""
+related_runs:
+  implementation_run_id: 20260804T203809Z-s10a
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: 20260805T040828Z-s10c
+  verification_of_run_id: 20260805T010549Z-s10v
+instruction_file: delivery/stages/design-change-reconciliation.md
+pipeline_state:
+  path: delivery/state.yaml
+  commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
+approved_design_handoff:
+  path: delivery/design-handoff/1.0.0
+  version: "1.0.0"
+draft_design_handoff:
+  path: delivery/design-handoff/1.0.1
+  version: "1.0.1"
+  status: draft
+governing_inputs:
+  - {path: docs/product/product-specification.md, version: "2.2", sha256: "16870f6517ee65864e08761fd271f7618704225c6b7dd082505cf8bfeb611499"}
+  - {path: docs/architecture/architecture.md, version: "1.4", sha256: "b4422602ba539ba5cf975808e53b4f5b8c902bdc9ccebc4b26adc18df84f5b33"}
+  - {path: docs/design/penpot-design-brief.md, version: "2.5", sha256: "8919684a1c4bbc82198774d96ae691a38f8290ad7f5f968c6a2b436baa620c67"}
+  - {path: delivery/runs/S10/20260805T040828Z-s10c/evidence/board-comparison.json, version: current, sha256: "c3228fd63d90c92ae1ed89114315549f820a41e9b7d215fb3cdef52aa1ec45e7"}
+  - {path: delivery/runs/S10/20260805T040828Z-s10c/evidence/recapture.json, version: current, sha256: "7cc9cbd278b63e3f49832895935b961462efb8aefef9efdbc61f76ea35cb88ce"}
+dependency_handoffs:
+  - delivery/runs/S10/20260805T040828Z-s10c/handoff.yaml
+approved_gates:
+  - G20-S10-handoff-1.0.1-repair
+  - product-owner-approved-in-place-1.0.1-repair
+  - product-owner-approved-live-screen-repair
+ownership:
+  include:
+    - delivery/runs/S10/20260805T042051Z-s10s/status.yaml
+    - delivery/runs/S10/20260805T042051Z-s10s/handoff.yaml
+    - delivery/runs/S10/20260805T042051Z-s10s/report.md
+    - delivery/runs/S10/20260805T042051Z-s10s/evidence/**
+  exclude:
+    - delivery/design-handoff/**
+    - delivery/design-reconciliation/**
+    - delivery/traceability.csv
+    - delivery/state.yaml
+    - delivery/proposals/**
+    - docs/**
+    - src/**
+    - packages/**
+    - apps/**
+independent_test:
+  required: false
+  exemption_reason: "Bounded Penpot screen-state restoration and reference export only; no shipped behavior."
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs:
+      - canonical product/design requirements
+      - prior Penpot repair and recapture/comparison evidence
+      - connected live ParchMint Penpot file
+      - product-owner approval to fix the affected live screens in place
+    withheld_inputs: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands:
+  - "file delivery/runs/S10/20260805T042051Z-s10s/evidence/exports/*.png"
+  - "identify delivery/runs/S10/20260805T042051Z-s10s/evidence/exports/*.png"
+  - "sha256sum delivery/runs/S10/20260805T042051Z-s10s/evidence/exports/*.png"
+  - "unzip -t delivery/runs/S10/20260805T042051Z-s10s/evidence/source/parchmint-ui.penpot"
+  - "git diff --check"
+required_evidence:
+  - minimal active-file identity/revision/theme probe and zero-error validation before mutation
+  - page-local visibility audit of every production screen with an expanded Explorer, including editor-dual-two-manuscript, editor-same-document-two-views, and both Manuscript/Research focus boards
+  - proof that every expanded Explorer always renders both Manuscript and Research section roots regardless of which documents are open; an empty Research hierarchy still renders its root
+  - restoration of the Research section root on every affected rendered board and of Research document rows only where the screen fixture actually contains those documents
+  - proof Harbor Notes pane tabs remain hidden on editor-dual-two-manuscript while Chapter One and Chapter Two remain its pane documents
+  - exact shape IDs and before/after hidden state for every mutation
+  - proof no unrelated board, component, token, page, name, or content mutation occurred
+  - zero-error validation after mutation and final live revision
+  - stabilized Light and Dark exports of editor-dual-two-manuscript at 1440x900
+  - direct visual inspection proving both Explorer roots, Chapter One/Two panes, readable prose, and fully dark Dark surfaces
+  - authoritative native Penpot source export after the live mutation, or an explicit external-input blocker if native export remains unavailable
+  - SHA-256, PNG dimensions, active-theme restoration, and exact evidence limits
+resource_constraints:
+  - all Penpot calls stay inside this patch worker to isolate high-volume output
+  - begin with a minimal active-file probe and bounded board-local audits
+  - mutate only hidden visibility state necessary to restore mandatory TREE-001 Explorer content
+  - treat Global Search-replaces-Explorer screens and deliberately collapsed/hidden Explorer states as the only visibility-audit exceptions
+  - on editor-dual-two-manuscript, unhide only PM / Sidebar / Section / Research (039701d9-7e2b-8031-8008-67b6372f8819) and PM / Sidebar / Row / Harbor Notes (039701d9-7e2b-8031-8008-67b6372f445b); keep both Harbor Notes pane-tab shapes hidden
+  - inspect all other production boards with an expanded Explorer and mutate only if their Manuscript or Research section root is actually hidden
+  - preserve distinct two-document versus same-document semantics, stable board IDs/names, PM component reuse, layout, content, focus, and semantic tokens
+  - after theme switching, wait for repeated semantic color probes to stabilize before export
+  - do not fabricate, image-generate, post-process, relabel, delete, or replace either board
+  - if any Penpot call stalls, verify partial state before retrying
+  - do not edit the draft handoff, reconciliation, traceability, prior validation evidence, state, proposals, docs, or production paths
+  - do not run Git write operations; Orchestrator owns commits and publishing
+  - leave candidate_commit/output_commit blank for Orchestrator finalization
