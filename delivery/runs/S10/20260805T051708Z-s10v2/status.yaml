@@ -1,0 +1,32 @@
+schema_version: 3
+run_role: validation
+stage_id: S10
+run_id: 20260805T051708Z-s10v2
+result: needs_approval
+baseline_commit: "bd238f6acd55c5008b13ce3eae1475b7f38c9b0a"
+candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
+output_commit: ""
+charter_commit: ""
+related_run_ids: [20260805T043444Z-s10i, 20260805T010549Z-s10v]
+files_changed:
+  - delivery/runs/S10/20260805T051708Z-s10v2/status.yaml
+  - delivery/runs/S10/20260805T051708Z-s10v2/handoff.yaml
+  - delivery/runs/S10/20260805T051708Z-s10v2/report.md
+  - delivery/runs/S10/20260805T051708Z-s10v2/evidence/validation.json
+commands_run:
+  - "python3 delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py"
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+  - "unzip -tq delivery/design-handoff/1.0.1/parchmint-ui.penpot"
+  - "git diff --exit-code 276baa3da311f127be8cc3f5e3386b05fa2ad55c -- delivery/design-handoff/1.0.0"
+  - "git diff --check 276baa3da311f127be8cc3f5e3386b05fa2ad55c..bd238f6acd55c5008b13ce3eae1475b7f38c9b0a -- . ':(exclude)delivery/design-handoff/1.0.1/parchmint-ui.penpot'"
+platforms_tested: [Linux structural tooling, static Penpot archive, direct Light/Dark reference inspection]
+test_tiers_completed: [tier_a, ui-review]
+developer_tests_added: []
+independent_tests_added: []
+requirements_addressed: [TREE-001, PRJ-010, WS-011, APPR-006, FMT-019, META-011, CARD-010, WORD-002, SPELL-004, SPELL-005, PLAT-001, PLAT-002, A11Y-005, A11Y-007, A11Y-009]
+design_ids_addressed: [PM/Screen/editor-dual-two-manuscript, PM/Screen/editor-same-document-two-views, PM/Sidebar, PM/SpellingContextMenu, Page-13-platform-and-layout-references]
+contracts_changed: []
+blocking_issues: []
+deviations: []
+dependencies: [product-owner-G10-approval-of-exact-candidate]
+recommended_next_stages: [G10-product-owner-approval]

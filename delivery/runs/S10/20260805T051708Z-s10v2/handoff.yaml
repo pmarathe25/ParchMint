@@ -1,0 +1,31 @@
+schema_version: 3
+run_role: validation
+stage_id: S10
+run_id: 20260805T051708Z-s10v2
+candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
+output_commit: ""
+contracts_and_schema_versions:
+  design_handoff: "1.0.1 draft"
+  reconciliation: "1.0.1 pending G10"
+ports: []
+implementations: []
+generated_bindings: []
+fixtures:
+  - "20 directly reviewed 1440x900 Light/Dark reference PNGs"
+test_provenance:
+  developer_test_locations: [delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py]
+  independent_test_locations: []
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  charter_path: ""
+  charter_commit: ""
+  candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
+commands:
+  - "python3 delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py"
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+native_evidence: []
+known_approved_limitations:
+  - "No CI checks are configured on PR #2; empty statusCheckRollup is not a pass."
+  - "Static visual/source evidence does not prove native interaction, measured contrast, accessibility, performance, packaging, or cross-platform runtime."
+artifact_paths:
+  - delivery/runs/S10/20260805T051708Z-s10v2/evidence/validation.json

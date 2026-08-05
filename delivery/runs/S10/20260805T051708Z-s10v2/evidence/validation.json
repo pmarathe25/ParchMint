@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "stage_id": "S10",
+  "run_id": "20260805T051708Z-s10v2",
+  "recorded_at": "2026-08-05T05:26:11Z",
+  "validator": {
+    "task": "/root/s10_validation_repaired",
+    "role": "analyst",
+    "model_tier": "Terra",
+    "procedure": "ui-review",
+    "fresh_for_candidate": true,
+    "write_policy": "read-only"
+  },
+  "candidate": {
+    "substantive_commit": "450e705238f381f3ab56cec389134adc8fae43d7",
+    "finalized_metadata_commit": "bd238f6acd55c5008b13ce3eae1475b7f38c9b0a",
+    "handoff_version": "1.0.1",
+    "manifest_sha256": "0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14"
+  },
+  "pull_request": {
+    "number": 2,
+    "url": "https://github.com/pmarathe25/ParchMint/pull/2",
+    "state": "open-draft",
+    "base": "main",
+    "head_commit": "bd238f6acd55c5008b13ce3eae1475b7f38c9b0a",
+    "merge_state": "CLEAN",
+    "status_checks": [],
+    "ci_disposition": "No checks configured; not treated as a pass."
+  },
+  "result": "needs_approval",
+  "blocking_findings": [],
+  "visual_review": {
+    "references_directly_inspected": 20,
+    "reference_pairs": 10,
+    "editor_dual_light": "Both Explorer roots and Harbor Notes visible; Chapter One and Chapter Two remain separate pane documents.",
+    "editor_dual_dark": "Same repaired state; application and manuscript surfaces fully dark and readable; no scrim.",
+    "other_references": "No blocking visual/product mismatch found across the remaining nine Light/Dark pairs."
+  },
+  "source_review": {
+    "file_id": "2be68822-842f-8175-8008-65eef13b0227",
+    "board_id": "e96ec683-a782-802c-8008-65f886281b72",
+    "board_bounds": [1440, 900],
+    "research_root_hidden": false,
+    "harbor_notes_row_hidden": false,
+    "obsolete_harbor_notes_tabs_hidden": true
+  },
+  "integrity": {
+    "repair_validator": "passed",
+    "handoff_checksum_records": 1016,
+    "penpot_zip": "passed",
+    "approved_1_0_0_immutable": true,
+    "diff_check": "passed"
+  },
+  "mapping_review": {
+    "components": 79,
+    "screens": 87,
+    "implementation_map_coverage": "87/87 exact",
+    "traceability_requirements": 259,
+    "unmapped_with_explicit_disposition": 60,
+    "saved_existing_mappings": ["SAVE-014", "EXP-009"],
+    "repaired_mapping": "WS-011",
+    "spell_004": "Spellcheck screen plus PM/SpellingContextMenu dictionaryerror only.",
+    "spell_005": "Inline underline plus word-anchored context menu."
+  },
+  "canonical_scope_review": {
+    "unsupported_variants_found": [],
+    "tree_001": "Both Manuscript and Research roots remain visible whenever Explorer is shown; only Search replacement and deliberately collapsed/hidden Explorer are exceptions.",
+    "distinct_dual_boards": true
+  },
+  "evidence_limits": [
+    "Static screenshots and Penpot structure do not prove native interaction or click behavior.",
+    "Shared editor state and undo, measured contrast, screen readers, IME, performance, packaging, and cross-platform runtime remain later gates.",
+    "An empty PR status-check rollup is not CI acceptance."
+  ],
+  "exact_next_action": "Obtain product-owner approval of exact handoff 1.0.1 and reconciliation metadata at bd238f6acd55c5008b13ce3eae1475b7f38c9b0a before advancing G10."
+}
