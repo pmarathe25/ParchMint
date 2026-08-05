@@ -4,6 +4,7 @@
 
 **Substantive candidate:** `450e705238f381f3ab56cec389134adc8fae43d7`  
 **Finalized candidate metadata / PR head:** `bd238f6acd55c5008b13ce3eae1475b7f38c9b0a`  
+**Validation evidence commit:** `5155460e9475c607ce7f6dd3596912ca6a972137`  
 **PR:** #2, open draft to `main`; exact head verified; no checks configured.
 
 ## Findings

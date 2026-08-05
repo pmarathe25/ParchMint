@@ -3,7 +3,7 @@ run_role: validation
 stage_id: S10
 run_id: 20260805T051708Z-s10v2
 candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
-output_commit: ""
+output_commit: "5155460e9475c607ce7f6dd3596912ca6a972137"
 contracts_and_schema_versions:
   design_handoff: "1.0.1 draft"
   reconciliation: "1.0.1 pending G10"
