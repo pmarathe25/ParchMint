@@ -52,6 +52,9 @@ ownership:
   exclude:
     - delivery/runs/S10/20260805T043444Z-s10i/dispatch.yaml
     - delivery/runs/S10/20260805T043444Z-s10i/evidence/source/**
+    - delivery/design-handoff/1.0.1/parchmint-ui.penpot
+    - delivery/design-handoff/1.0.1/references/light/editor-dual-light.png
+    - delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png
     - delivery/design-handoff/1.0.0/**
     - delivery/state.yaml
     - delivery/proposals/**
