@@ -1,0 +1,23 @@
+schema_version: 3
+run_role: validation
+stage_id: S10
+run_id: 20260805T010549Z-s10v
+result: blocked
+baseline_commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
+candidate_commit: "fa85a0b31ec9ca9cc9d1765520825cc67d958551"
+output_commit: ""
+charter_commit: ""
+related_run_ids: [20260804T203809Z-s10a, 20260804T205500Z-s10v, 20260804T224650Z-s10x, 20260804T230332Z-s10p, 20260804T232745Z-s10r]
+files_changed: []
+commands_run: []
+platforms_tested: []
+test_tiers_completed: []
+developer_tests_added: []
+independent_tests_added: []
+requirements_addressed: []
+design_ids_addressed: []
+contracts_changed: []
+blocking_issues: [validation-pending]
+deviations: []
+dependencies: [20260804T232745Z-s10r, PR-2]
+recommended_next_stages: [G10-exact-candidate-product-owner-review]
