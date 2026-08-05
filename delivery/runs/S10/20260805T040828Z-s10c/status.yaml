@@ -5,7 +5,7 @@ run_id: 20260805T040828Z-s10c
 result: needs_approval
 baseline_commit: "3d5d097cdb75b46e9b4409ca5f914b710a0190f8"
 candidate_commit: ""
-output_commit: ""
+output_commit: "1a5137211c8569fcdb0820bd4f551ff4f25d4d90"
 charter_commit: ""
 related_run_ids: [20260804T230332Z-s10p, 20260804T232745Z-s10r, 20260805T010549Z-s10v]
 files_changed:
