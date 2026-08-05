@@ -5,10 +5,14 @@ run_id: 20260805T042051Z-s10s
 result: completed_with_external_blocker
 baseline_commit: "8d345c32e6ff3b3358c605b16d4e53e75911a64e"
 candidate_commit: ""
-output_commit: ""
+output_commit: "dd7cef9c1677b93a747e8f2b89f6a665e592a40f"
 charter_commit: ""
 related_run_ids: [20260805T040828Z-s10c, 20260805T010549Z-s10v]
-files_changed: [delivery/runs/S10/20260805T042051Z-s10s/evidence/live-repair.json]
+files_changed:
+  - delivery/runs/S10/20260805T042051Z-s10s/status.yaml
+  - delivery/runs/S10/20260805T042051Z-s10s/handoff.yaml
+  - delivery/runs/S10/20260805T042051Z-s10s/report.md
+  - delivery/runs/S10/20260805T042051Z-s10s/evidence/live-repair.json
 commands_run:
   - python3 -m json.tool delivery/runs/S10/20260805T042051Z-s10s/evidence/live-repair.json
   - git diff --check

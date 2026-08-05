@@ -6,7 +6,7 @@
 **Result:** bounded live repair complete; native source export externally blocked
 **Baseline commit:** `8d345c32e6ff3b3358c605b16d4e53e75911a64e`
 **Candidate commit:** blank (Orchestrator owns finalization)
-**Output commit:** blank
+**Output commit:** `dd7cef9c1677b93a747e8f2b89f6a665e592a40f`
 
 ## Result
 
