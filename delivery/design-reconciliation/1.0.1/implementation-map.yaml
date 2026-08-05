@@ -165,6 +165,16 @@ screens:
       - {screen_id: error-recovery-dark, penpot_board_id: e96ec683-a782-802c-8008-65fb6192c697}
       - {screen_id: error-recovery-light, penpot_board_id: e96ec683-a782-802c-8008-65fb6192c697}
       - {screen_id: unsupported-pasted-image-light, penpot_board_id: e96ec683-a782-802c-8008-65fb56ee8f75}
+  - workspace_state: platform-and-layout-references
+    code_target: "reference-only; no production route. Platform adapters and native acceptance own runtime menus, dialogs, chrome, scaling, and resize enforcement."
+    inventory_screens:
+      - {screen_id: platform-windows-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68ad0591c1f0}
+      - {screen_id: platform-macos-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68ad06fe7e7e}
+      - {screen_id: platform-linux-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68ad0874c501}
+      - {screen_id: layout-1280x720-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68ac7f8d72b3}
+      - {screen_id: layout-1440x900-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68ac809dae04}
+      - {screen_id: layout-1920x1080-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68acee88e488}
+      - {screen_id: layout-2560x1440-reference, penpot_board_id: c5362ef2-ec03-8060-8008-68acefeb81c9}
 interactions:
   - id: companion-focus
     interpretation: Toolbar and Inspector target only the focused view; shared content/history is distinct from each view's independent selection, scroll, focus, composition, and local-search state.
@@ -192,3 +202,10 @@ assets:
     - Preserve source SVG and accessibility intent; do not rasterize or optimize destructively during import.
     - Resolve token-colored fill at render time; no theme-specific icon swap is approved.
     - Emit a sorted manifest with source checksum/version and make CI regenerate/copy then fail on a dirty diff.
+s10_repair_interpretation:
+  tree_001: Whenever Explorer is shown, render Manuscript and Research roots as independent disclosure sections even when Research has no open document. The only exclusions are Global Search replacing Explorer and deliberately collapsed/hidden Explorer states.
+  distinct_dual_boards:
+    two_manuscript: {board: e96ec683-a782-802c-8008-65f886281b72, state: "Chapter One primary and Chapter Two companion"}
+    same_document_two_views: {board: e96ec683-a782-802c-8008-65f89294547e, state: "Chapter One in both panes with independent scroll and selection"}
+    rule: Neither board substitutes for or deletes the other.
+  evidence_boundary: Page 13 and static references support design mapping only; native window behavior, contrast measurement, and accessibility interaction remain later gates.

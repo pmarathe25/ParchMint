@@ -1,0 +1,70 @@
+schema_version: 1
+stage_id: S10
+run_id: 20260805T043444Z-s10i
+purpose: >-
+  Explicit dispositions for requirements with no Penpot screen or component ID.
+  Absence of an ID is not a claim that the requirement is absent from v1; it
+  records that the requirement has no honest visual/component mapping in this
+  draft handoff.
+categories:
+  deferred:
+    requirements: [PLAT-004, TREE-014, TREE-015, META-010, HIST-011, RES-004]
+    evidence: docs/product/product-specification.md
+  nonvisual_state_or_data_contract:
+    requirements:
+      - PLAT-003
+      - TITLE-001
+      - TITLE-002
+      - TITLE-003
+      - TITLE-004
+      - TITLE-005
+      - TITLE-006
+      - TITLE-007
+      - TITLE-008
+      - CMT-013
+      - CMT-014
+      - UNDO-001
+      - UNDO-002
+      - UNDO-003
+      - UNDO-004
+      - UNDO-005
+      - UNDO-006
+      - UNDO-007
+      - RES-001
+      - RES-002
+      - RES-003
+      - WORD-003
+      - WORD-004
+      - WORD-005
+      - DATA-002
+      - DATA-003
+      - DATA-004
+      - DATA-006
+      - DATA-007
+      - DATA-008
+      - DATA-009
+      - DATA-010
+      - DATA-011
+    evidence: docs/product/product-specification.md
+  native_or_release_validation_only:
+    requirements: [PLAT-005, SPELL-006, A11Y-006, A11Y-008]
+    evidence: delivery/design-handoff/1.0.1/specs/cross-platform-variants.md
+  performance_or_responsiveness_gate:
+    requirements:
+      - PERF-001
+      - PERF-002
+      - PERF-005
+      - PERF-006
+      - PERF-009
+      - PERF-010
+      - PERF-011
+      - PERF-013
+      - PERF-014
+      - PERF-015
+    evidence: docs/product/product-specification.md
+  security_or_supply_chain_control:
+    requirements: [SEC-002, SEC-003, SEC-004, SEC-005, SEC-006, SEC-007, SEC-008]
+    evidence: docs/product/product-specification.md
+limits:
+  - Static Penpot evidence cannot prove behavior, data integrity, native runtime, performance, security, or accessibility interaction.
+  - These dispositions must remain visible to later implementation and validation stages; they are not exemptions from their requirements.

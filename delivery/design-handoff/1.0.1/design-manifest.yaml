@@ -69,7 +69,7 @@ appearance:
 assets:
   - file: "parchmint-ui.penpot"
     kind: "penpot archive"
-    sha256: "f6b14e4447f33ea6d7262ec69ddee2a6794a2c4cf33f4a9fa9012668914bf3eb"
+    sha256: "2c41059ee5b6b5eb2099d1cc5e090dd42c91d0835ff97d66104b46610d20a35d"
   - file: "tokens/tokens.json"
     kind: "design tokens"
     sha256: "d0754fec54be1b9d4b10d85ce31c13ebee0466f9cf71035f6ab5376c5b92744e"

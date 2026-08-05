@@ -28,7 +28,11 @@ resolved_issues:
   - id: ISSUE-009-proposed
     requirements: [TREE-017, WS-006, EDIT-001, EDIT-002, EDIT-003, EDIT-004, EDIT-005]
     disposition: resolved
-    resolution: "Replaced the Light/Dark editor-dual baselines and native source with the repaired two-Manuscript board; the four Research/Harbor Notes shapes are hidden."
+    resolution: "The repaired two-Manuscript board retains distinct Chapter One and Chapter Two panes. Research and Harbor Notes are visible in Explorer; only the two obsolete Harbor Notes pane tabs remain hidden. Fresh source evidence is recorded by S10i."
+  - id: ISSUE-010-proposed
+    requirements: [TREE-001, APPR-005, APPR-008, EDIT-001, EDIT-002, EDIT-003, EDIT-004, EDIT-005, WS-006]
+    disposition: resolved
+    resolution: "The refreshed 1440x900 Light product-owner export and Dark current-board archive thumbnail were directly reviewed. Both show Manuscript and Research roots, Harbor Notes, and separate Chapter One/Chapter Two panes; Dark remains fully dark and readable."
 open_issues:
   - id: ISSUE-006
     severity: nonblocking

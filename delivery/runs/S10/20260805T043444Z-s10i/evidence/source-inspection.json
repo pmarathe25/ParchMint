@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "source": {
+    "path": "delivery/design-handoff/1.0.1/parchmint-ui.penpot",
+    "sha256": "2c41059ee5b6b5eb2099d1cc5e090dd42c91d0835ff97d66104b46610d20a35d",
+    "size_bytes": 18916938,
+    "zip_integrity": "passed",
+    "file_id": "2be68822-842f-8175-8008-65eef13b0227"
+  },
+  "board": {
+    "id": "e96ec683-a782-802c-8008-65f886281b72",
+    "name": "editor-dual-two-manuscript",
+    "bounds": [1440, 900],
+    "pane_documents": {"primary": "Chapter One", "companion": "Chapter Two"}
+  },
+  "shape_visibility": {
+    "039701d9-7e2b-8031-8008-67b6372f8819": {"name": "PM / Sidebar / Section / Research", "hidden": false},
+    "039701d9-7e2b-8031-8008-67b6372f445b": {"name": "PM / Sidebar / Row / Harbor Notes", "hidden": false},
+    "039701d9-7e2b-8031-8008-67ab4a5407a6": {"name": "PM / EditorPaneHeader / Tab / Harbor Notes", "hidden": true},
+    "039701d9-7e2b-8031-8008-67ab4a5c9a97": {"name": "PM / EditorPaneHeader / Tab / Harbor Notes", "hidden": true}
+  },
+  "reference_files": {
+    "light": {"path": "delivery/design-handoff/1.0.1/references/light/editor-dual-light.png", "sha256": "48905595473756d2b06c9df8f25c3e5e5b9963c7b469ca647305d31e84543373", "dimensions": [1440, 900], "source": "product-owner export from repaired live board"},
+    "dark": {"path": "delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png", "sha256": "e8ec7283998a5423a73440be42393729c884b3171085f4254a5d8785d5b49d5c", "dimensions": [1440, 900], "source": "current-board thumbnail from the verified refreshed archive"}
+  },
+  "direct_visual_review": {
+    "light": "Manuscript and Research roots plus Harbor Notes are visible; Chapter One and Chapter Two remain in separate panes.",
+    "dark": "Same Explorer and pane state is visible; application and manuscript surfaces are fully dark and readable."
+  },
+  "evidence_limit": "Archive structure verifies visibility flags and board dimensions, not rendered pixels or native application behavior."
+}

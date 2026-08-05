@@ -5,7 +5,7 @@
 | Ownership | Requirements/design inputs | Bounded output | Verification |
 |---|---|---|---|
 | `packages/design-system` | tokens, icons, PM primitives | deterministic token/icon importer, generated CSS/TS/manifests, semantic primitive components | importer dirty diff, source checksums, Light/Dark component fixtures |
-| `desktop-ui/workspace-shell` | PM shell, Explorer, Inspector, status, Appearance | mock-service launcher and all navigable workspace shells; System/Light/Dark propagation | keyboard/focus fixture, 20 reference captures, no hard-coded colors |
+| `desktop-ui/workspace-shell` | PM shell, Explorer, Inspector, status, Appearance; TREE-001 root invariant | mock-service launcher and all navigable workspace shells; System/Light/Dark propagation; both roots whenever Explorer is shown | keyboard/focus fixture, 20 reference captures, no hard-coded colors |
 | `desktop-ui/hierarchy-cards` | PM Tree/Card family | virtualized hierarchy/cards, visual drag preview and selection only | deep-tree and Cards fixtures; platform modifier contract |
 | `desktop-ui/dialog-feedback` | launcher/export/recovery/shared feedback | dialogs, menus, loading/error/recovery presentations against mocks | focus restoration, reduced-motion and live-region fixtures |
 
@@ -28,4 +28,4 @@ All PM components are theme-sensitive because they consume semantic roles. Manda
 
 ## Remaining gate and evidence limits
 
-`open-issues.yaml` records ISSUE-001 through ISSUE-005 and the repaired visual-reference mismatches as resolved in this candidate. ISSUE-006 and ISSUE-007 remain nonblocking evidence limits and later validation work, not permission to weaken requirements. G10 still requires product-owner approval of this exact 1.0.1 candidate.
+`open-issues.yaml` records ISSUE-001 through ISSUE-005 and ISSUE-010 as resolved in this candidate. ISSUE-006 and ISSUE-007 remain nonblocking evidence limits and later validation work, not permission to weaken requirements. G10 still requires fresh validation and product-owner approval of this exact 1.0.1 candidate.

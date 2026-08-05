@@ -1,9 +1,9 @@
 schema_version: 2
 gate_id: G10
 handoff_version: "1.0.1"
-manifest_sha256: "8e1d2ff8763a09cb457a64a290b826125d984fada5241ae4512425c5ee5b210f"
+manifest_sha256: "0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14"
 reconciliation_commit: ""
 status: pending
 approved_by: ""
 approved_at: ""
-notes: "ISSUE-001 through ISSUE-005 and the two visual-reference mismatches are resolved in this draft candidate. Product-owner approval of this exact checksum-valid 1.0.1 handoff and reconciliation remains required before G10 advances."
+notes: "ISSUE-001 through ISSUE-005 and ISSUE-010 are resolved in this draft. Fresh independent Terra validation and product-owner approval of this exact checksum-valid 1.0.1 handoff and reconciliation remain required before G10 advances."

@@ -20,8 +20,8 @@ Every core screen has a Light and Dark baseline. System is validated behaviorall
 | launcher-default | Dark | shared | 1440 | 900 | 1 | launcher-default / recent projects | references/dark/launcher-dark.png | native chrome mask; row focus/name review |
 | editor-single-default | Light | shared | 1440 | 900 | 1 | editor-single-default / primary focused | references/light/editor-single-light.png | inspect toolbar/tab focus and readable column |
 | editor-single-default | Dark | shared | 1440 | 900 | 1 | editor-single-default / primary focused | references/dark/editor-single-dark.png | require fully dark manuscript canvas |
-| editor-dual-default | Light | shared | 1440 | 900 | 1 | editor-dual-default / companion focused | references/light/editor-dual-light.png | inspect independent-pane visual state |
-| editor-dual-default | Dark | shared | 1440 | 900 | 1 | editor-dual-default / companion focused | references/dark/editor-dual-dark.png | inspect focused/unfocused distinction |
+| editor-dual-default | Light | shared | 1440 | 900 | 1 | editor-dual-default / Chapter One plus Chapter Two | references/light/editor-dual-light.png | both Explorer roots visible; inspect distinct-pane state |
+| editor-dual-default | Dark | shared | 1440 | 900 | 1 | editor-dual-default / Chapter One plus Chapter Two | references/dark/editor-dual-dark.png | both Explorer roots visible; inspect focused/unfocused distinction and dark canvas |
 | cards-default | Light | shared | 1440 | 900 | 1 | cards-default / expanded hierarchy | references/light/cards-light.png | inspect hierarchy, selection, metadata read-only state |
 | cards-default | Dark | shared | 1440 | 900 | 1 | cards-default / expanded hierarchy | references/dark/cards-dark.png | inspect hierarchy and contrast |
 | global-search-default | Light | shared | 1440 | 900 | 1 | global-search-default / query entry | references/light/global-search-light.png | Explorer replaced; no scope selector |
@@ -40,6 +40,7 @@ Every core screen has a Light and Dark baseline. System is validated behaviorall
 ## Semantic checks
 
 - Layout hierarchy, spacing, resizable panes, disclosure, truncation, wrapping, and 1280x720 minimum contract.
+- On every shown Explorer capture, Manuscript and Research roots are both visible even with no Research document open. Global Search replacement and explicitly collapsed/hidden Explorer fixtures are the only exclusions.
 - Focus/selection/active/unfocused and keyboard state; no color-only indication.
 - Dark manuscript canvas, semantic token consumption, and Appearance propagation without authored-content/output change.
 - Search, comments, spellcheck, save/error/recovery, history restore, and Entire Manuscript export constraints.

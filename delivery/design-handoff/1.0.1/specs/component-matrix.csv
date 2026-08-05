@@ -1,5 +1,5 @@
 component_id,penpot_component_id,name,variants,states,themes,requirements,implementation_target,notes
-PM/AppearanceChoice,469ffc7d-964a-806d-8008-6c9283050cac,AppearanceChoice,Selection,,light|dark,,production,
+PM/AppearanceChoice,469ffc7d-964a-806d-8008-6c9283050cac,AppearanceChoice,Selection,,light|dark,APPR-006,production,Same semantic choice structure in Light and Dark; token implementation contract is in appearance-matrix.md.
 PM/Button,e96ec683-a782-802c-8008-65f522b059ea,Button,"Kind,State",,light|dark,,production,
 PM/Checkbox,e96ec683-a782-802c-8008-65f59d52590f,Checkbox,,"unchecked,checked,mixed,focus-visible,disabled",light|dark,"EXP-003,A11Y-001",production,
 PM/CommentAnchorState,e96ec683-a782-802c-8008-65f6958ed787,CommentAnchorState,State,"range,position,document-level,active",light|dark,"CMT-005,CMT-006,CMT-010,CMT-011",production,
@@ -24,7 +24,7 @@ PM/EditorPaneHeader,e96ec683-a782-802c-8008-660773416c6c,EditorPaneHeader,,"mult
 PM/EmptyState,e96ec683-a782-802c-8008-65f5a56d7081,EmptyState,,"first-launch,no-results,empty-root",light|dark,PRJ-002,production,
 PM/ErrorBanner,e96ec683-a782-802c-8008-65f709a7779e,ErrorBanner,,"save,history,search,export,canonical-file",light|dark,"HIST-009,SAVE-013",production,
 PM/ExportDialog,e96ec683-a782-802c-8008-65f7076a5ebf,ExportDialog,,"entire-manuscript,exporting,success,failure",light|dark,EXP-001–010,production,
-PM/FocusVisible,e96ec683-a782-802c-8008-65f5a74ac4f2,FocusVisible,,focus-visible,light|dark,A11Y-002,production,
+PM/FocusVisible,e96ec683-a782-802c-8008-65f5a74ac4f2,FocusVisible,,focus-visible,light|dark,"A11Y-002,A11Y-009",production,Focus ring is measured against both token sets during later implementation/native validation.
 PM/FormattingToolbar,e96ec683-a782-802c-8008-65f644651aae,FormattingToolbar,,"alwaysvisible,focused-viewtarget,mixedselection,disabledcommand",light|dark,"TOOL-001,TOOL-002,TOOL-003,TOOL-005",production,
 PM/GlobalSearchPanel,e96ec683-a782-802c-8008-65f6f12da672,GlobalSearchPanel,,"query,streaming,noresults,indexrebuilding,casesensitive,wholeword",light|dark,"SEARCH-006,SEARCH-007,SEARCH-009,SEARCH-010",production,
 PM/TreeRow/Group,e96ec683-a782-802c-8008-65f5ec3722d4,Group,,"default,selected,active-context,focused,expanded,collapsed,cut",light|dark,"TREE-002,TREE-003,TREE-016",production,
@@ -36,19 +36,19 @@ PM/InlineRename,e96ec683-a782-802c-8008-65f5f11a916f,InlineRename,,"editing,inva
 PM/Card/InsertionMarker,e96ec683-a782-802c-8008-65f6bfdd12c6,InsertionMarker,,"before,after,inside-group,invalid",light|dark,"CARD-003,CARD-004,CARD-009",production,
 PM/Inspector,e96ec683-a782-802c-8008-65f5e1526037,Inspector,,"documenteditable,groupeditablewithoutComments,focus-within,validationerror",light|dark,"WS-002,WS-004,WS-014,META-001–009,CMT-005",production,
 PM/InspectorSection,e96ec683-a782-802c-8008-65f68f2c7a00,InspectorSection,,"expanded,collapsed,focus-within",light|dark,"WS-004,META-001,META-002",production,
-PM/LauncherProjectCard,e96ec683-a782-802c-8008-65f701e0505c,LauncherProjectCard,,"available,missing,locked,focused",light|dark,"PRJ-002,PRJ-009",production,
-PM/LoadingState,e96ec683-a782-802c-8008-65f5a65dd2a8,LoadingState,,"indeterminate,determinate,reduced-motion",light|dark,A11Y-003,production,
+PM/LauncherProjectCard,e96ec683-a782-802c-8008-65f701e0505c,LauncherProjectCard,,"available,missing,locked,focused",light|dark,"PRJ-002,PRJ-009,PRJ-010",production,Recent entry presents name/path/last-opened and activates the project.
+PM/LoadingState,e96ec683-a782-802c-8008-65f5a65dd2a8,LoadingState,,"indeterminate,determinate,reduced-motion",light|dark,"A11Y-003,A11Y-007",production,Reduced-motion state is tokenized; system-preference verification remains an implementation/native gate.
 PM/LocalFindBar,e96ec683-a782-802c-8008-65f6476c9d47,LocalFindBar,,"hidden,find,replaceexpanded,casesensitive,wholeword,noresults,focusreturn",light|dark,"SEARCH-001,SEARCH-002,SEARCH-003,SEARCH-004",production,
-PM/MetadataDefinitionEditor,e96ec683-a782-802c-8008-65f7064e136b,MetadataDefinitionEditor,,"new,existing,applicability-hidden-values,deleting",light|dark,META-003–009,production,
+PM/MetadataDefinitionEditor,e96ec683-a782-802c-8008-65f7064e136b,MetadataDefinitionEditor,,"new,existing,applicability-hidden-values,reordering,deleting",light|dark,"META-003–009,META-011",production,Direct reordering and per-field deletion are visible settings interactions.
 PM/MetadataField,e96ec683-a782-802c-8008-65f69160b6a2,MetadataField,,"single-line,multiline,hidden-by-applicability,default-copied",light|dark,META-003–009,production,
-PM/Card/MetadataValue,e96ec683-a782-802c-8008-65f6c1031f26,MetadataValue,,"read,editing,not-applicable",light|dark,"META-004,META-005,CARD-006",production,
+PM/Card/MetadataValue,e96ec683-a782-802c-8008-65f6c1031f26,MetadataValue,,"read,editing,not-applicable",light|dark,"META-004,META-005,CARD-006,CARD-010",production,Status is shown only where the project-defined field is applicable; Cards remains read-only for metadata values.
 PM/Tree/MultiSelection,e96ec683-a782-802c-8008-65f5f01ca60e,MultiSelection,,"default,hover,focus-visible,disabledwhereapplicable",light|dark,"TREE-007,TREE-008,TREE-009",production,
 PM/MultilineField,e96ec683-a782-802c-8008-65f59b7d7f49,MultilineField,,"empty,populated,focus-visible,disabled,invalid",light|dark,META-001,production,
 PM/NamedSnapshot,e96ec683-a782-802c-8008-65f6fb1b86ee,NamedSnapshot,,"default,selected",light|dark,HIST-006,production,
 PM/NewProjectDialog,e96ec683-a782-802c-8008-65f702f8240b,NewProjectDialog,,"empty,valid,invalid-destination,creating,error",light|dark,"PRJ-003–005,PRJ-008",production,
 PM/OrphanedComment,e96ec683-a782-802c-8008-65f69699fe2b,OrphanedComment,,"orphaned,reattaching",light|dark,"CMT-011,CMT-012",production,
 PM/AtomicBreak/Page,e96ec683-a782-802c-8008-65f64a806611,Page,,"default,selected,focus-visible",light|dark,"FMT-010,FMT-012",production,
-PM/ProgressState,e96ec683-a782-802c-8008-65f70887ed14,ProgressState,,"indeterminate,determinate,cancellable,paused,reduced-motion",light|dark,"PERF-012,A11Y-003",production,
+PM/ProgressState,e96ec683-a782-802c-8008-65f70887ed14,ProgressState,,"indeterminate,determinate,cancellable,paused,reduced-motion",light|dark,"PERF-012,A11Y-003,A11Y-007",production,Reduced-motion state is tokenized; system-preference verification remains an implementation/native gate.
 PM/RecentlyDeletedList,e96ec683-a782-802c-8008-65f6ffa154ca,RecentlyDeletedList,,"populated,empty,restore-fallback-location",light|dark,DEL-003–005,production,
 PM/RecoveryDialog,e96ec683-a782-802c-8008-65f70ac67a6f,RecoveryDialog,,"found,reviewing,restoring,discard-confirmation,error",light|dark,SAVE-011–014,production,
 PM/ReplacePreview,e96ec683-a782-802c-8008-65f6f5a72f9f,ReplacePreview,,"reviewing,applying,complete,stale-result",light|dark,"SEARCH-006,SEARCH-011,SEARCH-012,SEARCH-013,SEARCH-014",production,
@@ -63,17 +63,17 @@ PM/SearchResultGroup,e96ec683-a782-802c-8008-65f6f3773e63,SearchResultGroup,,"ex
 PM/Select,e96ec683-a782-802c-8008-65f59c69c917,Select,,"closed,open,focus-visible,disabled",light|dark,"PRJ-003,A11Y-001",production,
 PM/SettingsNav,469ffc7d-964a-806d-8008-6c952fec7805,SettingsNav,Selection,"general,appearance,styles,metadata,dictionaries",light|dark,"META-003,FMT-004–007,SPELL-001–003",production,
 PM/Sidebar,e96ec683-a782-802c-8008-65f5e0564ae5,Sidebar,,"activedocumentsrevealed,focused-paneactive,other-paneactive,selected,cut",light|dark,"WS-002,WS-003,TREE-001,TREE-019",production,
-PM/SpellcheckUnderline,e96ec683-a782-802c-8008-66077bd31eb2,SpellcheckUnderline,,"misspelled,activesuggestion",light|dark,"SPELL-001–003,A11Y-004",production,
-PM/SpellingContextMenu,e96ec683-a782-802c-8008-66077d6e0583,SpellingContextMenu,,"suggestions,nosuggestions,dictionaryerror,keyboardfocus",light|dark,SPELL-001–003,production,PM / ContextMenu
+PM/SpellcheckUnderline,e96ec683-a782-802c-8008-66077bd31eb2,SpellcheckUnderline,,"misspelled,activesuggestion",light|dark,"SPELL-001–003,SPELL-005,A11Y-004",production,In-place misspelling decoration only; service failure is represented by SpellingContextMenu dictionaryerror.
+PM/SpellingContextMenu,e96ec683-a782-802c-8008-66077d6e0583,SpellingContextMenu,,"suggestions,nosuggestions,dictionaryerror,keyboardfocus",light|dark,"SPELL-001–005",production,PM / ContextMenu; dictionaryerror is the visible recoverable spellcheck failure state and suggestions are word-anchored.
 PM/Splitter,e96ec683-a782-802c-8008-65f5e247224c,Splitter,,"idle,hover,dragging,keyboard-focus",light|dark,"WS-002,WS-006",production,
-PM/StatusBar,e96ec683-a782-802c-8008-65f5e7195d18,StatusBar,,"Explorershown/hidden,Inspectorshown/hidden,dirty,saving,saved,error",light|dark,"WS-013,WORD-001,SAVE-006",production,
+PM/StatusBar,e96ec683-a782-802c-8008-65f5e7195d18,StatusBar,,"Explorershown/hidden,Inspectorshown/hidden,dirty,saving,saved,error,manuscript-total",light|dark,"WS-013,WORD-001,WORD-002,SAVE-006",production,Manuscript total is a normal-workspace presentation; derived-count loading strategy is not a visual claim.
 PM/StyleActionDialog,c6b492ab-8095-8078-8008-66f598c25172,StyleActionDialog,,,light|dark,,production,
-PM/StyleEditor,e96ec683-a782-802c-8008-65f7052e0f41,StyleEditor,,"reserved,custom,inherited,dirty,delete-unused,replace-in-use",light|dark,FMT-003–007,production,
+PM/StyleEditor,e96ec683-a782-802c-8008-65f7052e0f41,StyleEditor,,"reserved,custom,inherited,dirty,delete-unused,replace-in-use",light|dark,"FMT-003–007,FMT-019",production,Own-entry deletion is available for custom styles; reserved styles have no deletion action.
 PM/StyleSelect,e96ec683-a782-802c-8008-65f64567de5c,StyleSelect,,"closed,open,mixed,focus-visible",light|dark,"FMT-002–007,TOOL-005",production,
 PM/SynopsisEditor,e96ec683-a782-802c-8008-65f69039ae10,SynopsisEditor,,"empty,editing,populated,focus-visible",light|dark,"META-001,META-002",production,
 PM/Tab,e96ec683-a782-802c-8008-65f5e620057d,Tab,,"active,inactive,hover,focus-visible,dirty",light|dark,"EDIT-001,EDIT-003,EDIT-005,EDIT-012,A11Y-003",production,
 PM/TextField,e96ec683-a782-802c-8008-65f59a903029,TextField,,"empty,populated,focus-visible,disabled,invalid",light|dark,"PRJ-003,A11Y-001",production,
-PM/Toast,e96ec683-a782-802c-8008-65f5a47e7859,Toast,,"success,error,reduced-motion",light|dark,"EXP-009,A11Y-003",production,
+PM/Toast,e96ec683-a782-802c-8008-65f5a47e7859,Toast,,"success,error,reduced-motion",light|dark,"EXP-009,A11Y-003,A11Y-007",production,Reduced-motion state is tokenized; system-preference verification remains an implementation/native gate.
 PM/Tooltip,e96ec683-a782-802c-8008-65f5a0f731ac,Tooltip,,open,light|dark,"CMT-007,A11Y-001",production,
 PM/Tree,e96ec683-a782-802c-8008-65f5ea0be98b,Tree,,"default,hover,focus-visible,disabledwhereapplicable",light|dark,"TREE-001,TREE-002,TREE-003",production,
 PM/TreeRow/ActiveDocument,e96ec683-a782-802c-8008-660778942c0f,Variants,State,"focused-paneactive,other-paneactive,selected,offscreenreveal",light|dark,"TREE-019,WS-010",production,

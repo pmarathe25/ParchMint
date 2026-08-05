@@ -1,0 +1,36 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260805T043444Z-s10i
+candidate_commit: ""
+output_commit: ""
+contracts_and_schema_versions:
+  design_handoff_manifest: "1.0.1 draft; sha256 0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14"
+ports: []
+implementations: []
+generated_bindings: []
+fixtures:
+  - delivery/design-handoff/1.0.1/references/light/editor-dual-light.png
+  - delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png
+test_provenance:
+  developer_test_locations: [delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py]
+  independent_test_locations: []
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  charter_path: ""
+  charter_commit: ""
+  candidate_commit: ""
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1"
+  - "cd delivery/design-handoff/1.0.1 && sha256sum -c checksums.sha256"
+  - "python3 delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py"
+native_evidence:
+  - "Refreshed source file ID 2be68822-842f-8175-8008-65eef13b0227 is ZIP-valid and has repaired Research/Harbor Notes visibility flags."
+  - "Direct Light/Dark reference review confirms both Explorer roots and distinct Chapter One/Chapter Two panes; Dark surface is fully dark and readable."
+known_approved_limitations:
+  - "Static handoff evidence does not prove native runtime, measured contrast, performance, screen reader, IME, clipboard, menu, or platform behavior."
+artifact_paths:
+  - delivery/runs/S10/20260805T043444Z-s10i/evidence/source-inspection.json
+  - delivery/runs/S10/20260805T043444Z-s10i/evidence/traceability-adjudication.md
+  - delivery/runs/S10/20260805T043444Z-s10i/evidence/requirement-dispositions.yaml
+  - delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py
