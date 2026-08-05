@@ -2,22 +2,33 @@ schema_version: 3
 run_role: validation
 stage_id: S10
 run_id: 20260805T010549Z-s10v
-result: blocked
+result: failed
 baseline_commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
 candidate_commit: "fa85a0b31ec9ca9cc9d1765520825cc67d958551"
 output_commit: ""
 charter_commit: ""
 related_run_ids: [20260804T203809Z-s10a, 20260804T205500Z-s10v, 20260804T224650Z-s10x, 20260804T230332Z-s10p, 20260804T232745Z-s10r]
-files_changed: []
-commands_run: []
-platforms_tested: []
-test_tiers_completed: []
+files_changed:
+  - delivery/runs/S10/20260805T010549Z-s10v/evidence/validation.json
+  - delivery/runs/S10/20260805T010549Z-s10v/status.yaml
+  - delivery/runs/S10/20260805T010549Z-s10v/handoff.yaml
+  - delivery/runs/S10/20260805T010549Z-s10v/report.md
+commands_run:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+  - "python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py"
+  - "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551"
+  - "git diff --exit-code 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551 -- delivery/design-handoff/1.0.0"
+  - "gh pr view 2 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup"
+platforms_tested: [linux-hosted-static-evidence]
+test_tiers_completed: [tier_a]
 developer_tests_added: []
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: ["canonical S10 v1 design mappings; focused revalidation of APPR-005/008, EDIT-001 through EDIT-005, WS-006/011, TREE-017, SAVE-011 through SAVE-014, EXP-001/002/008/009, SEARCH-006/007, HIST-007/008, SPELL-001 through SPELL-003, and CMT-002/003"]
+design_ids_addressed: ["all 79 component IDs", "all 80 screen inventory rows", "all 20 candidate Light/Dark reference PNGs", "PM/GlobalSearchPanel", "PM/ExportDialog", "PM/RestoreDialog", "PM/SpellcheckUnderline", "editor-dual-default", "error-recovery-default"]
 contracts_changed: []
-blocking_issues: [validation-pending]
-deviations: []
+blocking_issues: [dark-dual-editor-reference-unusable, traceability-applicable-mappings-incomplete]
+deviations:
+  - "The packaged Dark dual-editor reference is visibly dimmed and unusable despite readable source text fills."
+  - "At least WS-011, SAVE-014, and EXP-009 have demonstrably applicable design evidence but no traceability mapping or blocking disposition."
 dependencies: [20260804T232745Z-s10r, PR-2]
-recommended_next_stages: [G10-exact-candidate-product-owner-review]
+recommended_next_stages: [S10-repair-after-product-owner-direction]

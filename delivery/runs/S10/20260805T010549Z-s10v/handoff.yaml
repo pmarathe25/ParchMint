@@ -17,7 +17,19 @@ test_provenance:
   charter_path: ""
   charter_commit: ""
   candidate_commit: "fa85a0b31ec9ca9cc9d1765520825cc67d958551"
-commands: []
-native_evidence: []
-known_approved_limitations: []
-artifact_paths: []
+commands:
+  - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify"
+  - "python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py"
+  - "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551"
+  - "git diff --exit-code 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551 -- delivery/design-handoff/1.0.0"
+  - "gh pr view 2 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup"
+native_evidence: ["None: direct inspection covered static candidate PNG references and native-archive structure only."]
+known_approved_limitations:
+  - "PR #2 has no check rollup because CI workflows do not exist before S20."
+  - "Static references do not prove focus behavior, contrast metrics, screen readers, IME, native dialogs, actual spellcheck behavior, performance, or platform behavior."
+  - "Candidate 1.0.1 remains draft and G10 remains pending."
+artifact_paths:
+  - delivery/runs/S10/20260805T010549Z-s10v/evidence/validation.json
+  - delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png
+  - delivery/design-reconciliation/1.0.1/open-issues.yaml
+  - delivery/traceability.csv

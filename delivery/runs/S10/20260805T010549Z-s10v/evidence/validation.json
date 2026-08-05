@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "stage_id": "S10",
+  "run_id": "20260805T010549Z-s10v",
+  "result": "failed",
+  "validator": {
+    "agent_task": "/root/s10_validation_1_0_1",
+    "agent_role": "analyst",
+    "model_tier": "Terra",
+    "procedure": "ui-review",
+    "write_mode": "read-only"
+  },
+  "commits": {
+    "baseline": "1594f396fd0fa4f60ec235e396104f949b42376b",
+    "substantive_handoff_candidate": "238920eede91c1697e587ceed9d457a80818bfc4",
+    "repair_run_output_reviewed": "fa85a0b31ec9ca9cc9d1765520825cc67d958551",
+    "pr_head_with_validation_dispatch": "0dd515e23e5bb763c2d43ded249e29810b3a6b49"
+  },
+  "pull_request": {
+    "number": 2,
+    "url": "https://github.com/pmarathe25/ParchMint/pull/2",
+    "state": "OPEN",
+    "draft": true,
+    "merge_state": "CLEAN",
+    "checks": [],
+    "checks_note": "No workflows exist before S20; no CI or native claim is made."
+  },
+  "commands": [
+    {
+      "command": "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1 --verify",
+      "result": "passed: 1016 files covered"
+    },
+    {
+      "command": "python3 delivery/runs/S10/20260804T232745Z-s10r/evidence/validate_repair.py",
+      "result": "passed: 17 source-derived and static package checks"
+    },
+    {
+      "command": "git diff --check 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --exit-code 1594f396fd0fa4f60ec235e396104f949b42376b..fa85a0b31ec9ca9cc9d1765520825cc67d958551 -- delivery/design-handoff/1.0.0",
+      "result": "passed: approved 1.0.0 unchanged"
+    },
+    {
+      "command": "gh pr view 2 --json number,url,isDraft,state,headRefName,headRefOid,baseRefName,mergeStateStatus,statusCheckRollup",
+      "result": "passed: open draft PR, clean merge state, dispatch head 0dd515e, empty check rollup"
+    }
+  ],
+  "visible_evidence": {
+    "directly_inspected_pngs": [
+      "references/light/launcher-light.png",
+      "references/dark/launcher-dark.png",
+      "references/light/editor-single-light.png",
+      "references/dark/editor-single-dark.png",
+      "references/light/editor-dual-light.png",
+      "references/dark/editor-dual-dark.png",
+      "references/light/cards-light.png",
+      "references/dark/cards-dark.png",
+      "references/light/global-search-light.png",
+      "references/dark/global-search-dark.png",
+      "references/light/history-light.png",
+      "references/dark/history-dark.png",
+      "references/light/settings-appearance-light.png",
+      "references/dark/settings-appearance-dark.png",
+      "references/light/export-light.png",
+      "references/dark/export-dark.png",
+      "references/light/error-recovery-light.png",
+      "references/dark/error-recovery-dark.png",
+      "references/light/recently-deleted-light.png",
+      "references/dark/recently-deleted-dark.png"
+    ],
+    "pair_results": [
+      {
+        "screen_id": "launcher-default",
+        "result": "passed",
+        "observation": "Light and Dark launcher references are readable and coherent."
+      },
+      {
+        "screen_id": "editor-single-default",
+        "result": "passed",
+        "observation": "Light and Dark single-editor references are readable and coherent."
+      },
+      {
+        "screen_id": "editor-dual-default",
+        "result": "failed",
+        "observation": "Light shows two readable Manuscript documents. Dark shows both manuscript panes and prose nearly black or dimmed while the Inspector remains normally visible; no blocking state explains the scrim-like presentation."
+      },
+      {
+        "screen_id": "cards-default",
+        "result": "passed",
+        "observation": "Light and Dark Cards references are readable and coherent."
+      },
+      {
+        "screen_id": "global-search-default",
+        "result": "passed",
+        "observation": "Light and Dark Global Search references are readable and show Explorer replacement without a scope selector."
+      },
+      {
+        "screen_id": "history-default",
+        "result": "passed",
+        "observation": "Light and Dark History references are readable and coherent."
+      },
+      {
+        "screen_id": "settings-appearance-default",
+        "result": "passed",
+        "observation": "Light and Dark settings references are readable and show System, Light, and Dark."
+      },
+      {
+        "screen_id": "export-default",
+        "result": "passed",
+        "observation": "Light and Dark export references are readable and use Entire Manuscript scope."
+      },
+      {
+        "screen_id": "error-recovery-default",
+        "result": "passed",
+        "observation": "Light and Dark repaired references show a recovery summary, retained History checkpoint, and Discard/Recover choices."
+      },
+      {
+        "screen_id": "recently-deleted-default",
+        "result": "passed",
+        "observation": "Light and Dark Recently Deleted references are readable and coherent."
+      }
+    ],
+    "limits": [
+      "Static images do not prove keyboard or focus behavior, measured contrast, native dialogs, screen readers, IME, actual spellcheck behavior, performance, or platform behavior."
+    ]
+  },
+  "source_evidence": {
+    "penpot_archive_sha256": "f6b14e4447f33ea6d7262ec69ddee2a6794a2c4cf33f4a9fa9012668914bf3eb",
+    "lfs_tracked": true,
+    "zip_integrity": "passed",
+    "byte_matches_repair_source": true,
+    "dual_board": {
+      "id": "e96ec683-a782-802c-8008-65f886281b72",
+      "name": "editor-dual-two-manuscript",
+      "dimensions": [1440, 900],
+      "obsolete_research_shapes_hidden": true,
+      "source_export_discrepancy": "The archive has light prose fills on dark canvases, but the packaged Dark reference is visibly dimmed; the discrepancy is unexplained."
+    }
+  },
+  "canonical_state_checks": [
+    {
+      "design_id": "PM/GlobalSearchPanel",
+      "requirements": ["SEARCH-006", "SEARCH-007"],
+      "result": "passed",
+      "observation": "No user-visible scope state or selector remains."
+    },
+    {
+      "design_id": "PM/ExportDialog",
+      "requirements": ["EXP-001", "EXP-002", "EXP-008"],
+      "result": "passed",
+      "observation": "Entire Manuscript is the only v1 scope."
+    },
+    {
+      "design_id": "PM/RestoreDialog",
+      "requirements": ["HIST-007", "HIST-008"],
+      "result": "passed",
+      "observation": "Only whole-project, restoring, and error states remain."
+    },
+    {
+      "design_id": "PM/SpellcheckUnderline",
+      "requirements": ["SPELL-001", "SPELL-002", "SPELL-003"],
+      "result": "passed",
+      "observation": "No per-document disablement remains."
+    },
+    {
+      "design_id": "comments-resolved-filter",
+      "requirements": ["CMT-002", "CMT-003"],
+      "result": "passed",
+      "observation": "The resolved filter narrows one continuous unsectioned list."
+    }
+  ],
+  "findings": [
+    {
+      "id": "dark-dual-editor-reference-unusable",
+      "severity": "blocking",
+      "kind": "visual-reference and source-export discrepancy",
+      "requirements": ["APPR-005", "APPR-008", "EDIT-001", "EDIT-002", "EDIT-003", "EDIT-004", "EDIT-005", "WS-006", "TREE-017"],
+      "design_ids": ["editor-dual-default", "PM / Screen / editor-dual-two-manuscript", "e96ec683-a782-802c-8008-65f886281b72"],
+      "observation": "The packaged Dark dual-editor baseline is visually unusable while its Light counterpart is correct and the source archive indicates light prose fills.",
+      "impact": "The canonical Dark visual-regression baseline cannot be accepted, and the reconciliation incorrectly records the repaired pair as resolved.",
+      "next_action": "Regenerate and directly inspect the Dark reference from the authoritative board, or correct the board/export discrepancy, then update checksum and provenance."
+    },
+    {
+      "id": "traceability-applicable-mappings-incomplete",
+      "severity": "blocking",
+      "kind": "S10 traceability gap",
+      "requirements": ["WS-011", "SAVE-014", "EXP-009"],
+      "observation": "Seventy-four traceability rows have neither a Penpot screen nor component mapping. At least WS-011, SAVE-014, and EXP-009 are directly represented in candidate specs or inventories but remain unmapped and have no declared blocking entry.",
+      "evidence": [
+        "WS-011 is represented in specs/cross-platform-variants.md.",
+        "SAVE-014 is represented by close-save-failure-light in specs/screen-inventory.csv.",
+        "EXP-009 is represented by PM/Toast in specs/component-matrix.csv."
+      ],
+      "impact": "S10 cannot claim complete applicable mapping or an explicit disposition for demonstrably represented requirements.",
+      "next_action": "Populate all demonstrably applicable design mappings and explicitly block or justify any remaining applicable gap."
+    }
+  ],
+  "verified_limits_and_boundaries": {
+    "stable_component_rows": 79,
+    "stable_screen_rows": 80,
+    "all_screen_rows_have_penpot_board_ids": true,
+    "g20_direction_otherwise_followed": true,
+    "candidate_handoff_status": "draft",
+    "reconciliation_approval_status": "pending",
+    "g10_may_advance": false
+  },
+  "next_action": "Stop before G10 and obtain product-owner direction. If approved, dispatch a bounded S10 repair for the Dark dual-editor reference and applicable traceability mappings, then rerun fresh validation before requesting exact-candidate approval."
+}
