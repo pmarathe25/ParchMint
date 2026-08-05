@@ -1,0 +1,110 @@
+schema_version: 3
+run_role: repair
+stage_id: S10
+run_id: 20260805T043444Z-s10i
+baseline_commit: "276baa3da311f127be8cc3f5e3386b05fa2ad55c"
+candidate_commit: ""
+related_runs:
+  implementation_run_id: 20260804T203809Z-s10a
+  test_charter_run_id: ""
+  independent_test_run_id: ""
+  repair_of_run_id: 20260805T010549Z-s10v
+  verification_of_run_id: 20260805T010549Z-s10v
+instruction_file: delivery/stages/design-change-reconciliation.md
+pipeline_state:
+  path: delivery/state.yaml
+  commit: "1594f396fd0fa4f60ec235e396104f949b42376b"
+approved_design_handoff:
+  path: delivery/design-handoff/1.0.0
+  version: "1.0.0"
+  status: approved
+draft_design_handoff:
+  path: delivery/design-handoff/1.0.1
+  version: "1.0.1"
+  status: draft
+governing_inputs:
+  - {path: docs/product/product-specification.md, version: "2.2", sha256: "16870f6517ee65864e08761fd271f7618704225c6b7dd082505cf8bfeb611499"}
+  - {path: docs/architecture/architecture.md, version: "1.4", sha256: "b4422602ba539ba5cf975808e53b4f5b8c902bdc9ccebc4b26adc18df84f5b33"}
+  - {path: docs/design/penpot-design-brief.md, version: "2.5", sha256: "8919684a1c4bbc82198774d96ae691a38f8290ad7f5f968c6a2b436baa620c67"}
+  - {path: delivery/proposals/G20-S10-handoff-1.0.1-repair/approval.yaml, version: approved, sha256: "6a11b3e725d698ae06c49640203a0774b24cd14be1c8f8c1b6d8e9732ec02342"}
+  - {path: delivery/runs/S10/20260805T010549Z-s10v/evidence/validation.json, version: failed-validation, sha256: "4c93880a971762409c6326d9ce7f0af9a455fce905ec4c6cc329ddc10950785d"}
+  - {path: delivery/runs/S10/20260805T040828Z-s10c/evidence/board-comparison.json, version: current, sha256: "c3228fd63d90c92ae1ed89114315549f820a41e9b7d215fb3cdef52aa1ec45e7"}
+  - {path: delivery/runs/S10/20260805T040828Z-s10c/evidence/recapture.json, version: current, sha256: "7cc9cbd278b63e3f49832895935b961462efb8aefef9efdbc61f76ea35cb88ce"}
+  - {path: delivery/runs/S10/20260805T040828Z-s10c/evidence/page13-boards.json, version: current, sha256: "ad32b8096372784b65e64f5b81823133da32fe2b1c24fabc721ecd736c74b431"}
+  - {path: delivery/runs/S10/20260805T042051Z-s10s/evidence/live-repair.json, version: current, sha256: "f71c78412d45bb9b0f28deec4f89b4c912e6b038547d39126fac1368ae359bbd"}
+dependency_handoffs:
+  - delivery/runs/S10/20260805T042051Z-s10s/handoff.yaml
+  - delivery/runs/S10/20260805T040828Z-s10c/handoff.yaml
+  - delivery/runs/S10/20260805T010549Z-s10v/handoff.yaml
+approved_gates:
+  - G20-S10-handoff-1.0.1-repair
+  - product-owner-approved-in-place-1.0.1-repair
+  - product-owner-approved-live-screen-repair
+ownership:
+  include:
+    - delivery/design-handoff/1.0.1/**
+    - delivery/design-reconciliation/1.0.1/**
+    - delivery/traceability.csv
+    - delivery/runs/S10/20260805T043444Z-s10i/status.yaml
+    - delivery/runs/S10/20260805T043444Z-s10i/handoff.yaml
+    - delivery/runs/S10/20260805T043444Z-s10i/report.md
+    - delivery/runs/S10/20260805T043444Z-s10i/evidence/**
+  exclude:
+    - delivery/runs/S10/20260805T043444Z-s10i/dispatch.yaml
+    - delivery/runs/S10/20260805T043444Z-s10i/evidence/source/**
+    - delivery/design-handoff/1.0.0/**
+    - delivery/state.yaml
+    - delivery/proposals/**
+    - docs/**
+    - src/**
+    - packages/**
+    - apps/**
+independent_test:
+  required: false
+  exemption_reason: "Design reconciliation and reference/source repair only; no shipped production behavior."
+  charter_path: ""
+  charter_commit: ""
+  knowledge_boundary:
+    allowed_inputs:
+      - canonical product, architecture, and design requirements
+      - approved handoff 1.0.0 and draft handoff/reconciliation 1.0.1
+      - failed validation and all subsequent repair evidence
+      - product-owner approvals and clarified TREE-001 Explorer invariant
+      - externally supplied refreshed native Penpot source and Light/Dark references when present
+    withheld_inputs: []
+test_tier:
+  tier_a: true
+  tier_b_required: false
+  tier_c_required: false
+  native_platforms: []
+required_commands:
+  - "cd delivery/design-handoff/1.0.1 && sha256sum -c checksums.sha256"
+  - "unzip -t delivery/design-handoff/1.0.1/parchmint-ui.penpot"
+  - "file delivery/design-handoff/1.0.1/references/light/editor-dual-light.png delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png"
+  - "identify delivery/design-handoff/1.0.1/references/light/editor-dual-light.png delivery/design-handoff/1.0.1/references/dark/editor-dual-dark.png"
+  - "python3 delivery/runs/S10/20260805T043444Z-s10i/evidence/validate_repair.py"
+  - "git diff --check"
+required_evidence:
+  - immutable approved handoff 1.0.0 remains byte-identical to baseline
+  - refreshed native Penpot source matches file ID 2be68822-842f-8175-8008-65eef13b0227 and contains the live Explorer visibility repair
+  - repaired Light and Dark editor-dual-two-manuscript 1440x900 references visibly render both Manuscript and Research roots while retaining Chapter One and Chapter Two in separate panes
+  - stable mapping for the distinct two-document and same-document-two-views boards; neither board is deleted or substituted
+  - TREE-001 is recorded as an always-visible Manuscript/Research root invariant whenever Explorer is shown, with only Global Search-replaces-Explorer and collapsed/hidden Explorer exceptions
+  - component and screen inventories carry requirement annotations before derived traceability is regenerated
+  - PRJ-010 is mapped to launcher board e96ec683-a782-802c-8008-65f767f20cfd and PM/LauncherProjectCard e96ec683-a782-802c-8008-65f701e0505c
+  - FMT-019, META-011, CARD-010, WORD-002, SPELL-004, SPELL-005, and A11Y-007 receive verified direct mappings or explicit evidence-backed dispositions
+  - PLAT-001, PLAT-002, WS-011, APPR-006, A11Y-005, and A11Y-009 receive explicit verified mappings, token/contrast contracts, native-only dispositions, or blocking entries without inventing visual proof
+  - the prior failed validation remains immutable; new adjudication evidence records that SAVE-014 and EXP-009 were already mapped while WS-011 was genuinely blank
+  - all other requirements lacking Penpot mappings are explicitly classified as deferred, nonvisual/state/behavioral, native/performance/accessibility-only, security, or a true open issue
+  - design manifest, asset inventory, source/reference provenance, checksums, open issues, implementation map, work breakdown, and visual-regression plan agree
+  - the candidate remains draft and G10 pending until a fresh independent Terra validation passes and exact-candidate product-owner approval is recorded
+resource_constraints:
+  - treat the product specification as canonical over handoff components
+  - edit the draft 1.0.1 package in place; never modify approved 1.0.0 or rewrite prior failed-validation evidence
+  - do not add unsupported Search scope controls, partial Export scope, partial History restore, per-document spellcheck language, a ribbon Search destination, a floating comment control, or a toolbar appearance toggle
+  - preserve exact stable PM names and Penpot IDs; leave nonvisual/native evidence limits explicit
+  - no direct Penpot calls are authorized in this integration run; use committed repair evidence and externally supplied exports
+  - the Orchestrator exclusively owns the evidence/source drop path and all Git writes, commits, pushes, PR updates, merges, and worktrees
+  - perform non-source work first; if the refreshed source or either repaired PNG is absent, stop finalization with a precise external-input blocker rather than copying stale evidence or fabricating an artifact
+  - do not broaden product, architecture, accessibility, performance, or platform claims beyond the available evidence
+  - leave candidate_commit and output_commit blank for Orchestrator finalization
