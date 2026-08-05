@@ -1,6 +1,7 @@
 # S10 Draft 1.0.1 Integration Repair
 
 **Result:** Draft candidate repaired; ready for a fresh independent Terra validation. G10 remains pending.
+**Candidate/output commit:** `450e705238f381f3ab56cec389134adc8fae43d7`
 
 ## What changed
 

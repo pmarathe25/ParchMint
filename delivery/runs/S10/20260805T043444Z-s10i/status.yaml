@@ -4,8 +4,8 @@ stage_id: S10
 run_id: 20260805T043444Z-s10i
 result: needs_approval
 baseline_commit: "276baa3da311f127be8cc3f5e3386b05fa2ad55c"
-candidate_commit: ""
-output_commit: ""
+candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
+output_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
 charter_commit: ""
 related_run_ids: [20260805T010549Z-s10v, 20260805T040828Z-s10c, 20260805T042051Z-s10s]
 files_changed:

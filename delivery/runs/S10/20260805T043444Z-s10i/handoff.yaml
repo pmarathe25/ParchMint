@@ -2,8 +2,8 @@ schema_version: 3
 run_role: repair
 stage_id: S10
 run_id: 20260805T043444Z-s10i
-candidate_commit: ""
-output_commit: ""
+candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
+output_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
 contracts_and_schema_versions:
   design_handoff_manifest: "1.0.1 draft; sha256 0d53ded15bcf035dcc7a0ac3ee1afe8909831550ca5a0e815504b7d39f905b14"
 ports: []
@@ -19,7 +19,7 @@ test_provenance:
   independent_test_run_id: ""
   charter_path: ""
   charter_commit: ""
-  candidate_commit: ""
+  candidate_commit: "450e705238f381f3ab56cec389134adc8fae43d7"
 commands:
   - "python3 delivery/design-handoff/scripts/build-checksums.py delivery/design-handoff/1.0.1"
   - "cd delivery/design-handoff/1.0.1 && sha256sum -c checksums.sha256"
