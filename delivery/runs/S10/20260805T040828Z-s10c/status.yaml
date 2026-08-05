@@ -2,22 +2,32 @@ schema_version: 3
 run_role: repair
 stage_id: S10
 run_id: 20260805T040828Z-s10c
-result: blocked
+result: needs_approval
 baseline_commit: "3d5d097cdb75b46e9b4409ca5f914b710a0190f8"
 candidate_commit: ""
 output_commit: ""
 charter_commit: ""
 related_run_ids: [20260804T230332Z-s10p, 20260804T232745Z-s10r, 20260805T010549Z-s10v]
-files_changed: []
-commands_run: []
-platforms_tested: []
-test_tiers_completed: []
+files_changed:
+  - delivery/runs/S10/20260805T040828Z-s10c/status.yaml
+  - delivery/runs/S10/20260805T040828Z-s10c/handoff.yaml
+  - delivery/runs/S10/20260805T040828Z-s10c/report.md
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/recapture.json
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/page13-boards.json
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/board-comparison.json
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/exports/editor-dual-dark-a.png
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/exports/editor-dual-dark-b.png
+  - delivery/runs/S10/20260805T040828Z-s10c/evidence/exports/editor-dual-dark.png
+commands_run: ["file evidence/exports/*.png", "sha256sum evidence/exports/*.png", "cmp -s editor-dual-dark-a.png editor-dual-dark-b.png", "git diff --check"]
+platforms_tested: [Penpot plugin context]
+test_tiers_completed: [design-structure, visual-inspection]
 developer_tests_added: []
 independent_tests_added: []
-requirements_addressed: []
-design_ids_addressed: []
+requirements_addressed: [TREE-001, WS-006, WS-009, WS-010, EDIT-002, EDIT-006, EDIT-007, EDIT-008, EDIT-009]
+design_ids_addressed: [e96ec683-a782-802c-8008-65f886281b72, e96ec683-a782-802c-8008-65f89294547e]
 contracts_changed: []
-blocking_issues: [penpot-recapture-pending]
-deviations: []
+blocking_issues: [changed-target-board-comparison-needs-product-owner-approval, rendered-Research-sidebar-hidden]
+deviations:
+  - "The prior dual-board repair hid the Research section and Harbor Notes Explorer row as well as the obsolete Harbor Notes tabs; the rendered two-Manuscript screen therefore violates TREE-001."
 dependencies: [connected-ParchMint-Penpot-file]
-recommended_next_stages: [S10-in-place-1.0.1-integration-repair]
+recommended_next_stages: [S10-in-place-1.0.1-integration-repair-after-target-approval]

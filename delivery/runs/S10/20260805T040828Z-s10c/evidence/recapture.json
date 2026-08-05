@@ -1,0 +1,13 @@
+{
+  "file": {"id": "2be68822-842f-8175-8008-65eef13b0227", "name": "ParchMint", "revision": 1541, "validate_errors": 0},
+  "board": {"id": "e96ec683-a782-802c-8008-65f886281b72", "name": "PM / Screen / editor-dual-two-manuscript", "bounds": "1440x900", "children": 5},
+  "theme": {"appearance_group": "Appearance", "active": "Dark", "dark_theme_id": "469ffc7d-964a-806d-8008-6c323f6d3396", "light_active": false},
+  "readiness_probes": [
+    {"revision": 1541, "colors": {"Content":"#151713", "PrimaryCanvas":"#252924", "PrimaryProse":"#f1f4ef", "CompanionCanvas":"#252924", "CompanionProse":"#f1f4ef", "Sidebar":"#1a1d19", "Inspector":"#1a1d19"}},
+    {"revision": 1541, "colors": {"Content":"#151713", "PrimaryCanvas":"#252924", "PrimaryProse":"#f1f4ef", "CompanionCanvas":"#252924", "CompanionProse":"#f1f4ef", "Sidebar":"#1a1d19", "Inspector":"#1a1d19"}}
+  ],
+  "exports": {"a": {"path":"evidence/exports/editor-dual-dark-a.png","sha256":"3be3cb7381db3e045c5b34eedbf2f027ac7b2f1c0bfbe5cdca86ae3b459196ac","dimensions":"1440x900"}, "b": {"path":"evidence/exports/editor-dual-dark-b.png","sha256":"3be3cb7381db3e045c5b34eedbf2f027ac7b2f1c0bfbe5cdca86ae3b459196ac","dimensions":"1440x900"}, "canonical":"evidence/exports/editor-dual-dark.png", "byte_compare":"cmp exit 0; identical bytes (therefore decoded pixels identical)"},
+  "direct_observations": ["Both exports inspected with view_image", "Chapter One and Chapter Two prose are readable in separate Manuscript panes", "Application chrome, sidebar, inspector, canvases, and prose surfaces are fully dark", "The rendered Explorer omits Research and Harbor Notes because the two corresponding sidebar shapes remain hidden from the prior repair"],
+  "mutation_proof": {"revision_before":1541,"revision_after":1541,"validate_after":0,"design_mutation":"none; read-only probes and exports only"},
+  "static_limits": ["ImageMagick identify/compare commands were unavailable; file(1), cmp(1), and SHA-256 were used", "Visual and byte identity do not replace native acceptance"]
+}

@@ -1,0 +1,35 @@
+{
+  "revision": 1541,
+  "boards": {
+    "editor-dual-two-manuscript": {
+      "id": "e96ec683-a782-802c-8008-65f886281b72",
+      "bounds": "1440x900",
+      "roots": ["Manuscript", "Research"],
+      "rows": ["Part One", "Chapter One (active)", "Chapter Two", "Harbor Notes"],
+      "rendered_visibility": {"Manuscript": true, "Research": false, "Harbor Notes": false},
+      "pane_documents": {"primary": "Chapter One", "companion": "Chapter Two"},
+      "primary_prose": "Chapter One — The harbor held the last of the evening light. — Mara waited beneath the clock tower.",
+      "companion_prose": "Chapter Two — Rain found the city before dawn. — Another manuscript document opens on the right.",
+      "state_evidence": ["active Chapter One tree row", "selected indicators in both pane tab strips", "editor destination selected"]
+    },
+    "editor-same-document-two-views": {
+      "id": "e96ec683-a782-802c-8008-65f89294547e",
+      "bounds": "1440x900",
+      "roots": ["Manuscript", "Research"],
+      "rows": ["Part One", "Chapter One (active)", "Chapter Two", "Harbor Notes"],
+      "pane_documents": {"primary": "Chapter One", "companion": "Chapter One"},
+      "primary_prose": "Chapter One — Opening paragraphs at scroll position 12%. — Cursor after harbor.",
+      "companion_prose": "Chapter One — Later paragraphs at scroll position 68%. — Independent selection around letter.",
+      "state_evidence": ["active Chapter One tree row", "selected indicators in both pane tab strips", "editor destination selected", "independent scroll/selection annotations"]
+    }
+  },
+  "assessment": {
+    "semantically_redundant": false,
+    "shared": ["same 1440x900 shell", "same structural Manuscript and Research Explorer roots", "same structural hierarchy rows", "same four tabs per pane", "same Inspector sections and editor toolbar contract"],
+    "unique_editor_dual_two_manuscript": ["cross-document two-pane state: Chapter One primary and Chapter Two companion", "visible companion prose proves distinct Manuscript documents open concurrently"],
+    "unique_editor_same_document_two_views": ["same document Chapter One in both panes", "explicit independent scroll positions (12% vs 68%)", "explicit independent selections/cursor state"],
+    "requirements": {"editor-dual-two-manuscript": ["WS-006", "WS-009", "WS-010"], "editor-same-document-two-views": ["WS-009", "WS-010", "architecture shared-document independent-view-state contract"]},
+    "research_finding": "Research and Harbor Notes remain in the two-Manuscript board structure but are absent from its rendered Explorer because the prior repair left PM / Sidebar / Section / Research (039701d9-7e2b-8031-8008-67b6372f8819) and PM / Sidebar / Row / Harbor Notes (039701d9-7e2b-8031-8008-67b6372f445b) hidden. That repair also hid two Harbor Notes pane tabs, which should remain hidden for the two-Manuscript state. The rendered omission conflicts with TREE-001 but does not make the board semantically redundant with the same-document board."
+  },
+  "export_attempt": "same-document board export returned no image after bounded wait; no replacement selected or copied"
+}

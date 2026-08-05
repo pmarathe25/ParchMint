@@ -1,0 +1,12 @@
+{
+  "page": {"id":"e96ec683-a782-802c-8008-65f2d91ce9cd", "name":"13 Cross-Platform Variants"},
+  "boards": {
+    "windows":"c5362ef2-ec03-8060-8008-68ad0591c1f0",
+    "macOS":"c5362ef2-ec03-8060-8008-68ad06fe7e7e",
+    "linux":"c5362ef2-ec03-8060-8008-68ad0874c501",
+    "layout-1280x720":"c5362ef2-ec03-8060-8008-68ac7f8d72b3",
+    "layout-1440x900":"c5362ef2-ec03-8060-8008-68ac809dae04",
+    "layout-1920x1080":"c5362ef2-ec03-8060-8008-68acee88e488",
+    "layout-2560x1440":"c5362ef2-ec03-8060-8008-68acefeb81c9"
+  }
+}
