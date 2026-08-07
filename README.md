@@ -15,7 +15,7 @@ Read these documents in this order:
    presentation of the product.
 4. [Future work](docs/product/future-work.md) — ideas that are outside v1.
 5. [Implementation plans](plans/README.md) — the implementation stages and their order.
-6. [Agent instructions](AGENTS.md) — rules for making and reviewing changes.
+6. [Stage delivery](plans/stage-delivery.md) — the required test, implementation, reconciliation, and verification workflow.
 
 The [decisions log](docs/decisions.md) gives short explanations for technical
 choices that affect the whole codebase. It provides context; it does not add
