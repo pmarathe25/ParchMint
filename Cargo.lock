@@ -319,6 +319,9 @@ dependencies = [
 [[package]]
 name = "parchmint-export-html"
 version = "0.1.0"
+dependencies = [
+ "parchmint-export-api",
+]
 
 [[package]]
 name = "parchmint-history-api"

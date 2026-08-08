@@ -10,3 +10,5 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-export-api = { path = "../parchmint-export-api" }
