@@ -10,3 +10,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-search-api = { path = "../parchmint-search-api" }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
