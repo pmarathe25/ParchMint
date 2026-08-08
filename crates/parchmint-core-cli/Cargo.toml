@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+parchmint-application = { path = "../parchmint-application" }
 parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-export-api = { path = "../parchmint-export-api" }

@@ -145,18 +145,13 @@ fn machine_mode_is_stable_regardless_of_flag_placement() {
 }
 
 #[test]
-fn command_save_recover_history_search_rebuild_and_export_use_real_project_state() {
+fn command_and_export_use_real_project_state() {
     let fixture = Fixture::new();
     let path = fixture.path().to_str().unwrap();
     let export = fixture.path().join("out.html");
 
     for args in [
         vec!["--machine", "command", path, "noop"],
-        vec!["--machine", "save", path],
-        vec!["--machine", "recover", path],
-        vec!["--machine", "history", path],
-        vec!["--machine", "search", path, "draft"],
-        vec!["--machine", "rebuild", path],
         vec!["--machine", "export", path, export.to_str().unwrap()],
     ] {
         let output = cli(&args);

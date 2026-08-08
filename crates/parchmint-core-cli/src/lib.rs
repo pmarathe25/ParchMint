@@ -6,17 +6,24 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
+use parchmint_application::{
+    DocumentCommand, DocumentSnapshot, DocumentStateOwner, DocumentVisibility,
+    NativeDocumentStateOwner,
+};
 use parchmint_contracts::generated::CliOutputV1;
-use parchmint_domain::{DocumentId, ProjectId};
+use parchmint_domain::{BlockId, CheckpointId, DocumentId, ProjectId, ProjectRevision};
 use parchmint_export_api::{
     ExportDefaults, ExportNode, ExportRequest, ExportRunOptions, ExportSink, ExportSource,
     ExportStyleCatalog, Exporter, ProjectSnapshot as ExportProjectSnapshot, SourceRevision,
 };
 use parchmint_export_html::HtmlExporter;
-use parchmint_history_api::{HistoryPageQuery, HistoryStore};
+use parchmint_history_api::{HistoryPageQuery, HistoryStore, SnapshotName};
 use parchmint_history_git2::Git2HistoryStore;
 use parchmint_project_format::{
     CanonicalCodec, CanonicalRelativePath, ContentHash, FormatVersion, ProjectFormatCodec,
@@ -30,7 +37,10 @@ use parchmint_project_repository::{
     AtomicWritePlan, AtomicWriter, CreateProject, ProjectPath, ProjectRepository,
     ProjectRootCapability, StagedResource,
 };
-use parchmint_recovery_api::RecoveryJournal;
+use parchmint_recovery_api::{
+    DocumentRevision, DurableRevisionVector, EditorRevisionRange, RecoveryBaseSnapshot,
+    RecoveryBatch, RecoveryJournal, RecoveryRevisionVector, VersionedRecoveryPayload,
+};
 use parchmint_recovery_fs::FsRecoveryJournal;
 use parchmint_save::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, ProjectSaveCoordinator,
@@ -38,14 +48,17 @@ use parchmint_save::{
     SaveRevisionVector,
 };
 use parchmint_search_api::{
-    SearchBatch, SearchBatchSink, SearchField, SearchIndex, SearchProjectionSource,
-    SearchProjectionVisitor, SearchQuery,
+    RevisionId, SearchBatch, SearchBatchSink, SearchDocumentProjection, SearchField, SearchIndex,
+    SearchIndexState, SearchProjectionSource, SearchProjectionVisitor, SearchQuery,
+    SearchTextProjection,
 };
 use parchmint_search_sqlite::SqliteSearchIndex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 const CLI_SCHEMA: &str = "parchmint.cli-output/v1";
+// A marked project must finish its whole-project restore before normal open.
+const PENDING_RESTORE_PATH: &str = ".parchmint/pending-restore";
 
 /// Runs the CLI with process arguments and returns its stable numeric exit code.
 pub fn run_process() -> i32 {
@@ -55,12 +68,12 @@ pub fn run_process() -> i32 {
 /// Runs the CLI with supplied arguments and returns its stable numeric exit code.
 pub fn run_args(arguments: impl IntoIterator<Item = String>) -> i32 {
     let parsed = parse(arguments);
-    let outcome = match parsed.command {
-        Ok(_) if parsed.cancelled => Outcome::cancelled(),
+    let result = match parsed.command {
+        Ok(_) if parsed.cancelled => CommandResult::from(Outcome::cancelled()),
         Ok(command) => execute(command),
-        Err(outcome) => outcome,
+        Err(outcome) => CommandResult::from(outcome),
     };
-    emit(parsed.machine, outcome)
+    emit(parsed.machine, result)
 }
 
 #[derive(Debug)]
@@ -78,12 +91,42 @@ enum Command {
     Migrate(PathBuf),
     Inspect(PathBuf),
     Apply(PathBuf, String),
+    Edit(PathBuf, String, String),
+    Terminate(PathBuf),
     Save(PathBuf),
     Recover(PathBuf),
+    Checkpoint(PathBuf, String),
+    Restore(PathBuf, String),
     History(PathBuf),
+    Index(PathBuf),
     Search(PathBuf, String),
     Rebuild(PathBuf),
+    Close(PathBuf),
     Export(PathBuf, PathBuf),
+}
+
+#[derive(Debug)]
+struct CommandResult {
+    outcome: Outcome,
+    data: Option<Value>,
+}
+
+impl CommandResult {
+    fn success(data: Value) -> Self {
+        Self {
+            outcome: Outcome::success(),
+            data: Some(data),
+        }
+    }
+}
+
+impl From<Outcome> for CommandResult {
+    fn from(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            data: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,13 +227,27 @@ fn parse_command(positional: &[String]) -> Result<Command, Outcome> {
         "migrate" => Command::Migrate(one_path(arguments)?),
         "inspect" => Command::Inspect(one_path(arguments)?),
         "save" => Command::Save(one_path(arguments)?),
+        "terminate" => Command::Terminate(one_path(arguments)?),
         "recover" => Command::Recover(one_path(arguments)?),
         "history" => Command::History(one_path(arguments)?),
+        "index" => Command::Index(one_path(arguments)?),
         "rebuild" => Command::Rebuild(one_path(arguments)?),
+        "close" => Command::Close(one_path(arguments)?),
+        "edit" if arguments.len() == 3 => Command::Edit(
+            PathBuf::from(&arguments[0]),
+            arguments[1].clone(),
+            arguments[2].clone(),
+        ),
+        "checkpoint" if arguments.len() == 2 => {
+            Command::Checkpoint(PathBuf::from(&arguments[0]), arguments[1].clone())
+        }
+        "restore" if arguments.len() == 2 => {
+            Command::Restore(PathBuf::from(&arguments[0]), arguments[1].clone())
+        }
         "command" if arguments.len() == 2 => {
             Command::Apply(PathBuf::from(&arguments[0]), arguments[1].clone())
         }
-        "search" if arguments.len() == 2 => {
+        "search" | "query" if arguments.len() == 2 => {
             Command::Search(PathBuf::from(&arguments[0]), arguments[1].clone())
         }
         "export" if arguments.len() == 2 => {
@@ -200,19 +257,25 @@ fn parse_command(positional: &[String]) -> Result<Command, Outcome> {
     })
 }
 
-fn execute(command: Command) -> Outcome {
+fn execute(command: Command) -> CommandResult {
     match command {
-        Command::Create(path) => create(path),
-        Command::Open(path) | Command::Validate(path) => open(path),
-        Command::Migrate(path) => migrate(path),
-        Command::Inspect(path) => inspect(path),
-        Command::Apply(path, operation) => apply(path, operation),
-        Command::Save(path) => save(path),
-        Command::Recover(path) => recover(path),
+        Command::Create(path) => create(path).into(),
+        Command::Open(path) | Command::Validate(path) => open(path).into(),
+        Command::Migrate(path) => migrate(path).into(),
+        Command::Inspect(path) => inspect(path).into(),
+        Command::Apply(path, operation) => apply(path, operation).into(),
+        Command::Edit(path, resource, body) => edit(path, resource, body).into(),
+        Command::Terminate(path) => terminate(path).into(),
+        Command::Save(path) => save(path, SavePriority::Explicit).into(),
+        Command::Recover(path) => recover(path).into(),
+        Command::Checkpoint(path, name) => checkpoint(path, name),
+        Command::Restore(path, checkpoint) => restore(path, checkpoint).into(),
         Command::History(path) => history(path),
+        Command::Index(path) => index(path).into(),
         Command::Search(path, text) => search(path, text),
-        Command::Rebuild(path) => rebuild(path),
-        Command::Export(path, output) => export(path, output),
+        Command::Rebuild(path) => rebuild(path).into(),
+        Command::Close(path) => save(path, SavePriority::Close).into(),
+        Command::Export(path, output) => export(path, output).into(),
     }
 }
 
@@ -305,7 +368,104 @@ fn apply(path: PathBuf, operation: String) -> Outcome {
     open(path)
 }
 
-fn save(path: PathBuf) -> Outcome {
+fn edit(path: PathBuf, resource: String, text: String) -> Outcome {
+    if let Err(outcome) = open_project(&path) {
+        return outcome;
+    }
+    let relative = match CanonicalRelativePath::parse(resource) {
+        Ok(relative) if is_document_resource(&relative) => relative,
+        _ => return Outcome::unsafe_input(),
+    };
+    let current = match read_optional_resource(&path, &relative) {
+        Ok(bytes) => bytes,
+        Err(outcome) => return outcome,
+    };
+    let replacement = match canonical_document_from_text(&text) {
+        Ok(bytes) => bytes,
+        Err(outcome) => return outcome,
+    };
+    let document = DocumentId::from_bytes(project_key(Path::new(relative.as_str())));
+    let owner = NativeDocumentStateOwner::new([DocumentSnapshot {
+        document_id: document,
+        body: String::from_utf8_lossy(&current).into_owned(),
+        revision: Default::default(),
+        visibility: DocumentVisibility::Open,
+    }]);
+    let command = DocumentCommand {
+        document_id: document,
+        observed_revision: Default::default(),
+        body: String::from_utf8_lossy(&replacement).into_owned(),
+    };
+    if owner.execute(command).is_err()
+        || owner.undo(document).is_err()
+        || owner.redo(document).is_err()
+    {
+        return Outcome::failed();
+    }
+    let replacement = match owner.snapshot(document) {
+        Ok(snapshot) => snapshot.body.into_bytes(),
+        Err(_) => return Outcome::failed(),
+    };
+
+    let pending = match pending_recovery(&path) {
+        Ok(pending) => pending,
+        Err(outcome) => return outcome,
+    };
+    if pending
+        .last()
+        .is_some_and(|batch| !batch.documents.contains_key(&document))
+    {
+        return Outcome::failed();
+    }
+    let project_revision = pending.last().map_or(ProjectRevision::from(1), |batch| {
+        batch.project_revision.next()
+    });
+    let document_revision = pending
+        .last()
+        .and_then(|batch| batch.documents.get(&document))
+        .map_or(DocumentRevision::from(1), |range| range.last.next());
+    let base_hash = pending
+        .last()
+        .and_then(|batch| batch.result_hashes.get(&ResourceId::Document))
+        .copied()
+        .unwrap_or_else(|| content_hash(&current));
+    let result_hash = content_hash(&replacement);
+    let batch = RecoveryBatch {
+        project_revision,
+        documents: BTreeMap::from([(
+            document,
+            EditorRevisionRange::new(document_revision, document_revision)
+                .expect("one revision is a valid recovery range"),
+        )]),
+        base_hashes: BTreeMap::from([(ResourceId::Document, base_hash)]),
+        result_hashes: BTreeMap::from([(ResourceId::Document, result_hash)]),
+        payload: VersionedRecoveryPayload::V1(parchmint_contracts::generated::RecoveryRecordV1 {
+            schema: "parchmint.recovery-record/v1".into(),
+            record_id: encode_hex(&Sha256::digest(&replacement)),
+            operations: vec![json!({
+                "kind": "replace-document",
+                "path": relative.as_str(),
+                "body": String::from_utf8_lossy(&replacement),
+            })],
+        }),
+    };
+    match FsRecoveryJournal::open(path).and_then(|journal| journal.append(batch)) {
+        Ok(_) => Outcome::success(),
+        Err(_) => Outcome::failed(),
+    }
+}
+
+fn terminate(path: PathBuf) -> Outcome {
+    if let Err(outcome) = open_project(&path) {
+        return outcome;
+    }
+    match FsRecoveryJournal::open(path).and_then(|journal| journal.inspect()) {
+        Ok(inventory) if !inventory.records.is_empty() => Outcome::success(),
+        Ok(_) | Err(_) => Outcome::failed(),
+    }
+}
+
+fn save(path: PathBuf, priority: SavePriority) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
@@ -343,6 +503,7 @@ fn save(path: PathBuf) -> Outcome {
         Err(_) => return Outcome::failed(),
     };
     let digest: [u8; 32] = Sha256::digest(&manifest).into();
+    let intent_hash = checkpoint_intent_hash(&resources, b"save");
     let request = SaveRequest::new(
         SaveRevisionVector {
             project_revision: 0.into(),
@@ -359,19 +520,33 @@ fn save(path: PathBuf) -> Outcome {
             bytes: manifest,
         }]),
         CheckpointInput {
-            intent_hash: CheckpointIntentHash::from_bytes(project_digest(&path)),
+            intent_hash,
             resources,
             category: CheckpointCategory::ExplicitSave,
             affected_documents: Vec::new(),
             name: None,
         },
-        SavePriority::Explicit,
+        priority,
     );
+    if coordinator.reconcile_open().is_err() {
+        return Outcome::failed();
+    }
     match coordinator
         .request(request)
         .and_then(|ticket| ticket.wait())
     {
-        Ok(_) => Outcome::success(),
+        Ok(_) => match FsRecoveryJournal::open(&path).and_then(|journal| {
+            let inventory = journal.inspect()?;
+            match inventory.durable_through {
+                Some(revisions) => journal
+                    .compact(DurableRevisionVector::new(revisions))
+                    .map(|_| ()),
+                None => Ok(()),
+            }
+        }) {
+            Ok(()) => Outcome::success(),
+            Err(_) => Outcome::failed(),
+        },
         Err(_) => Outcome::failed(),
     }
 }
@@ -380,46 +555,152 @@ fn recover(path: PathBuf) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
-    match FsRecoveryJournal::open(path).and_then(|journal| journal.inspect()) {
-        Ok(_) => Outcome::success(),
-        Err(_) => Outcome::failed(),
+    let pending = match pending_recovery(&path) {
+        Ok(pending) => pending,
+        Err(outcome) => return outcome,
+    };
+    if pending.is_empty() {
+        return Outcome::success();
+    }
+    let mut replacements = BTreeMap::new();
+    for batch in pending {
+        let VersionedRecoveryPayload::V1(payload) = batch.payload;
+        for operation in payload.operations {
+            let Some(fields) = operation.as_object() else {
+                return Outcome::failed();
+            };
+            if fields.get("kind").and_then(Value::as_str) != Some("replace-document") {
+                return Outcome::failed();
+            }
+            let Some(relative) = fields
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| CanonicalRelativePath::parse(path).ok())
+                .filter(is_document_resource)
+            else {
+                return Outcome::failed();
+            };
+            let Some(body) = fields.get("body").and_then(Value::as_str) else {
+                return Outcome::failed();
+            };
+            let canonical = match ProjectFormatCodec::default().decode_document(body.as_bytes()) {
+                Ok(document) => document.as_html().as_bytes().to_vec(),
+                Err(_) => return Outcome::failed(),
+            };
+            replacements.insert(relative, canonical);
+        }
+    }
+    let writes = replacements
+        .into_iter()
+        .map(|(path, bytes)| StagedResource {
+            path: path.to_string(),
+            bytes,
+        })
+        .collect();
+    atomic_write(&path, AtomicWritePlan::new(writes))
+}
+
+fn checkpoint(path: PathBuf, name: String) -> CommandResult {
+    if let Err(outcome) = open_project(&path) {
+        return outcome.into();
+    }
+    let snapshot_name = match SnapshotName::new(name) {
+        Ok(name) => name,
+        Err(_) => return Outcome::usage().into(),
+    };
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
+        Ok(value) => value,
+        Err(error) => return filesystem_outcome(error).into(),
+    };
+    let resources = match canonical_resources(&root, &files) {
+        Ok(resources) => resources,
+        Err(outcome) => return outcome.into(),
+    };
+    let store = Git2HistoryStore::new(root);
+    if store.initialize(ProjectRootCapability::new(0)).is_err() {
+        return Outcome::failed().into();
+    }
+    let input = CheckpointInput {
+        intent_hash: checkpoint_intent_hash(&resources, snapshot_name.as_str().as_bytes()),
+        resources,
+        category: CheckpointCategory::NamedSnapshot,
+        affected_documents: Vec::new(),
+        name: Some(snapshot_name),
+    };
+    match store.checkpoint(input) {
+        Ok(checkpoint) => CommandResult::success(json!({
+            "checkpoint_id": encode_hex(checkpoint.as_bytes()),
+        })),
+        Err(_) => Outcome::failed().into(),
     }
 }
 
-fn history(path: PathBuf) -> Outcome {
+fn restore(path: PathBuf, encoded_checkpoint: String) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
+    let checkpoint = match decode_hex::<16>(&encoded_checkpoint) {
+        Some(bytes) => CheckpointId::from_bytes(bytes),
+        None => return Outcome::usage(),
+    };
     let files = NativeProjectFileSystem::new();
     let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
         Ok(value) => value,
         Err(error) => return filesystem_outcome(error),
     };
-    let store = Git2HistoryStore::new(root);
+    let store = Git2HistoryStore::new(root.clone());
     if store.initialize(ProjectRootCapability::new(0)).is_err() {
         return Outcome::failed();
     }
+    if store.preview(checkpoint).is_err() {
+        return Outcome::failed();
+    }
+    if write_pending_restore(&root, &encoded_checkpoint).is_err() {
+        return Outcome::failed();
+    }
+    finish_pending_restore(&root, &files, checkpoint, &encoded_checkpoint)
+}
+
+fn history(path: PathBuf) -> CommandResult {
+    if let Err(outcome) = open_project(&path) {
+        return outcome.into();
+    }
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
+        Ok(value) => value,
+        Err(error) => return filesystem_outcome(error).into(),
+    };
+    let store = Git2HistoryStore::new(root);
+    if store.initialize(ProjectRootCapability::new(0)).is_err() {
+        return Outcome::failed().into();
+    }
     match store.list(HistoryPageQuery::newest_first(20)) {
-        Ok(_) => Outcome::success(),
-        Err(_) => Outcome::failed(),
+        Ok(page) => CommandResult::success(json!({
+            "checkpoint_count": page.checkpoints.len(),
+        })),
+        Err(_) => Outcome::failed().into(),
     }
 }
 
-fn search(path: PathBuf, text: String) -> Outcome {
-    if text.is_empty() {
-        return Outcome::usage();
-    }
+fn index(path: PathBuf) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
-    let index = SqliteSearchIndex::new(&path);
-    let source = EmptyProjectionSource;
-    if index
-        .open_or_rebuild(ProjectId::from_bytes(project_key(&path)), &source)
-        .is_err()
-    {
-        return Outcome::failed();
+    search_index(&path).map_or_else(|outcome| outcome, |_| Outcome::success())
+}
+
+fn search(path: PathBuf, text: String) -> CommandResult {
+    if text.is_empty() {
+        return Outcome::usage().into();
     }
+    if let Err(outcome) = open_project(&path) {
+        return outcome.into();
+    }
+    let (index, _, _) = match search_index(&path) {
+        Ok(services) => services,
+        Err(outcome) => return outcome.into(),
+    };
     let query = SearchQuery {
         text,
         fields: [SearchField::Body].into_iter().collect(),
@@ -427,9 +708,12 @@ fn search(path: PathBuf, text: String) -> Outcome {
         whole_word: false,
         generation: 1,
     };
-    match index.query(query, Box::new(DiscardSearchBatches)) {
-        Ok(()) => Outcome::success(),
-        Err(_) => Outcome::failed(),
+    let sink = CountSearchHits::default();
+    match index.query(query, Box::new(sink.clone())) {
+        Ok(()) => CommandResult::success(json!({
+            "hit_count": sink.hit_count(),
+        })),
+        Err(_) => Outcome::failed().into(),
     }
 }
 
@@ -437,9 +721,14 @@ fn rebuild(path: PathBuf) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
-    let index = SqliteSearchIndex::new(&path);
-    let source = EmptyProjectionSource;
-    match index.open_or_rebuild(ProjectId::from_bytes(project_key(&path)), &source) {
+    let (index, source, rebuilt) = match search_index(&path) {
+        Ok(services) => services,
+        Err(outcome) => return outcome,
+    };
+    if rebuilt {
+        return Outcome::success();
+    }
+    match index.rebuild(&source) {
         Ok(_) => Outcome::success(),
         Err(_) => Outcome::failed(),
     }
@@ -475,6 +764,7 @@ fn open_project(path: &Path) -> Result<(), Outcome> {
     if !safe_path(path) {
         return Err(Outcome::unsafe_input());
     }
+    reconcile_pending_restore(path)?;
     let repository = FsProjectRepository::native();
     repository
         .open(ProjectPath::new(path))
@@ -525,18 +815,341 @@ fn project_key(path: &Path) -> [u8; 16] {
     digest[..16].try_into().expect("digest has a fixed length")
 }
 
+fn content_hash(bytes: &[u8]) -> ContentHash {
+    ContentHash::from_bytes(Sha256::digest(normalize_line_endings(bytes)).into())
+}
+
+fn checkpoint_intent_hash(
+    resources: &BTreeMap<CanonicalRelativePath, ContentHash>,
+    salt: &[u8],
+) -> CheckpointIntentHash {
+    let mut digest = Sha256::new();
+    digest.update(salt);
+    for (path, hash) in resources {
+        digest.update(path.as_str().as_bytes());
+        digest.update([0]);
+        digest.update(hash.as_bytes());
+    }
+    CheckpointIntentHash::from_bytes(digest.finalize().into())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
+fn decode_hex<const N: usize>(encoded: &str) -> Option<[u8; N]> {
+    if encoded.len() != N * 2 {
+        return None;
+    }
+    let mut decoded = [0_u8; N];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        decoded[index] = (high << 4) | low;
+    }
+    Some(decoded)
+}
+
+fn canonical_document_from_text(text: &str) -> Result<Vec<u8>, Outcome> {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            character => escaped.push(character),
+        }
+    }
+    let html = format!("<p data-block-id=\"cli-body\">{escaped}</p>");
+    ProjectFormatCodec::default()
+        .decode_document(html.as_bytes())
+        .map(|document| document.as_html().as_bytes().to_vec())
+        .map_err(|_| Outcome::failed())
+}
+
+fn searchable_document_text(html: &str) -> String {
+    let mut visible = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => {
+                in_tag = true;
+                if !visible.chars().last().is_some_and(char::is_whitespace) {
+                    visible.push(' ');
+                }
+            }
+            '>' => in_tag = false,
+            character if !in_tag => visible.push(character),
+            _ => {}
+        }
+    }
+    visible
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn read_optional_resource(
+    project: &Path,
+    relative: &CanonicalRelativePath,
+) -> Result<Vec<u8>, Outcome> {
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = files
+        .acquire(UntrustedProjectPath::new(project))
+        .map_err(filesystem_outcome)?;
+    match files.read(&root, relative) {
+        Ok(bytes) => Ok(bytes),
+        Err(parchmint_project_fs::FsError::Missing { .. }) => Ok(Vec::new()),
+        Err(error) => Err(filesystem_outcome(error)),
+    }
+}
+
+fn atomic_write(project: &Path, plan: AtomicWritePlan) -> Outcome {
+    if plan.writes.is_empty() {
+        return Outcome::success();
+    }
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(project)) {
+        Ok(value) => value,
+        Err(error) => return filesystem_outcome(error),
+    };
+    let writer = FsAtomicWriter::new(NativeAtomicFileOps::new(root));
+    let staged = match writer.stage(plan) {
+        Ok(staged) => staged,
+        Err(_) => return Outcome::failed(),
+    };
+    if !writer.validate_staged(&staged).is_valid() {
+        let _ = writer.abandon(staged);
+        return Outcome::failed();
+    }
+    match writer.commit(staged) {
+        Ok(_) => Outcome::success(),
+        Err(_) => Outcome::failed(),
+    }
+}
+
+fn reconcile_pending_restore(project: &Path) -> Result<(), Outcome> {
+    let marker = project.join(PENDING_RESTORE_PATH);
+    match fs::symlink_metadata(&marker) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) | Err(_) => return Err(Outcome::failed()),
+    }
+
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = files
+        .acquire(UntrustedProjectPath::new(project))
+        .map_err(filesystem_outcome)?;
+    let marker_path = CanonicalRelativePath::parse(PENDING_RESTORE_PATH)
+        .expect("the pending restore path is canonical");
+    let marker = files
+        .read(&root, &marker_path)
+        .map_err(filesystem_outcome)?;
+    let encoded = std::str::from_utf8(&marker)
+        .ok()
+        .map(str::trim)
+        .ok_or_else(Outcome::failed)?;
+    let checkpoint = decode_hex::<16>(encoded)
+        .map(CheckpointId::from_bytes)
+        .ok_or_else(Outcome::failed)?;
+    match finish_pending_restore(&root, &files, checkpoint, encoded) {
+        Outcome::Success => Ok(()),
+        _ => Err(Outcome::failed()),
+    }
+}
+
+fn write_pending_restore(
+    root: &parchmint_project_fs::ProjectRootCapability,
+    encoded_checkpoint: &str,
+) -> Result<(), Outcome> {
+    let marker = root
+        .checked_path()
+        .map_err(filesystem_outcome)?
+        .join(PENDING_RESTORE_PATH);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker)
+        .map_err(|_| Outcome::failed())?;
+    if writeln!(file, "{encoded_checkpoint}").is_err() || file.sync_all().is_err() {
+        drop(file);
+        let _ = fs::remove_file(&marker);
+        let _ = sync_directory(marker.parent().expect("restore marker has a parent"));
+        return Err(Outcome::failed());
+    }
+    sync_directory(marker.parent().expect("restore marker has a parent"))
+}
+
+fn finish_pending_restore(
+    root: &parchmint_project_fs::ProjectRootCapability,
+    files: &NativeProjectFileSystem,
+    checkpoint: CheckpointId,
+    encoded_checkpoint: &str,
+) -> Outcome {
+    let writer = FsAtomicWriter::new(NativeAtomicFileOps::new(root.clone()));
+    let records = match files.transaction_records(root) {
+        Ok(records) => records,
+        Err(_) => return Outcome::failed(),
+    };
+    if records
+        .into_iter()
+        .any(|record| writer.reconcile(record).is_err())
+    {
+        return Outcome::failed();
+    }
+
+    let store = Git2HistoryStore::new(root.clone());
+    if store.initialize(ProjectRootCapability::new(0)).is_err() {
+        return Outcome::failed();
+    }
+    let plan = match store.restore(checkpoint) {
+        Ok(plan) => plan,
+        Err(_) => return Outcome::failed(),
+    };
+    let staged = match writer.stage(plan.writes().clone()) {
+        Ok(staged) => staged,
+        Err(_) => return Outcome::failed(),
+    };
+    if !writer.validate_staged(&staged).is_valid() {
+        let _ = writer.abandon(staged);
+        return Outcome::failed();
+    }
+
+    let root_path = match root.checked_path() {
+        Ok(path) => path,
+        Err(_) => {
+            let _ = writer.abandon(staged);
+            return Outcome::failed();
+        }
+    };
+    let mut deletions = Vec::new();
+    for deletion in plan.deletions() {
+        let target = root_path.join(deletion.as_str());
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                deletions.push(target);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) | Err(_) => {
+                let _ = writer.abandon(staged);
+                return Outcome::failed();
+            }
+        }
+    }
+    for target in deletions {
+        let parent = target.parent().expect("canonical resource has a parent");
+        if fs::remove_file(&target).is_err() || sync_directory(parent).is_err() {
+            let _ = writer.abandon(staged);
+            return Outcome::failed();
+        }
+    }
+    if writer.commit(staged).is_err() {
+        return Outcome::failed();
+    }
+
+    let resources = match canonical_resources(root, files) {
+        Ok(resources) if resources == *plan.resources() => resources,
+        Ok(_) | Err(_) => return Outcome::failed(),
+    };
+    if store
+        .checkpoint(CheckpointInput {
+            intent_hash: checkpoint_intent_hash(&resources, encoded_checkpoint.as_bytes()),
+            resources,
+            category: CheckpointCategory::Restoration,
+            affected_documents: Vec::new(),
+            name: None,
+        })
+        .is_err()
+    {
+        return Outcome::failed();
+    }
+    match clear_pending_restore(root) {
+        Ok(()) => Outcome::success(),
+        Err(outcome) => outcome,
+    }
+}
+
+fn clear_pending_restore(
+    root: &parchmint_project_fs::ProjectRootCapability,
+) -> Result<(), Outcome> {
+    let marker = root
+        .checked_path()
+        .map_err(filesystem_outcome)?
+        .join(PENDING_RESTORE_PATH);
+    fs::remove_file(&marker).map_err(|_| Outcome::failed())?;
+    sync_directory(marker.parent().expect("restore marker has a parent"))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), Outcome> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| Outcome::failed())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(path: &Path) -> Result<(), Outcome> {
+    fs::metadata(path)
+        .map(|_| ())
+        .map_err(|_| Outcome::failed())
+}
+
+fn pending_recovery(project: &Path) -> Result<Vec<RecoveryBatch>, Outcome> {
+    let journal = FsRecoveryJournal::open(project).map_err(|_| Outcome::failed())?;
+    let inventory = journal.inspect().map_err(|_| Outcome::failed())?;
+    if inventory.records.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut base_hashes = vec![content_hash(&[])];
+    let files = NativeProjectFileSystem::new();
+    let (root, lease) = files
+        .acquire(UntrustedProjectPath::new(project))
+        .map_err(filesystem_outcome)?;
+    for (path, bytes) in canonical_resource_bytes(&root, &files)? {
+        if is_document_resource(&path) {
+            let hash = content_hash(&bytes);
+            if !base_hashes.contains(&hash) {
+                base_hashes.push(hash);
+            }
+        }
+    }
+    drop(lease);
+
+    for hash in base_hashes {
+        let replay = journal
+            .replay(RecoveryBaseSnapshot {
+                revisions: RecoveryRevisionVector::new(ProjectRevision::default(), BTreeMap::new()),
+                hashes: BTreeMap::from([(ResourceId::Document, hash)]),
+            })
+            .map_err(|_| Outcome::failed())?;
+        if replay.isolation.is_none() && replay.accepted.len() == inventory.records.len() {
+            return Ok(replay.accepted);
+        }
+    }
+    Err(Outcome::failed())
+}
+
 fn canonical_resources(
     root: &parchmint_project_fs::ProjectRootCapability,
     files: &NativeProjectFileSystem,
 ) -> Result<BTreeMap<CanonicalRelativePath, ContentHash>, Outcome> {
     Ok(canonical_resource_bytes(root, files)?
         .into_iter()
-        .map(|(path, bytes)| {
-            (
-                path,
-                ContentHash::from_bytes(Sha256::digest(normalize_line_endings(&bytes)).into()),
-            )
-        })
+        .map(|(path, bytes)| (path, content_hash(&bytes)))
         .collect())
 }
 
@@ -628,6 +1241,11 @@ fn is_canonical_resource(path: &CanonicalRelativePath) -> bool {
         || path.starts_with("annotations/") && path.ends_with(".json")
 }
 
+fn is_document_resource(path: &CanonicalRelativePath) -> bool {
+    let path = path.as_str();
+    (path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html")
+}
+
 fn normalize_line_endings(bytes: &[u8]) -> Vec<u8> {
     if !bytes.windows(2).any(|window| window == b"\r\n") {
         return bytes.to_vec();
@@ -697,21 +1315,79 @@ fn export_snapshot(path: &Path) -> Result<ExportProjectSnapshot, std::io::Error>
     ))
 }
 
-struct EmptyProjectionSource;
+struct CanonicalSearchSource(Vec<SearchDocumentProjection>);
 
-impl SearchProjectionSource for EmptyProjectionSource {
+impl CanonicalSearchSource {
+    fn load(project: &Path) -> Result<Self, Outcome> {
+        let files = NativeProjectFileSystem::new();
+        let (root, _lease) = files
+            .acquire(UntrustedProjectPath::new(project))
+            .map_err(filesystem_outcome)?;
+        let resources = canonical_resource_bytes(&root, &files)?;
+        let codec = ProjectFormatCodec::default();
+        let mut projections = Vec::new();
+        for (path, bytes) in resources {
+            if !is_document_resource(&path) {
+                continue;
+            }
+            let document = codec
+                .decode_document(&bytes)
+                .map_err(|_| Outcome::invalid_project())?;
+            let id = project_key(Path::new(path.as_str()));
+            projections.push(SearchDocumentProjection {
+                document_id: DocumentId::from_bytes(id),
+                revision: RevisionId::from(1),
+                texts: vec![SearchTextProjection {
+                    block_id: BlockId::from_bytes(id),
+                    field: SearchField::Body,
+                    text: searchable_document_text(document.as_html()),
+                }],
+            });
+        }
+        Ok(Self(projections))
+    }
+}
+
+impl SearchProjectionSource for CanonicalSearchSource {
     fn visit_projections(
         &self,
-        _: &mut dyn SearchProjectionVisitor,
+        visitor: &mut dyn SearchProjectionVisitor,
     ) -> Result<(), parchmint_search_api::SearchError> {
+        for projection in &self.0 {
+            visitor.visit(projection.clone())?;
+        }
         Ok(())
     }
 }
 
-struct DiscardSearchBatches;
+#[derive(Clone, Default)]
+struct CountSearchHits(Arc<AtomicUsize>);
 
-impl SearchBatchSink for DiscardSearchBatches {
-    fn push(&self, _: SearchBatch) {}
+impl CountSearchHits {
+    fn hit_count(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+impl SearchBatchSink for CountSearchHits {
+    fn push(&self, batch: SearchBatch) {
+        self.0.fetch_add(batch.hits.len(), Ordering::Relaxed);
+    }
+}
+
+fn search_index(
+    project: &Path,
+) -> Result<(SqliteSearchIndex, CanonicalSearchSource, bool), Outcome> {
+    let source = CanonicalSearchSource::load(project)?;
+    let index = SqliteSearchIndex::new(project);
+    let state = index
+        .open_or_rebuild(ProjectId::from_bytes(project_key(project)), &source)
+        .map_err(|_| Outcome::failed())?;
+    Ok((
+        index,
+        source,
+        matches!(state, SearchIndexState::Rebuilt { .. }),
+    ))
 }
 
 struct NativeExportSink {
@@ -781,12 +1457,13 @@ fn export_sink_error() -> parchmint_export_api::ExportError {
     }
 }
 
-fn emit(machine: bool, outcome: Outcome) -> i32 {
+fn emit(machine: bool, result: CommandResult) -> i32 {
+    let outcome = result.outcome;
     let output = CliOutputV1 {
         schema: CLI_SCHEMA.into(),
         ok: matches!(outcome, Outcome::Success),
         message: Some(outcome.message().into()),
-        data: None::<Value>,
+        data: result.data,
     };
     if machine {
         println!(
