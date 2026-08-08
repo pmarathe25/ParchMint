@@ -300,6 +300,9 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-editor-api"
 version = "0.1.0"
+dependencies = [
+    "parchmint-domain",
+]
 
 [[package]]
 name = "parchmint-editor-core"
