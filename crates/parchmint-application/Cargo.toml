@@ -10,3 +10,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-domain = { path = "../parchmint-domain" }
+parchmint-editor-api = { path = "../parchmint-editor-api" }
