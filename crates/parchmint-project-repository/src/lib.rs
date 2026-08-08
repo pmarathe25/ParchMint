@@ -336,6 +336,10 @@ impl CommitReceipt {
     pub fn new(id: u64) -> Self {
         Self(id)
     }
+
+    pub const fn id(&self) -> u64 {
+        self.0
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReport {

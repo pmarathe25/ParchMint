@@ -10,3 +10,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-contracts = { path = "../parchmint-contracts" }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-recovery-api = { path = "../parchmint-recovery-api" }
+parchmint-save = { path = "../parchmint-save" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+parchmint-domain = { path = "../parchmint-domain" }
+parchmint-project-format = { path = "../parchmint-project-format" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }

@@ -364,6 +364,18 @@ dependencies = [
 [[package]]
 name = "parchmint-recovery-fs"
 version = "0.1.0"
+dependencies = [
+    "parchmint-contracts",
+    "parchmint-domain",
+    "parchmint-history-api",
+    "parchmint-project-format",
+    "parchmint-project-repository",
+    "parchmint-recovery-api",
+    "parchmint-save",
+    "serde",
+    "serde_json",
+    "sha2 0.11.0",
+]
 
 [[package]]
 name = "parchmint-save"
