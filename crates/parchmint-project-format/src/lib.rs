@@ -155,6 +155,10 @@ impl fmt::Display for CanonicalRelativePath {
 pub struct ContentHash([u8; 32]);
 
 impl ContentHash {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

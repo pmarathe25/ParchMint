@@ -378,3 +378,19 @@ fn restore_plan_rejects_partial_or_extra_writes() {
         .is_err()
     );
 }
+
+#[test]
+fn complete_restore_plan_tracks_resources_absent_from_the_checkpoint() {
+    let source = CheckpointId::from_bytes([2; 16]);
+    let manifest = CanonicalRelativePath::parse("project.toml").unwrap();
+    let obsolete = CanonicalRelativePath::parse("manuscript/obsolete.html").unwrap();
+    let resources = BTreeMap::from([(manifest.clone(), ContentHash::from_bytes([3; 32]))]);
+    let writes = AtomicWritePlan::new(vec![StagedResource {
+        path: manifest.as_str().into(),
+        bytes: b"manifest".to_vec(),
+    }]);
+
+    let plan = RestorePlan::complete(source, resources, writes, vec![obsolete.clone()]).unwrap();
+
+    assert_eq!(plan.deletions(), &[obsolete]);
+}

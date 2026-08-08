@@ -10,3 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
+libz-sys = { version = "=1.1.29", default-features = false, features = ["libc", "static"] }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-project-format = { path = "../parchmint-project-format" }
+parchmint-project-fs = { path = "../parchmint-project-fs" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }
+sha2.workspace = true

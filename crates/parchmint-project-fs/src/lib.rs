@@ -128,6 +128,12 @@ impl ProjectRootCapability {
     fn contract_root(&self) -> ContractRoot {
         ContractRoot::new(self.root_id)
     }
+
+    /// Returns the validated root while this capability owns its write lock.
+    pub fn checked_path(&self) -> Result<&Path, FsError> {
+        verify_lock_owner(self)?;
+        Ok(&self.path)
+    }
 }
 
 /// The operating-system lock held for one writable project session.

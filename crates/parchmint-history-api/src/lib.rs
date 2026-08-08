@@ -176,6 +176,7 @@ pub struct RestorePlan {
     source: CheckpointId,
     resources: BTreeMap<CanonicalRelativePath, ContentHash>,
     writes: AtomicWritePlan,
+    deletions: Vec<CanonicalRelativePath>,
 }
 
 impl RestorePlan {
@@ -183,6 +184,17 @@ impl RestorePlan {
         source: CheckpointId,
         resources: BTreeMap<CanonicalRelativePath, ContentHash>,
         writes: AtomicWritePlan,
+    ) -> Result<Self, HistoryError> {
+        Self::complete(source, resources, writes, Vec::new())
+    }
+
+    /// Builds a whole-project restore, including canonical resources that the
+    /// normal save path must remove because they are absent from the source.
+    pub fn complete(
+        source: CheckpointId,
+        resources: BTreeMap<CanonicalRelativePath, ContentHash>,
+        writes: AtomicWritePlan,
+        deletions: Vec<CanonicalRelativePath>,
     ) -> Result<Self, HistoryError> {
         let write_paths: Result<BTreeSet<_>, _> = writes
             .writes
@@ -201,10 +213,22 @@ impl RestorePlan {
                 reason: "must contain exactly the checkpoint resource set",
             });
         }
+        let deletion_paths: BTreeSet<_> = deletions.iter().cloned().collect();
+        if deletion_paths.len() != deletions.len()
+            || deletion_paths
+                .iter()
+                .any(|path| resources.contains_key(path))
+        {
+            return Err(HistoryError::InvalidInput {
+                field: "restore deletions",
+                reason: "must be unique and absent from the checkpoint resource set",
+            });
+        }
         Ok(Self {
             source,
             resources,
             writes,
+            deletions,
         })
     }
 
@@ -218,6 +242,10 @@ impl RestorePlan {
 
     pub fn writes(&self) -> &AtomicWritePlan {
         &self.writes
+    }
+
+    pub fn deletions(&self) -> &[CanonicalRelativePath] {
+        &self.deletions
     }
 }
 
