@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -469,13 +469,13 @@ pub fn at_fault_point(
     }
 }
 
-pub struct FaultingAtomicFileOps<F> {
-    inner: F,
+pub struct FaultingService<T> {
+    inner: T,
     schedule: Arc<dyn FaultSchedule>,
 }
 
-impl<F> FaultingAtomicFileOps<F> {
-    pub fn new(inner: F, schedule: Arc<dyn FaultSchedule>) -> Self {
+impl<T> FaultingService<T> {
+    pub fn new(inner: T, schedule: Arc<dyn FaultSchedule>) -> Self {
         Self { inner, schedule }
     }
 
@@ -483,69 +483,56 @@ impl<F> FaultingAtomicFileOps<F> {
         at_fault_point(self.schedule.as_ref(), point)
     }
 
-    pub fn inner(&self) -> &F {
+    pub fn inner(&self) -> &T {
         &self.inner
     }
 }
 
-pub struct FaultingHistoryStore<H> {
-    inner: H,
-    schedule: Arc<dyn FaultSchedule>,
-}
-
-impl<H> FaultingHistoryStore<H> {
-    pub fn new(inner: H, schedule: Arc<dyn FaultSchedule>) -> Self {
-        Self { inner, schedule }
-    }
-
-    pub fn schedule_at(&self, point: FaultPoint) -> Result<(), InjectedFault> {
-        at_fault_point(self.schedule.as_ref(), point)
-    }
-
-    pub fn inner(&self) -> &H {
-        &self.inner
-    }
-}
+pub type FaultingAtomicFileOps<T> = FaultingService<T>;
+pub type FaultingHistoryStore<T> = FaultingService<T>;
+pub type FaultingSearchIndex<T> = FaultingService<T>;
+pub type FaultingRecoveryJournal<T> = FaultingService<T>;
+pub type FaultingEditorAdapter<T> = FaultingService<T>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(u64);
 
-#[derive(Debug)]
-pub struct ControlledExecutor;
+impl TaskId {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
 
-thread_local! {
-    static EXECUTOR_STATE: std::cell::RefCell<HashMap<usize, VecDeque<TaskId>>> =
-        std::cell::RefCell::new(HashMap::new());
+#[derive(Debug, Default)]
+pub struct ControlledExecutor {
+    pending: VecDeque<TaskId>,
 }
 
 impl ControlledExecutor {
-    fn key(this: &Self) -> usize {
-        this as *const Self as usize
+    pub const fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+        }
     }
 
-    fn with_state<R>(this: &Self, f: impl FnOnce(&mut VecDeque<TaskId>) -> R) -> R {
-        EXECUTOR_STATE.with(|state| {
-            let mut map = state.borrow_mut();
-            let queue = map.entry(Self::key(this)).or_insert_with(VecDeque::new);
-            f(queue)
-        })
+    pub fn enqueue(&mut self, task: TaskId) {
+        self.pending.push_back(task);
     }
 
     pub fn run_next(&mut self) -> bool {
-        Self::with_state(self, |queue| queue.pop_front().is_some())
+        self.pending.pop_front().is_some()
     }
 
     pub fn run_named(&mut self, task: TaskId) -> bool {
-        Self::with_state(self, |queue| {
-            if !queue.contains(&task) {
-                queue.push_back(task);
-            }
-            true
-        })
+        let Some(position) = self.pending.iter().position(|queued| *queued == task) else {
+            return false;
+        };
+        self.pending.remove(position);
+        true
     }
 
     pub fn pending(&self) -> Vec<TaskId> {
-        Self::with_state(self, |queue| queue.iter().copied().collect())
+        self.pending.iter().copied().collect()
     }
 }
 
@@ -629,10 +616,10 @@ mod tests {
 
     #[test]
     fn controlled_executor_runs_named_tasks_in_queue_order() {
-        let mut executor = ControlledExecutor;
+        let mut executor = ControlledExecutor::new();
         assert!(executor.pending().is_empty());
-        assert!(executor.run_named(TaskId(1)));
-        assert!(executor.run_named(TaskId(2)));
+        executor.enqueue(TaskId(1));
+        executor.enqueue(TaskId(2));
         assert_eq!(executor.pending(), vec![TaskId(1), TaskId(2)]);
         assert!(executor.run_next());
         assert_eq!(executor.pending(), vec![TaskId(2)]);
