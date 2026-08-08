@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "parchmint.recovery-record/v1",
+  "title": "ParchMint recovery record",
+  "type": "object",
+  "required": ["schema", "record_id", "operations"],
+  "properties": {
+    "schema": { "const": "parchmint.recovery-record/v1" },
+    "record_id": { "type": "string", "minLength": 1 },
+    "operations": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}

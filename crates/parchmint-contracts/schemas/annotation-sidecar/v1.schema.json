@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "parchmint.annotation-sidecar/v1",
+  "title": "ParchMint annotation sidecar",
+  "type": "object",
+  "required": ["schema", "document_id", "threads"],
+  "properties": {
+    "schema": { "const": "parchmint.annotation-sidecar/v1" },
+    "document_id": { "type": "string", "minLength": 1 },
+    "threads": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": false
+}

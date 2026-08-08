@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "parchmint.cli-output/v1",
+  "title": "ParchMint machine-readable CLI output",
+  "type": "object",
+  "required": ["schema", "ok"],
+  "properties": {
+    "schema": { "const": "parchmint.cli-output/v1" },
+    "ok": { "type": "boolean" },
+    "message": { "type": "string" },
+    "data": {}
+  },
+  "additionalProperties": false
+}
