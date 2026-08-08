@@ -1,0 +1,58 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# Policy exceptions belong in supply-chain/exceptions.toml and must be reviewed
+# there with a package, owner, reason, and expiry before this list is changed.
+ignore = []
+
+[licenses]
+# Every license here is GPL-3.0-compatible. Per-package exceptions are kept
+# empty so they cannot bypass the repository exception record.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "GPL-3.0-only",
+    "GPL-3.0-or-later",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[licenses.private]
+ignore = false
+registries = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+allow-workspace = false
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[sources.allow-org]
+github = []
+gitlab = []
+bitbucket = []

@@ -1,0 +1,9 @@
+format-version = 1
+artifact = []
+
+# List every bundled non-source artifact here.
+# [[artifact]]
+# path = "assets/example.bin"
+# sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# source = "https://example.invalid/upstream/example.bin"
+# license = "SPDX-License-Identifier"

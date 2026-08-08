@@ -1,0 +1,6 @@
+# Versions used by CI and code generation.
+[ci]
+cargo-deny = "0.20.2"
+
+[generators]
+typify = "0.7.0"

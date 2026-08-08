@@ -1,0 +1,11 @@
+format-version = 1
+exception = []
+
+# Every exception uses this shape. Expired entries fail CI.
+# [[exception]]
+# id = "RUSTSEC-YYYY-NNNN"
+# check = "advisory"
+# package = "crate-name@1.2.3"
+# owner = "@github-owner-or-team"
+# reason = "Why this is needed and how the risk is contained."
+# expires = "2026-12-31"

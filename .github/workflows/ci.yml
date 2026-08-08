@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - ".cargo/**"
+      - ".github/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "assets/**"
+      - "crates/**"
+      - "deny.toml"
+      - "packaging/**"
+      - "resources/**"
+      - "rust-toolchain.toml"
+      - "supply-chain/**"
+      - "tools/**"
+  push:
+    branches:
+      - main
+    tags:
+      - "v*-rc*"
+    paths:
+      - ".cargo/**"
+      - ".github/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "assets/**"
+      - "crates/**"
+      - "deny.toml"
+      - "packaging/**"
+      - "resources/**"
+      - "rust-toolchain.toml"
+      - "supply-chain/**"
+      - "tools/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_DENY_VERSION: "0.20.2"
+  RUST_TOOLCHAIN: "1.97.1"
+
+jobs:
+  workspace-and-supply-chain:
+    name: ${{ matrix.os }} / locked workspace and supply chain
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: >-
+          rustup toolchain install "$RUST_TOOLCHAIN"
+          --profile minimal
+          --component clippy
+          --component rustfmt
+
+      - name: Fetch locked dependencies
+        run: cargo +$RUST_TOOLCHAIN fetch --locked
+
+      - name: Verify workspace metadata
+        run: cargo +$RUST_TOOLCHAIN metadata --locked --offline --no-deps --format-version 1
+
+      - name: Verify formatting
+        run: cargo +$RUST_TOOLCHAIN fmt --all --check
+
+      - name: Check locked workspace
+        run: cargo +$RUST_TOOLCHAIN check --workspace --all-targets --locked --offline
+
+      - name: Lint locked workspace
+        run: >-
+          cargo +$RUST_TOOLCHAIN clippy
+          --workspace
+          --all-targets
+          --locked
+          --offline
+          --
+          -D warnings
+
+      - name: Test locked workspace
+        run: cargo +$RUST_TOOLCHAIN test --workspace --locked --offline
+
+      - name: Verify exception records and bundled artifacts
+        run: >-
+          cargo +$RUST_TOOLCHAIN run
+          --locked
+          --offline
+          --package parchmint-ci
+          --
+          verify
+
+      - name: Verify native SBOM baseline
+        run: >-
+          cargo +$RUST_TOOLCHAIN run
+          --locked
+          --offline
+          --package parchmint-ci
+          --
+          sbom verify
+
+      - name: Install pinned cargo-deny
+        run: cargo +$RUST_TOOLCHAIN install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+
+      - name: Check advisories, GPL-compatible licenses, bans, and provenance
+        run: cargo +$RUST_TOOLCHAIN deny --locked check all
