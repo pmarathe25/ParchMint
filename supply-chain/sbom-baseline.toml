@@ -288,6 +288,25 @@ dependencies = [
 [[package]]
 name = "parchmint-core-cli"
 version = "0.1.0"
+dependencies = [
+    "parchmint-contracts",
+    "parchmint-domain",
+    "parchmint-export-api",
+    "parchmint-export-html",
+    "parchmint-history-api",
+    "parchmint-history-git2",
+    "parchmint-project-format",
+    "parchmint-project-fs",
+    "parchmint-project-repository",
+    "parchmint-recovery-api",
+    "parchmint-recovery-fs",
+    "parchmint-save",
+    "parchmint-search-api",
+    "parchmint-search-sqlite",
+    "parchmint-test-support",
+    "serde_json",
+    "sha2 0.11.0",
+]
 
 [[package]]
 name = "parchmint-design-system"

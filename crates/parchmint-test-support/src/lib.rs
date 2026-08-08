@@ -262,6 +262,7 @@ impl ScopedProject {
     pub fn canonical_bytes(&self) -> Result<CanonicalResourceSet, FixtureError> {
         let codec = ProjectFormatCodec::default();
         let mut files = read_fixture_files(self.root.as_path())?;
+        files.remove(".parchmint/root-id");
         let format_control = files.remove(".parchmint/format-version").ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
