@@ -10,3 +10,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-project-format = { path = "../parchmint-project-format" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }
+sha2.workspace = true

@@ -71,10 +71,28 @@ pub struct ProjectSnapshot {
     pub document_ids: Vec<DocumentId>,
 }
 
-#[derive(Debug)]
 pub struct OpenProject {
     pub snapshot: ProjectSnapshot,
-    _lease: Lease,
+    _lease: Box<dyn Send + Sync>,
+}
+
+impl OpenProject {
+    /// Builds an opened project whose writable lease lives for as long as this value.
+    pub fn with_lease(snapshot: ProjectSnapshot, lease: impl Send + Sync + 'static) -> Self {
+        Self {
+            snapshot,
+            _lease: Box::new(lease),
+        }
+    }
+}
+
+impl fmt::Debug for OpenProject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenProject")
+            .field("snapshot", &self.snapshot)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -99,6 +117,7 @@ pub enum RepositoryError {
     MissingResource { path: ProjectPath },
     UnsafePath { path: String },
     Interrupted { path: ProjectPath },
+    Integrity { path: ProjectPath, reason: String },
     NotFound { document: DocumentId },
 }
 impl fmt::Display for RepositoryError {
@@ -189,13 +208,13 @@ impl ProjectRepository for InMemoryProjectRepository {
         state.projects.insert(path.clone(), project);
         state.leases.insert(path.clone(), true);
         state.active = Some(path.clone());
-        Ok(OpenProject {
+        Ok(OpenProject::with_lease(
             snapshot,
-            _lease: Lease {
+            Lease {
                 state: self.state.clone(),
                 path,
             },
-        })
+        ))
     }
     fn open(&self, path: ProjectPath) -> Result<OpenProject, RepositoryError> {
         let mut state = self.state.lock().expect("repository lock");
@@ -220,13 +239,13 @@ impl ProjectRepository for InMemoryProjectRepository {
         let snapshot = Self::snapshot(&path, project);
         state.leases.insert(path.clone(), true);
         state.active = Some(path.clone());
-        Ok(OpenProject {
+        Ok(OpenProject::with_lease(
             snapshot,
-            _lease: Lease {
+            Lease {
                 state: self.state.clone(),
                 path,
             },
-        })
+        ))
     }
     fn load_document(&self, document: DocumentId) -> Result<Vec<u8>, RepositoryError> {
         let mut state = self.state.lock().expect("repository lock");
@@ -252,6 +271,10 @@ pub struct ProjectRootCapability(u64);
 impl ProjectRootCapability {
     pub fn new(id: u64) -> Self {
         Self(id)
+    }
+
+    pub fn id(&self) -> u64 {
+        self.0
     }
 }
 
@@ -284,6 +307,18 @@ impl StagedWrite {
             plan,
         }
     }
+
+    pub fn root(&self) -> ProjectRootCapability {
+        ProjectRootCapability::new(self.root)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn plan(&self) -> &AtomicWritePlan {
+        &self.plan
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveTransactionRecord {
@@ -297,11 +332,20 @@ impl SaveTransactionRecord {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitReceipt(u64);
+impl CommitReceipt {
+    pub fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationReport {
     valid: bool,
 }
 impl ValidationReport {
+    pub fn new(valid: bool) -> Self {
+        Self { valid }
+    }
+
     pub fn is_valid(&self) -> bool {
         self.valid
     }
@@ -311,6 +355,10 @@ pub struct Reconciliation {
     reconciled: bool,
 }
 impl Reconciliation {
+    pub fn new(reconciled: bool) -> Self {
+        Self { reconciled }
+    }
+
     pub fn is_reconciled(&self) -> bool {
         self.reconciled
     }
@@ -320,6 +368,10 @@ pub struct Abandonment {
     abandoned: bool,
 }
 impl Abandonment {
+    pub fn new(abandoned: bool) -> Self {
+        Self { abandoned }
+    }
+
     pub fn was_abandoned(&self) -> bool {
         self.abandoned
     }

@@ -240,6 +240,11 @@ dependencies = [
 [[package]]
 name = "parchmint-project-fs"
 version = "0.1.0"
+dependencies = [
+    "parchmint-project-format",
+    "parchmint-project-repository",
+    "sha2 0.11.0",
+]
 
 [[package]]
 name = "parchmint-project-repository"

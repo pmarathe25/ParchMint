@@ -329,7 +329,8 @@ impl ProjectFormatCodec {
     pub fn decode_manifest(&self, bytes: &[u8]) -> Result<CanonicalManifest, FormatError> {
         let text = utf8(bytes, "project manifest")?;
         let value = text
-            .parse::<toml::Value>()
+            .parse::<toml::Table>()
+            .map(toml::Value::Table)
             .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
         Ok(CanonicalManifest(value))
     }
