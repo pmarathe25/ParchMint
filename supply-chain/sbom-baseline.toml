@@ -439,6 +439,10 @@ dependencies = [
 [[package]]
 name = "parchmint-spellcheck-api"
 version = "0.1.0"
+dependencies = [
+    "parchmint-domain",
+    "parchmint-editor-api",
+]
 
 [[package]]
 name = "parchmint-spellcheck-en-us"
