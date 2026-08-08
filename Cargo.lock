@@ -367,6 +367,13 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-save"
 version = "0.1.0"
+dependencies = [
+ "parchmint-domain",
+ "parchmint-history-api",
+ "parchmint-project-format",
+ "parchmint-project-repository",
+ "parchmint-recovery-api",
+]
 
 [[package]]
 name = "parchmint-search-api"
