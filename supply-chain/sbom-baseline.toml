@@ -391,6 +391,9 @@ dependencies = [
 [[package]]
 name = "parchmint-search-api"
 version = "0.1.0"
+dependencies = [
+    "parchmint-domain",
+]
 
 [[package]]
 name = "parchmint-search-sqlite"
