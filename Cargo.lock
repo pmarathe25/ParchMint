@@ -499,6 +499,11 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-workspace-state"
 version = "0.1.0"
+dependencies = [
+ "parchmint-domain",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "pkg-config"
