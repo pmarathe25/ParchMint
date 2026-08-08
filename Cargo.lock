@@ -275,6 +275,10 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-test-support"
 version = "0.1.0"
+dependencies = [
+ "parchmint-domain",
+ "parchmint-project-format",
+]
 
 [[package]]
 name = "parchmint-ui-api"
