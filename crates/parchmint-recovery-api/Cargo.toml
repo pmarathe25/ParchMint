@@ -10,3 +10,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-contracts = { path = "../parchmint-contracts" }
+parchmint-domain = { path = "../parchmint-domain" }
+parchmint-project-format = { path = "../parchmint-project-format" }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -353,6 +353,12 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-recovery-api"
 version = "0.1.0"
+dependencies = [
+ "parchmint-contracts",
+ "parchmint-domain",
+ "parchmint-project-format",
+ "serde_json",
+]
 
 [[package]]
 name = "parchmint-recovery-fs"
