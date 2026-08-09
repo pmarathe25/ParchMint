@@ -12,4 +12,4 @@ workspace = true
 
 [dependencies]
 parchmint-platform-api = { path = "../parchmint-platform-api" }
-parchmint-platform-native = { path = "../parchmint-platform-native" }
+parchmint-preferences = { path = "../parchmint-preferences" }

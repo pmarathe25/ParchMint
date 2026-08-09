@@ -508,7 +508,7 @@ name = "parchmint-ui-iced"
 version = "0.1.0"
 dependencies = [
  "parchmint-platform-api",
- "parchmint-platform-native",
+ "parchmint-preferences",
 ]
 
 [[package]]
