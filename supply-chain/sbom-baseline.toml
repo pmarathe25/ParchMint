@@ -341,6 +341,9 @@ dependencies = [
 [[package]]
 name = "parchmint-editor-core"
 version = "0.1.0"
+dependencies = [
+    "parchmint-editor-api",
+]
 
 [[package]]
 name = "parchmint-editor-iced"
