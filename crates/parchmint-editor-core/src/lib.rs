@@ -6,6 +6,7 @@
 //! semantic blocks and edits.
 
 mod document_engine;
+pub mod feasibility;
 mod projection;
 
 use std::collections::BTreeMap;
@@ -528,6 +529,12 @@ impl EditorCoreSession {
     /// Returns a deterministic snapshot of the current shared state.
     pub fn canonical_projection(&self) -> CanonicalProjection {
         self.inner.projection().canonical()
+    }
+
+    /// Borrows current text for the crate-owned feasibility layout without
+    /// exposing the private document engine.
+    pub(crate) fn text_for_feasibility(&self) -> &str {
+        self.inner.engine.text()
     }
 
     /// Drains one bounded projection work item for a background consumer.

@@ -109,6 +109,7 @@ pub(super) trait DocumentEngine {
     fn load(&mut self, document: SemanticDocumentSnapshot) -> Result<(), EngineError>;
     fn apply(&mut self, edit: EngineEdit) -> Result<EngineChange, EngineError>;
     fn blocks(&self) -> Vec<SemanticBlockSnapshot>;
+    fn text(&self) -> &str;
     fn scalar_len(&self) -> usize;
 }
 
@@ -160,6 +161,10 @@ impl DocumentEngine for PrivateTextEngine {
 
     fn blocks(&self) -> Vec<SemanticBlockSnapshot> {
         self.blocks.clone()
+    }
+
+    fn text(&self) -> &str {
+        self.blocks.first().map_or("", |block| block.text.as_str())
     }
 
     fn scalar_len(&self) -> usize {
