@@ -320,6 +320,12 @@ dependencies = [
 [[package]]
 name = "parchmint-desktop"
 version = "0.1.0"
+dependencies = [
+    "parchmint-editor-api",
+    "parchmint-platform-api",
+    "parchmint-preferences",
+    "parchmint-ui-api",
+]
 
 [[package]]
 name = "parchmint-domain"
