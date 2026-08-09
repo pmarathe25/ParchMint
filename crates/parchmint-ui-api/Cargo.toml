@@ -10,3 +10,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-application = { path = "../parchmint-application" }
+parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-platform-api = { path = "../parchmint-platform-api" }
+parchmint-preferences = { path = "../parchmint-preferences" }
+parchmint-spellcheck-api = { path = "../parchmint-spellcheck-api" }
+parchmint-workspace-state = { path = "../parchmint-workspace-state" }

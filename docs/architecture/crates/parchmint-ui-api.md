@@ -44,6 +44,7 @@ pub struct UiStartup {
 pub struct UiPorts {
     pub application: ApplicationServices,
     pub editor: Arc<dyn EditorAdapter>,
+    pub spellcheck: Arc<dyn SpellcheckService>,
     pub platform: PlatformServices,
     pub preferences: Arc<dyn PreferenceService>,
     pub appearance: Arc<dyn AppearanceService>,
@@ -57,9 +58,15 @@ and events internally. It registers any concrete window with the concrete
 platform adapter through private integration code. That registration does not
 belong to this public contract.
 
-The UI applies each numbered appearance event to every registered window in
-stable window-ID order before it applies the next event. This keeps all open
-windows on the same theme generation.
+`ProjectSessionRegistry` issues a ParchMint capability for each logical project
+session. Recreating a session advances its generation, which makes delayed work
+that holds the previous capability stale.
+
+The UI applies each numbered appearance event to every registered
+`WindowCapability` in stable logical window-ID order before it applies the next
+event. The callback receives the full capability, including its generation, so
+the native adapter can reject a closed or recreated window without receiving a
+widget or native-window type.
 
 ## Implementation
 

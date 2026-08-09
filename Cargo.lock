@@ -494,6 +494,14 @@ dependencies = [
 [[package]]
 name = "parchmint-ui-api"
 version = "0.1.0"
+dependencies = [
+ "parchmint-application",
+ "parchmint-editor-api",
+ "parchmint-platform-api",
+ "parchmint-preferences",
+ "parchmint-spellcheck-api",
+ "parchmint-workspace-state",
+]
 
 [[package]]
 name = "parchmint-ui-iced"
