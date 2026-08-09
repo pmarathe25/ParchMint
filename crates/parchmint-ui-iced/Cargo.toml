@@ -10,3 +10,6 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+parchmint-platform-api = { path = "../parchmint-platform-api" }
+parchmint-platform-native = { path = "../parchmint-platform-native" }

@@ -384,6 +384,9 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-platform-native"
 version = "0.1.0"
+dependencies = [
+    "parchmint-platform-api",
+]
 
 [[package]]
 name = "parchmint-preferences"
@@ -496,6 +499,10 @@ version = "0.1.0"
 [[package]]
 name = "parchmint-ui-iced"
 version = "0.1.0"
+dependencies = [
+    "parchmint-platform-api",
+    "parchmint-platform-native",
+]
 
 [[package]]
 name = "parchmint-workspace-state"
