@@ -63,13 +63,10 @@ fn append_validation_preserves_order_and_revision_receipts_are_exact() {
         invalid_document.validate_after(Some(&first)),
         Err(RecoveryError::NonConsecutiveDocumentRevision { .. })
     ));
-    assert_eq!(
-        RecoveryReceipt {
-            durable_through: second.revision_vector(),
-        }
-        .durable_through,
-        revisions(2)
-    );
+    let receipt = RecoveryReceipt::for_batch(&second);
+    assert_eq!(receipt.durable_through, revisions(2));
+    assert!(receipt.authenticates(&second));
+    assert!(!receipt.authenticates(&first));
 }
 
 #[test]

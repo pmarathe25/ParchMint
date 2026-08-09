@@ -1854,8 +1854,15 @@ dependencies = [
 name = "parchmint-application"
 version = "0.1.0"
 dependencies = [
+    "parchmint-contracts",
     "parchmint-domain",
     "parchmint-editor-api",
+    "parchmint-history-api",
+    "parchmint-project-repository",
+    "parchmint-recovery-api",
+    "parchmint-save",
+    "serde_json",
+    "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1925,7 +1932,12 @@ version = "0.1.0"
 name = "parchmint-editor-api"
 version = "0.1.0"
 dependencies = [
+    "parchmint-contracts",
     "parchmint-domain",
+    "parchmint-recovery-api",
+    "parchmint-save",
+    "serde_json",
+    "sha2 0.11.0",
 ]
 
 [[package]]
@@ -1941,9 +1953,18 @@ version = "0.1.0"
 dependencies = [
     "iced",
     "iced_test",
+    "parchmint-application",
+    "parchmint-contracts",
     "parchmint-editor-api",
     "parchmint-editor-core",
+    "parchmint-history-api",
     "parchmint-platform-api",
+    "parchmint-project-repository",
+    "parchmint-recovery-api",
+    "parchmint-recovery-fs",
+    "parchmint-save",
+    "serde_json",
+    "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2034,6 +2055,7 @@ dependencies = [
     "parchmint-domain",
     "parchmint-project-format",
     "serde_json",
+    "sha2 0.11.0",
 ]
 
 [[package]]

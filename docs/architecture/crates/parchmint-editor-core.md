@@ -59,7 +59,7 @@ impl EditorCoreSession {
     ) -> Result<AppliedEditorChange, EditorError>;
     pub fn selection(&self, view: ViewId) -> Result<EditorSelection, EditorError>;
     pub fn project(&self, through: EditorRevision)
-        -> AsyncResult<CanonicalProjection>;
+        -> Result<AsyncResult<CanonicalProjection>, EditorError>;
 }
 ```
 

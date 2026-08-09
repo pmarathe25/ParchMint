@@ -15,6 +15,9 @@ session.
 
 The crate calls the service interfaces for saving, History, search, and editor
 work. The desktop executable supplies the concrete service implementations.
+The application-owned `EditorPersistenceCoordinator` can be constructed with
+injected save and recovery services before the production desktop graph is
+assembled. Full desktop graph assembly remains deferred to Stage 38.
 
 ## How it works
 
@@ -92,6 +95,11 @@ Long-running application methods return a future, stream, task handle, or event
 receiver. The application calls synchronous storage interfaces only from its
 background worker pool. Public methods use ParchMint types instead of types from
 the storage libraries.
+
+`EditorPersistenceCoordinator` owns projection-to-recovery routing, the
+receipt/frontier acknowledgement boundary, bounded repeated-save coalescing,
+and the public Saved/Dirty/Error frontier. It does not assemble the desktop
+service graph; that remains Stage 38 work.
 
 ## Implementation
 

@@ -18,3 +18,12 @@ parchmint-platform-api = { path = "../parchmint-platform-api" }
 
 [dev-dependencies]
 iced_test = "=0.14.0"
+parchmint-application = { path = "../parchmint-application" }
+parchmint-contracts = { path = "../parchmint-contracts" }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }
+parchmint-recovery-api = { path = "../parchmint-recovery-api" }
+parchmint-recovery-fs = { path = "../parchmint-recovery-fs" }
+parchmint-save = { path = "../parchmint-save" }
+serde_json.workspace = true
+sha2.workspace = true

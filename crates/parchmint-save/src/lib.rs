@@ -335,6 +335,7 @@ impl From<HistoryError> for SaveError {
 /// The result delivered only after canonical files and History both complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedAcknowledgement {
+    pub ticket_id: SaveTicketId,
     pub requested_revisions: SaveRevisionVector,
     pub written_revisions: SaveRevisionVector,
     pub checkpoint: CheckpointId,
@@ -365,6 +366,24 @@ pub struct SaveTicket {
 }
 
 impl SaveTicket {
+    /// Creates a pending ticket for injected coordinator contract tests.
+    pub fn pending(id: u64) -> Self {
+        Self {
+            id: SaveTicketId(id),
+            state: Arc::new(TicketState::default()),
+        }
+    }
+
+    /// Creates an already completed ticket for injected coordinator contract tests.
+    pub fn completed(id: u64, acknowledgement: SavedAcknowledgement) -> Self {
+        let state = Arc::new(TicketState::default());
+        *state.result.lock().expect("save ticket lock") = Some(Ok(acknowledgement));
+        Self {
+            id: SaveTicketId(id),
+            state,
+        }
+    }
+
     pub const fn id(&self) -> SaveTicketId {
         self.id
     }
@@ -409,6 +428,11 @@ pub struct SaveStatusSnapshot {
     pub active: Option<SaveRevisionVector>,
     pub saved_through: Option<SaveRevisionVector>,
     pub error: Option<SaveError>,
+    /// Number of requests currently retained by the worker queue, excluding
+    /// the active write.
+    pub queued_requests: usize,
+    /// Highest worker-queue depth observed by this coordinator.
+    pub max_queued_requests: usize,
 }
 
 impl Default for SaveStatusSnapshot {
@@ -419,6 +443,8 @@ impl Default for SaveStatusSnapshot {
             active: None,
             saved_through: None,
             error: None,
+            queued_requests: 0,
+            max_queued_requests: 0,
         }
     }
 }
@@ -468,13 +494,42 @@ impl ProjectSaveCoordinator {
         history: Arc<dyn HistoryStore>,
         intents: Arc<dyn CheckpointIntentStore>,
     ) -> Result<Self, SaveError> {
+        Self::new_inner(project, writer, history, intents, None)
+    }
+
+    #[cfg(test)]
+    fn new_with_worker_pause(
+        project: ProjectId,
+        writer: Arc<dyn AtomicWriter>,
+        history: Arc<dyn HistoryStore>,
+        intents: Arc<dyn CheckpointIntentStore>,
+        pause: Arc<WorkerPause>,
+    ) -> Result<Self, SaveError> {
+        Self::new_inner(project, writer, history, intents, Some(pause))
+    }
+
+    fn new_inner(
+        project: ProjectId,
+        writer: Arc<dyn AtomicWriter>,
+        history: Arc<dyn HistoryStore>,
+        intents: Arc<dyn CheckpointIntentStore>,
+        worker_pause: Option<Arc<WorkerPause>>,
+    ) -> Result<Self, SaveError> {
         let (sender, receiver) = mpsc::channel();
         let status = Arc::new(Mutex::new(SaveStatusSnapshot::default()));
         let worker_status = Arc::clone(&status);
         let worker = thread::Builder::new()
             .name(format!("parchmint-save-{:02x}", project.as_bytes()[15]))
             .spawn(move || {
-                run_worker(project, writer, history, intents, receiver, worker_status);
+                run_worker(
+                    project,
+                    writer,
+                    history,
+                    intents,
+                    receiver,
+                    worker_status,
+                    worker_pause.clone(),
+                );
             })
             .map_err(|_| SaveError::WorkerStopped)?;
         Ok(Self {
@@ -584,6 +639,100 @@ struct WorkerDependencies {
     status: Arc<Mutex<SaveStatusSnapshot>>,
 }
 
+#[derive(Debug, Default)]
+struct WorkerPause {
+    state: Mutex<WorkerPauseState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct WorkerPauseState {
+    blocked: bool,
+    entered: bool,
+    observed_depth: usize,
+    observed_generation: SaveGeneration,
+}
+
+#[allow(dead_code)]
+impl WorkerPause {
+    fn blocked() -> Self {
+        Self {
+            state: Mutex::new(WorkerPauseState {
+                blocked: true,
+                ..WorkerPauseState::default()
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn before_execute(
+        &self,
+        receiver: &mpsc::Receiver<Command>,
+        queue: &mut VecDeque<WorkItem>,
+        dependencies: &WorkerDependencies,
+    ) {
+        let mut state = self.state.lock().expect("worker pause lock");
+        if !state.blocked {
+            return;
+        }
+        state.entered = true;
+        state.observed_depth = queue.len();
+        state.observed_generation = highest_generation(queue);
+        self.changed.notify_all();
+        drop(state);
+        loop {
+            if !self.state.lock().expect("worker pause lock").blocked {
+                return;
+            }
+            if let Ok(command) = receiver.recv_timeout(Duration::from_millis(10)) {
+                if handle_command(command, queue, dependencies) {
+                    return;
+                }
+                while let Ok(command) = receiver.try_recv() {
+                    if handle_command(command, queue, dependencies) {
+                        return;
+                    }
+                }
+                coalesce_queue(queue);
+                update_queue_metrics(&dependencies.status, queue.len());
+                let mut state = self.state.lock().expect("worker pause lock");
+                state.observed_depth = queue.len();
+                state.observed_generation = highest_generation(queue);
+                self.changed.notify_all();
+            }
+        }
+    }
+
+    fn wait_until_entered(&self) -> usize {
+        let state = self.state.lock().expect("worker pause lock");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(3), |state| !state.entered)
+            .expect("worker pause lock");
+        assert!(state.entered, "save worker did not reach its pause");
+        assert!(!timeout.timed_out(), "save worker pause timed out");
+        state.observed_depth
+    }
+
+    fn wait_until_generation(&self, generation: SaveGeneration) {
+        let state = self.state.lock().expect("worker pause lock");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(3), |state| {
+                state.observed_generation < generation
+            })
+            .expect("worker pause lock");
+        assert!(state.observed_generation >= generation);
+        assert!(!timeout.timed_out(), "save worker pause timed out");
+    }
+
+    fn resume(&self) {
+        let mut state = self.state.lock().expect("worker pause lock");
+        state.blocked = false;
+        self.changed.notify_all();
+    }
+}
+
 fn run_worker(
     project: ProjectId,
     writer: Arc<dyn AtomicWriter>,
@@ -591,6 +740,7 @@ fn run_worker(
     intents: Arc<dyn CheckpointIntentStore>,
     receiver: mpsc::Receiver<Command>,
     status: Arc<Mutex<SaveStatusSnapshot>>,
+    worker_pause: Option<Arc<WorkerPause>>,
 ) {
     let dependencies = WorkerDependencies {
         project,
@@ -620,10 +770,15 @@ fn run_worker(
             }
         }
         coalesce_queue(&mut queue);
+        update_queue_metrics(&dependencies.status, queue.len());
+        if let Some(pause) = &worker_pause {
+            pause.before_execute(&receiver, &mut queue, &dependencies);
+        }
         let Some(index) = highest_priority_index(&queue) else {
             continue;
         };
         let mut work = queue.remove(index).expect("selected queue item exists");
+        update_queue_metrics(&dependencies.status, queue.len());
         mark_saving(&dependencies.status, &work.request.revisions);
         let result = execute_save(&dependencies, &work.request);
         match result {
@@ -632,6 +787,7 @@ fn run_worker(
                     complete_ticket(
                         &ticket.state,
                         Ok(SavedAcknowledgement {
+                            ticket_id: ticket.id,
                             requested_revisions: ticket.requested,
                             written_revisions: completed.revisions.clone(),
                             checkpoint: completed.checkpoint,
@@ -708,6 +864,14 @@ fn coalesce_queue(queue: &mut VecDeque<WorkItem>) {
             .tickets
             .append(&mut superseded.tickets);
     }
+}
+
+fn highest_generation(queue: &VecDeque<WorkItem>) -> SaveGeneration {
+    queue
+        .iter()
+        .map(|work| work.request.revisions.generation)
+        .max()
+        .unwrap_or_default()
 }
 
 fn cancel_queued(queue: &mut VecDeque<WorkItem>, ticket: SaveTicketId) -> CancelOutcome {
@@ -836,6 +1000,12 @@ fn mark_saving(status: &Mutex<SaveStatusSnapshot>, revisions: &SaveRevisionVecto
     status.state = SaveState::Saving;
     status.active = Some(revisions.clone());
     status.error = None;
+}
+
+fn update_queue_metrics(status: &Mutex<SaveStatusSnapshot>, depth: usize) {
+    let mut status = status.lock().expect("save status lock");
+    status.queued_requests = depth;
+    status.max_queued_requests = status.max_queued_requests.max(depth);
 }
 
 fn mark_saved(status: &Mutex<SaveStatusSnapshot>, revisions: SaveRevisionVector) {

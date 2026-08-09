@@ -13,3 +13,12 @@ workspace = true
 [dependencies]
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-recovery-api = { path = "../parchmint-recovery-api" }
+parchmint-save = { path = "../parchmint-save" }
+
+[dev-dependencies]
+parchmint-contracts = { path = "../parchmint-contracts" }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }
+serde_json.workspace = true
+sha2.workspace = true

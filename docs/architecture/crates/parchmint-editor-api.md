@@ -99,7 +99,7 @@ pub trait EditorAdapter: Send + Sync {
         &self,
         session: SharedEditorSession,
         through: EditorRevision,
-    ) -> AsyncResult<CanonicalProjection>;
+    ) -> AsyncResult<Result<CanonicalProjection, EditorError>>;
 
     fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent>;
     fn close(&self, session: SharedEditorSession) -> AsyncResult<()>;
@@ -114,6 +114,8 @@ documents, transactions, render trees, engine-native selections, or storage.
 `SelectionGeometry` positions comment and spelling menus. Search and spellcheck
 decorations belong to one view and can be rebuilt. `close` releases the views
 and session after outstanding projection and recovery work settles.
+Projection requests outside the retained revision budget fail explicitly, so a
+save cannot acknowledge a different revision or crash the persistence worker.
 
 ## Implementation boundary
 

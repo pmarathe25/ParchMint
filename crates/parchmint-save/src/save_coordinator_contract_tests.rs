@@ -375,6 +375,56 @@ fn each_project_coordinator_has_one_serial_writer_and_queue() {
 }
 
 #[test]
+fn real_worker_coalesces_distinct_requests_while_execution_is_paused() {
+    let pause = Arc::new(WorkerPause::blocked());
+    let writer = Arc::new(RecordingWriter::new(None));
+    let history = Arc::new(RecordingHistory::default());
+    let intents = Arc::new(InMemoryCheckpointIntentStore::new());
+    let coordinator = ProjectSaveCoordinator::new_with_worker_pause(
+        project_id(9),
+        writer,
+        history,
+        intents,
+        pause.clone(),
+    )
+    .expect("start paused save worker");
+
+    let mut tickets = Vec::new();
+    for generation in 1..=8 {
+        tickets.push(
+            coordinator
+                .request(request(
+                    generation as u8,
+                    generation,
+                    &[(1, generation)],
+                    SavePriority::Autosave,
+                ))
+                .expect("queue save request"),
+        );
+    }
+
+    assert_eq!(pause.wait_until_entered(), 1);
+    pause.wait_until_generation(SaveGeneration::from(8));
+    let status = coordinator.status();
+    assert_eq!(status.queued_requests, 1);
+    assert_eq!(status.max_queued_requests, 1);
+    pause.resume();
+
+    for ticket in tickets {
+        assert_eq!(
+            ticket
+                .wait_timeout(WAIT)
+                .expect("save completion")
+                .written_revisions,
+            revisions(8, &[(1, 8)])
+        );
+    }
+    let status = coordinator.status();
+    assert_eq!(status.queued_requests, 0);
+    assert_eq!(status.max_queued_requests, 1);
+}
+
+#[test]
 fn active_save_keeps_its_revision_vector_when_later_edits_arrive() {
     let pause = Arc::new(CommitPause::blocked());
     let harness = Harness::new(Some(pause.clone()));

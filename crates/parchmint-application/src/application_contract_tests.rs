@@ -1,8 +1,27 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::Arc,
     task::{Context, Poll, Waker},
 };
+
+use parchmint_contracts::generated::RecoveryRecordV1;
+use parchmint_editor_api::{
+    CanonicalProjection, DocumentId, DurableProjectionBatch, EditorPersistenceError, EditorRevision,
+};
+use parchmint_project_repository::AtomicWritePlan;
+use parchmint_recovery_api::{
+    CompactionReport, ContentHash, DiscardReport, RecoveryBaseSnapshot, RecoveryBatch,
+    RecoveryError, RecoveryInventory, RecoveryJournal, RecoveryReceipt, RecoveryRecord,
+    RecoveryRecordSummary, RecoveryReplay, RecoveryRevisionVector, ResourceId,
+    VersionedRecoveryPayload,
+};
+use parchmint_save::{
+    CheckpointCategory, CheckpointInput, CheckpointIntentHash, SaveCoordinator, SaveError,
+    SavePriority, SaveRequest, SaveStatusSnapshot, SaveTicket, SavedAcknowledgement,
+};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -77,6 +96,359 @@ fn setup() -> (
     let documents = sample_documents();
     let dispatcher = NativeProjectCommandDispatcher::new(sample_project(), documents.clone());
     (dispatcher, documents)
+}
+
+#[test]
+fn production_editor_coordinator_routes_projections_and_tracks_newer_dirty_frontier() {
+    let journal = Arc::new(ProductionJournal::default());
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([(ResourceId::Document, hash("base"))]),
+    };
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+    let first = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(1),
+        "one",
+        vec![],
+        vec![],
+        1,
+    );
+    let second = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(2),
+        "one two",
+        vec![],
+        vec![],
+        2,
+    );
+
+    let first_durable = coordinator
+        .persist_projection(&first, &save_vector(1), payload("one"))
+        .expect("first projection routes through production coordinator");
+    assert_eq!(coordinator.status().state, parchmint_save::SaveState::Dirty);
+    assert_eq!(coordinator.status().requested, Some(save_vector(1)));
+    assert_eq!(coordinator.frontier().unwrap(), base.revisions);
+    coordinator
+        .acknowledge_recovery(first_durable.clone())
+        .unwrap();
+    let fabricated = SavedAcknowledgement {
+        ticket_id: SaveTicket::pending(999).id(),
+        requested_revisions: save_vector(1),
+        written_revisions: save_vector(1),
+        checkpoint: parchmint_domain::CheckpointId::from_bytes([1; 16]),
+    };
+    assert!(coordinator.acknowledge_save(&fabricated).is_err());
+
+    let second_durable = coordinator
+        .persist_projection(&second, &save_vector(2), payload("one two"))
+        .expect("newer projection routes through production coordinator");
+    assert_eq!(coordinator.status().state, parchmint_save::SaveState::Dirty);
+    assert_eq!(coordinator.status().requested, Some(save_vector(2)));
+    assert!(matches!(
+        DurableProjectionBatch::new(
+            second_durable.batch().clone(),
+            first_durable.receipt().clone()
+        ),
+        Err(EditorPersistenceError::Recovery(
+            RecoveryError::UnknownRevisionVector
+        ))
+    ));
+    coordinator.acknowledge_recovery(second_durable).unwrap();
+    assert_eq!(coordinator.frontier().unwrap().project_revision.value(), 2);
+    let reopened = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let replay = reopened.reconcile_recovery(base).unwrap();
+    assert_eq!(replay.accepted.len(), 2);
+    assert_eq!(reopened.status().state, parchmint_save::SaveState::Dirty);
+}
+
+#[test]
+fn production_reconciliation_exposes_retained_inventory_and_exact_isolation_reason() {
+    let journal = Arc::new(ProductionJournal::default());
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([(ResourceId::Document, hash("base"))]),
+    };
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+    let projection = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(1),
+        "one",
+        vec![],
+        vec![],
+        1,
+    );
+    coordinator
+        .persist_projection(&projection, &save_vector(1), payload("one"))
+        .expect("persist valid recovery record");
+    journal
+        .records
+        .lock()
+        .unwrap()
+        .push(RecoveryRecord::UnknownVersion {
+            project_revision: Some(parchmint_domain::ProjectRevision::from(2)),
+            version: "v9".into(),
+        });
+
+    let replay = coordinator
+        .reconcile_recovery(base)
+        .expect("reconcile retained records");
+    assert_eq!(replay.accepted.len(), 1);
+    let isolation = replay.isolation.expect("isolation reason");
+    assert_eq!(isolation.position, 1);
+    assert_eq!(
+        isolation.reason,
+        parchmint_recovery_api::RecoveryIsolationReason::UnknownVersion {
+            version: "v9".into()
+        }
+    );
+    let status = coordinator.status();
+    assert_eq!(status.state, parchmint_save::SaveState::Error);
+    assert_eq!(status.recovery_retained_records, 2);
+    assert_eq!(status.recovery_inventory.as_ref().unwrap().records.len(), 2);
+    assert_eq!(status.recovery_isolation, Some(isolation.clone()));
+    assert_eq!(
+        status.error,
+        Some(EditorPersistenceError::RecoveryIsolation(isolation.reason))
+    );
+}
+
+#[test]
+fn production_editor_coordinator_coalesces_repeated_save_requests_and_bounds_queue() {
+    let journal = Arc::new(ProductionJournal::default());
+    let save = Arc::new(RecordingSave::default());
+    let coordinator = EditorPersistenceCoordinator::new(
+        journal,
+        save.clone(),
+        RecoveryBaseSnapshot {
+            revisions: RecoveryRevisionVector::new(
+                parchmint_domain::ProjectRevision::default(),
+                BTreeMap::new(),
+            ),
+            hashes: BTreeMap::from([(ResourceId::Document, hash("base"))]),
+        },
+    );
+    let projection = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(1),
+        "one",
+        vec![],
+        vec![],
+        1,
+    );
+    let request = save_request(1);
+    let first_ticket = coordinator.submit_save(&projection, request).unwrap();
+    let mut latest_ticket = first_ticket.clone();
+    for revision in 2..=8 {
+        let projection = CanonicalProjection::new(
+            document_id(),
+            EditorRevision::from(revision),
+            format!("revision-{revision}"),
+            vec![],
+            vec![],
+            1,
+        );
+        latest_ticket = coordinator
+            .submit_save(&projection, save_request(revision))
+            .unwrap();
+    }
+    assert_eq!(save.requests.lock().unwrap().len(), 8);
+    assert_eq!(coordinator.save_queue_depth(), 1);
+    assert_eq!(coordinator.max_save_queue_depth(), 1);
+    assert_eq!(coordinator.submitted_save_requests(), 8);
+    assert_eq!(coordinator.coalesced_save_requests(), 7);
+    assert!(
+        coordinator
+            .acknowledge_save(&SavedAcknowledgement {
+                ticket_id: first_ticket.id(),
+                requested_revisions: save_vector(1),
+                written_revisions: save_vector(1),
+                checkpoint: parchmint_domain::CheckpointId::from_bytes([1; 16]),
+            })
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .acknowledge_save(&SavedAcknowledgement {
+                ticket_id: latest_ticket.id(),
+                requested_revisions: save_vector(1),
+                written_revisions: save_vector(1),
+                checkpoint: parchmint_domain::CheckpointId::from_bytes([1; 16]),
+            })
+            .is_err()
+    );
+    assert!(
+        coordinator
+            .acknowledge_save(&SavedAcknowledgement {
+                ticket_id: latest_ticket.id(),
+                requested_revisions: save_vector(8),
+                written_revisions: save_vector(8),
+                checkpoint: parchmint_domain::CheckpointId::from_bytes([8; 16]),
+            })
+            .is_err()
+    );
+}
+
+#[derive(Debug, Default)]
+struct RecordingSave {
+    requests: Mutex<Vec<SaveRequest>>,
+}
+
+impl SaveCoordinator for RecordingSave {
+    fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(SaveTicket::pending(
+            self.requests.lock().unwrap().len() as u64
+        ))
+    }
+
+    fn status(&self) -> SaveStatusSnapshot {
+        SaveStatusSnapshot::default()
+    }
+
+    fn reconcile_open(&self) -> Result<parchmint_save::OpenReconciliation, SaveError> {
+        Ok(parchmint_save::OpenReconciliation::default())
+    }
+
+    fn cancel_pending(&self, _ticket: SaveTicket) -> parchmint_save::CancelOutcome {
+        parchmint_save::CancelOutcome::Cancelled
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProductionJournal {
+    records: Mutex<Vec<RecoveryRecord>>,
+}
+
+impl RecoveryJournal for ProductionJournal {
+    fn append(&self, batch: RecoveryBatch) -> Result<RecoveryReceipt, RecoveryError> {
+        let mut records = self.records.lock().unwrap();
+        batch.validate_after(records.last().and_then(|record| match record {
+            RecoveryRecord::Complete(batch) => Some(batch),
+            _ => None,
+        }))?;
+        let receipt = RecoveryReceipt::for_batch(&batch);
+        records.push(RecoveryRecord::Complete(batch));
+        Ok(receipt)
+    }
+
+    fn flush_through(
+        &self,
+        target: RecoveryRevisionVector,
+    ) -> Result<RecoveryReceipt, RecoveryError> {
+        self.records
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|record| match record {
+                RecoveryRecord::Complete(batch) if batch.revision_vector() == target => {
+                    Some(Ok(RecoveryReceipt::for_batch(batch)))
+                }
+                _ => None,
+            })
+            .unwrap_or(Err(RecoveryError::UnknownRevisionVector))
+    }
+
+    fn inspect(&self) -> Result<RecoveryInventory, RecoveryError> {
+        let records = self.records.lock().unwrap();
+        Ok(RecoveryInventory {
+            records: records
+                .iter()
+                .enumerate()
+                .map(|(position, record)| RecoveryRecordSummary {
+                    position,
+                    project_revision: match record {
+                        RecoveryRecord::Complete(batch) => Some(batch.project_revision),
+                        _ => None,
+                    },
+                })
+                .collect(),
+            durable_through: records.last().and_then(|record| match record {
+                RecoveryRecord::Complete(batch) => Some(batch.revision_vector()),
+                _ => None,
+            }),
+        })
+    }
+
+    fn replay(&self, base: RecoveryBaseSnapshot) -> Result<RecoveryReplay, RecoveryError> {
+        Ok(parchmint_recovery_api::replay_records(
+            &base,
+            self.records.lock().unwrap().clone(),
+        ))
+    }
+
+    fn compact(
+        &self,
+        _durable: parchmint_recovery_api::DurableRevisionVector,
+    ) -> Result<CompactionReport, RecoveryError> {
+        Ok(CompactionReport {
+            removed_records: 0,
+            retained_records: self.records.lock().unwrap().len(),
+        })
+    }
+
+    fn discard_through(
+        &self,
+        _durable: parchmint_recovery_api::DurableRevisionVector,
+    ) -> Result<DiscardReport, RecoveryError> {
+        Ok(DiscardReport {
+            removed_records: 0,
+            retained_records: self.records.lock().unwrap().len(),
+        })
+    }
+}
+
+fn document_id() -> DocumentId {
+    DocumentId::from_bytes([44; 16])
+}
+
+fn hash(value: &str) -> ContentHash {
+    ContentHash::from_bytes(Sha256::digest(value.as_bytes()).into())
+}
+
+fn save_vector(revision: u64) -> parchmint_save::SaveRevisionVector {
+    parchmint_save::SaveRevisionVector {
+        project_revision: parchmint_domain::ProjectRevision::default(),
+        open_documents: BTreeMap::from([(
+            document_id(),
+            parchmint_recovery_api::DocumentRevision::from(revision),
+        )]),
+        closed_resources: BTreeMap::new(),
+        canonical_hashes: BTreeMap::new(),
+        generation: parchmint_save::SaveGeneration::from(revision),
+    }
+}
+
+fn save_request(revision: u64) -> SaveRequest {
+    let revisions = save_vector(revision);
+    SaveRequest::new(
+        revisions,
+        AtomicWritePlan::new(Vec::new()),
+        CheckpointInput {
+            intent_hash: CheckpointIntentHash::from_bytes([revision as u8; 32]),
+            resources: BTreeMap::new(),
+            category: CheckpointCategory::Autosave,
+            affected_documents: vec![document_id()],
+            name: None,
+        },
+        SavePriority::Autosave,
+    )
+}
+
+fn payload(body: &str) -> VersionedRecoveryPayload {
+    VersionedRecoveryPayload::V1(RecoveryRecordV1 {
+        schema: "parchmint.recovery-record/v1".into(),
+        record_id: format!("application-{body}"),
+        operations: vec![json!({ "body": body })],
+    })
 }
 
 fn replacement() -> ReplacementSelection {

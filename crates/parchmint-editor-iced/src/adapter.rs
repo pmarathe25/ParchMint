@@ -766,7 +766,7 @@ impl EditorAdapter for EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             Err(invalid(
-                "composite save/recovery edits are integrated in Stage 34",
+                "composite project edits are not available in the Iced adapter",
             ))
         })
     }
@@ -775,16 +775,14 @@ impl EditorAdapter for EditorIcedAdapter {
         &self,
         session: SharedEditorSession,
         through: EditorRevision,
-    ) -> AsyncResult<CanonicalProjection> {
+    ) -> AsyncResult<Result<CanonicalProjection, EditorError>> {
         let projection = self.with_session(session, |state| {
             state.require_open()?;
             state.projections.get(&through).cloned().ok_or_else(|| {
                 invalid("requested projection revision is outside the retained budget")
             })
         });
-        Box::pin(async move {
-            projection.expect("project requires an issued revision inside the configured budget")
-        })
+        Box::pin(async move { projection })
     }
 
     fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent> {

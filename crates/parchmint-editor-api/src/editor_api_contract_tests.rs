@@ -11,6 +11,17 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+use parchmint_contracts::generated::RecoveryRecordV1;
+use parchmint_recovery_api::{
+    CompactionReport, ContentHash, DiscardReport, DocumentRevision, ProjectRevision,
+    RecoveryBaseSnapshot, RecoveryBatch, RecoveryError, RecoveryInventory, RecoveryJournal,
+    RecoveryReceipt, RecoveryRecord, RecoveryRecordSummary, RecoveryReplay, RecoveryRevisionVector,
+    ResourceId, VersionedRecoveryPayload,
+};
+use parchmint_save::{SaveGeneration, SaveRevisionVector};
+use serde_json::json;
+use sha2::Digest;
+
 use super::*;
 
 #[test]
@@ -35,7 +46,7 @@ fn two_views_share_document_history_and_keep_selection_state_independent() {
         .execute(session.clone(), origin(first), undo(2))
         .unwrap();
 
-    let projection = wait(adapter.project(session.clone(), revision(3)));
+    let projection = wait(adapter.project(session.clone(), revision(3))).unwrap();
     assert_eq!(projection.body(), "alpha");
     assert_eq!(projection.revision(), revision(3));
     assert_eq!(
@@ -55,13 +66,13 @@ fn stale_commands_are_rejected_without_mutating_revision_or_projection() {
     adapter
         .execute(session.clone(), origin(first), insert("alpha", 0))
         .unwrap();
-    let before = wait(adapter.project(session.clone(), revision(1)));
+    let before = wait(adapter.project(session.clone(), revision(1))).unwrap();
     let error = adapter
         .execute(session.clone(), origin(first), insert("stale", 0))
         .unwrap_err();
 
     assert!(error.is_stale_command());
-    assert_eq!(wait(adapter.project(session, revision(1))), before);
+    assert_eq!(wait(adapter.project(session, revision(1))).unwrap(), before);
 }
 
 #[test]
@@ -96,7 +107,9 @@ fn view_presentation_is_scoped_without_changing_the_document_revision() {
         .set_spellcheck_decorations(session.clone(), second, vec![spellcheck_decoration(6, 10)])
         .unwrap();
     assert_eq!(
-        wait(adapter.project(session.clone(), revision(0))).revision(),
+        wait(adapter.project(session.clone(), revision(0)))
+            .unwrap()
+            .revision(),
         revision(0)
     );
     let first_state = adapter.detach_view(session.clone(), first).unwrap();
@@ -120,8 +133,8 @@ fn projections_are_deterministic_canonical_snapshots() {
         .execute(session.clone(), origin(first), insert("alpha", 0))
         .unwrap();
 
-    let left = wait(adapter.project(session.clone(), revision(1)));
-    let right = wait(adapter.project(session, revision(1)));
+    let left = wait(adapter.project(session.clone(), revision(1))).unwrap();
+    let right = wait(adapter.project(session, revision(1))).unwrap();
     assert_eq!(left, right);
     assert_eq!(left.document_id(), document_id());
     assert_eq!(left.word_count(), 1);
@@ -154,6 +167,199 @@ fn events_and_close_follow_the_session_contract() {
     );
     assert!(matches!(adapter.selection(session.clone(), first), Err(error) if error.is_closed()));
     assert!(matches!(adapter.detach_view(session, first), Err(error) if error.is_closed()));
+}
+
+#[test]
+fn persistence_coordinator_public_contract_keeps_receipt_separate_from_frontier_ack() {
+    let journal = Arc::new(ContractJournal::default());
+    let base = recovery_base("base");
+    let coordinator = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let projection =
+        CanonicalProjection::new(document_id(), revision(1), "next", vec![], vec![], 1);
+    let durable = coordinator
+        .persist_projection(&projection, &save_vector(1), payload("next"))
+        .unwrap();
+
+    assert_eq!(coordinator.frontier().unwrap(), base.revisions);
+    assert_eq!(
+        durable.receipt().durable_through,
+        durable.batch().revision_vector()
+    );
+    let receipt = durable.receipt().clone();
+    let frontier = coordinator.acknowledge_recovery(durable).unwrap();
+    assert_eq!(receipt.durable_through, frontier);
+    assert_eq!(coordinator.frontier().unwrap(), frontier);
+}
+
+#[test]
+fn persistence_coordinator_public_contract_reconciles_unacknowledged_batches_exactly() {
+    let journal = Arc::new(ContractJournal::default());
+    let base = recovery_base("base");
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+    let first = CanonicalProjection::new(document_id(), revision(1), "one", vec![], vec![], 1);
+    let second = CanonicalProjection::new(document_id(), revision(2), "one two", vec![], vec![], 2);
+    coordinator
+        .acknowledge_recovery(
+            coordinator
+                .persist_projection(&first, &save_vector(1), payload("one"))
+                .unwrap(),
+        )
+        .unwrap();
+    let unacknowledged = coordinator
+        .persist_projection(&second, &save_vector(2), payload("one two"))
+        .unwrap();
+    let original_receipt = unacknowledged.receipt().clone();
+
+    let reopened = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let resumed_frontier = reopened
+        .resume_recovery_acknowledgement(base.clone(), unacknowledged)
+        .unwrap();
+    let replay = reopened.reconcile_recovery(base).unwrap();
+    assert_eq!(replay.accepted.len(), 2);
+    assert!(replay.isolated.is_empty());
+    assert_eq!(replay.accepted[0].payload, payload("one"));
+    assert_eq!(replay.accepted[1].payload, payload("one two"));
+    assert_eq!(
+        replay.accepted[0].result_hashes,
+        replay.accepted[1].base_hashes
+    );
+    assert_eq!(
+        original_receipt.durable_through,
+        replay.accepted[1].revision_vector()
+    );
+    assert_eq!(resumed_frontier, replay.accepted[1].revision_vector());
+    assert_eq!(
+        reopened.frontier().unwrap(),
+        replay.accepted[1].revision_vector()
+    );
+}
+
+#[derive(Debug, Default)]
+struct ContractJournal {
+    records: Mutex<Vec<RecoveryRecord>>,
+}
+
+impl RecoveryJournal for ContractJournal {
+    fn append(&self, batch: RecoveryBatch) -> Result<RecoveryReceipt, RecoveryError> {
+        let mut records = self.records.lock().unwrap();
+        let previous = records.last().and_then(|record| match record {
+            RecoveryRecord::Complete(batch) => Some(batch),
+            _ => None,
+        });
+        batch.validate_after(previous)?;
+        let frontier = batch.revision_vector();
+        records.push(RecoveryRecord::Complete(batch));
+        let RecoveryRecord::Complete(batch) = records.last().expect("record appended") else {
+            unreachable!("contract journal stores complete records")
+        };
+        assert_eq!(batch.revision_vector(), frontier);
+        Ok(RecoveryReceipt::for_batch(batch))
+    }
+
+    fn flush_through(
+        &self,
+        target: RecoveryRevisionVector,
+    ) -> Result<RecoveryReceipt, RecoveryError> {
+        if self
+            .records
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|record| matches!(record, RecoveryRecord::Complete(batch) if batch.revision_vector() == target))
+        {
+            let records = self.records.lock().unwrap();
+            let record = records.iter().find(|record| {
+                matches!(record, RecoveryRecord::Complete(batch) if batch.revision_vector() == target)
+            });
+            let Some(RecoveryRecord::Complete(batch)) = record else {
+                return Err(RecoveryError::UnknownRevisionVector);
+            };
+            Ok(RecoveryReceipt::for_batch(batch))
+        } else {
+            Err(RecoveryError::UnknownRevisionVector)
+        }
+    }
+
+    fn inspect(&self) -> Result<RecoveryInventory, RecoveryError> {
+        let records = self.records.lock().unwrap();
+        Ok(RecoveryInventory {
+            records: records
+                .iter()
+                .enumerate()
+                .map(|(position, record)| RecoveryRecordSummary {
+                    position,
+                    project_revision: match record {
+                        RecoveryRecord::Complete(batch) => Some(batch.project_revision),
+                        _ => None,
+                    },
+                })
+                .collect(),
+            durable_through: records.last().and_then(|record| match record {
+                RecoveryRecord::Complete(batch) => Some(batch.revision_vector()),
+                _ => None,
+            }),
+        })
+    }
+
+    fn replay(&self, base: RecoveryBaseSnapshot) -> Result<RecoveryReplay, RecoveryError> {
+        Ok(parchmint_recovery_api::replay_records(
+            &base,
+            self.records.lock().unwrap().clone(),
+        ))
+    }
+
+    fn compact(
+        &self,
+        _durable: parchmint_recovery_api::DurableRevisionVector,
+    ) -> Result<CompactionReport, RecoveryError> {
+        Ok(CompactionReport {
+            removed_records: 0,
+            retained_records: self.records.lock().unwrap().len(),
+        })
+    }
+
+    fn discard_through(
+        &self,
+        _durable: parchmint_recovery_api::DurableRevisionVector,
+    ) -> Result<DiscardReport, RecoveryError> {
+        Ok(DiscardReport {
+            removed_records: 0,
+            retained_records: self.records.lock().unwrap().len(),
+        })
+    }
+}
+
+fn recovery_base(body: &str) -> RecoveryBaseSnapshot {
+    RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(ProjectRevision::default(), BTreeMap::new()),
+        hashes: BTreeMap::from([(ResourceId::Document, hash(body))]),
+    }
+}
+
+fn save_vector(revision: u64) -> SaveRevisionVector {
+    SaveRevisionVector {
+        project_revision: ProjectRevision::default(),
+        open_documents: BTreeMap::from([(document_id(), DocumentRevision::from(revision))]),
+        closed_resources: BTreeMap::new(),
+        canonical_hashes: BTreeMap::from([(
+            ResourceId::Document,
+            hash(if revision == 1 { "next" } else { "one two" }),
+        )]),
+        generation: SaveGeneration::from(revision),
+    }
+}
+
+fn payload(body: &str) -> VersionedRecoveryPayload {
+    VersionedRecoveryPayload::V1(RecoveryRecordV1 {
+        schema: "parchmint.recovery-record/v1".into(),
+        record_id: format!("contract-{body}"),
+        operations: vec![json!({ "body": body })],
+    })
+}
+
+fn hash(body: &str) -> ContentHash {
+    ContentHash::from_bytes(sha2::Sha256::digest(body.as_bytes()).into())
 }
 
 fn attach(adapter: &dyn EditorAdapter, session: SharedEditorSession, view: ViewId) {
@@ -572,7 +778,7 @@ impl EditorAdapter for NativeEditorAdapter {
         &self,
         session: SharedEditorSession,
         through: EditorRevision,
-    ) -> AsyncResult<CanonicalProjection> {
+    ) -> AsyncResult<Result<CanonicalProjection, EditorError>> {
         let projection = self.with_session(session, |state| {
             state.require_open()?;
             state
@@ -583,7 +789,7 @@ impl EditorAdapter for NativeEditorAdapter {
                     reason: "requested projection revision is unavailable",
                 })
         });
-        Box::pin(async move { projection.expect("contract caller requests an issued revision") })
+        Box::pin(async move { projection })
     }
 
     fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent> {

@@ -19,8 +19,8 @@ use parchmint_recovery_api::{
     CompactionReport, DiscardReport, DocumentId, DocumentRevision, DurableRevisionVector,
     EditorRevisionRange, RecoveryBaseSnapshot, RecoveryBatch, RecoveryError, RecoveryInventory,
     RecoveryJournal, RecoveryReceipt, RecoveryRecord, RecoveryRecordSummary, RecoveryReplay,
-    RecoveryRevisionVector, ResourceId, VersionedRecoveryPayload, contains_revision_vector,
-    is_covered_by_durable, replay_records,
+    RecoveryRevisionVector, ResourceId, VersionedRecoveryPayload, is_covered_by_durable,
+    replay_records,
 };
 use parchmint_save::{
     AtomicWritePlan, CheckpointIntent, CheckpointIntentState, CheckpointIntentStore,
@@ -359,16 +359,12 @@ impl RecoveryJournal for FsRecoveryJournal {
         let batches = validated_batches(&frames)?;
         if batches.last() == Some(&batch) {
             self.sync_journal()?;
-            return Ok(RecoveryReceipt {
-                durable_through: batch.revision_vector(),
-            });
+            return Ok(RecoveryReceipt::for_batch(&batch));
         }
         batch.validate_after(batches.last())?;
         let frame = encode_journal_frame(&batch)?;
         self.append_frame(&frame)?;
-        Ok(RecoveryReceipt {
-            durable_through: batch.revision_vector(),
-        })
+        Ok(RecoveryReceipt::for_batch(&batch))
     }
 
     fn flush_through(
@@ -385,13 +381,15 @@ impl RecoveryJournal for FsRecoveryJournal {
             .iter()
             .map(|frame| frame.record.clone())
             .collect::<Vec<_>>();
-        if !contains_revision_vector(&records, &target) {
-            return Err(RecoveryError::UnknownRevisionVector);
-        }
+        let batch = records
+            .iter()
+            .find_map(|record| match record {
+                RecoveryRecord::Complete(batch) if batch.revision_vector() == target => Some(batch),
+                _ => None,
+            })
+            .ok_or(RecoveryError::UnknownRevisionVector)?;
         self.sync_journal()?;
-        Ok(RecoveryReceipt {
-            durable_through: target,
-        })
+        Ok(RecoveryReceipt::for_batch(batch))
     }
 
     fn inspect(&self) -> Result<RecoveryInventory, RecoveryError> {

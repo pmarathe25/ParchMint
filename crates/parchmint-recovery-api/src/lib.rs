@@ -10,6 +10,7 @@ pub use parchmint_domain::{DocumentId, ProjectRevision};
 pub use parchmint_project_format::{ContentHash, ResourceId};
 
 use parchmint_contracts::generated::RecoveryRecordV1;
+use sha2::{Digest, Sha256};
 
 /// A monotonic per-document revision, independent of any editor engine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -255,10 +256,49 @@ impl RecoveryRecord {
     }
 }
 
+/// Opaque identity binding a durable receipt to one exact recovery batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RecoveryReceiptId([u8; 32]);
+
 /// A receipt for recovery data known to have reached durable storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryReceipt {
     pub durable_through: RecoveryRevisionVector,
+    receipt_id: RecoveryReceiptId,
+}
+
+impl RecoveryReceipt {
+    /// Creates the only receipt identity accepted for this exact batch.
+    pub fn for_batch(batch: &RecoveryBatch) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(batch.project_revision.value().to_le_bytes());
+        for (document, range) in &batch.documents {
+            digest.update(document.as_bytes());
+            digest.update(range.first.value().to_le_bytes());
+            digest.update(range.last.value().to_le_bytes());
+        }
+        for (resource, hash) in &batch.base_hashes {
+            digest.update(format!("{resource:?}").as_bytes());
+            digest.update(hash.as_bytes());
+        }
+        for (resource, hash) in &batch.result_hashes {
+            digest.update(format!("{resource:?}").as_bytes());
+            digest.update(hash.as_bytes());
+        }
+        digest.update(format!("{:?}", batch.payload).as_bytes());
+        Self {
+            durable_through: batch.revision_vector(),
+            receipt_id: RecoveryReceiptId(digest.finalize().into()),
+        }
+    }
+
+    pub fn receipt_id(&self) -> RecoveryReceiptId {
+        self.receipt_id
+    }
+
+    pub fn authenticates(&self, batch: &RecoveryBatch) -> bool {
+        self == &Self::for_batch(batch)
+    }
 }
 
 /// A journal entry visible to recovery diagnostics.

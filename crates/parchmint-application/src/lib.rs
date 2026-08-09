@@ -1,5 +1,9 @@
 //! Application command ownership, undo routing, and revision capture.
 
+mod editor_persistence;
+
+pub use editor_persistence::{EditorPersistenceCoordinator, EditorPersistenceStatus};
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
