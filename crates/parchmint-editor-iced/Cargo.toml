@@ -10,3 +10,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["canvas", "crisp", "fira-sans", "thread-pool", "tiny-skia", "wayland", "x11"] }
+parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-editor-core = { path = "../parchmint-editor-core" }
+parchmint-platform-api = { path = "../parchmint-platform-api" }
+
+[dev-dependencies]
+iced_test = "=0.14.0"
