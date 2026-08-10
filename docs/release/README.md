@@ -43,8 +43,9 @@ without adding a second runtime parser.
    the signing-input schema, bind the real package SHA-256, and reference CI
    secret names. Keep secret values in the CI secret store.
 3. Build the exact source revision with `Cargo.lock` and the pinned Rust
-   toolchain. The native job renders its package template and creates the real
-   package.
+   toolchain. `cargo build --release --locked --package parchmint-desktop`
+   produces the `parchmint` executable used by each package template. The
+   native job renders its package template and creates the real package.
 4. Run signature verification on the signed package. On macOS, run
    notarization, staple the result, and verify the stapled package. Record the
    verification tool and the notarization service ticket in the corresponding
@@ -82,13 +83,16 @@ must not bypass them through `deny.toml`.
 
 ## Current blockers
 
+`cargo run --locked --package parchmint-desktop` now enters the native Iced
+event loop and shows the launcher. This command is useful for a native manual
+run, but running or compiling it in ordinary CI does not create release
+evidence. Launch evidence still requires the packaged executable on a clean
+native runner and a hash-bound observation accepted by the release verifier.
+
 - Native runtime evidence does not support minimum Windows, macOS, or Linux
   versions.
 - Native package icons and Windows logo assets have not been approved or
   exported.
-- The desktop crate assembles the production graph, but its production runner
-  does not enter a real native event loop. It cannot yet produce honest launch
-  or native UI evidence.
 - No signing identities, notarization profile, CI credential references, or
   Linux signing policy are approved.
 - No clean install, launch, upgrade, uninstall, signature, notarization,

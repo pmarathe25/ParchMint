@@ -15,6 +15,47 @@ use parchmint_platform_api::SystemAppearance;
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
 
 #[test]
+fn launch_request_parses_the_optional_first_project_argument() {
+    assert_eq!(
+        LaunchRequest::from_args(["parchmint"]),
+        LaunchRequest::launcher()
+    );
+    assert_eq!(
+        LaunchRequest::from_args(["parchmint", "/tmp/novel.parchmint"]),
+        LaunchRequest::open("/tmp/novel.parchmint")
+    );
+    assert_eq!(
+        LaunchRequest::from_args([
+            "parchmint",
+            "/tmp/first.parchmint",
+            "/tmp/ignored.parchmint",
+        ]),
+        LaunchRequest::open("/tmp/first.parchmint")
+    );
+}
+
+#[test]
+fn run_completes_startup_and_project_routing_before_entering_the_ui_driver() {
+    let project = "/tmp/run-wiring.parchmint";
+    let desktop = fixture(AppearanceMode::System, SystemAppearance::Dark);
+
+    assert_eq!(
+        desktop.bootstrap.run(LaunchRequest::open(project)),
+        Ok(parchmint_desktop::ExitCode::SUCCESS)
+    );
+    let events = desktop.ui.events();
+    let opened = events
+        .iter()
+        .position(|event| matches!(event, Event::Opened { .. }))
+        .expect("project should open before the native driver");
+    let ran = events
+        .iter()
+        .position(|event| *event == Event::Ran)
+        .expect("native driver should run");
+    assert!(opened < ran);
+}
+
+#[test]
 fn startup_injects_services_resolves_initial_appearance_and_routes_launch_intent() {
     let project = "/tmp/launch-intent.parchmint";
     let desktop = fixture(AppearanceMode::Dark, SystemAppearance::Light);

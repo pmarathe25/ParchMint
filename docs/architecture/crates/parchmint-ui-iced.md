@@ -73,31 +73,29 @@ the section-root fallback. Appearance emits an application-preference action,
 not a project command. Export, save, close, and recovery retain their failure
 state without claiming success or discarding recovery data.
 
-When it creates an `iced` window, this crate uses private concrete integration
-code to register the window with `parchmint-platform-native`. The integration
-keeps raw window handles inside the two concrete adapters. The platform API
-receives only the resulting `WindowCapability` for dialogs, menus, clipboard
-work, and similar requests.
+When it creates or destroys an `iced` project window, this crate calls a
+ParchMint-owned lifecycle callback. The desktop's private concrete integration
+uses that callback to register or retire the `WindowCapability` with
+`parchmint-platform-native`. Raw Iced handles stay inside the driver; the
+platform API receives only the capability for dialogs, menus, clipboard work,
+and similar requests.
 
 ## Public API
 
-The binary starts the UI through the contract in `parchmint-ui-api` and receives
-no `iced` objects back:
+The desktop crate starts the native driver with ParchMint-owned values and
+callbacks. No `iced` object crosses the crate boundary:
 
 ```rust
-pub struct IcedDesktopUi;
-
-impl DesktopUi for IcedDesktopUi {
-    fn run(
-        self: Box<Self>,
-        startup: UiStartup,
-        ports: UiPorts,
-    ) -> Result<ExitCode, UiError>;
-}
+pub fn run_native_desktop(
+    startup: NativeDesktopStartup,
+) -> Result<(), NativeDesktopError>;
 ```
 
-The public API uses types defined by ParchMint. The crate uses `iced::Task` and
-`iced::Subscription` internally.
+The native driver uses an Iced daemon because the launcher and each project use
+separate native windows. Its callbacks route launcher project paths through the
+desktop session registry and route project close requests through final save.
+The crate uses `iced::Task`, `iced::Subscription`, and raw Iced window IDs only
+inside the driver.
 
 Editor geometry fixtures use ParchMint-owned logical rectangles. The private
 Iced fixture surface consumes the same workspace state and is tested with the

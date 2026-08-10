@@ -35,8 +35,9 @@ an error.
 
 ## Public API
 
-The executable exports no Rust library API. The following types let tests run
-the startup code without building an installer:
+The package builds the `parchmint` executable. The following library types let
+tests run the same startup path with injected services and a deterministic UI
+driver:
 
 ```rust
 pub struct LaunchRequest {
@@ -45,11 +46,11 @@ pub struct LaunchRequest {
 
 pub struct DesktopBootstrap {
     pub application: ApplicationServices,
-    pub project_filesystem: ProjectFilesystemServices,
+    pub project_filesystem: Arc<dyn ProjectFilesystemService>,
     pub preferences: Arc<dyn PreferenceService>,
     pub appearance: Arc<dyn AppearanceService>,
     pub platform: PlatformServices,
-    pub ui: Box<dyn DesktopUi>,
+    pub ui: Arc<dyn DesktopUi>,
 }
 
 impl DesktopBootstrap {
@@ -57,10 +58,11 @@ impl DesktopBootstrap {
     pub fn run(self, request: LaunchRequest) -> Result<ExitCode, StartupError>;
 }
 
-fn main() -> ExitCode {
-    DesktopBootstrap::production()
+fn main() -> std::process::ExitCode {
+    let exit = DesktopBootstrap::production()
         .and_then(|app| app.run(LaunchRequest::from_environment()))
-        .unwrap_or_else(StartupError::report_and_exit)
+        .unwrap_or_else(StartupError::report_and_exit);
+    process_exit_code(exit)
 }
 ```
 
@@ -69,27 +71,15 @@ them.
 
 ## Implementation
 
-```rust
-async fn start(
-    mut app: DesktopBootstrap,
-    request: LaunchRequest,
-) -> Result<ExitCode> {
-    let preferences = app.preferences.load().await?;
-    let system = app.platform.system_appearance().await?;
-    let theme = app.appearance.initialize(&preferences, system)?;
-    let sessions = ProjectSessionRegistry::new();
-
-    let startup = UiStartup {
-        appearance: theme,
-        sessions,
-        initial_project: request.project,
-    };
-    let ports = app.ui_ports();
-    app.ui.run(startup, ports)
-}
-```
+`DesktopBootstrap::run` completes asynchronous preference and system-appearance
+startup, initializes the UI, routes the optional launch path, and then enters
+the injected UI driver. Production selects the native Iced driver. That driver
+opens a launcher window, opens one native window for each registered project,
+and blocks in the Iced event loop until every window closes.
 
 Startup registers the first project session and window after every service is
 ready. If startup fails earlier, it leaves no partial session or window. Each
 window and project session has a generation number. The application ignores a
 background result when its generation belongs to a closed window or session.
+Project-window close requests run through the final-save lifecycle before Iced
+destroys the native window.

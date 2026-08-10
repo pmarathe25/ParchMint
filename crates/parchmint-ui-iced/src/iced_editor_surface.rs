@@ -149,9 +149,11 @@ mod tests {
         );
         let golden = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
-            .join(format!("{stem}-tiny-skia.sha256"));
+            .join(stem);
         assert!(
-            golden.is_file(),
+            golden
+                .with_file_name(format!("{stem}-tiny-skia.sha256"))
+                .is_file(),
             "checked-in tiny-skia fixture hash is required for {stem}"
         );
         assert!(

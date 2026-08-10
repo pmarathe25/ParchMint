@@ -14,6 +14,7 @@ use std::{
     any::Any,
     collections::BTreeMap,
     error::Error,
+    ffi::OsString,
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -59,8 +60,14 @@ impl LaunchRequest {
 
     /// Parses the optional first path supplied by the operating system.
     pub fn from_environment() -> Self {
-        std::env::args_os()
+        Self::from_args(std::env::args_os())
+    }
+
+    /// Parses a process argument sequence whose first value is the executable.
+    pub fn from_args(args: impl IntoIterator<Item = impl Into<OsString>>) -> Self {
+        args.into_iter()
             .nth(1)
+            .map(Into::into)
             .map(PathBuf::from)
             .map(Self::open)
             .unwrap_or_else(Self::launcher)
@@ -328,8 +335,8 @@ impl DesktopBootstrap {
         Ok(runtime)
     }
 
-    pub async fn run(self, request: LaunchRequest) -> Result<ExitCode, StartupError> {
-        let runtime = self.start(request).await?;
+    pub fn run(self, request: LaunchRequest) -> Result<ExitCode, StartupError> {
+        let runtime = production::block_on(self.start(request))?;
         self.ui.run(runtime).map_err(StartupError::Ui)
     }
 }

@@ -3,7 +3,6 @@ use std::{
     fs,
     future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Wake, Waker},
     thread,
@@ -29,6 +28,7 @@ use parchmint_platform_api::WindowCapability;
 use parchmint_platform_native::{NativePlatform, iced_adapter::IcedWindowRegistry};
 use parchmint_preferences::{
     AppearanceController, FilePreferenceStore, PreferenceCoordinator, PreferenceService,
+    ResolvedAppearance,
 };
 use parchmint_project_format::{CanonicalCodec, CanonicalRelativePath, ProjectFormatCodec};
 use parchmint_project_fs::{
@@ -49,7 +49,10 @@ use parchmint_search_api::{
 use parchmint_search_sqlite::SqliteSearchIndex;
 use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_spellcheck_en_us::{EnUsSpellcheckService, SpellcheckError, SpellcheckOperation};
-use parchmint_ui_iced::{Shell, ShellWindows};
+use parchmint_ui_iced::{
+    NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup, NativeProjectOpenResult,
+    NativeProjectWindow, run_native_desktop,
+};
 use parchmint_workspace_state::FileWorkspaceStateStore;
 use sha2::{Digest, Sha256};
 
@@ -935,28 +938,58 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
     }
 }
 
+#[derive(Default)]
+struct ProductionUiState {
+    appearance: Option<ResolvedAppearance>,
+    projects: BTreeMap<WindowCapability, NativeProjectWindow>,
+    locked_project: Option<PathBuf>,
+}
+
+trait NativeDesktopDriver: Send + Sync {
+    fn run(&self, startup: NativeDesktopStartup) -> Result<(), NativeDesktopError>;
+}
+
+struct IcedDesktopDriver;
+
+impl NativeDesktopDriver for IcedDesktopDriver {
+    fn run(&self, startup: NativeDesktopStartup) -> Result<(), NativeDesktopError> {
+        run_native_desktop(startup)
+    }
+}
+
 struct ProductionDesktopUi {
-    windows: Mutex<ShellWindows>,
+    state: Mutex<ProductionUiState>,
     registry: IcedWindowRegistry,
     controls: ProductionControls,
+    driver: Arc<dyn NativeDesktopDriver>,
 }
 
 impl DesktopUi for ProductionDesktopUi {
-    fn start(&self, _startup: DesktopStartup) -> Result<(), DesktopUiError> {
+    fn start(&self, startup: DesktopStartup) -> Result<(), DesktopUiError> {
+        self.state
+            .lock()
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .appearance = Some(startup.appearance.appearance);
         Ok(())
     }
 
     fn project_opened(
         &self,
-        _project: &RequestedProjectPath,
+        project: &RequestedProjectPath,
         window: WindowCapability,
         session: parchmint_ui_api::ProjectSessionCapability,
     ) -> Result<(), DesktopUiError> {
-        let window = self.registry.register_window(window);
-        self.windows
+        self.state
             .lock()
-            .map_err(|_| DesktopUiError::new("Iced window registry is unavailable"))?
-            .insert(window, Shell::new(window));
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .projects
+            .insert(
+                window,
+                NativeProjectWindow {
+                    project: project.as_path().to_path_buf(),
+                    window,
+                },
+            );
         self.controls.observe(ProductionObservation::WindowOpened {
             window,
             session_id: session.session_id(),
@@ -967,11 +1000,11 @@ impl DesktopUi for ProductionDesktopUi {
 
     fn focus_window(&self, window: WindowCapability) -> Result<(), DesktopUiError> {
         let known = self
-            .windows
+            .state
             .lock()
-            .map_err(|_| DesktopUiError::new("Iced window registry is unavailable"))?
-            .values()
-            .any(|shell| shell.window() == window);
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .projects
+            .contains_key(&window);
         if !known {
             return Err(DesktopUiError::new("cannot focus a stale project window"));
         }
@@ -981,6 +1014,10 @@ impl DesktopUi for ProductionDesktopUi {
     }
 
     fn project_locked(&self, project: &RequestedProjectPath) -> Result<(), DesktopUiError> {
+        self.state
+            .lock()
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .locked_project = Some(project.as_path().to_path_buf());
         self.controls.observe(ProductionObservation::ProjectLocked {
             path: project.as_path().to_path_buf(),
         });
@@ -994,11 +1031,11 @@ impl DesktopUi for ProductionDesktopUi {
     }
 
     fn project_closed(&self, window: WindowCapability) -> Result<(), DesktopUiError> {
-        self.registry.close_window(window);
-        self.windows
+        self.state
             .lock()
-            .map_err(|_| DesktopUiError::new("Iced window registry is unavailable"))?
-            .remove(window);
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .projects
+            .remove(&window);
         self.controls
             .observe(ProductionObservation::WindowClosed(window));
         Ok(())
@@ -1017,11 +1054,82 @@ impl DesktopUi for ProductionDesktopUi {
         Ok(())
     }
 
-    fn run(&self, _runtime: DesktopRuntime) -> Result<parchmint_ui_api::ExitCode, DesktopUiError> {
-        // The model and native capabilities are live here. A platform desktop
-        // interaction driver owns entering and exiting the Iced event loop;
-        // headless tests must not manufacture that evidence.
+    fn run(&self, runtime: DesktopRuntime) -> Result<parchmint_ui_api::ExitCode, DesktopUiError> {
+        let (appearance, projects, locked_project) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?;
+            let appearance = state.appearance.ok_or_else(|| {
+                DesktopUiError::new("Iced desktop was run before startup completed")
+            })?;
+            (
+                appearance,
+                state.projects.values().cloned().collect(),
+                state.locked_project.clone(),
+            )
+        };
+        self.driver
+            .run(NativeDesktopStartup {
+                appearance,
+                projects,
+                locked_project,
+                callbacks: Arc::new(ProductionUiCallbacks {
+                    runtime,
+                    registry: self.registry.clone(),
+                }),
+            })
+            .map_err(|error| DesktopUiError::new(error.to_string()))?;
         Ok(parchmint_ui_api::ExitCode::SUCCESS)
+    }
+}
+
+struct ProductionUiCallbacks {
+    runtime: DesktopRuntime,
+    registry: IcedWindowRegistry,
+}
+
+impl NativeDesktopCallbacks for ProductionUiCallbacks {
+    fn open_project(&self, project: PathBuf) -> Result<NativeProjectOpenResult, String> {
+        let result = self
+            .runtime
+            .open_project(project.clone())
+            .map_err(|error| error.to_string())?;
+        Ok(match result {
+            crate::OpenProjectResult::Opened { window, .. } => {
+                NativeProjectOpenResult::Opened(NativeProjectWindow { project, window })
+            }
+            crate::OpenProjectResult::Focused(window) => NativeProjectOpenResult::Focused(window),
+            crate::OpenProjectResult::Locked => NativeProjectOpenResult::Locked,
+        })
+    }
+
+    fn close_project(&self, project: PathBuf) -> Result<(), String> {
+        let request = self
+            .runtime
+            .begin_final_save(&project)
+            .map_err(|error| error.to_string())?;
+        match self
+            .runtime
+            .resolve_final_save(request, Ok(()))
+            .map_err(|error| error.to_string())?
+        {
+            crate::FinalSaveResolution::Closed(_) => Ok(()),
+            crate::FinalSaveResolution::SaveFailed => {
+                Err(format!("final save failed for {}", project.display()))
+            }
+            crate::FinalSaveResolution::IgnoredStale => {
+                Err(format!("project window is stale: {}", project.display()))
+            }
+        }
+    }
+
+    fn project_window_created(&self, window: WindowCapability) {
+        self.registry.register_window(window);
+    }
+
+    fn project_window_destroyed(&self, window: WindowCapability) {
+        self.registry.close_window(window);
     }
 }
 
@@ -1085,9 +1193,10 @@ pub(crate) fn assemble_with_controls(
         shared: Arc::clone(&shared),
     });
     let ui = Arc::new(ProductionDesktopUi {
-        windows: Mutex::new(Shell::windows()),
+        state: Mutex::new(ProductionUiState::default()),
         registry: platform.iced_window_registry(),
         controls,
+        driver: Arc::new(IcedDesktopDriver),
     });
     let platform_services: PlatformServices = platform.appearance.clone();
 
@@ -1431,7 +1540,8 @@ impl Wake for ThreadWake {
     }
 }
 
-fn block_on<T>(mut future: Pin<Box<dyn Future<Output = T> + Send>>) -> T {
+pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
+    let mut future = Box::pin(future);
     let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
     let mut context = Context::from_waker(&waker);
     loop {

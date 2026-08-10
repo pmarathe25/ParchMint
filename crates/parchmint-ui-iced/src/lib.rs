@@ -11,9 +11,11 @@ mod iced_editor_surface;
     reason = "the private Iced surface is exercised by headless fixture tests"
 )]
 mod iced_project_surface;
+mod native;
 mod project_workspace;
 
 pub use editor_workspace::*;
+pub use native::*;
 pub use project_workspace::*;
 
 use std::collections::{BTreeMap, BTreeSet};

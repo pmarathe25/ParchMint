@@ -39,6 +39,7 @@ pub enum Event {
     Retained(WindowCapability),
     Closed(WindowCapability),
     SaveFailed(WindowCapability),
+    Ran,
 }
 
 #[derive(Default)]
@@ -144,6 +145,11 @@ impl DesktopUi for RecordingUi {
     ) -> Result<(), DesktopUiError> {
         self.event(Event::SaveFailed(window));
         Ok(())
+    }
+
+    fn run(&self, _runtime: DesktopRuntime) -> Result<parchmint_desktop::ExitCode, DesktopUiError> {
+        self.event(Event::Ran);
+        Ok(parchmint_desktop::ExitCode::SUCCESS)
     }
 }
 
