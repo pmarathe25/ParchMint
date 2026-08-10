@@ -2378,6 +2378,9 @@ dependencies = [
 name = "parchmint-ui-iced"
 version = "0.1.0"
 dependencies = [
+ "iced",
+ "iced_test",
+ "parchmint-editor-api",
  "parchmint-platform-api",
  "parchmint-preferences",
 ]

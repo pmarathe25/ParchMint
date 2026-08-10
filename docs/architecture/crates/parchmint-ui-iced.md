@@ -34,6 +34,19 @@ recovery work.
 The mounted editor handles keystrokes directly. It can draw the result while
 serialization, file access, and analysis continue in the background.
 
+The editor workspace keeps one presentation record per pane and one local
+search/decorations record per mounted view. Tabs identify documents, while the
+mounted `ViewId` identifies independent cursor, selection, scroll, focus, and
+local-search state. Switching a tab advances that view's mount generation.
+Toolbar and undo messages resolve to the last focused editor view and emit
+adapter-facing effects; toolbar focus does not replace the editor target.
+
+Editor completions carry the exact task, request number, view, document,
+document revision, and mount generation. A result is ignored when any field
+differs from the live request. This prevents spellcheck, comments, or word-count
+work from crossing an edit or tab switch even when the UI reuses the same
+mounted view.
+
 When it creates an `iced` window, this crate uses private concrete integration
 code to register the window with `parchmint-platform-native`. The integration
 keeps raw window handles inside the two concrete adapters. The platform API
@@ -59,6 +72,11 @@ impl DesktopUi for IcedDesktopUi {
 
 The public API uses types defined by ParchMint. The crate uses `iced::Task` and
 `iced::Subscription` internally.
+
+Editor geometry fixtures use ParchMint-owned logical rectangles. The private
+Iced fixture surface consumes the same workspace state and is tested with the
+pinned headless tiny-skia renderer, so pane focus and Light/Dark composition do
+not require a native display.
 
 ## Implementation
 

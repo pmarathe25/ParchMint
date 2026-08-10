@@ -1,4 +1,13 @@
-//! Framework-neutral presentation state for the non-editor desktop shell.
+//! Iced desktop presentation state for the shell and editor workspace.
+
+mod editor_workspace;
+#[allow(
+    dead_code,
+    reason = "the private Iced surface is exercised by headless fixture tests"
+)]
+mod iced_editor_surface;
+
+pub use editor_workspace::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 
