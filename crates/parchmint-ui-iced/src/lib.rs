@@ -6,8 +6,15 @@ mod editor_workspace;
     reason = "the private Iced surface is exercised by headless fixture tests"
 )]
 mod iced_editor_surface;
+#[allow(
+    dead_code,
+    reason = "the private Iced surface is exercised by headless fixture tests"
+)]
+mod iced_project_surface;
+mod project_workspace;
 
 pub use editor_workspace::*;
+pub use project_workspace::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 

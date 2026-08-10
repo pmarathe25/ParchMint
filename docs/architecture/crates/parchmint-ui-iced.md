@@ -16,6 +16,12 @@ workspace shell; hierarchy and Cards; editor workspace; comments and Inspector;
 search and replace; History and deletion; settings, spellcheck, and styles; and
 launcher, export, and recovery.
 
+Project-facing views share one hierarchy selection model. Explorer and Cards
+therefore normalize ancestor/descendant selections, preserve explicit tree
+order, and validate the same drag destinations before emitting an application
+command. Cards activation mounts the document through the existing editor
+workspace instead of creating a second editor state path.
+
 ## How it works
 
 ```text
@@ -47,6 +53,26 @@ differs from the live request. This prevents spellcheck, comments, or word-count
 work from crossing an edit or tab switch even when the UI reuses the same
 mounted view.
 
+Project completions use the same rule at project scope. Their ticket contains
+the project session, typed task, request number, and captured project revision.
+Starting a newer task invalidates the older task in that family. Replacement,
+restore, and recovery results also require their captured revision to remain
+current. Save and export results may finish for an older captured revision:
+the UI reports the completed frontier while leaving later edits dirty or the
+export tied to its immutable source revision.
+
+Global Search streams results only for its live query generation. Replacement
+review is a middle-pane hierarchy whose group and document controls derive
+selected, unselected, or indeterminate state from match leaves. Applying the
+selection emits candidates for application-owned revision and text
+revalidation; the UI never edits document bodies itself.
+
+History restore stays whole-project and requires an explicit confirmation.
+Recently Deleted emits complete-subtree restoration at the former location or
+the section-root fallback. Appearance emits an application-preference action,
+not a project command. Export, save, close, and recovery retain their failure
+state without claiming success or discarding recovery data.
+
 When it creates an `iced` window, this crate uses private concrete integration
 code to register the window with `parchmint-platform-native`. The integration
 keeps raw window handles inside the two concrete adapters. The platform API
@@ -77,6 +103,11 @@ Editor geometry fixtures use ParchMint-owned logical rectangles. The private
 Iced fixture surface consumes the same workspace state and is tested with the
 pinned headless tiny-skia renderer, so pane focus and Light/Dark composition do
 not require a native display.
+
+Project fixtures use the maintained Screen Catalog IDs for Explorer, Cards,
+Global Search, History, Recently Deleted, Appearance Settings, Export, and
+recovery. Each surface is rendered headlessly in Light and Dark from the same
+presentation state and semantic Iced theme palette.
 
 ## Implementation
 
