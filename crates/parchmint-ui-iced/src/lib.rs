@@ -13,10 +13,12 @@ mod iced_editor_surface;
 mod iced_project_surface;
 mod native;
 mod project_workspace;
+mod visual_verification;
 
 pub use editor_workspace::*;
 pub use native::*;
 pub use project_workspace::*;
+pub use visual_verification::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 

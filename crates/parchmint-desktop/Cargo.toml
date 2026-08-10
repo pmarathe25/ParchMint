@@ -43,4 +43,4 @@ sha2.workspace = true
 [dev-dependencies]
 parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-editor-core = { path = "../parchmint-editor-core" }
-parchmint-test-support = { path = "../parchmint-test-support" }
+parchmint-test-support = { path = "../../tests/parchmint-test-support" }

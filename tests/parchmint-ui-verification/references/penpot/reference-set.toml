@@ -1,0 +1,79 @@
+schema = "parchmint.penpot-reference-set/v1"
+penpot_file_id = "2be68822-842f-8175-8008-65eef13b0227"
+penpot_file_name = "ParchMint"
+exported_on = "2026-08-10"
+logical_width = 1440
+logical_height = 900
+export_scale = 2
+physical_width = 2880
+physical_height = 1800
+
+[[screens]]
+fixture_id = "launcher-default"
+board_id = "e96ec683-a782-802c-8008-65f767f20cfd"
+penpot_name = "PM / Screen / launcher-recent"
+light = "light/launcher-light.png"
+dark = "dark/launcher-dark.png"
+
+[[screens]]
+fixture_id = "editor-single-default"
+board_id = "e96ec683-a782-802c-8008-65f7fdf858b9"
+penpot_name = "PM / Screen / editor-single-default"
+light = "light/editor-single-light.png"
+dark = "dark/editor-single-dark.png"
+
+[[screens]]
+fixture_id = "editor-dual-default"
+board_id = "e96ec683-a782-802c-8008-65f886281b72"
+penpot_name = "PM / Screen / editor-dual-two-manuscript"
+light = "light/editor-dual-light.png"
+dark = "dark/editor-dual-dark.png"
+
+[[screens]]
+fixture_id = "cards-default"
+board_id = "e96ec683-a782-802c-8008-65f906f35093"
+penpot_name = "PM / Screen / cards-manuscript-default"
+light = "light/cards-light.png"
+dark = "dark/cards-dark.png"
+
+[[screens]]
+fixture_id = "global-search-default"
+board_id = "e96ec683-a782-802c-8008-65f9972c44e6"
+penpot_name = "PM / Screen / search-query-entry"
+light = "light/global-search-light.png"
+dark = "dark/global-search-dark.png"
+
+[[screens]]
+fixture_id = "history-default"
+board_id = "e96ec683-a782-802c-8008-65fa56f4c808"
+penpot_name = "PM / Screen / history-session-date-grouped"
+light = "light/history-light.png"
+dark = "dark/history-dark.png"
+
+[[screens]]
+fixture_id = "settings-appearance-default"
+board_id = "469ffc7d-964a-806d-8008-6c33b32674a9"
+penpot_name = "PM / Screen / settings-appearance-system"
+light = "light/settings-appearance-light.png"
+dark = "dark/settings-appearance-dark.png"
+
+[[screens]]
+fixture_id = "export-default"
+board_id = "e96ec683-a782-802c-8008-65faf34784d8"
+penpot_name = "PM / Screen / export-project-output-controls"
+light = "light/export-project-output-controls-light.png"
+dark = "dark/export-project-output-controls-dark.png"
+
+[[screens]]
+fixture_id = "error-recovery-default"
+board_id = "e96ec683-a782-802c-8008-65fb6192c697"
+penpot_name = "PM / Screen / recovered-after-crash"
+light = "light/error-recovery-light.png"
+dark = "dark/error-recovery-dark.png"
+
+[[screens]]
+fixture_id = "recently-deleted-default"
+board_id = "e96ec683-a782-802c-8008-65fa7a7978c7"
+penpot_name = "PM / Screen / recently-deleted"
+light = "light/recently-deleted-light.png"
+dark = "dark/recently-deleted-dark.png"

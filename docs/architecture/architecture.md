@@ -130,6 +130,8 @@ one another in the workspace.
   without starting the desktop UI.
 - [`parchmint-test-support`](crates/parchmint-test-support.md) provides shared
   fixtures, controlled tasks, and failure injection.
+- [`parchmint-ui-verification`](crates/parchmint-ui-verification.md) decodes,
+  compares, and reports framework-neutral PNG visual artifacts.
 
 ## Data and ownership
 

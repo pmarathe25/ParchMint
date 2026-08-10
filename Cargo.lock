@@ -2410,6 +2410,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "parchmint-ui-verification"
+version = "0.1.0"
+dependencies = [
+ "parchmint-ui-iced",
+ "png",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "toml",
+]
+
+[[package]]
 name = "parchmint-workspace-state"
 version = "0.1.0"
 dependencies = [

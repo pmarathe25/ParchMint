@@ -119,7 +119,7 @@ enum Message {
     },
 }
 
-struct NativeDesktop {
+pub(crate) struct NativeDesktop {
     appearance: ResolvedAppearance,
     launcher: LauncherState,
     windows: BTreeMap<window::Id, NativeWindow>,
@@ -230,71 +230,47 @@ impl NativeDesktop {
         window::close_requests().map(Message::CloseRequested)
     }
 
-    fn launcher_view(&self) -> Element<'_, Message> {
-        let recent_projects = if self.launcher.recent_projects().is_empty() {
-            text("No recent projects yet.").size(14)
-        } else {
-            text("Recent projects are available.").size(14)
-        };
-        let mut content = column![
-            text("ParchMint").size(36),
-            text("Write and organize a project in ordinary files.").size(16),
-            recent_projects,
-            text_input("Project directory", &self.project_path)
-                .on_input(Message::ProjectPathChanged)
-                .on_submit(Message::OpenProject)
-                .padding(10),
-            if self.opening_project {
-                button("Opening Project…")
-            } else {
-                button("Open Project").on_press(Message::OpenProject)
-            },
-        ]
-        .spacing(18)
-        .max_width(720);
-        if let Some(status) = &self.status {
-            content = content.push(text(status).size(14));
-        }
-        container(content)
-            .padding(40)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill)
-            .into()
+    /// Builds the launcher surface with owned display values. Keeping this
+    /// static makes it usable by the headless visual-verification boundary.
+    fn launcher_view(&self) -> Element<'static, Message> {
+        launcher_surface(
+            !self.launcher.recent_projects().is_empty(),
+            self.project_path.clone(),
+            self.opening_project,
+            self.status.clone(),
+        )
     }
 
-    fn project_view<'a>(
+    #[cfg(feature = "visual-verification")]
+    pub(crate) fn verification_launcher_element() -> Element<'static, ()> {
+        launcher_surface(false, String::new(), false, None).map(|_| ())
+    }
+
+    #[cfg(feature = "visual-verification")]
+    pub(crate) fn verification_project_element() -> Element<'static, ()> {
+        let shell = Shell::new(WindowCapability::new(1, 1));
+        project_surface(
+            window::Id::unique(),
+            "/verification/project.parchment".to_owned(),
+            shell.destination(),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    fn project_view(
         id: window::Id,
-        project: &'a Path,
-        shell: &'a Shell,
-        status: Option<&'a str>,
-    ) -> Element<'a, Message> {
-        let navigation = row![
-            destination_button(id, "Editor", RibbonDestination::Editor),
-            destination_button(id, "Cards", RibbonDestination::Cards),
-            destination_button(id, "History", RibbonDestination::History),
-            destination_button(id, "Recently Deleted", RibbonDestination::RecentlyDeleted),
-            destination_button(id, "Export", RibbonDestination::Export),
-            destination_button(id, "Settings", RibbonDestination::Settings),
-        ]
-        .spacing(8);
-        let mut content = column![
-            navigation,
-            text(format!("{:?}", shell.destination())).size(24),
-            text(project.display().to_string()).size(14),
-            text("The project session is open and connected to the production service graph.")
-                .size(16),
-        ]
-        .spacing(20);
-        if let Some(status) = status {
-            content = content.push(text(status).size(14));
-        }
-        container(content)
-            .padding(24)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        project: &Path,
+        shell: &Shell,
+        status: Option<&str>,
+    ) -> Element<'static, Message> {
+        project_surface(
+            id,
+            project.display().to_string(),
+            shell.destination(),
+            status.map(str::to_owned),
+        )
     }
-
     fn open_launcher_window(&mut self) -> Task<Message> {
         let (id, task) = window::open(window_settings((900.0, 620.0)));
         self.windows.insert(id, NativeWindow::Launcher);
@@ -394,6 +370,75 @@ impl NativeDesktop {
             window::close(id)
         }
     }
+}
+
+fn launcher_surface(
+    has_recent_projects: bool,
+    project_path: String,
+    opening_project: bool,
+    status: Option<String>,
+) -> Element<'static, Message> {
+    let recent_projects = if has_recent_projects {
+        text("Recent projects are available.").size(14)
+    } else {
+        text("No recent projects yet.").size(14)
+    };
+    let mut content = column![
+        text("ParchMint").size(36),
+        text("Write and organize a project in ordinary files.").size(16),
+        recent_projects,
+        text_input("Project directory", &project_path)
+            .on_input(Message::ProjectPathChanged)
+            .on_submit(Message::OpenProject)
+            .padding(10),
+        if opening_project {
+            button("Opening Project…")
+        } else {
+            button("Open Project").on_press(Message::OpenProject)
+        },
+    ]
+    .spacing(18)
+    .max_width(720);
+    if let Some(status) = status {
+        content = content.push(text(status).size(14));
+    }
+    container(content)
+        .padding(40)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill)
+        .into()
+}
+
+fn project_surface(
+    id: window::Id,
+    project: String,
+    destination: RibbonDestination,
+    status: Option<String>,
+) -> Element<'static, Message> {
+    let navigation = row![
+        destination_button(id, "Editor", RibbonDestination::Editor),
+        destination_button(id, "Cards", RibbonDestination::Cards),
+        destination_button(id, "History", RibbonDestination::History),
+        destination_button(id, "Recently Deleted", RibbonDestination::RecentlyDeleted),
+        destination_button(id, "Export", RibbonDestination::Export),
+        destination_button(id, "Settings", RibbonDestination::Settings),
+    ]
+    .spacing(8);
+    let mut content = column![
+        navigation,
+        text(format!("{:?}", destination)).size(24),
+        text(project).size(14),
+        text("The project session is open and connected to the production service graph.").size(16),
+    ]
+    .spacing(20);
+    if let Some(status) = status {
+        content = content.push(text(status).size(14));
+    }
+    container(content)
+        .padding(24)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn destination_button(

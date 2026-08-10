@@ -1,0 +1,25 @@
+[package]
+name = "parchmint-ui-verification"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "parchmint-ui-verify"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+parchmint-ui-iced = { path = "../../crates/parchmint-ui-iced", features = ["visual-verification"] }
+png = "=0.18.1"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+sha2.workspace = true
+toml.workspace = true

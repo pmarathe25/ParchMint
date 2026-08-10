@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/parchmint-ci"]
+members = ["crates/*", "tests/*", "tools/parchmint-ci"]
 
 [workspace.package]
 version = "0.1.0"

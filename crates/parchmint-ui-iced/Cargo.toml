@@ -10,8 +10,13 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+visual-verification = ["dep:iced_test"]
+
 [dependencies]
 iced = { version = "=0.14.0", default-features = false, features = ["crisp", "fira-sans", "thread-pool", "tiny-skia", "wayland", "x11"] }
+iced_test = { version = "=0.14.0", optional = true }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-platform-api = { path = "../parchmint-platform-api" }
 parchmint-preferences = { path = "../parchmint-preferences" }

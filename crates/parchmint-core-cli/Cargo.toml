@@ -30,4 +30,4 @@ serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
-parchmint-test-support = { path = "../parchmint-test-support" }
+parchmint-test-support = { path = "../../tests/parchmint-test-support" }
