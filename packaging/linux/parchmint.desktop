@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ParchMint
+Comment=Plan and write novels locally
+Exec=parchmint %f
+Icon=parchmint
+Terminal=false
+Categories=Office;WordProcessor;

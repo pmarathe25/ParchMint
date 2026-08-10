@@ -1,0 +1,14 @@
+format-version = 1
+platform = "macos"
+package-sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[signing]
+tool = "codesign"
+identity = "Developer ID Application"
+credential-environment = ["PARCHMINT_APPLE_CERTIFICATE", "PARCHMINT_APPLE_CERTIFICATE_PASSWORD"]
+timestamp-url = "https://timestamp.apple.com/ts01"
+
+[notarization]
+tool = "xcrun notarytool"
+profile-environment = "PARCHMINT_APPLE_NOTARY_PROFILE"
+staple = true

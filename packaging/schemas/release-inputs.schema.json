@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parchmint.invalid/schemas/release-inputs.schema.json",
+  "title": "ParchMint release readiness inputs",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format-version", "artifact", "platform"],
+  "properties": {
+    "format-version": { "const": 1 },
+    "artifact": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": { "enum": ["dependency-notices", "release-sbom", "provenance", "release-gate-evidence"] },
+          "status": { "enum": ["available", "missing"] },
+          "path": { "$ref": "#/$defs/path" },
+          "missing-reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "platform": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name", "architecture", "package-format", "package-definition",
+          "package-assets-status", "minimum-version-status", "signing-status", "notarization-status"
+        ],
+        "properties": {
+          "name": { "enum": ["windows", "macos", "linux"] },
+          "architecture": { "type": "string", "minLength": 1 },
+          "package-format": { "enum": ["msix", "dmg", "deb"] },
+          "package-definition": { "$ref": "#/$defs/path" },
+          "package-assets-status": { "enum": ["available", "missing"] },
+          "package-assets": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/path" } },
+          "package-assets-missing-reason": { "type": "string", "minLength": 1 },
+          "minimum-version-status": { "enum": ["frozen", "missing"] },
+          "minimum-version": { "type": "string", "minLength": 1 },
+          "minimum-version-evidence": { "$ref": "#/$defs/path" },
+          "minimum-version-missing-reason": { "type": "string", "minLength": 1 },
+          "signing-status": { "$ref": "#/$defs/policy" },
+          "signing-input": { "$ref": "#/$defs/path" },
+          "signing-missing-reason": { "type": "string", "minLength": 1 },
+          "notarization-status": { "$ref": "#/$defs/policy" },
+          "notarization-input": { "$ref": "#/$defs/path" },
+          "notarization-missing-reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\r\\n]+$" },
+    "policy": { "enum": ["required", "not-applicable", "missing"] }
+  }
+}

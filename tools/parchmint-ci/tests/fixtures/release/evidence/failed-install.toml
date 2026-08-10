@@ -1,0 +1,10 @@
+format-version = 1
+kind = "install"
+platform = "linux"
+release-version = "0.1.0-rc.1"
+source-revision = "0123456789abcdef0123456789abcdef01234567"
+package-sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+result = "failed"
+runner = "native-linux-clean-runner"
+observed-at = "2026-08-09T12:00:00Z"
+details = "The package did not install."

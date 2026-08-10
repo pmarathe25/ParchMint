@@ -1,0 +1,11 @@
+format-version = 1
+kind = "native-ui"
+platform = "windows"
+release-version = "0.1.0-rc.1"
+source-revision = "0123456789abcdef0123456789abcdef01234567"
+package-sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+result = "passed"
+runner = "native-windows-desktop-runner"
+observed-at = "2026-08-09T12:00:00Z"
+details = "Observed native menus, dialogs, and clipboard integration."
+checks = ["clipboard", "dialogs", "menus"]

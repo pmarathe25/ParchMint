@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parchmint.invalid/schemas/provenance.schema.json",
+  "title": "ParchMint release provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format-version", "release-version", "source-revision", "builder", "build-run",
+    "cargo-lock-sha256", "dependency-notices-sha256", "sbom-sha256", "subject"
+  ],
+  "properties": {
+    "format-version": { "const": 1 },
+    "release-version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.[0-9]+$" },
+    "source-revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "builder": { "type": "string", "minLength": 1 },
+    "build-run": { "type": "string", "minLength": 1 },
+    "cargo-lock-sha256": { "$ref": "#/$defs/sha256" },
+    "dependency-notices-sha256": { "$ref": "#/$defs/sha256" },
+    "sbom-sha256": { "$ref": "#/$defs/sha256" },
+    "subject": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["platform", "path", "sha256"],
+        "properties": {
+          "platform": { "enum": ["windows", "macos", "linux"] },
+          "path": { "$ref": "#/$defs/path" },
+          "sha256": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "path": { "type": "string", "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\r\\n]+$" }
+  }
+}

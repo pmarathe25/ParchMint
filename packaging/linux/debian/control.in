@@ -1,0 +1,10 @@
+Package: parchmint
+Version: @DEBIAN_VERSION@
+Section: editors
+Priority: optional
+Architecture: @DEBIAN_ARCHITECTURE@
+Maintainer: @MAINTAINER@
+Depends: @RUNTIME_DEPENDENCIES@
+Description: Local-first novel planning and writing desktop application
+ ParchMint stores canonical project data in ordinary local files and works
+ without a network connection.

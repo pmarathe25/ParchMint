@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://parchmint.invalid/schemas/release-gates.schema.json",
+  "title": "ParchMint v1 release-gate evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format-version", "release-version", "source-revision", "result", "gate"],
+  "properties": {
+    "format-version": { "const": 1 },
+    "release-version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+-rc\\.[0-9]+$" },
+    "source-revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "result": { "const": "passed" },
+    "gate": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "result", "evidence"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1, "maximum": 11 },
+          "result": { "const": "passed" },
+          "evidence": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

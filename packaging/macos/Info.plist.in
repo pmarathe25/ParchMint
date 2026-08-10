@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>ParchMint</string>
+  <key>CFBundleExecutable</key>
+  <string>parchmint</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.parchmint.desktop</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>ParchMint</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@RELEASE_VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@BUILD_NUMBER@</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>@MINIMUM_MACOS_VERSION@</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+</dict>
+</plist>
