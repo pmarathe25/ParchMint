@@ -16,8 +16,8 @@ session.
 The crate calls the service interfaces for saving, History, search, and editor
 work. The desktop executable supplies the concrete service implementations.
 The application-owned `EditorPersistenceCoordinator` can be constructed with
-injected save and recovery services before the production desktop graph is
-assembled. Full desktop graph assembly remains deferred to Stage 38.
+injected save and recovery services. The production desktop graph retains one
+coordinator and one serial save worker beneath each exact project lease.
 
 ## How it works
 

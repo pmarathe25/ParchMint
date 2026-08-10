@@ -11,9 +11,32 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+parchmint-application = { path = "../parchmint-application" }
+parchmint-domain = { path = "../parchmint-domain" }
+parchmint-editor-iced = { path = "../parchmint-editor-iced" }
+parchmint-export-api = { path = "../parchmint-export-api" }
+parchmint-export-html = { path = "../parchmint-export-html" }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-history-git2 = { path = "../parchmint-history-git2" }
 parchmint-platform-api = { path = "../parchmint-platform-api" }
+parchmint-platform-native = { path = "../parchmint-platform-native" }
 parchmint-preferences = { path = "../parchmint-preferences" }
+parchmint-project-format = { path = "../parchmint-project-format" }
+parchmint-project-fs = { path = "../parchmint-project-fs" }
+parchmint-project-repository = { path = "../parchmint-project-repository" }
+parchmint-recovery-api = { path = "../parchmint-recovery-api" }
+parchmint-recovery-fs = { path = "../parchmint-recovery-fs" }
+parchmint-save = { path = "../parchmint-save" }
+parchmint-search-api = { path = "../parchmint-search-api" }
+parchmint-search-sqlite = { path = "../parchmint-search-sqlite" }
+parchmint-spellcheck-api = { path = "../parchmint-spellcheck-api" }
+parchmint-spellcheck-en-us = { path = "../parchmint-spellcheck-en-us" }
 parchmint-ui-api = { path = "../parchmint-ui-api" }
+parchmint-ui-iced = { path = "../parchmint-ui-iced" }
+parchmint-workspace-state = { path = "../parchmint-workspace-state" }
+sha2.workspace = true
 
 [dev-dependencies]
 parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-editor-core = { path = "../parchmint-editor-core" }
+parchmint-test-support = { path = "../parchmint-test-support" }

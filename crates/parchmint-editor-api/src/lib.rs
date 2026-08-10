@@ -418,8 +418,8 @@ impl EditorPersistenceCoordinator {
     }
 
     /// Builds a recovery-only coordinator for contract and recovery replay
-    /// consumers that do not own a save worker. Desktop graph assembly remains
-    /// deferred to Stage 38.
+    /// consumers that do not own a save worker. The production desktop graph
+    /// uses [`Self::new`] with its project-scoped save worker.
     pub fn new_recovery_only(
         recovery: Arc<dyn RecoveryJournal>,
         base: RecoveryBaseSnapshot,

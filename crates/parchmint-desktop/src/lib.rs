@@ -1,7 +1,14 @@
 //! Native-desktop startup and project-window lifecycle coordination.
 //!
-//! Concrete production graph assembly remains deferred to Stage 38; callers
-//! inject ready-to-use services through [`DesktopBootstrap`].
+//! Production assembles concrete services through [`DesktopBootstrap`], while
+//! tests may still inject ready-to-use services at the same boundary.
+
+mod production;
+
+pub use production::{
+    ProductionApplicationGraph, ProductionControls, ProductionFaultKind, ProductionFaultPoint,
+    ProductionMeasurement, ProductionObservation, ProductionProjectSession,
+};
 
 use std::{
     any::Any,
@@ -60,7 +67,7 @@ impl LaunchRequest {
     }
 }
 
-/// Opaque application graph, assembled by a later production bootstrap.
+/// Opaque application-wide graph retained by the desktop bootstrap.
 pub type ApplicationServices = Arc<dyn Any + Send + Sync>;
 
 /// The platform service needed before the UI starts.
@@ -114,8 +121,8 @@ impl fmt::Display for ProjectFilesystemError {
 
 impl Error for ProjectFilesystemError {}
 
-/// Filesystem operations the desktop lifecycle needs before Stage 38 wires
-/// concrete repository, recovery, and save implementations together.
+/// Filesystem operations the desktop lifecycle needs from an injected or
+/// production project graph.
 pub trait ProjectFilesystemService: Send + Sync {
     fn open(
         &self,
@@ -184,7 +191,10 @@ pub enum StartupError {
     Appearance(PreferenceError),
     Project(ProjectFilesystemError),
     Ui(DesktopUiError),
-    ProductionGraphDeferred,
+    Production {
+        component: &'static str,
+        reason: String,
+    },
 }
 
 impl fmt::Display for StartupError {
@@ -199,8 +209,8 @@ impl fmt::Display for StartupError {
             }
             Self::Project(error) => write!(formatter, "could not open project: {error}"),
             Self::Ui(error) => write!(formatter, "could not start desktop UI: {error}"),
-            Self::ProductionGraphDeferred => {
-                formatter.write_str("the production desktop service graph is assembled by Stage 38")
+            Self::Production { component, reason } => {
+                write!(formatter, "could not initialize {component}: {reason}")
             }
         }
     }
@@ -209,6 +219,13 @@ impl fmt::Display for StartupError {
 impl Error for StartupError {}
 
 impl StartupError {
+    fn production(component: &'static str, error: impl fmt::Display) -> Self {
+        Self::Production {
+            component,
+            reason: error.to_string(),
+        }
+    }
+
     pub fn report_and_exit(self) -> ExitCode {
         eprintln!("ParchMint could not start: {self}");
         ExitCode::new(1)
@@ -227,7 +244,7 @@ impl From<ProjectFilesystemError> for StartupError {
     }
 }
 
-/// Injected desktop startup. Production graph assembly is deferred to Stage 38.
+/// Injected desktop startup with a concrete production constructor.
 pub struct DesktopBootstrap {
     pub application: ApplicationServices,
     pub project_filesystem: Arc<dyn ProjectFilesystemService>,
@@ -257,7 +274,18 @@ impl DesktopBootstrap {
     }
 
     pub fn production() -> Result<Self, StartupError> {
-        Err(StartupError::ProductionGraphDeferred)
+        production::assemble()
+    }
+
+    /// Builds the production graph with explicit integration-test controls.
+    pub fn production_with_controls(controls: ProductionControls) -> Result<Self, StartupError> {
+        production::assemble_with_controls(controls)
+    }
+
+    /// Returns the concrete graph when this bootstrap came from production.
+    pub fn production_graph(&self) -> Option<&ProductionApplicationGraph> {
+        self.application
+            .downcast_ref::<ProductionApplicationGraph>()
     }
 
     pub async fn start(&self, request: LaunchRequest) -> Result<DesktopRuntime, StartupError> {

@@ -2155,10 +2155,33 @@ dependencies = [
 name = "parchmint-desktop"
 version = "0.1.0"
 dependencies = [
+ "parchmint-application",
+ "parchmint-domain",
  "parchmint-editor-api",
+ "parchmint-editor-core",
+ "parchmint-editor-iced",
+ "parchmint-export-api",
+ "parchmint-export-html",
+ "parchmint-history-api",
+ "parchmint-history-git2",
  "parchmint-platform-api",
+ "parchmint-platform-native",
  "parchmint-preferences",
+ "parchmint-project-format",
+ "parchmint-project-fs",
+ "parchmint-project-repository",
+ "parchmint-recovery-api",
+ "parchmint-recovery-fs",
+ "parchmint-save",
+ "parchmint-search-api",
+ "parchmint-search-sqlite",
+ "parchmint-spellcheck-api",
+ "parchmint-spellcheck-en-us",
+ "parchmint-test-support",
  "parchmint-ui-api",
+ "parchmint-ui-iced",
+ "parchmint-workspace-state",
+ "sha2 0.11.0",
 ]
 
 [[package]]

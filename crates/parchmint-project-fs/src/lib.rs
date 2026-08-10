@@ -1482,6 +1482,21 @@ impl<F: ProjectFileSystem> FsProjectRepository<F> {
         }
     }
 
+    /// Returns the native root capability retained by the currently opened
+    /// repository session.
+    ///
+    /// The returned capability remains authorized only while the matching
+    /// [`OpenProject`] lease is alive. Production composition uses this seam
+    /// to construct History, recovery, search, and save services without
+    /// acquiring a second project lock.
+    pub fn active_root(&self) -> Option<ProjectRootCapability> {
+        self.active
+            .lock()
+            .expect("active project lock")
+            .as_ref()
+            .map(|active| active.root.clone())
+    }
+
     fn map_repository_error(path: &ProjectPath, error: FsError) -> RepositoryError {
         match error {
             FsError::Missing { .. } => RepositoryError::MissingResource { path: path.clone() },

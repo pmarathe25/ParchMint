@@ -17,6 +17,8 @@ use parchmint_project_format::{
     CanonicalResourceSet, FormatError, ProjectFormatCodec, ResourceId,
 };
 
+pub mod complete_application;
+
 #[derive(Debug, Clone)]
 pub struct DeterministicIdSource {
     state: u64,

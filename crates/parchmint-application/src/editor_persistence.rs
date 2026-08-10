@@ -53,7 +53,8 @@ struct SaveQueue {
 }
 
 /// Application-owned public seam joining real editor projections to recovery
-/// and revisioned saves. The desktop graph remains explicitly deferred.
+/// and revisioned saves. The desktop graph supplies one coordinator per live
+/// project lease.
 pub struct EditorPersistenceCoordinator {
     recovery: RecoveryCoordinator,
     status: Mutex<EditorPersistenceStatus>,
