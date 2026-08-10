@@ -10,3 +10,7 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+harper-core = { version = "=0.29.0", default-features = false }
+parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-spellcheck-api = { path = "../parchmint-spellcheck-api" }
