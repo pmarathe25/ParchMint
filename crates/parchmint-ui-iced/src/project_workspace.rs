@@ -983,6 +983,8 @@ pub struct SettingsState {
     style_order: Vec<String>,
     selected_detail: Option<SettingsDetail>,
     selected_category: SettingsCategory,
+    metadata_drag_source: Option<String>,
+    metadata_drag_target: Option<usize>,
 }
 
 impl SettingsState {
@@ -1029,6 +1031,8 @@ impl SettingsState {
                 .collect(),
             selected_detail: None,
             selected_category: SettingsCategory::Appearance,
+            metadata_drag_source: None,
+            metadata_drag_target: None,
         }
     }
 
@@ -1084,6 +1088,8 @@ impl SettingsState {
             style_order,
             selected_detail: None,
             selected_category: SettingsCategory::Appearance,
+            metadata_drag_source: None,
+            metadata_drag_target: None,
         }
     }
 
@@ -1153,6 +1159,14 @@ impl SettingsState {
 
     pub const fn selected_category(&self) -> SettingsCategory {
         self.selected_category
+    }
+
+    pub fn metadata_drag_source(&self) -> Option<&str> {
+        self.metadata_drag_source.as_deref()
+    }
+
+    pub const fn metadata_drag_target(&self) -> Option<usize> {
+        self.metadata_drag_target
     }
 
     pub fn metadata_field(&self, id: &str) -> Option<MetadataFieldSummary<'_>> {
@@ -2554,6 +2568,10 @@ pub enum ProjectMessage {
         field_id: String,
         target_index: usize,
     },
+    BeginMetadataFieldDrag(String),
+    SetMetadataFieldDragTarget(usize),
+    CommitMetadataFieldDrag,
+    CancelMetadataFieldDrag,
     RequestDeleteMetadataField(String),
     ConfirmDeleteMetadataField,
     SelectStyle(String),
@@ -3710,6 +3728,40 @@ impl ProjectWorkspace {
                     field_id,
                     target_index,
                 }]
+            }
+            ProjectMessage::BeginMetadataFieldDrag(field_id) => {
+                if self.settings.metadata_definitions.contains_key(&field_id) {
+                    self.settings.metadata_drag_source = Some(field_id);
+                    self.settings.metadata_drag_target = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetMetadataFieldDragTarget(target_index) => {
+                if self.settings.metadata_drag_source.is_some() {
+                    self.settings.metadata_drag_target =
+                        Some(target_index.min(self.settings.metadata_order.len()));
+                }
+                Vec::new()
+            }
+            ProjectMessage::CommitMetadataFieldDrag => {
+                let source = self.settings.metadata_drag_source.take();
+                let target = self.settings.metadata_drag_target.take();
+                match (source, target) {
+                    (Some(field_id), Some(target_index))
+                        if self.settings.metadata_definitions.contains_key(&field_id) =>
+                    {
+                        self.update(ProjectMessage::ReorderMetadataField {
+                            field_id,
+                            target_index,
+                        })
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            ProjectMessage::CancelMetadataFieldDrag => {
+                self.settings.metadata_drag_source = None;
+                self.settings.metadata_drag_target = None;
+                Vec::new()
             }
             ProjectMessage::RequestDeleteMetadataField(field_id) => {
                 if self.settings.metadata_definitions.contains_key(&field_id) {

@@ -27,6 +27,7 @@ use parchmint_preferences::{
     AppearanceService, PreferenceCommand, PreferenceError, PreferenceService, RecentProject,
     ResolvedAppearance, ThemeSnapshot,
 };
+use parchmint_ui_iced::NativeCaptureRequest;
 pub use parchmint_ui_api::{ExitCode, RequestedProjectPath, UiError as DesktopUiError};
 use parchmint_ui_api::{
     ProjectQueryError, ProjectSessionAuthority, ProjectSessionCapability, ProjectSessionRegistry,
@@ -227,6 +228,17 @@ pub trait DesktopUi: Send + Sync {
     fn run(&self, _runtime: DesktopRuntime) -> Result<ExitCode, DesktopUiError> {
         Ok(ExitCode::SUCCESS)
     }
+
+    /// Starts one verification-only native render capture. The default keeps
+    /// injected desktop seams source-compatible; production overrides it to
+    /// pass the request to the Iced event-loop driver.
+    fn run_with_native_capture(
+        &self,
+        runtime: DesktopRuntime,
+        _capture: NativeCaptureRequest,
+    ) -> Result<ExitCode, DesktopUiError> {
+        self.run(runtime)
+    }
 }
 
 /// A startup failure reported by the injected bootstrap seam.
@@ -378,6 +390,20 @@ impl DesktopBootstrap {
     pub fn run(self, request: LaunchRequest) -> Result<ExitCode, StartupError> {
         let runtime = production::block_on(self.start(request))?;
         self.ui.run(runtime).map_err(StartupError::Ui)
+    }
+
+    /// Runs the real production desktop with one explicit render-target
+    /// capture request. Product startup remains unchanged; only the native
+    /// driver owns capture timing and file output.
+    pub fn run_native_capture(
+        self,
+        request: LaunchRequest,
+        capture: NativeCaptureRequest,
+    ) -> Result<ExitCode, StartupError> {
+        let runtime = production::block_on(self.start(request))?;
+        self.ui
+            .run_with_native_capture(runtime, capture)
+            .map_err(StartupError::Ui)
     }
 }
 

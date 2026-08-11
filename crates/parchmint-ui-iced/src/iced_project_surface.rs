@@ -10,13 +10,15 @@ use parchmint_ui_api::HistoryMaintenanceStatus;
 use std::collections::BTreeMap;
 
 use crate::{
-    CommentAnchor, ContentState, DragDestination, EditorMessage, FocusTarget, HierarchyItemKind,
-    HierarchyRowKind, InspectorSection, MetadataFieldApplicability, MetadataFieldTextKind,
+    CommentAnchor, ContentState, DragDestination, EditorMessage, F6Region, FocusTarget,
+    HierarchyItemKind, HierarchyRowKind, InspectorSection, MetadataFieldApplicability,
+    MetadataFieldTextKind,
     ProjectFixture, ProjectMessage, ProjectModal, ProjectWorkspace, ReplacementCheckState,
     ReplacementPreviewRowKind, RestoreLocation, RibbonDestination, SaveState, SelectionGesture,
     SettingsCategory, SettingsDetail, ShellLayout, SidebarSurface, StatusCount, StyleProperty,
     components::{self, ButtonKind, Interaction, StatusKind, Surface},
     design_tokens::{ParchMintTheme, RIBBON_HEIGHT, STATUS_HEIGHT},
+    focus,
     iced_editor_surface::EditorCenterMessage,
 };
 
@@ -225,6 +227,7 @@ fn ribbon(
                 tooltip::Position::Bottom,
             ))
         });
+    let buttons = focus::f6_region(F6Region::ModeSwitch, buttons);
     let title = row![text("▯").size(20), text(project_title).size(16),]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center)
@@ -585,7 +588,11 @@ fn explorer_rail<'a>(
     ]
     .spacing(8)
     .height(Length::Fill);
-    hierarchy_context_overlay(workspace, rail.into(), theme)
+    hierarchy_context_overlay(
+        workspace,
+        focus::f6_region(F6Region::Explorer, rail),
+        theme,
+    )
 }
 
 fn hierarchy_drag_handle(
@@ -3101,12 +3108,14 @@ fn inspector<'a>(
         ]
         .spacing(10)
     };
-    container(content)
-        .padding(12)
-        .width(width)
-        .height(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest))
-        .into()
+    focus::f6_region(
+        F6Region::Inspector,
+        container(content)
+            .padding(12)
+            .width(width)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+    )
 }
 
 fn status_bar<'a>(
@@ -3172,12 +3181,14 @@ fn status_bar<'a>(
     ]
     .align_y(iced::alignment::Vertical::Center)
     .spacing(14);
-    container(content)
-        .padding([6, 12])
-        .width(Length::Fill)
-        .height(u32::from(STATUS_HEIGHT))
-        .style(move |_| components::status_style(theme, kind))
-        .into()
+    focus::f6_region(
+        F6Region::StatusBar,
+        container(content)
+            .padding([6, 12])
+            .width(Length::Fill)
+            .height(u32::from(STATUS_HEIGHT))
+            .style(move |_| components::status_style(theme, kind)),
+    )
 }
 
 fn modal_view<'a>(
@@ -3208,28 +3219,34 @@ fn modal_view<'a>(
             text(detail).size(13),
             row![
                 Space::new().width(Length::Fill),
-                button(text("Cancel"))
-                    .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
-                    .style(move |_, status| components::button_style(
-                        theme,
-                        ButtonKind::Secondary,
-                        interaction(status, false)
-                    )),
-                button(text("Confirm"))
-                    .on_press(ProjectSurfaceMessage::Project(match modal {
-                        ProjectModal::HistoryRestore { .. } =>
-                            ProjectMessage::ConfirmHistoryRestore,
-                        ProjectModal::DeleteMetadataField { .. } =>
-                            ProjectMessage::ConfirmDeleteMetadataField,
-                        ProjectModal::DeleteStyle { .. } => ProjectMessage::ConfirmDeleteStyle,
-                        ProjectModal::ReinitializeHistory =>
-                            ProjectMessage::ConfirmHistoryReinitialize,
-                    }))
-                    .style(move |_, status| components::button_style(
-                        theme,
-                        ButtonKind::Destructive,
-                        interaction(status, false)
-                    ))
+                focus::region(
+                    focus::modal_cancel_id(),
+                    button(text("Cancel"))
+                        .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Secondary,
+                            interaction(status, false)
+                        )),
+                ),
+                focus::region(
+                    focus::modal_confirm_id(),
+                    button(text("Confirm"))
+                        .on_press(ProjectSurfaceMessage::Project(match modal {
+                            ProjectModal::HistoryRestore { .. } =>
+                                ProjectMessage::ConfirmHistoryRestore,
+                            ProjectModal::DeleteMetadataField { .. } =>
+                                ProjectMessage::ConfirmDeleteMetadataField,
+                            ProjectModal::DeleteStyle { .. } => ProjectMessage::ConfirmDeleteStyle,
+                            ProjectModal::ReinitializeHistory =>
+                                ProjectMessage::ConfirmHistoryReinitialize,
+                        }))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Destructive,
+                            interaction(status, false)
+                        )),
+                )
             ]
             .spacing(10)
         ]

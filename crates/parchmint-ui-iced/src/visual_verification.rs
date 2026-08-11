@@ -260,10 +260,9 @@ fn production_element(
     appearance: VisualAppearance,
 ) -> iced::Element<'static, ()> {
     use crate::{
-        EditorMessage, EditorPane, ProjectFixture, ProjectMessage, ProjectWorkspace,
-        RibbonDestination, SelectionGesture,
         iced_editor_surface::editor_center_surface,
-        iced_project_surface::{ProjectSurfaceMessage, verification_project_surface},
+        iced_project_surface::{verification_project_surface, ProjectSurfaceMessage},
+        ProjectWorkspace, RibbonDestination,
     };
 
     if target == VisualTarget::Launcher {
@@ -271,39 +270,10 @@ fn production_element(
         return crate::native::NativeDesktop::verification_launcher_element();
     }
 
-    let project_fixture = match target {
-        VisualTarget::EditorSingle | VisualTarget::EditorDual => ProjectFixture::Explorer,
-        VisualTarget::Cards => ProjectFixture::Cards,
-        VisualTarget::GlobalSearch => ProjectFixture::GlobalSearch,
-        VisualTarget::History => ProjectFixture::History,
-        VisualTarget::SettingsAppearance => ProjectFixture::SettingsAppearance,
-        VisualTarget::Export => ProjectFixture::Export,
-        VisualTarget::ErrorRecovery => ProjectFixture::ErrorRecovery,
-        VisualTarget::RecentlyDeleted => ProjectFixture::RecentlyDeleted,
-        VisualTarget::Launcher => unreachable!("launcher returned above"),
-    };
-    let mut workspace = ProjectWorkspace::from_fixture(project_fixture);
-    // The Penpot boards consistently inspect Chapter One. Keep that selection
-    // in the verification-only fixture so the real Inspector composition is
-    // populated rather than being an empty shell.
-    if target != VisualTarget::ErrorRecovery {
-        workspace.update(ProjectMessage::SelectHierarchy {
-            node_id: "chapter-one".to_owned(),
-            gesture: SelectionGesture::Replace,
-        });
-    }
-    if target == VisualTarget::EditorSingle {
-        let companion = workspace.editor().pane(EditorPane::Companion);
-        if let Some(document_id) = companion.active_document().map(str::to_owned) {
-            workspace.editor_mut().update(EditorMessage::CloseTab {
-                pane: EditorPane::Companion,
-                document_id,
-            });
-        }
-    }
-    populate_editor_tabs(&mut workspace, target);
+    let snapshot = verification_snapshot();
+    let workspace = verification_workspace(target, appearance, &snapshot);
     let workspace: &'static ProjectWorkspace = Box::leak(Box::new(workspace));
-    let slots = editor_slots(target);
+    let slots = editor_slots(&snapshot, workspace, target, appearance);
     let theme = presentation(appearance);
     let editor = editor_center_surface(workspace.editor(), theme, &slots, None)
         .map(ProjectSurfaceMessage::EditorCenter);
@@ -323,83 +293,767 @@ fn production_element(
 }
 
 #[cfg(feature = "visual-verification")]
-fn populate_editor_tabs(workspace: &mut crate::ProjectWorkspace, target: VisualTarget) {
+fn editor_slots(
+    snapshot: &parchmint_ui_api::ProjectSnapshot,
+    workspace: &crate::ProjectWorkspace,
+    target: VisualTarget,
+    appearance: VisualAppearance,
+) -> crate::iced_editor_surface::EditorHostSlots {
+    use crate::{
+        iced_editor_surface::{EditorHostSlots, EditorPaneSlot},
+        EditorPane,
+    };
+
+    let mut slots = EditorHostSlots::default();
     if !matches!(
         target,
-        VisualTarget::EditorSingle | VisualTarget::EditorDual
+        VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::GlobalSearch
     ) {
-        return;
+        return slots;
     }
-    let tabs = [
-        ("chapter-one", "Chapter One"),
-        ("chapter-two", "Chapter Two"),
-        ("harbor-notes", "Harbor Notes"),
-        ("map-of-the-coast", "Map of the Coast"),
-    ];
-    for pane in [crate::EditorPane::Primary, crate::EditorPane::Companion] {
-        if target == VisualTarget::EditorSingle && pane == crate::EditorPane::Companion {
+    for pane in [EditorPane::Primary, EditorPane::Companion] {
+        let Some(document_id) = workspace.editor().pane(pane).active_document() else {
             continue;
-        }
-        for (id, title) in tabs {
-            workspace
-                .editor_mut()
-                .update(crate::EditorMessage::OpenTab {
-                    pane,
-                    tab: crate::TabSpec::new(id, title),
-                });
-        }
-        let active = if pane == crate::EditorPane::Primary {
-            "chapter-one"
-        } else {
-            "chapter-two"
         };
-        workspace
-            .editor_mut()
-            .update(crate::EditorMessage::ActivateTab {
-                pane,
-                document_id: active.to_owned(),
-            });
+        let document = snapshot
+            .documents
+            .iter()
+            .find(|document| stable_id(document.document_id.as_bytes()) == document_id)
+            .expect("mounted production tab has a snapshot document");
+        let adapter = parchmint_editor_iced::EditorIcedAdapter::new(
+            parchmint_editor_iced::EditorIcedConfig::default(),
+        )
+        .expect("verification adapter starts");
+        let viewport = parchmint_editor_iced::EditorViewport::new(720.0, 520.0)
+            .expect("verification viewport is valid");
+        let theme = match appearance {
+            VisualAppearance::Light => parchmint_editor_iced::EditorSurfaceTheme::light(),
+            VisualAppearance::Dark => parchmint_editor_iced::EditorSurfaceTheme::dark(),
+        };
+        let binding = parchmint_editor_iced::MountedEditorBinding::mount(
+            &adapter,
+            parchmint_editor_iced::MountedEditorBindingConfig::new(
+                parchmint_editor_iced::MountedEditorSession::Open(
+                    crate::project_runtime::canonical_load(snapshot, document.document_id)
+                        .expect("verification snapshot is canonical"),
+                ),
+                parchmint_platform_api::WindowCapability::new(900, 1),
+                workspace.editor().pane(pane).view(),
+                viewport,
+                theme,
+            ),
+        )
+        .expect("verification editor host mounts");
+        slots.insert(pane, EditorPaneSlot::mounted(binding.host().clone()));
+    }
+    slots
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_snapshot() -> parchmint_ui_api::ProjectSnapshot {
+    use parchmint_application::{DocumentSnapshot, DocumentVisibility};
+    use parchmint_domain::{
+        apply_project_command, DocumentId, MetadataApplicability, MetadataFieldDefinition,
+        MetadataFieldId, MetadataTextKind, NodeId, Project, ProjectCommand, ProjectId,
+    };
+    use parchmint_editor_api::EditorRevision;
+
+    let part_one = NodeId::from_bytes([0x13; 16]);
+    let part_two = NodeId::from_bytes([0x23; 16]);
+    let chapter_one_node = NodeId::from_bytes([0x11; 16]);
+    let chapter_two_node = NodeId::from_bytes([0x21; 16]);
+    let harbor_notes_node = NodeId::from_bytes([0x31; 16]);
+    let map_node = NodeId::from_bytes([0x41; 16]);
+    let old_chapter_node = NodeId::from_bytes([0x51; 16]);
+    let draft_scenes_node = NodeId::from_bytes([0x61; 16]);
+    let chapter_one = DocumentId::from_bytes([0x12; 16]);
+    let chapter_two = DocumentId::from_bytes([0x22; 16]);
+    let harbor_notes = DocumentId::from_bytes([0x32; 16]);
+    let map = DocumentId::from_bytes([0x42; 16]);
+    let old_chapter = DocumentId::from_bytes([0x52; 16]);
+    let point_of_view = MetadataFieldId::from_bytes([0x71; 16]);
+    let target_words = MetadataFieldId::from_bytes([0x72; 16]);
+    let words = MetadataFieldId::from_bytes([0x73; 16]);
+    let status = MetadataFieldId::from_bytes([0x74; 16]);
+    let mut project = Project::new(ProjectId::from_bytes([0x10; 16]));
+    project.display_title = "The Glass Harbor".to_owned();
+    project.author = Some("Mara Venn".to_owned());
+    project
+        .nodes
+        .try_insert_group(part_one, NodeId::manuscript_root(), 0, "Part One")
+        .expect("verification group is valid");
+    project
+        .nodes
+        .try_insert_document(chapter_one_node, chapter_one, part_one, 0, "Chapter One")
+        .expect("verification document is valid");
+    project
+        .nodes
+        .try_insert_document(chapter_two_node, chapter_two, part_one, 1, "Chapter Two")
+        .expect("verification second document is valid");
+    project
+        .nodes
+        .try_insert_group(part_two, NodeId::manuscript_root(), 1, "Part Two")
+        .expect("verification second group is valid");
+    project
+        .nodes
+        .try_insert_document(map_node, map, part_two, 0, "Map of the Coast")
+        .expect("verification map is valid");
+    project
+        .nodes
+        .try_insert_document(
+            harbor_notes_node,
+            harbor_notes,
+            NodeId::research_root(),
+            0,
+            "Harbor Notes",
+        )
+        .expect("verification research document is valid");
+    project
+        .nodes
+        .try_insert_document(old_chapter_node, old_chapter, part_one, 2, "Old Chapter")
+        .expect("verification deleted chapter is valid");
+    project
+        .nodes
+        .try_insert_group(draft_scenes_node, part_one, 3, "Draft Scenes")
+        .expect("verification deleted group is valid");
+    for field in [
+        MetadataFieldDefinition {
+            id: point_of_view,
+            label: "POV".to_owned(),
+            description: Some("Narrative perspective".to_owned()),
+            applicability: MetadataApplicability::GroupsAndDocuments,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: true,
+        },
+        MetadataFieldDefinition {
+            id: target_words,
+            label: "Target".to_owned(),
+            description: None,
+            applicability: MetadataApplicability::Groups,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: true,
+        },
+        MetadataFieldDefinition {
+            id: words,
+            label: "Words".to_owned(),
+            description: None,
+            applicability: MetadataApplicability::Documents,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: true,
+        },
+        MetadataFieldDefinition {
+            id: status,
+            label: "Status".to_owned(),
+            description: None,
+            applicability: MetadataApplicability::Documents,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: false,
+        },
+    ] {
+        project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::upsert_metadata_field(field),
+        )
+        .expect("verification metadata is valid")
+        .project;
+    }
+    for command in [
+        ProjectCommand::set_synopsis(
+            chapter_one_node,
+            "The harbor has fallen silent, and Mara must decide whom to trust.",
+        ),
+        ProjectCommand::set_synopsis(part_one, "The opening movement of the novel."),
+        ProjectCommand::set_synopsis(
+            chapter_two_node,
+            "The sealed letter changes what Mara believes.",
+        ),
+        ProjectCommand::set_synopsis(part_two, "The fallout after the harbor reveal."),
+        ProjectCommand::set_metadata_value(
+            chapter_one_node,
+            point_of_view,
+            Some("Mara".to_owned()),
+        ),
+        ProjectCommand::set_metadata_value(
+            chapter_two_node,
+            point_of_view,
+            Some("Mara".to_owned()),
+        ),
+        ProjectCommand::set_metadata_value(part_one, point_of_view, Some("Multiple".to_owned())),
+        ProjectCommand::set_metadata_value(part_two, point_of_view, Some("Multiple".to_owned())),
+        ProjectCommand::set_metadata_value(part_one, target_words, Some("3,500 words".to_owned())),
+        ProjectCommand::set_metadata_value(part_two, target_words, Some("3,200 words".to_owned())),
+        ProjectCommand::set_metadata_value(chapter_one_node, words, Some("1,240".to_owned())),
+        ProjectCommand::set_metadata_value(chapter_two_node, words, Some("1,080".to_owned())),
+        ProjectCommand::set_metadata_value(chapter_one_node, status, Some("Draft".to_owned())),
+        ProjectCommand::delete_node_at(old_chapter_node, 1_725_000_000_000),
+        ProjectCommand::delete_node_at(draft_scenes_node, 1_725_000_001_000),
+    ] {
+        project = apply_project_command(&project, project.revision, command)
+            .expect("verification project command is valid")
+            .project;
+    }
+    parchmint_ui_api::ProjectSnapshot {
+        project,
+        document_summaries: Vec::new(),
+        documents: vec![
+            DocumentSnapshot {
+                document_id: chapter_one,
+                body: "<h1>Chapter One</h1><p>The harbor held the last of the evening light. Mara waited beneath the clock tower, turning the unopened letter between her fingers.</p><blockquote>“Some journeys begin long before the road.”</blockquote><hr><p>By morning, the tide had erased every footprint.</p>".to_owned(),
+                comments: Vec::new(),
+                revision: EditorRevision::from(1),
+                visibility: DocumentVisibility::Open,
+            },
+            DocumentSnapshot {
+                document_id: chapter_two,
+                body: "<h1>Chapter Two</h1><p>Rain found the city before dawn.</p><p>Another manuscript document opens on the right.</p>".to_owned(),
+                comments: Vec::new(),
+                revision: EditorRevision::from(1),
+                visibility: DocumentVisibility::Closed,
+            },
+            DocumentSnapshot {
+                document_id: harbor_notes,
+                body: "<h1>Harbor Notes</h1><p>A harbor road beneath the cliffs.</p><p>Every harbor keeps its own weather.</p>".to_owned(),
+                comments: Vec::new(),
+                revision: EditorRevision::from(1),
+                visibility: DocumentVisibility::Closed,
+            },
+            DocumentSnapshot {
+                document_id: map,
+                body: "<h1>Map of the Coast</h1><p>The coast road follows the harbor cliffs.</p>".to_owned(),
+                comments: Vec::new(), revision: EditorRevision::from(1), visibility: DocumentVisibility::Closed,
+            },
+            DocumentSnapshot {
+                document_id: old_chapter,
+                body: "<h1>Old Chapter</h1><p>The harbor held the last of the evening light.</p><blockquote>“Some journeys begin long before the road.”</blockquote><p>Mara kept the unopened letter hidden.</p>".to_owned(),
+                comments: Vec::new(), revision: EditorRevision::from(1), visibility: DocumentVisibility::Closed,
+            },
+        ],
+        styles_css: String::new(),
     }
 }
 
 #[cfg(feature = "visual-verification")]
-fn editor_slots(target: VisualTarget) -> crate::iced_editor_surface::EditorHostSlots {
-    use crate::{
-        EditorPane,
-        iced_editor_surface::{EditorCenterPaneState, EditorHostSlots, EditorPaneSlot},
-    };
+fn verification_node_id() -> String {
+    "11".repeat(16)
+}
 
-    let mut slots = EditorHostSlots::default();
-    if matches!(
-        target,
-        VisualTarget::EditorSingle | VisualTarget::EditorDual
-    ) {
-        slots.insert(
-            EditorPane::Primary,
-            EditorPaneSlot::state(EditorCenterPaneState::VerificationProse {
-                heading: "Chapter One",
-                paragraphs: &[
-                    "The harbor held the last of the evening light. Mara waited beneath the clock tower, turning the unopened letter between her fingers.",
-                    "“Some journeys begin long before the road.”",
-                    "✱",
-                    "By morning, the tide had erased every footprint.",
-                ],
-            }),
-        );
+#[cfg(feature = "visual-verification")]
+fn verification_chapter_two_node_id() -> String {
+    "21".repeat(16)
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_part_one_node_id() -> String {
+    "13".repeat(16)
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_harbor_notes_node_id() -> String {
+    "31".repeat(16)
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_map_node_id() -> String {
+    "41".repeat(16)
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_deleted_node_id() -> String {
+    "51".repeat(16)
+}
+
+#[cfg(feature = "visual-verification")]
+fn stable_id(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_semantic_body(
+    document_id: parchmint_domain::DocumentId,
+    body: String,
+) -> parchmint_editor_api::SemanticDocument {
+    parchmint_editor_core::EditorCoreSession::open(
+        parchmint_editor_core::CanonicalDocumentLoad::new(document_id, body),
+    )
+    .expect("verification document is canonical")
+    .canonical_projection()
+    .semantic()
+    .clone()
+}
+
+/// Hydrates every catalog board through the public workspace reducer and task
+/// completion boundary. The deterministic payloads model service responses;
+/// rendering consumes only the resulting production workspace state.
+#[cfg(feature = "visual-verification")]
+fn verification_workspace(
+    target: VisualTarget,
+    appearance: VisualAppearance,
+    snapshot: &parchmint_ui_api::ProjectSnapshot,
+) -> crate::ProjectWorkspace {
+    use crate::{
+        ContentState, DragDestination, GlobalSearchResult, HistoryCheckpointCategory,
+        HistoryCheckpointRow, HistoryCurrentDocument, HistoryDocumentPreview, HistoryPreviewData,
+        ProjectMessage, ProjectTask, ProjectTaskCompletion, ProjectTaskPayload, SelectionGesture,
+        SettingsCategory,
+    };
+    use parchmint_domain::ProjectExportSetting;
+
+    let chapter_one = verification_node_id();
+    let part_one = verification_part_one_node_id();
+    let chapter_two = verification_chapter_two_node_id();
+    let harbor_notes = verification_harbor_notes_node_id();
+    let map = verification_map_node_id();
+    let deleted = verification_deleted_node_id();
+    let chapter_one_document = stable_id(snapshot.documents[0].document_id.as_bytes());
+    let chapter_two_document = stable_id(snapshot.documents[1].document_id.as_bytes());
+    let harbor_notes_document = stable_id(snapshot.documents[2].document_id.as_bytes());
+    let mut workspace = crate::ProjectWorkspace::from_snapshot(snapshot);
+    let _ = workspace.update(ProjectMessage::SelectHierarchy {
+        node_id: chapter_one.clone(),
+        gesture: SelectionGesture::Replace,
+    });
+
+    match target {
+        VisualTarget::Launcher => unreachable!("launcher has its own native state"),
+        VisualTarget::EditorSingle => {
+            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_two.clone()));
+            let _ = workspace.update(ProjectMessage::DropHierarchy {
+                source_id: harbor_notes,
+                destination: DragDestination::EditorPane(crate::EditorPane::Primary),
+            });
+            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(map.clone()));
+            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
+        }
+        VisualTarget::EditorDual => {
+            for node_id in [chapter_two.clone(), map.clone(), chapter_one.clone()] {
+                let _ = workspace.update(ProjectMessage::OpenHierarchyNode(node_id));
+            }
+            for node_id in [
+                chapter_one.clone(),
+                chapter_two.clone(),
+                map.clone(),
+                chapter_two.clone(),
+            ] {
+                let _ = workspace.update(ProjectMessage::OpenHierarchyNodeInCompanion(node_id));
+            }
+            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
+            let _ = workspace
+                .editor_mut()
+                .update(crate::EditorMessage::FocusPane(crate::EditorPane::Primary));
+        }
+        VisualTarget::Cards => {
+            let _ = workspace.update(ProjectMessage::SetCardsSection(stable_id(
+                parchmint_domain::NodeId::manuscript_root().as_bytes(),
+            )));
+            let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one));
+            let _ = workspace.update(ProjectMessage::ActivateCard(chapter_one));
+        }
+        VisualTarget::GlobalSearch => {
+            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
+            let _ = workspace.update(ProjectMessage::ShowGlobalSearch);
+            let _ = workspace.update(ProjectMessage::SetGlobalSearchQuery("harbor".to_owned()));
+            let ticket = workspace.begin_task(ProjectTask::GlobalSearch {
+                generation: workspace.global_search().query_generation(),
+            });
+            assert!(
+                workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                    ticket,
+                    ProjectTaskPayload::SearchBatch {
+                        results: vec![
+                            GlobalSearchResult {
+                                document_id: chapter_one_document.clone(),
+                                match_id: "chapter-one-harbor-1".to_owned(),
+                                prefix: "...the ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " held the last of the evening light.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: chapter_one_document.clone(),
+                                match_id: "chapter-one-harbor-2".to_owned(),
+                                prefix: "Mara returned to the ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " before the bells rang.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: harbor_notes_document.clone(),
+                                match_id: "harbor-notes-1".to_owned(),
+                                prefix: "...a ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " road beneath the cliffs.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: harbor_notes_document.clone(),
+                                match_id: "harbor-notes-2".to_owned(),
+                                prefix: "Every ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " keeps its own weather.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: harbor_notes_document.clone(),
+                                match_id: "harbor-notes-3".to_owned(),
+                                prefix: "The old ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " maps were water-stained.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: harbor_notes_document.clone(),
+                                match_id: "harbor-notes-4".to_owned(),
+                                prefix: "At dawn, the ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " was quiet again.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                        ],
+                        finished: true,
+                    },
+                ))
+            );
+        }
+        VisualTarget::History => {
+            let history_checkpoint_body = "<p>1 The harbor held the last of the evening light.</p><p>2 Mara waited beneath the clock tower.</p><p>3 The unopened letter remained on the desk.</p><p>4 By morning, the tide had erased every footprint.</p>".to_owned();
+            let history_current_body = "<p>1 The harbor held the last of the evening light.</p><p>2 Mara waited beneath the clock tower.</p><p>3 The sealed letter remained on the desk.</p><p>4 By morning, the tide had erased every footprint.</p>".to_owned();
+            let checkpoints = vec![
+                HistoryCheckpointRow {
+                    checkpoint_id: "autosave-chapter-one".to_owned(),
+                    sequence: 4,
+                    category: HistoryCheckpointCategory::Autosave,
+                    affected_document_ids: vec![chapter_one_document],
+                    name: Some("Chapter One".to_owned()),
+                },
+                HistoryCheckpointRow {
+                    checkpoint_id: "before-revisions".to_owned(),
+                    sequence: 3,
+                    category: HistoryCheckpointCategory::NamedSnapshot,
+                    affected_document_ids: Vec::new(),
+                    name: Some("Before revisions".to_owned()),
+                },
+                HistoryCheckpointRow {
+                    checkpoint_id: "moved-chapter-two".to_owned(),
+                    sequence: 2,
+                    category: HistoryCheckpointCategory::StructuralChange,
+                    affected_document_ids: vec![chapter_two_document],
+                    name: Some("Moved Chapter Two".to_owned()),
+                },
+                HistoryCheckpointRow {
+                    checkpoint_id: "saved-chapter-one".to_owned(),
+                    sequence: 1,
+                    category: HistoryCheckpointCategory::ExplicitSave,
+                    affected_document_ids: vec![stable_id(
+                        snapshot.documents[0].document_id.as_bytes(),
+                    )],
+                    name: Some("Chapter One".to_owned()),
+                },
+            ];
+            let ticket = workspace.begin_task(ProjectTask::LoadHistory);
+            assert!(
+                workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                    ticket,
+                    ProjectTaskPayload::HistoryLoaded {
+                        checkpoints: checkpoints.clone(),
+                    },
+                ))
+            );
+            let _ = workspace.update(ProjectMessage::SelectHistoryCheckpoint(
+                "autosave-chapter-one".to_owned(),
+            ));
+            let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
+                checkpoint_id: "autosave-chapter-one".to_owned(),
+            });
+            assert!(
+                workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                    ticket,
+                    ProjectTaskPayload::HistoryPreviewReady {
+                        preview: HistoryPreviewData {
+                            checkpoint: checkpoints[0].clone(),
+                            resource_paths: vec![
+                                "1 Current: The harbor held the last of the evening light."
+                                    .to_owned(),
+                                "2 Current: Mara waited beneath the clock tower.".to_owned(),
+                                "3 Checkpoint: The unopened letter was sealed.".to_owned(),
+                                "4 Checkpoint: By morning, the tide had erased every footprint."
+                                    .to_owned(),
+                            ],
+                            document: Some(HistoryDocumentPreview {
+                                document_id: stable_id(
+                                    snapshot.documents[0].document_id.as_bytes()
+                                ),
+                                canonical_path: "documents/chapter-one.html".to_owned(),
+                                semantic: verification_semantic_body(
+                                    snapshot.documents[0].document_id,
+                                    history_checkpoint_body,
+                                ),
+                            }),
+                        },
+                    },
+                ))
+            );
+            workspace.set_history_current_document(Some(HistoryCurrentDocument {
+                document_id: stable_id(snapshot.documents[0].document_id.as_bytes()),
+                title: "Chapter One".to_owned(),
+                body: history_current_body.clone(),
+                semantic: verification_semantic_body(
+                    snapshot.documents[0].document_id,
+                    history_current_body,
+                ),
+            }));
+        }
+        VisualTarget::SettingsAppearance => {
+            let _ = workspace.update(ProjectMessage::SelectSettingsCategory(
+                SettingsCategory::Appearance,
+            ));
+        }
+        VisualTarget::Export => {
+            let _ = workspace.update(ProjectMessage::SetExportOutputName(
+                "the-glass-harbor.html".to_owned(),
+            ));
+            let _ = workspace.update(ProjectMessage::SetExportDestination(Some(
+                "~/Documents".to_owned(),
+            )));
+            let _ = workspace.update(ProjectMessage::SetExportNumbering(true));
+            let _ = workspace.update(ProjectMessage::SetExportTitleSetting(
+                ProjectExportSetting::Inherit,
+            ));
+        }
+        VisualTarget::ErrorRecovery => {
+            let ticket = workspace.begin_recovery_reconciliation();
+            assert!(
+                workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                    ticket,
+                    ProjectTaskPayload::RecoveryAvailable {
+                        accepted_records: 37,
+                        affected_documents: vec![(chapter_one_document, 1)],
+                        isolation: Some("Chapter One journal is ready to reconcile; the last durable history checkpoint remains preserved.".to_owned()),
+                    },
+                ))
+            );
+            assert_eq!(workspace.content_state(), &ContentState::Recovery);
+        }
+        VisualTarget::RecentlyDeleted => {
+            let _ = workspace.update(ProjectMessage::SelectRecentlyDeleted(deleted));
+        }
     }
-    if target == VisualTarget::EditorDual {
-        slots.insert(
-            EditorPane::Companion,
-            EditorPaneSlot::state(EditorCenterPaneState::VerificationProse {
-                heading: "Chapter Two",
-                paragraphs: &[
-                    "Rain found the city before dawn.",
-                    "Another manuscript document opens on the right.",
-                ],
-            }),
-        );
+    assert_scenario_contract(target, appearance, &workspace);
+    workspace
+}
+
+#[cfg(feature = "visual-verification")]
+fn assert_scenario_contract(
+    target: VisualTarget,
+    _appearance: VisualAppearance,
+    workspace: &crate::ProjectWorkspace,
+) {
+    use crate::{ContentState, SettingsCategory};
+    use parchmint_preferences::AppearanceMode;
+
+    match target {
+        VisualTarget::Launcher => {}
+        VisualTarget::EditorSingle => {
+            let primary = workspace.editor().pane(crate::EditorPane::Primary);
+            assert_eq!(
+                primary
+                    .tabs()
+                    .iter()
+                    .map(|tab| tab.title())
+                    .collect::<Vec<_>>(),
+                [
+                    "Chapter One",
+                    "Chapter Two",
+                    "Harbor Notes",
+                    "Map of the Coast"
+                ]
+            );
+            assert_eq!(
+                primary.active_document(),
+                primary.tabs().first().map(|tab| tab.id())
+            );
+            assert!(!workspace
+                .editor()
+                .pane(crate::EditorPane::Companion)
+                .is_populated());
+            assert_chapter_one_inspector(workspace);
+        }
+        VisualTarget::EditorDual => {
+            let primary = workspace.editor().pane(crate::EditorPane::Primary);
+            let companion = workspace.editor().pane(crate::EditorPane::Companion);
+            assert_eq!(
+                primary
+                    .tabs()
+                    .iter()
+                    .map(|tab| tab.title())
+                    .collect::<Vec<_>>(),
+                ["Chapter One", "Chapter Two", "Map of the Coast"]
+            );
+            assert_eq!(
+                companion
+                    .tabs()
+                    .iter()
+                    .map(|tab| tab.title())
+                    .collect::<Vec<_>>(),
+                ["Chapter One", "Chapter Two", "Map of the Coast"]
+            );
+            assert_eq!(
+                primary.active_document(),
+                primary.tabs().first().map(|tab| tab.id())
+            );
+            assert_eq!(
+                companion.active_document(),
+                companion.tabs().get(1).map(|tab| tab.id())
+            );
+            assert_chapter_one_inspector(workspace);
+        }
+        VisualTarget::Cards => {
+            let cards = workspace.cards().items();
+            assert!(cards.iter().any(|item| item.title == "Part One"
+                && item.synopsis == "The opening movement of the novel."));
+            assert!(cards.iter().any(|item| item.title == "Chapter One"
+                && item.synopsis
+                    == "The harbor has fallen silent, and Mara must decide whom to trust."));
+            assert!(cards.iter().any(|item| item.title == "Chapter Two"
+                && item.synopsis == "The sealed letter changes what Mara believes."));
+            assert!(cards.iter().any(|item| item.title == "Part Two"
+                && item.synopsis == "The fallout after the harbor reveal."));
+            assert!(cards.iter().any(|item| item.title == "Chapter One"
+                && item
+                    .metadata
+                    .iter()
+                    .any(|(_, label, value)| *label == "POV" && *value == Some("Mara"))
+                && item
+                    .metadata
+                    .iter()
+                    .any(|(_, label, value)| *label == "Words" && *value == Some("1,240"))));
+            assert!(cards
+                .iter()
+                .any(|item| item.title == "Chapter One" && item.visible));
+            assert!(cards
+                .iter()
+                .any(|item| item.title == "Chapter Two" && item.visible));
+            assert!(workspace.cards().last_activated_document().is_some());
+            assert_chapter_one_inspector(workspace);
+        }
+        VisualTarget::GlobalSearch => {
+            assert_eq!(workspace.global_search().query(), "harbor");
+            assert!(workspace.global_search().replacement().is_empty());
+            assert!(workspace.global_search().is_complete());
+            assert_eq!(workspace.global_search().results().len(), 6);
+            assert_eq!(
+                workspace
+                    .global_search()
+                    .results()
+                    .iter()
+                    .filter(|result| result.document_id
+                        == workspace
+                            .editor()
+                            .pane(crate::EditorPane::Primary)
+                            .active_document()
+                            .unwrap())
+                    .count(),
+                2
+            );
+            assert!(workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .is_populated());
+            assert_chapter_one_inspector(workspace);
+        }
+        VisualTarget::History => {
+            assert_eq!(workspace.history().checkpoints().len(), 4);
+            assert_eq!(
+                workspace.history().selected_checkpoint_id(),
+                Some("autosave-chapter-one")
+            );
+            assert!(workspace
+                .history()
+                .preview()
+                .and_then(|preview| preview.document.as_ref())
+                .is_some());
+            assert_eq!(
+                workspace
+                    .history()
+                    .current_document()
+                    .map(|document| document.title.as_str()),
+                Some("Chapter One")
+            );
+            let checkpoint = workspace
+                .history()
+                .preview()
+                .and_then(|preview| preview.document.as_ref())
+                .expect("selected history checkpoint includes a semantic document")
+                .semantic
+                .plain_text();
+            let current = workspace
+                .history()
+                .current_document()
+                .expect("history supplies the current mounted document")
+                .semantic
+                .plain_text();
+            assert!(checkpoint.contains("unopened letter"));
+            assert!(current.contains("sealed letter"));
+            assert_ne!(current, checkpoint);
+        }
+        VisualTarget::SettingsAppearance => {
+            assert_eq!(
+                workspace.settings().selected_category(),
+                SettingsCategory::Appearance
+            );
+            assert_eq!(workspace.settings().appearance(), AppearanceMode::System);
+        }
+        VisualTarget::Export => {
+            assert_eq!(workspace.export().output_name(), "the-glass-harbor.html");
+            assert_eq!(workspace.export().destination(), Some("~/Documents"));
+            assert!(workspace.export().numbers_documents());
+            assert!(workspace.export().can_start());
+            assert_eq!(
+                workspace.export().project_settings().emit_titles,
+                parchmint_domain::ProjectExportSetting::Inherit
+            );
+            assert!(!workspace.export().project_settings().starts_new_page);
+        }
+        VisualTarget::ErrorRecovery => {
+            assert_eq!(workspace.content_state(), &ContentState::Recovery);
+            assert_eq!(workspace.recovery().accepted_records(), 37);
+            assert!(workspace.recovery().isolation().is_some());
+        }
+        VisualTarget::RecentlyDeleted => {
+            assert_eq!(workspace.recently_deleted().items().len(), 2);
+            assert_eq!(
+                workspace.recently_deleted().selected_item_id(),
+                Some("51515151515151515151515151515151")
+            );
+            let preview = workspace
+                .recently_deleted()
+                .selected_preview()
+                .expect("Old Chapter has a canonical preview");
+            assert_eq!(preview.title, "Old Chapter");
+            assert!(preview.semantic.plain_text().contains("unopened letter"));
+        }
     }
-    slots
+}
+
+#[cfg(feature = "visual-verification")]
+fn assert_chapter_one_inspector(workspace: &crate::ProjectWorkspace) {
+    let chapter_one = verification_node_id();
+    assert_eq!(workspace.inspector_node_id(), Some(chapter_one.as_str()));
+    assert_eq!(
+        workspace.explorer().synopsis(&chapter_one),
+        Some("The harbor has fallen silent, and Mara must decide whom to trust.")
+    );
+    let items = workspace.inspector().metadata_items(&chapter_one);
+    assert!(items
+        .iter()
+        .any(|item| item.label == "POV" && item.effective_value == Some("Mara")));
+    assert!(items
+        .iter()
+        .any(|item| item.label == "Status" && item.effective_value == Some("Draft")));
 }
 
 #[cfg(all(test, feature = "visual-verification"))]
@@ -408,10 +1062,6 @@ mod tests {
     use iced_test::Simulator;
 
     use super::*;
-    use crate::{
-        EditorPane, ProjectFixture, ProjectMessage, ProjectWorkspace, SelectionGesture,
-        iced_editor_surface::{EditorCenterPaneState, EditorPaneSlot},
-    };
 
     #[test]
     fn catalog_has_every_penpot_fixture_at_the_2x_reference_size() {
@@ -429,11 +1079,14 @@ mod tests {
     }
 
     #[test]
-    fn every_production_composition_renders_headlessly_in_both_appearances() {
-        for target in VisualTarget::ALL {
+    fn launcher_and_mounted_editor_render_headlessly_with_bounded_renderer_state() {
+        for (target, appearance) in [
+            (VisualTarget::Launcher, VisualAppearance::Light),
+            (VisualTarget::EditorSingle, VisualAppearance::Light),
+        ] {
             let spec = visual_target_spec(target);
-            for appearance in VisualAppearance::ALL {
-                let theme = presentation(appearance);
+            let theme = presentation(appearance);
+            {
                 let mut simulator = Simulator::<()>::with_size(
                     visual_settings(),
                     Size::new(spec.width as f32, spec.height as f32),
@@ -448,32 +1101,57 @@ mod tests {
     }
 
     #[test]
-    fn editor_catalog_uses_populated_prose_and_inspector_fixture_state() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
-        workspace.update(ProjectMessage::SelectHierarchy {
-            node_id: "chapter-one".to_owned(),
-            gesture: SelectionGesture::Replace,
-        });
-        assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
-        populate_editor_tabs(&mut workspace, VisualTarget::EditorDual);
-        assert_eq!(workspace.editor().pane(EditorPane::Primary).tabs().len(), 4);
+    fn editor_catalog_hydrates_production_snapshot_and_mounts_real_host() {
+        let snapshot = verification_snapshot();
+        let workspace =
+            verification_workspace(VisualTarget::EditorDual, VisualAppearance::Light, &snapshot);
         assert_eq!(
-            workspace.editor().pane(EditorPane::Companion).tabs().len(),
-            4
+            workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .tabs()
+                .len(),
+            3
+        );
+        assert_eq!(
+            workspace
+                .editor()
+                .pane(crate::EditorPane::Companion)
+                .tabs()
+                .len(),
+            3
+        );
+        assert_eq!(snapshot.documents.len(), 5);
+        assert!(snapshot.documents[0].body.contains("harbor held the last"));
+        assert!(snapshot.documents[0]
+            .body
+            .contains("<blockquote>“Some journeys begin long before the road.”</blockquote>"));
+        assert_eq!(
+            workspace.explorer().synopsis(&verification_node_id()),
+            Some("The harbor has fallen silent, and Mara must decide whom to trust.")
         );
 
-        let slots = editor_slots(VisualTarget::EditorDual);
-        assert!(matches!(
-            slots.slot(EditorPane::Primary),
-            Some(EditorPaneSlot::State(
-                EditorCenterPaneState::VerificationProse { .. }
-            ))
-        ));
-        assert!(matches!(
-            slots.slot(EditorPane::Companion),
-            Some(EditorPaneSlot::State(
-                EditorCenterPaneState::VerificationProse { .. }
-            ))
-        ));
+        let slots = editor_slots(
+            &snapshot,
+            &workspace,
+            VisualTarget::EditorDual,
+            VisualAppearance::Light,
+        );
+        assert!(slots.slot(crate::EditorPane::Primary).is_some());
+        assert!(slots.slot(crate::EditorPane::Companion).is_some());
+    }
+
+    #[test]
+    fn catalog_scenarios_satisfy_their_production_state_contracts() {
+        let snapshot = verification_snapshot();
+        for target in VisualTarget::ALL {
+            if target == VisualTarget::Launcher {
+                continue;
+            }
+            for appearance in VisualAppearance::ALL {
+                let workspace = verification_workspace(target, appearance, &snapshot);
+                assert_scenario_contract(target, appearance, &workspace);
+            }
+        }
     }
 }

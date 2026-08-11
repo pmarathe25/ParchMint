@@ -4,7 +4,9 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    fs::File,
     hash::{Hash, Hasher},
+    io::BufWriter,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -94,6 +96,162 @@ pub struct NativeNewProjectRequest {
     pub title: String,
     pub destination: PathBuf,
     pub author: Option<String>,
+}
+
+/// A verification-only capture target owned by the native Iced driver.
+///
+/// This deliberately names production navigation state rather than any test
+/// fixture. A project target therefore captures the window built from the
+/// opened project's real services and snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCaptureTarget {
+    Launcher,
+    Project(RibbonDestination),
+}
+
+/// One explicitly authorized native render-target capture.
+///
+/// The driver requests a 1440 x 900 logical viewport and an Iced program
+/// scale factor of two by default. The actual render target is always retained
+/// unless a caller explicitly enables strict dimensions.
+#[derive(Debug, Clone)]
+pub struct NativeCaptureRequest {
+    pub target: NativeCaptureTarget,
+    pub appearance: ResolvedAppearance,
+    pub output_path: PathBuf,
+    pub exit_after_capture: bool,
+    pub settled_frames: u8,
+    logical_size: (u32, u32),
+    scale: u32,
+    required_size: Option<(u32, u32)>,
+    completion: Arc<Mutex<Option<Result<NativeCapturePng, String>>>>,
+}
+
+impl NativeCaptureRequest {
+    pub const LOGICAL_SIZE: (u32, u32) = (1440, 900);
+    pub const SCALE: u32 = 2;
+    pub const DEFAULT_PHYSICAL_SIZE: (u32, u32) = (
+        Self::LOGICAL_SIZE.0 * Self::SCALE,
+        Self::LOGICAL_SIZE.1 * Self::SCALE,
+    );
+    pub const DEFAULT_SETTLED_FRAMES: u8 = 3;
+
+    pub fn new(
+        target: NativeCaptureTarget,
+        appearance: ResolvedAppearance,
+        output_path: PathBuf,
+    ) -> Result<Self, NativeDesktopError> {
+        if !output_path.is_absolute() {
+            return Err(NativeDesktopError::new(
+                "native capture output must be an absolute, explicitly authorized path",
+            ));
+        }
+        if output_path.exists() {
+            return Err(NativeDesktopError::new(format!(
+                "native capture output already exists: {}",
+                output_path.display()
+            )));
+        }
+        if output_path
+            .extension()
+            .is_none_or(|extension| extension != "png")
+        {
+            return Err(NativeDesktopError::new(
+                "native capture output must have a .png extension",
+            ));
+        }
+        Ok(Self {
+            target,
+            appearance,
+            output_path,
+            exit_after_capture: true,
+            settled_frames: Self::DEFAULT_SETTLED_FRAMES,
+            logical_size: Self::LOGICAL_SIZE,
+            scale: Self::SCALE,
+            required_size: None,
+            completion: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    /// Configures the requested logical viewport and Iced program scale.
+    pub fn configure_viewport(
+        &mut self,
+        logical_size: (u32, u32),
+        scale: u32,
+    ) -> Result<(), NativeDesktopError> {
+        if logical_size.0 == 0 || logical_size.1 == 0 {
+            return Err(NativeDesktopError::new(
+                "native capture logical dimensions must be positive",
+            ));
+        }
+        if !matches!(scale, 1 | 2) {
+            return Err(NativeDesktopError::new(
+                "native capture scale must be 1 or 2",
+            ));
+        }
+        self.logical_size = logical_size;
+        self.scale = scale;
+        Ok(())
+    }
+
+    /// Makes the capture fail after writing when the actual render target does
+    /// not match `size`. The default retains every successful screenshot.
+    pub fn require_size(&mut self, size: Option<(u32, u32)>) -> Result<(), NativeDesktopError> {
+        if size.is_some_and(|(width, height)| width == 0 || height == 0) {
+            return Err(NativeDesktopError::new(
+                "required native capture dimensions must be positive",
+            ));
+        }
+        self.required_size = size;
+        Ok(())
+    }
+
+    pub const fn logical_size(&self) -> (u32, u32) {
+        self.logical_size
+    }
+
+    pub const fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    pub const fn requested_physical_size(&self) -> (u32, u32) {
+        (
+            self.logical_size.0 * self.scale,
+            self.logical_size.1 * self.scale,
+        )
+    }
+
+    fn validates_output(&self) -> Result<(), String> {
+        if self.settled_frames == 0 {
+            return Err("native capture requires at least one settled frame".to_owned());
+        }
+        if !self.output_path.is_absolute() {
+            return Err(
+                "native capture output must be an absolute, explicitly authorized path".to_owned(),
+            );
+        }
+        if self.output_path.exists() {
+            return Err(format!(
+                "native capture output already exists: {}",
+                self.output_path.display()
+            ));
+        }
+        if self.logical_size.0 == 0 || self.logical_size.1 == 0 {
+            return Err("native capture logical dimensions must be positive".to_owned());
+        }
+        if !matches!(self.scale, 1 | 2) {
+            return Err("native capture scale must be 1 or 2".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// One completed native PNG capture, including the physical render-target
+/// dimensions reported by Iced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeCapturePng {
+    output_path: PathBuf,
+    physical_size: (u32, u32),
 }
 
 /// One project window that was registered before the native loop started.
@@ -263,6 +421,9 @@ pub struct NativeDesktopStartup {
     pub recent_projects: Vec<PreferenceRecentProject>,
     pub projects: Vec<NativeProjectWindow>,
     pub locked_project: Option<PathBuf>,
+    /// Optional verification-only flow. This state is handled by the native
+    /// driver and is never routed through product reducers.
+    pub capture: Option<NativeCaptureRequest>,
     pub callbacks: Arc<dyn NativeDesktopCallbacks>,
 }
 
@@ -290,6 +451,10 @@ impl Error for NativeDesktopError {}
 
 /// Runs the native launcher and project windows until the user closes them.
 pub fn run_native_desktop(startup: NativeDesktopStartup) -> Result<(), NativeDesktopError> {
+    let capture_completion = startup
+        .capture
+        .as_ref()
+        .map(|capture| Arc::clone(&capture.completion));
     let startup = Mutex::new(Some(startup));
     iced::daemon(
         move || {
@@ -306,6 +471,12 @@ pub fn run_native_desktop(startup: NativeDesktopStartup) -> Result<(), NativeDes
     .title(NativeDesktop::title)
     .theme(NativeDesktop::theme)
     .subscription(NativeDesktop::subscription)
+    .scale_factor(|desktop, _| {
+        desktop
+            .capture
+            .as_ref()
+            .map_or(1.0, |capture| capture.request.scale() as f32)
+    })
     .default_font(iced::Font::with_name("Source Sans 3"))
     .font(include_bytes!(
         "../assets/fonts/source-sans-3/SourceSans3-Regular.ttf"
@@ -323,12 +494,30 @@ pub fn run_native_desktop(startup: NativeDesktopStartup) -> Result<(), NativeDes
         "../assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
     ))
     .run()
-    .map_err(|error| NativeDesktopError::new(error.to_string()))
+    .map_err(|error| NativeDesktopError::new(error.to_string()))?;
+    if let Some(completion) = capture_completion {
+        match completion
+            .lock()
+            .map_err(|_| NativeDesktopError::new("native capture completion mutex poisoned"))?
+            .take()
+        {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(error)) => Err(NativeDesktopError::new(error)),
+            None => Err(NativeDesktopError::new(
+                "native desktop exited before the requested capture completed",
+            )),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    WindowOpened,
+    WindowOpened(window::Id),
+    CaptureFrameTick,
+    CaptureScreenshot(window::Screenshot),
+    CaptureEncoded(Result<NativeCapturePng, String>),
     RuntimeEvent {
         window: window::Id,
         event: Event,
@@ -804,6 +993,18 @@ pub(crate) struct NativeDesktop {
     open_in_window_menu: Option<(WindowCapability, String)>,
     appearance_events: Option<Arc<dyn SystemAppearanceEventService>>,
     last_appearance_generation: u64,
+    capture: Option<NativeCaptureState>,
+}
+
+/// Ephemeral driver state for one native render capture. It intentionally has
+/// no product message or reducer representation.
+#[derive(Debug, Clone)]
+struct NativeCaptureState {
+    request: NativeCaptureRequest,
+    window: Option<window::Id>,
+    window_opened: bool,
+    settled_frames: u8,
+    screenshot_requested: bool,
 }
 
 enum NativeWindow {
@@ -832,6 +1033,29 @@ struct NativeProjectState {
     refresh_spellcheck_view: Option<ViewId>,
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
+    modal_focus: ModalFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModalFocus {
+    Cancel,
+    Confirm,
+}
+
+impl ModalFocus {
+    fn next(self) -> Self {
+        match self {
+            Self::Cancel => Self::Confirm,
+            Self::Confirm => Self::Cancel,
+        }
+    }
+
+    fn id(self) -> iced::widget::Id {
+        match self {
+            Self::Cancel => crate::focus::modal_cancel_id(),
+            Self::Confirm => crate::focus::modal_confirm_id(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -896,6 +1120,11 @@ impl NativeDesktop {
         let appearance_events = startup.callbacks.system_appearance_events();
         let menu_service = startup.callbacks.menu_service();
         let menu_activations = startup.callbacks.menu_activations();
+        let capture_error = startup
+            .capture
+            .as_ref()
+            .and_then(|request| request.validates_output().err());
+        let capture_valid = capture_error.is_none();
         let mut desktop = Self {
             appearance: startup.appearance,
             launcher: LauncherState::default(),
@@ -905,9 +1134,11 @@ impl NativeDesktop {
             close_failures: BTreeMap::new(),
             opening_project: false,
             creating_project: false,
-            status: startup
-                .locked_project
-                .map(|path| format!("Project is already open: {}", path.display())),
+            status: capture_error.clone().or_else(|| {
+                startup
+                    .locked_project
+                    .map(|path| format!("Project is already open: {}", path.display()))
+            }),
             callbacks: startup.callbacks,
             menu_service,
             menu_activations,
@@ -916,6 +1147,17 @@ impl NativeDesktop {
             open_in_window_menu: None,
             appearance_events,
             last_appearance_generation: 0,
+            capture: capture_valid
+                .then(|| {
+                    startup.capture.map(|request| NativeCaptureState {
+                        request,
+                        window: None,
+                        window_opened: false,
+                        settled_frames: 0,
+                        screenshot_requested: false,
+                    })
+                })
+                .flatten(),
         };
         for project in startup.recent_projects.into_iter().rev() {
             desktop.launcher.add_recent_project(
@@ -936,7 +1178,22 @@ impl NativeDesktop {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::WindowOpened => Task::none(),
+            Message::WindowOpened(window) => {
+                if let Some(capture) = self
+                    .capture
+                    .as_mut()
+                    .filter(|capture| capture.window == Some(window))
+                {
+                    capture.window_opened = true;
+                    // The subsequent subscription ticks are deliberately used
+                    // instead of sleeping in this update call: the event loop
+                    // remains free to create, lay out, and render the window.
+                }
+                Task::none()
+            }
+            Message::CaptureFrameTick => self.capture_after_settled_frame(),
+            Message::CaptureScreenshot(screenshot) => self.encode_capture(screenshot),
+            Message::CaptureEncoded(result) => self.finish_capture(result),
             Message::RuntimeEvent {
                 window,
                 event,
@@ -1850,6 +2107,11 @@ impl NativeDesktop {
             iced::time::every(Duration::from_millis(250)).map(Message::AutosaveTick),
             event::listen_with(runtime_event),
         ];
+        if self.capture.is_some() {
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(16)).map(|_| Message::CaptureFrameTick),
+            );
+        }
         if let Some(events) = &self.appearance_events {
             subscriptions.push(Subscription::run_with(
                 AppearanceEventSubscription(Arc::clone(events)),
@@ -1863,6 +2125,85 @@ impl NativeDesktop {
             ));
         }
         Subscription::batch(subscriptions)
+    }
+
+    fn capture_after_settled_frame(&mut self) -> Task<Message> {
+        let Some(capture) = self.capture.as_mut() else {
+            return Task::none();
+        };
+        let Some(window) = capture.window else {
+            return Task::none();
+        };
+        if !capture.window_opened || capture.screenshot_requested {
+            return Task::none();
+        }
+        capture.settled_frames = capture.settled_frames.saturating_add(1);
+        if capture.settled_frames < capture.request.settled_frames {
+            return Task::none();
+        }
+        capture.screenshot_requested = true;
+        window::screenshot(window).map(Message::CaptureScreenshot)
+    }
+
+    fn encode_capture(&mut self, screenshot: window::Screenshot) -> Task<Message> {
+        let Some(capture) = self.capture.as_ref() else {
+            return Task::none();
+        };
+        let output_path = capture.request.output_path.clone();
+        let actual = (screenshot.size.width, screenshot.size.height);
+        let bytes = screenshot.rgba.to_vec();
+        Task::perform(
+            Self::run_blocking_operation("encode native capture", move || {
+                encode_capture_png(&output_path, actual, bytes)?;
+                Ok(NativeCapturePng {
+                    output_path,
+                    physical_size: actual,
+                })
+            }),
+            Message::CaptureEncoded,
+        )
+    }
+
+    fn finish_capture(&mut self, result: Result<NativeCapturePng, String>) -> Task<Message> {
+        let Some(capture) = self.capture.take() else {
+            return Task::none();
+        };
+        match result {
+            Ok(png) => {
+                let requested = capture.request.requested_physical_size();
+                let strict_error = strict_size_error(&capture.request, &png);
+                println!(
+                    "native capture written: {} ({}x{} RGBA; requested {}x{} at {}x)",
+                    png.output_path.display(),
+                    png.physical_size.0,
+                    png.physical_size.1,
+                    requested.0,
+                    requested.1,
+                    capture.request.scale(),
+                );
+                *capture
+                    .request
+                    .completion
+                    .lock()
+                    .expect("native capture completion mutex poisoned") =
+                    Some(strict_error.map_or_else(|| Ok(png), Err));
+                if capture.request.exit_after_capture {
+                    iced::exit()
+                } else {
+                    Task::none()
+                }
+            }
+            Err(error) => {
+                eprintln!("native capture failed: {error}");
+                *capture
+                    .request
+                    .completion
+                    .lock()
+                    .expect("native capture completion mutex poisoned") = Some(Err(error.clone()));
+                self.status = Some(format!("Native capture failed: {error}"));
+                iced::exit()
+            }
+        }
     }
 
     fn capability_for_window(&self, id: window::Id) -> Option<WindowCapability> {
@@ -2174,6 +2515,14 @@ impl NativeDesktop {
                 state.modifiers = modifiers;
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::F6 | keyboard::key::Named::Tab),
+                repeat: false,
+                ..
+            }) if state.shell.focus_is_trapped() => {
+                state.modal_focus = state.modal_focus.next();
+                return iced::widget::operation::focus(state.modal_focus.id());
+            }
+            Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::F6),
                 repeat: false,
                 ..
@@ -2188,9 +2537,9 @@ impl NativeDesktop {
                         .get(&workspace.editor().focused_pane())
                 {
                     let _ = binding.restore_focus();
-                } else {
-                    return iced::widget::operation::focus_next();
                 }
+                return crate::focus::region_id(state.shell.focus_region())
+                    .map_or_else(Task::none, iced::widget::operation::focus);
             }
             Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -2638,10 +2987,12 @@ impl NativeDesktop {
                 }
                 let effects = workspace.update(message);
                 let modal_after = workspace.modal().is_some();
+                let focus_modal_initial = !modal_before && modal_after;
                 if !modal_before && modal_after {
                     state
                         .shell
                         .open_dialog(crate::DialogKind::RestoreConfirmation);
+                    state.modal_focus = ModalFocus::Cancel;
                 } else if modal_before && !modal_after {
                     state.shell.dismiss_dialog();
                 }
@@ -2659,6 +3010,11 @@ impl NativeDesktop {
                 }
                 let mut direct = Vec::new();
                 let mut tasks = Vec::new();
+                if focus_modal_initial {
+                    tasks.push(iced::widget::operation::focus(
+                        crate::focus::modal_cancel_id(),
+                    ));
+                }
                 if let Some(document) = history_filter {
                     let ticket = workspace.begin_task(ProjectTask::LoadHistory);
                     if let Some(feeds) = state.service_feeds.as_ref() {
@@ -5297,10 +5653,23 @@ impl NativeDesktop {
     }
 
     fn open_launcher_window(&mut self) -> Task<Message> {
-        let (id, task) = window::open(window_settings((900.0, 620.0), (720, 480)));
+        let capture_request = self.capture.as_ref().and_then(|capture| {
+            matches!(capture.request.target, NativeCaptureTarget::Launcher)
+                .then(|| capture.request.clone())
+        });
+        let (id, task) = window::open(capture_request.as_ref().map_or_else(
+            || window_settings((900.0, 620.0), (720, 480)),
+            capture_window_settings,
+        ));
         self.callbacks.project_window_created(LAUNCHER_CAPABILITY);
         self.windows.insert(id, NativeWindow::Launcher);
-        Task::batch([task.map(|_| Message::WindowOpened), self.refresh_menu(id)])
+        if capture_request.is_some() {
+            self.capture
+                .as_mut()
+                .expect("capture state was checked above")
+                .window = Some(id);
+        }
+        Task::batch([task.map(Message::WindowOpened), self.refresh_menu(id)])
     }
 
     fn mount_initial_editor(
@@ -5476,9 +5845,20 @@ impl NativeDesktop {
     }
 
     fn open_project_window(&mut self, project: NativeProjectWindow) -> Task<Message> {
-        let (id, task) = window::open(window_settings(
-            (1280.0, 720.0),
-            ShellLayout::MIN_WINDOW_SIZE,
+        let capture_request = self.capture.as_ref().and_then(|capture| {
+            matches!(capture.request.target, NativeCaptureTarget::Project(_))
+                .then(|| capture.request.clone())
+        });
+        let capture_destination =
+            capture_request
+                .as_ref()
+                .and_then(|capture| match capture.target {
+                    NativeCaptureTarget::Project(destination) => Some(destination),
+                    NativeCaptureTarget::Launcher => None,
+                });
+        let (id, task) = window::open(capture_destination.map_or_else(
+            || window_settings((1280.0, 720.0), ShellLayout::MIN_WINDOW_SIZE),
+            |_| capture_window_settings(capture_request.as_ref().expect("capture request exists")),
         ));
         self.project_windows.insert(project.window, id);
         self.callbacks.project_window_created(project.window);
@@ -5511,11 +5891,15 @@ impl NativeDesktop {
             .project_ui
             .as_ref()
             .map(|project| AsyncServiceFeeds::new(project.ports.clone()));
+        let mut shell = Shell::new(project.window);
+        if let Some(destination) = capture_destination {
+            shell.select_destination(destination);
+        }
         self.windows.insert(
             id,
             NativeWindow::Project(Box::new(NativeProjectState {
                 project: project.clone(),
-                shell: Shell::new(project.window),
+                shell,
                 workspace,
                 editor_hosts,
                 editor_bindings,
@@ -5534,8 +5918,15 @@ impl NativeDesktop {
                 refresh_spellcheck_view: None,
                 modifiers: keyboard::Modifiers::default(),
                 resizing: None,
+                modal_focus: ModalFocus::Cancel,
             })),
         );
+        if capture_destination.is_some() {
+            self.capture
+                .as_mut()
+                .expect("capture state was checked above")
+                .window = Some(id);
+        }
         let recovery_task = match self.windows.get_mut(&id) {
             Some(NativeWindow::Project(state)) => {
                 let session = state.project.session;
@@ -5569,7 +5960,7 @@ impl NativeDesktop {
             _ => Task::none(),
         };
         Task::batch([
-            task.map(|_| Message::WindowOpened),
+            task.map(Message::WindowOpened),
             self.refresh_menu(id),
             workspace_load,
             recovery_task,
@@ -6423,6 +6814,65 @@ fn window_settings(size: (f32, f32), minimum: (u32, u32)) -> window::Settings {
     }
 }
 
+fn capture_window_settings(capture: &NativeCaptureRequest) -> window::Settings {
+    let (width, height) = capture.logical_size();
+    window::Settings {
+        size: iced::Size::new(width as f32, height as f32),
+        min_size: Some(iced::Size::new(width as f32, height as f32)),
+        max_size: Some(iced::Size::new(width as f32, height as f32)),
+        position: window::Position::Centered,
+        resizable: false,
+        exit_on_close_request: false,
+        ..window::Settings::default()
+    }
+}
+
+fn encode_capture_png(
+    output_path: &std::path::Path,
+    size: (u32, u32),
+    rgba: Vec<u8>,
+) -> Result<(), String> {
+    let expected_len = usize::try_from(u64::from(size.0) * u64::from(size.1) * 4)
+        .map_err(|_| "native capture dimensions exceed supported memory size".to_owned())?;
+    if rgba.len() != expected_len {
+        return Err(format!(
+            "native capture contains {} RGBA bytes; expected {expected_len}",
+            rgba.len()
+        ));
+    }
+    let file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(|error| format!("could not create {}: {error}", output_path.display()))?;
+    let writer = BufWriter::new(file);
+    let mut encoder = png::Encoder::new(writer, size.0, size.1);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| format!("could not encode {}: {error}", output_path.display()))?;
+    writer
+        .write_image_data(&rgba)
+        .map_err(|error| format!("could not encode {}: {error}", output_path.display()))
+}
+
+fn strict_size_error(request: &NativeCaptureRequest, png: &NativeCapturePng) -> Option<String> {
+    request
+        .required_size
+        .filter(|required| *required != png.physical_size)
+        .map(|required| {
+            format!(
+                "native capture wrote {} at {}x{} pixels, but --require-size requested {}x{}",
+                png.output_path.display(),
+                png.physical_size.0,
+                png.physical_size.1,
+                required.0,
+                required.1,
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -6430,6 +6880,91 @@ mod tests {
     use iced::futures::executor::block_on;
 
     use super::*;
+
+    #[test]
+    fn native_capture_request_requires_a_new_absolute_png_path() {
+        let relative = NativeCaptureRequest::new(
+            NativeCaptureTarget::Launcher,
+            ResolvedAppearance::Light,
+            PathBuf::from("capture.png"),
+        );
+        assert!(relative.is_err());
+
+        let path = std::env::temp_dir().join(format!(
+            "parchmint-native-capture-request-{}.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let request = NativeCaptureRequest::new(
+            NativeCaptureTarget::Launcher,
+            ResolvedAppearance::Dark,
+            path.clone(),
+        )
+        .expect("fresh absolute PNG path is authorized");
+        assert_eq!(request.settled_frames, 3);
+        assert!(std::fs::File::create(&path).is_ok());
+        assert!(
+            NativeCaptureRequest::new(
+                NativeCaptureTarget::Launcher,
+                ResolvedAppearance::Dark,
+                path.clone(),
+            )
+            .is_err()
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn native_capture_preserves_clamped_dimensions_unless_strict_size_is_requested() {
+        let path = std::env::temp_dir().join(format!(
+            "parchmint-native-capture-size-{}.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut request = NativeCaptureRequest::new(
+            NativeCaptureTarget::Launcher,
+            ResolvedAppearance::Light,
+            path.clone(),
+        )
+        .expect("fresh output path");
+        request
+            .configure_viewport((960, 540), 1)
+            .expect("scale one viewport");
+        assert_eq!(request.requested_physical_size(), (960, 540));
+        let png = NativeCapturePng {
+            output_path: path,
+            physical_size: (1920, 1013),
+        };
+        assert!(strict_size_error(&request, &png).is_none());
+        request
+            .require_size(Some((2880, 1800)))
+            .expect("strict dimensions");
+        assert!(
+            strict_size_error(&request, &png)
+                .expect("strict mismatch")
+                .contains("1920x1013")
+        );
+    }
+
+    #[test]
+    fn native_capture_encoder_writes_rgba_png_without_replacing_a_file() {
+        let path = std::env::temp_dir().join(format!(
+            "parchmint-native-capture-encoder-{}.png",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        encode_capture_png(&path, (1, 1), vec![12, 34, 56, 255]).expect("encode one RGBA pixel");
+        let file = std::io::BufReader::new(File::open(&path).expect("open encoded PNG"));
+        let mut decoder = png::Decoder::new(file);
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().expect("read PNG info");
+        let mut bytes = vec![0; reader.output_buffer_size().expect("PNG output size")];
+        let frame = reader.next_frame(&mut bytes).expect("read PNG frame");
+        assert_eq!((frame.width, frame.height), (1, 1));
+        assert_eq!(&bytes[..frame.buffer_size()], &[12, 34, 56, 255]);
+        assert!(encode_capture_png(&path, (1, 1), vec![0, 0, 0, 255]).is_err());
+        let _ = std::fs::remove_file(path);
+    }
 
     struct RecordingCallbacks {
         open_result: Mutex<Option<NativeProjectOpenResult>>,
@@ -6930,6 +7465,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects: vec![project.clone()],
             locked_project: None,
+            capture: None,
             callbacks: callbacks.clone(),
         });
 
@@ -6962,6 +7498,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects: vec![project.clone()],
             locked_project: None,
+            capture: None,
             callbacks,
         });
         let _ = desktop.update(Message::MenuInstalled {
@@ -6992,6 +7529,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects: Vec::new(),
             locked_project: None,
+            capture: None,
             callbacks,
         });
 
@@ -7052,6 +7590,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects: Vec::new(),
             locked_project: None,
+            capture: None,
             callbacks: callbacks.clone(),
         });
         let _pending_open = desktop.route_project_open(project.project.clone());
@@ -7093,6 +7632,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects,
             locked_project: None,
+            capture: None,
             callbacks,
         });
 
@@ -7130,6 +7670,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects,
             locked_project: None,
+            capture: None,
             callbacks: callbacks.clone(),
         });
         *callbacks
@@ -7194,6 +7735,7 @@ mod tests {
             recent_projects: Vec::new(),
             projects: vec![project.clone(), other.clone()],
             locked_project: None,
+            capture: None,
             callbacks: callbacks.clone(),
         });
         let native_window = desktop.project_windows[&project.window];

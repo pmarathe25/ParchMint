@@ -86,9 +86,9 @@ use parchmint_ui_api::{
     ProjectUiProject, ProjectUiServices, ProjectWorkflowPort, ProjectWorkflowSnapshot,
 };
 use parchmint_ui_iced::{
-    NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup, NativeMenuAttachment,
-    NativeNewProjectRequest, NativeProjectOpenResult, NativeProjectWindow, NativeWindowAttachment,
-    run_native_desktop,
+    NativeCaptureRequest, NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup,
+    NativeMenuAttachment, NativeNewProjectRequest, NativeProjectOpenResult, NativeProjectWindow,
+    NativeWindowAttachment, run_native_desktop,
 };
 use parchmint_workspace_state::FileWorkspaceStateStore;
 use sha2::{Digest, Sha256};
@@ -2470,6 +2470,24 @@ impl DesktopUi for ProductionDesktopUi {
     }
 
     fn run(&self, runtime: DesktopRuntime) -> Result<parchmint_ui_api::ExitCode, DesktopUiError> {
+        self.run_native(runtime, None)
+    }
+
+    fn run_with_native_capture(
+        &self,
+        runtime: DesktopRuntime,
+        capture: NativeCaptureRequest,
+    ) -> Result<parchmint_ui_api::ExitCode, DesktopUiError> {
+        self.run_native(runtime, Some(capture))
+    }
+}
+
+impl ProductionDesktopUi {
+    fn run_native(
+        &self,
+        runtime: DesktopRuntime,
+        capture: Option<NativeCaptureRequest>,
+    ) -> Result<parchmint_ui_api::ExitCode, DesktopUiError> {
         let (appearance, projects, locked_project) = {
             let state = self
                 .state
@@ -2490,10 +2508,13 @@ impl DesktopUi for ProductionDesktopUi {
             .recent_projects;
         self.driver
             .run(NativeDesktopStartup {
-                appearance,
+                appearance: capture
+                    .as_ref()
+                    .map_or(appearance, |capture| capture.appearance),
                 recent_projects,
                 projects,
                 locked_project,
+                capture,
                 callbacks: Arc::new(ProductionUiCallbacks {
                     runtime,
                     registry: self.registry.clone(),

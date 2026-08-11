@@ -20,10 +20,11 @@ use parchmint_editor_iced::{
 };
 
 use crate::{
-    EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, FindDirection, FormattingCommand,
-    LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
+    EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, F6Region, FindDirection,
+    FormattingCommand, LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
+    focus,
 };
 
 /// The non-document state a center pane can render while an editor host is unavailable.
@@ -189,7 +190,10 @@ pub(crate) fn editor_center_surface(
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
 ) -> Element<'static, EditorCenterMessage> {
-    let toolbar = formatting_toolbar(workspace, theme);
+    let toolbar = focus::f6_region(
+        F6Region::FormattingToolbar,
+        formatting_toolbar(workspace, theme),
+    );
     let primary = editor_pane_surface(workspace, EditorPane::Primary, theme, slots);
     let companion_visible = workspace.pane(EditorPane::Companion).is_populated()
         || slots.slot(EditorPane::Companion).is_some();
@@ -498,10 +502,16 @@ fn editor_pane_surface(
                 .expect("sensor clamps editor viewport dimensions"),
         ),
     };
-    let body = sensor(pane_body(state, pane, theme, slots))
+    let body: Element<'static, EditorCenterMessage> = sensor(pane_body(state, pane, theme, slots))
         .key((pane, view))
         .on_show(viewport_message)
-        .on_resize(viewport_message);
+        .on_resize(viewport_message)
+        .into();
+    let body = if workspace.focused_pane() == pane {
+        focus::f6_region(F6Region::FocusedEditor, body)
+    } else {
+        body
+    };
     mouse_area(
         container(column![tabs, search, body].spacing(6))
             .width(Length::Fill)
@@ -544,7 +554,7 @@ fn tab_strip(
             ))
         },
     );
-    mouse_area(
+    let strip: Element<'static, EditorCenterMessage> = mouse_area(
         container(tabs)
             .padding([0, 6])
             .width(Length::Fill)
@@ -552,7 +562,12 @@ fn tab_strip(
             .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
     )
     .on_release(EditorCenterMessage::Workspace(EditorMessage::CommitTabDrag))
-    .into()
+    .into();
+    if focused {
+        focus::f6_region(F6Region::ActiveTab, strip)
+    } else {
+        strip
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -2484,6 +2484,7 @@ dependencies = [
  "parchmint-search-api",
  "parchmint-ui-api",
  "parchmint-workspace-state",
+ "png",
 ]
 
 [[package]]

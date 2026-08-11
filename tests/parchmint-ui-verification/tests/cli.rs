@@ -108,6 +108,67 @@ fn cli_returns_success_and_zero_metrics_for_an_exact_match() {
 }
 
 #[test]
+fn cli_writes_dimension_mismatch_diff_and_report() {
+    let directory = TestDirectory::new();
+    let reference = directory.path().join("reference.png");
+    let actual = directory.path().join("actual.png");
+    let diff = directory.path().join("diff.png");
+    let report = directory.path().join("report.json");
+    encode_png(&reference, &image(1)).unwrap();
+    encode_png(
+        &actual,
+        &RgbaImage::new(2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255]).unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_parchmint-ui-verify"))
+        .args([
+            "compare",
+            "--reference",
+            reference.to_str().unwrap(),
+            "--actual",
+            actual.to_str().unwrap(),
+            "--diff",
+            diff.to_str().unwrap(),
+            "--report",
+            report.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(diff.is_file());
+    let report: Value = serde_json::from_slice(&fs::read(report).unwrap()).unwrap();
+    assert_eq!(report["dimension_mismatch"], true);
+    assert_eq!(report["differing_pixels"], Value::Null);
+}
+
+#[cfg(unix)]
+#[test]
+fn native_capture_reports_a_child_failure_without_waiting_for_output() {
+    let directory = TestDirectory::new();
+    let output_path = directory.path().join("native.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_parchmint-ui-verify"))
+        .args([
+            "native-capture",
+            "--desktop",
+            "/bin/false",
+            "--target",
+            "launcher-default",
+            "--appearance",
+            "light",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!output_path.exists());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("exited with"));
+}
+
+#[test]
 fn cli_rejects_an_output_path_that_would_overwrite_the_reference() {
     let directory = TestDirectory::new();
     let reference = directory.path().join("reference.png");

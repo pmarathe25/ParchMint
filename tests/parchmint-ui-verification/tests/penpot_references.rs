@@ -1,12 +1,12 @@
 use std::{
     collections::BTreeSet,
     fmt::Write as _,
-    fs,
+    fs::{self, File},
+    io::BufReader,
     path::{Component, Path, PathBuf},
 };
 
 use parchmint_ui_iced::{VisualAppearance, VisualTarget, visual_target_spec};
-use parchmint_ui_verification::decode_png;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -68,10 +68,9 @@ fn checked_in_penpot_references_match_their_manifest_and_checksums() {
         for relative in [&screen.light, &screen.dark] {
             assert!(paths.insert(relative.as_str()));
             let path = safe_reference_path(&root, relative);
-            let image = decode_png(&path)
-                .unwrap_or_else(|error| panic!("decode reference {}: {error}", path.display()));
+            let dimensions = png_dimensions(&path);
             assert_eq!(
-                (image.width(), image.height()),
+                dimensions,
                 (reference_set.physical_width, reference_set.physical_height),
                 "unexpected dimensions for {}",
                 path.display()
@@ -94,6 +93,17 @@ fn checked_in_penpot_references_match_their_manifest_and_checksums() {
         assert!(checksummed_paths.insert(relative));
     }
     assert_eq!(checksummed_paths, paths);
+}
+
+/// Reads only PNG metadata so reference integrity validation stays bounded even
+/// for the 20 full-resolution Penpot exports.
+fn png_dimensions(path: &Path) -> (u32, u32) {
+    let file = File::open(path)
+        .unwrap_or_else(|error| panic!("open reference {}: {error}", path.display()));
+    let reader = png::Decoder::new(BufReader::new(file))
+        .read_info()
+        .unwrap_or_else(|error| panic!("read reference metadata {}: {error}", path.display()));
+    (reader.info().width, reader.info().height)
 }
 
 #[test]
