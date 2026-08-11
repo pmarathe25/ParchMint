@@ -2,8 +2,13 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fs,
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Wake, Waker},
     thread,
     time::Duration,
@@ -11,36 +16,44 @@ use std::{
 
 use parchmint_application::{
     DocumentSnapshot, DocumentVisibility, EditorPersistenceCoordinator, NativeDocumentStateOwner,
-    NativeProjectCommandDispatcher,
+    NativeProjectCommandDispatcher, PersistenceSaveKind, ProjectPersistenceCoordinator,
 };
 use parchmint_domain::{
-    BlockId, DocumentId, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
+    BlockId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectId,
+    apply_project_command,
 };
 use parchmint_editor_iced::{EditorIcedAdapter, EditorIcedConfig};
 use parchmint_export_api::{
-    ExportError, ExportHandle, ExportPlan, ExportRequest, ExportSink, ExportValidationReport,
-    Exporter, ProjectSnapshot as ExportProjectSnapshot,
+    ExportDefaults, ExportError, ExportHandle, ExportNode, ExportPlan, ExportRequest,
+    ExportRunOptions, ExportSettings, ExportSink, ExportSource, ExportStyleCatalog,
+    ExportValidationReport, Exporter, InheritedSetting, ProjectSnapshot as ExportProjectSnapshot,
+    SourceRevision,
 };
 use parchmint_export_html::HtmlExporter;
 use parchmint_history_api::{self as history, HistoryStore, ProjectRootCapability as HistoryRoot};
 use parchmint_history_git2::Git2HistoryStore;
-use parchmint_platform_api::WindowCapability;
+use parchmint_platform_api::{PathDialog, PathDialogKind, WindowCapability};
 use parchmint_platform_native::{NativePlatform, iced_adapter::IcedWindowRegistry};
 use parchmint_preferences::{
-    AppearanceController, FilePreferenceStore, PreferenceCoordinator, PreferenceService,
-    ResolvedAppearance,
+    AppearanceController, AppearanceMode, AppearanceService, FilePreferenceStore,
+    PreferenceCoordinator, PreferenceService, ResolvedAppearance,
 };
-use parchmint_project_format::{CanonicalCodec, CanonicalRelativePath, ProjectFormatCodec};
+use parchmint_project_format::{
+    CanonicalCodec, CanonicalProjectPathMap, CanonicalRelativePath, ProjectFormatCodec,
+};
 use parchmint_project_fs::{
     FsAtomicWriter, FsProjectRepository, NativeAtomicFileOps, NativeProjectFileSystem,
     ProjectFileSystem,
 };
-use parchmint_project_repository::{OpenProject, ProjectPath, ProjectRepository, RepositoryError};
+use parchmint_project_repository::{
+    CreateProject as RepositoryCreateProject, DocumentId as RepositoryDocumentId, OpenProject,
+    ProjectPath, ProjectRepository, RepositoryError,
+};
 use parchmint_recovery_api::{self as recovery, RecoveryJournal};
 use parchmint_recovery_fs::FsRecoveryJournal;
 use parchmint_save::{
     CheckpointIntent, CheckpointIntentStore, CheckpointReceipt, IntentStoreError,
-    ProjectSaveCoordinator, SaveCoordinator, SaveRequest, SaveTicket,
+    ProjectSaveCoordinator, SaveCoordinator, SaveRequest, SaveStatusSnapshot, SaveTicket,
 };
 use parchmint_search_api::{
     self as search, RevisionId, SearchDocumentProjection, SearchField, SearchIndex,
@@ -49,17 +62,25 @@ use parchmint_search_api::{
 use parchmint_search_sqlite::SqliteSearchIndex;
 use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_spellcheck_en_us::{EnUsSpellcheckService, SpellcheckError, SpellcheckOperation};
+use parchmint_ui_api::{
+    ApplicationServices as UiApplicationServices, CreateDocumentWorkflow, ExportArtifact,
+    ExportArtifactAction, ExportArtifactToken, PlatformServices as UiPlatformServices,
+    ProjectExportPort, ProjectQueryError, ProjectSaveStatus, ProjectSnapshot as UiProjectSnapshot,
+    ProjectSnapshotQuery, ProjectUiProject, ProjectUiServices, ProjectWorkflowPort,
+    ProjectWorkflowSnapshot,
+};
 use parchmint_ui_iced::{
-    NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup, NativeProjectOpenResult,
-    NativeProjectWindow, run_native_desktop,
+    NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup, NativeNewProjectRequest,
+    NativeProjectOpenResult, NativeProjectWindow, run_native_desktop,
 };
 use parchmint_workspace_state::FileWorkspaceStateStore;
 use sha2::{Digest, Sha256};
 
 use crate::{
     ApplicationServices, DesktopBootstrap, DesktopRuntime, DesktopStartup, DesktopUi,
-    DesktopUiError, PlatformServices, ProjectFilesystemError, ProjectFilesystemService,
-    ProjectSession, RequestedProjectPath, StartupError,
+    DesktopUiError, NewProjectRequest, PlatformServices, ProjectFilesystemError,
+    ProjectFilesystemService, ProjectSession, RequestedProjectPath, StartupError,
+    resolved_appearance,
 };
 
 /// Named production boundaries that an integration driver may fail once.
@@ -110,6 +131,8 @@ pub enum ProductionObservation {
         window: WindowCapability,
         session_id: u64,
         session_generation: u64,
+        typed_ports: bool,
+        native_editor: bool,
     },
     WindowFocused(WindowCapability),
     WindowRetained(WindowCapability),
@@ -566,6 +589,9 @@ struct SharedServices {
     spellcheck: Arc<EnUsSpellcheckService>,
     exporter: Arc<ControlledExporter>,
     workspace_state: Arc<FileWorkspaceStateStore>,
+    preferences: Arc<dyn PreferenceService>,
+    appearance: Arc<dyn AppearanceService>,
+    platform: UiPlatformServices,
     controls: ProductionControls,
 }
 
@@ -705,9 +731,405 @@ pub struct ProductionProjectSession {
     search: Arc<ControlledSearch>,
     save: Arc<ProjectSaveCoordinator>,
     persistence: Arc<EditorPersistenceCoordinator>,
+    project_persistence: Arc<ProjectPersistenceCoordinator>,
+    query: Arc<ProductionProjectQuery>,
+    ui_services: ProjectUiServices,
     _repository: Arc<FsProjectRepository>,
     _open_project: OpenProject,
     controls: ProductionControls,
+}
+
+struct ProductionProjectQuery {
+    commands: Arc<NativeProjectCommandDispatcher>,
+    documents: Arc<NativeDocumentStateOwner>,
+    persistence: Arc<ProjectPersistenceCoordinator>,
+}
+
+impl ProjectSnapshotQuery for ProductionProjectQuery {
+    fn snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
+        let project = self.commands.project().map_err(map_project_query_error)?;
+        let documents = project
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| match node.kind {
+                NodeKind::Document(document) => Some(document),
+                NodeKind::Root(_) | NodeKind::Group => None,
+            })
+            .map(|document| {
+                self.documents
+                    .snapshot(document)
+                    .map_err(map_project_query_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(UiProjectSnapshot {
+            project,
+            documents,
+            styles_css: self
+                .persistence
+                .canonical_text("styles.css")
+                .map_err(map_project_query_error)?
+                .unwrap_or_default(),
+        })
+    }
+}
+
+fn map_project_query_error(error: impl std::fmt::Display) -> ProjectQueryError {
+    ProjectQueryError::new(error.to_string())
+}
+
+struct ProductionSaveStatus {
+    save: Arc<ProjectSaveCoordinator>,
+}
+
+impl ProjectSaveStatus for ProductionSaveStatus {
+    fn status(&self) -> SaveStatusSnapshot {
+        self.save.status()
+    }
+}
+
+struct ProductionProjectWorkflows {
+    history: Arc<ControlledHistory>,
+    persistence: Arc<ProjectPersistenceCoordinator>,
+    query: Arc<ProductionProjectQuery>,
+    exporter: Arc<ControlledExporter>,
+    artifacts: Mutex<BTreeMap<ExportArtifactToken, PathBuf>>,
+    next_artifact: AtomicU64,
+}
+
+impl ProjectWorkflowPort for ProductionProjectWorkflows {
+    fn create_document(
+        &self,
+        request: CreateDocumentWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let saved = self
+            .persistence
+            .create_document(request)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.revision.checkpoint,
+        })
+    }
+
+    fn restore_checkpoint(
+        &self,
+        checkpoint: parchmint_domain::CheckpointId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let plan = self
+            .history
+            .restore(checkpoint)
+            .map_err(|error| ProjectQueryError::new(error.to_string()))?;
+        let restored = self
+            .persistence
+            .restore_history(plan)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: restored.revision.checkpoint,
+        })
+    }
+
+    fn create_named_snapshot(
+        &self,
+        name: String,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let saved = self
+            .persistence
+            .create_named_snapshot(name)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.checkpoint,
+        })
+    }
+}
+
+impl ProjectExportPort for ProductionProjectWorkflows {
+    fn export_to_path(
+        &self,
+        selection: parchmint_platform_api::UntrustedPathSelection,
+        options: ExportRunOptions,
+    ) -> Result<ExportArtifact, ProjectQueryError> {
+        let snapshot = self.query.snapshot()?;
+        let project = export_snapshot(&snapshot)?;
+        let (sink, output_name, completed_path) =
+            NativeExportSink::acquire(selection.as_path()).map_err(map_export_error)?;
+        let request = ExportRequest::new(output_name.clone(), options);
+        let plan = self
+            .exporter
+            .plan(request, &project)
+            .map_err(map_export_error)?;
+        let report = self.exporter.validate(&plan);
+        if !report.is_valid() {
+            return Err(map_export_error(ExportError::Validation(report)));
+        }
+        let handle = self
+            .exporter
+            .export(plan, Box::new(sink))
+            .map_err(map_export_error)?;
+        if handle.status() != parchmint_export_api::ExportStatus::Completed {
+            return Err(ProjectQueryError::new(
+                "export did not complete its atomic output",
+            ));
+        }
+        let token =
+            ExportArtifactToken::from_raw(self.next_artifact.fetch_add(1, Ordering::Relaxed));
+        self.artifacts
+            .lock()
+            .map_err(|_| ProjectQueryError::new("export artifact registry is unavailable"))?
+            .insert(token, completed_path);
+        Ok(ExportArtifact {
+            token,
+            display_name: output_name,
+        })
+    }
+
+    fn act_on_artifact(
+        &self,
+        artifact: ExportArtifactToken,
+        action: ExportArtifactAction,
+    ) -> Result<(), ProjectQueryError> {
+        let path = self
+            .artifacts
+            .lock()
+            .map_err(|_| ProjectQueryError::new("export artifact registry is unavailable"))?
+            .get(&artifact)
+            .cloned()
+            .ok_or_else(|| ProjectQueryError::new("export artifact token is unknown"))?;
+        open_export_artifact(&path, action)
+    }
+}
+
+fn map_project_workflow_error(error: impl std::fmt::Display) -> ProjectQueryError {
+    ProjectQueryError::new(error.to_string())
+}
+
+fn map_export_error(error: ExportError) -> ProjectQueryError {
+    ProjectQueryError::new(error.to_string())
+}
+
+struct NativeExportSink {
+    target: PathBuf,
+    temporary: PathBuf,
+    file: Option<fs::File>,
+    expected_name: String,
+    started: bool,
+}
+
+impl NativeExportSink {
+    fn acquire(path: &Path) -> Result<(Self, String, PathBuf), ExportError> {
+        if !path.is_absolute() {
+            return Err(export_sink_error(
+                "authorize",
+                "target must be an absolute path",
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .ok_or_else(|| export_sink_error("authorize", "target has no parent directory"))?;
+        let parent_metadata = fs::symlink_metadata(parent)
+            .map_err(|error| export_sink_error("authorize", error.to_string()))?;
+        if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+            return Err(export_sink_error(
+                "authorize",
+                "target parent is not a direct directory",
+            ));
+        }
+        if let Ok(metadata) = fs::symlink_metadata(path)
+            && (!metadata.is_file() || metadata.file_type().is_symlink())
+        {
+            return Err(export_sink_error(
+                "authorize",
+                "existing target is not a direct regular file",
+            ));
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| export_sink_error("authorize", "target filename is invalid"))?
+            .to_owned();
+        // The export planner accepts a portable name, never the OS path.
+        parchmint_export_api::ExportTargetCapability::checked(&name)
+            .map_err(|issue| ExportError::Validation(ExportValidationReport::from_issue(issue)))?;
+        static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(1);
+        let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(
+            ".{name}.parchmint-export-{}-{sequence}.tmp",
+            std::process::id()
+        ));
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| export_sink_error("authorize", error.to_string()))?;
+        Ok((
+            Self {
+                target: path.to_path_buf(),
+                temporary,
+                file: Some(file),
+                expected_name: name.clone(),
+                started: false,
+            },
+            name,
+            path.to_path_buf(),
+        ))
+    }
+}
+
+impl ExportSink for NativeExportSink {
+    fn start(
+        &mut self,
+        target: &parchmint_export_api::ExportTargetCapability,
+    ) -> Result<(), ExportError> {
+        if self.started || target.name().as_str() != self.expected_name {
+            return Err(ExportError::InvalidState);
+        }
+        self.started = true;
+        Ok(())
+    }
+
+    fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), ExportError> {
+        if !self.started {
+            return Err(ExportError::InvalidState);
+        }
+        self.file
+            .as_mut()
+            .ok_or(ExportError::InvalidState)?
+            .write_all(bytes)
+            .map_err(|error| export_sink_error("write", error.to_string()))
+    }
+
+    fn finish(&mut self) -> Result<(), ExportError> {
+        let mut file = self.file.take().ok_or(ExportError::InvalidState)?;
+        file.flush()
+            .and_then(|_| file.sync_all())
+            .map_err(|error| export_sink_error("finish", error.to_string()))?;
+        drop(file);
+        fs::rename(&self.temporary, &self.target)
+            .map_err(|error| export_sink_error("finish", error.to_string()))
+    }
+
+    fn abort(&mut self) {
+        self.file.take();
+        let _ = fs::remove_file(&self.temporary);
+    }
+}
+
+impl Drop for NativeExportSink {
+    fn drop(&mut self) {
+        if self.file.is_some() {
+            self.abort();
+        }
+    }
+}
+
+fn export_sink_error(operation: &'static str, reason: impl Into<String>) -> ExportError {
+    ExportError::Sink {
+        operation,
+        reason: reason.into(),
+    }
+}
+
+fn export_snapshot(
+    snapshot: &UiProjectSnapshot,
+) -> Result<ExportProjectSnapshot, ProjectQueryError> {
+    let sources = snapshot
+        .documents
+        .iter()
+        .map(|document| {
+            (
+                document.document_id,
+                ExportSource {
+                    revision: SourceRevision::from(document.revision.value()),
+                    body: document.body.clone(),
+                },
+            )
+        })
+        .collect();
+    let manuscript = export_nodes(&snapshot.project, NodeId::manuscript_root())?;
+    let research = export_nodes(&snapshot.project, NodeId::research_root())?;
+    let mut project = ExportProjectSnapshot::new(
+        ExportStyleCatalog::new(snapshot.styles_css.clone()),
+        ExportDefaults {
+            emit_titles: true,
+            start_new_page: snapshot.project.export_settings.starts_new_page,
+        },
+        manuscript,
+        sources,
+    );
+    project.research = research;
+    Ok(project)
+}
+
+fn export_nodes(project: &Project, parent: NodeId) -> Result<Vec<ExportNode>, ProjectQueryError> {
+    project
+        .nodes
+        .children(parent)
+        .iter()
+        .filter_map(|id| {
+            let node = project.nodes.get(*id)?;
+            if node.export_settings.excluded {
+                return None;
+            }
+            let settings = ExportSettings {
+                emit_titles: InheritedSetting::Inherit,
+                start_new_page: if node.export_settings.starts_new_page {
+                    InheritedSetting::Enabled
+                } else {
+                    InheritedSetting::Inherit
+                },
+            };
+            Some(match node.kind {
+                NodeKind::Document(document) => {
+                    Ok(ExportNode::document(document, node.title.clone(), settings))
+                }
+                NodeKind::Group => export_nodes(project, *id)
+                    .map(|children| ExportNode::group(node.title.clone(), settings, children)),
+                NodeKind::Root(_) => Err(ProjectQueryError::new(
+                    "project section contains a nested root",
+                )),
+            })
+        })
+        .collect()
+}
+
+fn open_export_artifact(
+    path: &Path,
+    action: ExportArtifactAction,
+) -> Result<(), ProjectQueryError> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        if action == ExportArtifactAction::Reveal {
+            command.arg("-R");
+        }
+        command.arg(path);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer");
+        if action == ExportArtifactAction::Reveal {
+            command.arg(format!("/select,{}", path.display()));
+        } else {
+            command.arg(path);
+        }
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(if action == ExportArtifactAction::Reveal {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        });
+        command
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| ProjectQueryError::new(format!("open export artifact failed: {error}")))
 }
 
 impl ProductionProjectSession {
@@ -743,6 +1165,14 @@ impl ProductionProjectSession {
         Arc::clone(&self.persistence)
     }
 
+    pub fn project_persistence(&self) -> Arc<ProjectPersistenceCoordinator> {
+        Arc::clone(&self.project_persistence)
+    }
+
+    pub fn ui_snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
+        self.query.snapshot()
+    }
+
     pub fn request_save(&self, request: SaveRequest) -> Result<SaveTicket, ProjectFilesystemError> {
         if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::FinalSave) {
             self.controls
@@ -770,8 +1200,11 @@ impl ProductionProjectSession {
             );
             return Err(injected_failure("save", kind));
         }
-        let application = match self.commands.capture_save_request() {
-            Ok(application) => application,
+        let (handle, _) = match self
+            .project_persistence
+            .request_save(PersistenceSaveKind::Final)
+        {
+            Ok(request) => request,
             Err(error) => {
                 self.controls.service_operation(
                     ProductionFaultPoint::FinalSave,
@@ -784,16 +1217,13 @@ impl ProductionProjectSession {
                 ));
             }
         };
-        if application.dirty_resources.iter().next().is_some() {
+        if let Err(error) = self.project_persistence.await_save(handle) {
             self.controls.service_operation(
                 ProductionFaultPoint::FinalSave,
                 "reconcile final save",
                 false,
             );
-            return Err(ProjectFilesystemError::failed(
-                "save",
-                "dirty application state has no acknowledged encoded save frontier",
-            ));
+            return Err(ProjectFilesystemError::failed("save", error.to_string()));
         }
         if let Err(error) = self.save.reconcile_open() {
             self.controls.service_operation(
@@ -824,6 +1254,27 @@ struct ProductionProjectFilesystem {
 }
 
 impl ProjectFilesystemService for ProductionProjectFilesystem {
+    fn create(
+        &self,
+        request: &NewProjectRequest,
+    ) -> Result<Box<dyn ProjectSession>, ProjectFilesystemError> {
+        let repository = FsProjectRepository::native();
+        let manifest = new_project_manifest(&request.title, request.author.as_deref());
+        let created = repository
+            .create(RepositoryCreateProject {
+                path: ProjectPath::new(&request.destination),
+                manifest,
+                documents: BTreeMap::from([(
+                    RepositoryDocumentId::new("untitled-document"),
+                    b"<p></p>".to_vec(),
+                )]),
+            })
+            .map_err(map_repository_error)?;
+        drop(created);
+        drop(repository);
+        self.open(&RequestedProjectPath::new(&request.destination))
+    }
+
     fn open(
         &self,
         requested: &RequestedProjectPath,
@@ -855,10 +1306,19 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             .to_path_buf();
         let resources = canonical_resources(&root)?;
         let project_id = project_id(&root, &resources);
-        let (project, documents, search_source) = application_state(project_id, &resources)?;
-        let recovery_base = recovery_base(&documents, &resources);
+        let (project, documents, search_source, canonical_paths, persistence_frontier) =
+            application_state(project_id, &resources)?;
+        let recovery_base = recovery_base(
+            &documents,
+            &resources,
+            &canonical_paths,
+            &persistence_frontier,
+        );
         let document_owner = Arc::new(NativeDocumentStateOwner::new(documents));
-        let commands = Arc::new(NativeProjectCommandDispatcher::new(project, document_owner));
+        let commands = Arc::new(NativeProjectCommandDispatcher::new(
+            project,
+            document_owner.clone(),
+        ));
 
         let history = Arc::new(ControlledHistory {
             inner: Git2HistoryStore::new(root.clone()),
@@ -897,8 +1357,47 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
         let persistence = Arc::new(EditorPersistenceCoordinator::new(
             recovery.clone(),
             save.clone(),
-            recovery_base,
+            recovery_base.clone(),
         ));
+        let project_persistence = Arc::new(ProjectPersistenceCoordinator::new(
+            commands.clone(),
+            document_owner.clone(),
+            persistence.clone(),
+            recovery_base,
+            resources.clone(),
+            canonical_paths,
+        ));
+        let query = Arc::new(ProductionProjectQuery {
+            commands: commands.clone(),
+            documents: document_owner,
+            persistence: project_persistence.clone(),
+        });
+        let workflows = Arc::new(ProductionProjectWorkflows {
+            history: history.clone(),
+            persistence: project_persistence.clone(),
+            query: query.clone(),
+            exporter: self.shared.exporter.clone(),
+            artifacts: Mutex::new(BTreeMap::new()),
+            next_artifact: AtomicU64::new(1),
+        });
+        let ui_services = ProjectUiServices::new(
+            UiApplicationServices::new(commands.clone(), commands.clone()),
+            query.clone(),
+            history.clone(),
+            recovery.clone(),
+            search.clone(),
+            Arc::new(ProductionSaveStatus { save: save.clone() }),
+            project_persistence.clone(),
+            workflows.clone(),
+            workflows,
+            self.shared.exporter.clone(),
+            self.shared.editor.clone(),
+            self.shared.spellcheck.clone(),
+            self.shared.workspace_state.clone(),
+            self.shared.preferences.clone(),
+            self.shared.appearance.clone(),
+            self.shared.platform.clone(),
+        );
 
         self.shared
             .controls
@@ -918,6 +1417,9 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             search,
             save,
             persistence,
+            project_persistence,
+            query,
+            ui_services,
             _repository: repository,
             _open_project: open_project,
             controls: self.shared.controls.clone(),
@@ -935,6 +1437,22 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
                 )
             })?;
         session.reconcile_final_save()
+    }
+
+    fn ui_services(
+        &self,
+        session: &dyn ProjectSession,
+    ) -> Result<Option<ProjectUiServices>, ProjectFilesystemError> {
+        let session = session
+            .as_any()
+            .downcast_ref::<ProductionProjectSession>()
+            .ok_or_else(|| {
+                ProjectFilesystemError::failed(
+                    "project UI services",
+                    "project session was not created by the production graph",
+                )
+            })?;
+        Ok(Some(session.ui_services.clone()))
     }
 }
 
@@ -960,6 +1478,10 @@ impl NativeDesktopDriver for IcedDesktopDriver {
 struct ProductionDesktopUi {
     state: Mutex<ProductionUiState>,
     registry: IcedWindowRegistry,
+    editor: Arc<EditorIcedAdapter>,
+    preferences: Arc<dyn PreferenceService>,
+    appearance: Arc<dyn AppearanceService>,
+    platform: UiPlatformServices,
     controls: ProductionControls,
     driver: Arc<dyn NativeDesktopDriver>,
 }
@@ -988,12 +1510,47 @@ impl DesktopUi for ProductionDesktopUi {
                 NativeProjectWindow {
                     project: project.as_path().to_path_buf(),
                     window,
+                    session,
+                    project_ui: None,
+                    editor: Some(self.editor.clone()),
                 },
             );
         self.controls.observe(ProductionObservation::WindowOpened {
             window,
             session_id: session.session_id(),
             session_generation: session.generation(),
+            typed_ports: false,
+            native_editor: true,
+        });
+        Ok(())
+    }
+
+    fn project_opened_with_ui(
+        &self,
+        project: &RequestedProjectPath,
+        window: WindowCapability,
+        project_ui: ProjectUiProject,
+    ) -> Result<(), DesktopUiError> {
+        let session = project_ui.session();
+        self.state
+            .lock()
+            .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
+            .projects
+            .insert(
+                window,
+                NativeProjectWindow::typed(
+                    project.as_path().to_path_buf(),
+                    window,
+                    project_ui,
+                    self.editor.clone(),
+                ),
+            );
+        self.controls.observe(ProductionObservation::WindowOpened {
+            window,
+            session_id: session.session_id(),
+            session_generation: session.generation(),
+            typed_ports: true,
+            native_editor: true,
         });
         Ok(())
     }
@@ -1069,14 +1626,23 @@ impl DesktopUi for ProductionDesktopUi {
                 state.locked_project.clone(),
             )
         };
+        let recent_projects = block_on(self.preferences.load())
+            .map_err(|error| DesktopUiError::new(error.to_string()))?
+            .values
+            .recent_projects;
         self.driver
             .run(NativeDesktopStartup {
                 appearance,
+                recent_projects,
                 projects,
                 locked_project,
                 callbacks: Arc::new(ProductionUiCallbacks {
                     runtime,
                     registry: self.registry.clone(),
+                    editor: self.editor.clone(),
+                    preferences: self.preferences.clone(),
+                    appearance: self.appearance.clone(),
+                    platform: self.platform.clone(),
                 }),
             })
             .map_err(|error| DesktopUiError::new(error.to_string()))?;
@@ -1087,6 +1653,10 @@ impl DesktopUi for ProductionDesktopUi {
 struct ProductionUiCallbacks {
     runtime: DesktopRuntime,
     registry: IcedWindowRegistry,
+    editor: Arc<EditorIcedAdapter>,
+    preferences: Arc<dyn PreferenceService>,
+    appearance: Arc<dyn AppearanceService>,
+    platform: UiPlatformServices,
 }
 
 impl NativeDesktopCallbacks for ProductionUiCallbacks {
@@ -1096,8 +1666,18 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
             .open_project(project.clone())
             .map_err(|error| error.to_string())?;
         Ok(match result {
-            crate::OpenProjectResult::Opened { window, .. } => {
-                NativeProjectOpenResult::Opened(NativeProjectWindow { project, window })
+            crate::OpenProjectResult::Opened { window, session } => {
+                let project_ui = self
+                    .runtime
+                    .project_ui(session)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "production project UI ports are unavailable".to_owned())?;
+                NativeProjectOpenResult::Opened(NativeProjectWindow::typed(
+                    project,
+                    window,
+                    project_ui,
+                    self.editor.clone(),
+                ))
             }
             crate::OpenProjectResult::Focused(window) => NativeProjectOpenResult::Focused(window),
             crate::OpenProjectResult::Locked => NativeProjectOpenResult::Locked,
@@ -1122,6 +1702,81 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
                 Err(format!("project window is stale: {}", project.display()))
             }
         }
+    }
+
+    fn create_project(
+        &self,
+        request: NativeNewProjectRequest,
+    ) -> Result<NativeProjectOpenResult, String> {
+        let project = request.destination.clone();
+        let result = self
+            .runtime
+            .create_project(NewProjectRequest::new(
+                request.title,
+                request.destination,
+                request.author,
+            ))
+            .map_err(|error| error.to_string())?;
+        Ok(match result {
+            crate::OpenProjectResult::Opened { window, session } => {
+                let project_ui = self
+                    .runtime
+                    .project_ui(session)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "production project UI ports are unavailable".to_owned())?;
+                NativeProjectOpenResult::Opened(NativeProjectWindow::typed(
+                    project,
+                    window,
+                    project_ui,
+                    self.editor.clone(),
+                ))
+            }
+            crate::OpenProjectResult::Focused(window) => NativeProjectOpenResult::Focused(window),
+            crate::OpenProjectResult::Locked => NativeProjectOpenResult::Locked,
+        })
+    }
+
+    fn choose_project_directory(
+        &self,
+        window: WindowCapability,
+        title: &'static str,
+    ) -> Result<Option<PathBuf>, String> {
+        block_on(self.platform.dialogs.choose_path(
+            window,
+            PathDialog {
+                kind: PathDialogKind::OpenDirectory,
+                title: Some(title.to_owned()),
+            },
+        ))
+        .map_err(|error| error.to_string())
+        .map(|result| {
+            result
+                .into_value()
+                .map(|selection| selection.as_path().to_path_buf())
+        })
+    }
+
+    fn set_appearance(&self, mode: AppearanceMode) -> Result<ResolvedAppearance, String> {
+        let system = block_on(self.platform.system_appearance.current_appearance())
+            .map(resolved_appearance)
+            .map_err(|error| error.to_string())?;
+        self.appearance
+            .system_appearance_changed(system)
+            .map_err(|error| error.to_string())?;
+        let current = block_on(self.preferences.load()).map_err(|error| error.to_string())?;
+        block_on(self.appearance.set_mode(current.revision, mode))
+            .map(|snapshot| snapshot.appearance)
+            .map_err(|error| error.to_string())
+    }
+
+    fn system_appearance_changed(
+        &self,
+        appearance: ResolvedAppearance,
+    ) -> Result<Option<ResolvedAppearance>, String> {
+        self.appearance
+            .system_appearance_changed(appearance)
+            .map(|snapshot| snapshot.map(|snapshot| snapshot.appearance))
+            .map_err(|error| error.to_string())
     }
 
     fn project_window_created(&self, window: WindowCapability) {
@@ -1159,6 +1814,15 @@ pub(crate) fn assemble_with_controls(
         EnUsSpellcheckService::new(Default::default())
             .map_err(|error| StartupError::production("spellcheck", error))?,
     );
+    let ui_platform = UiPlatformServices::new(
+        platform.menus.clone(),
+        platform.dialogs.clone(),
+        platform.clipboard.clone(),
+        platform.external_open.clone(),
+        platform.application_paths.clone(),
+        platform.appearance.clone(),
+    )
+    .with_system_appearance_events(platform.appearance_events.clone());
     let shared = Arc::new(SharedServices {
         editor,
         spellcheck,
@@ -1169,6 +1833,9 @@ pub(crate) fn assemble_with_controls(
         workspace_state: Arc::new(FileWorkspaceStateStore::new(
             paths.data().join("workspaces"),
         )),
+        preferences: preferences.clone(),
+        appearance: appearance.clone(),
+        platform: ui_platform,
         controls: controls.clone(),
     });
     for component in [
@@ -1195,6 +1862,10 @@ pub(crate) fn assemble_with_controls(
     let ui = Arc::new(ProductionDesktopUi {
         state: Mutex::new(ProductionUiState::default()),
         registry: platform.iced_window_registry(),
+        editor: shared.editor.clone(),
+        preferences: preferences.clone(),
+        appearance: appearance.clone(),
+        platform: shared.platform.clone(),
         controls,
         driver: Arc::new(IcedDesktopDriver),
     });
@@ -1336,11 +2007,97 @@ impl SearchProjectionSource for CanonicalSearchSource {
 fn application_state(
     project_id: ProjectId,
     resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
-) -> Result<(Project, Vec<DocumentSnapshot>, CanonicalSearchSource), ProjectFilesystemError> {
+) -> Result<
+    (
+        Project,
+        Vec<DocumentSnapshot>,
+        CanonicalSearchSource,
+        CanonicalProjectPathMap,
+        parchmint_project_format::CanonicalPersistenceFrontier,
+    ),
+    ProjectFilesystemError,
+> {
     let codec = ProjectFormatCodec::default();
     let mut project = Project::new(project_id);
+    let mut canonical_paths = CanonicalProjectPathMap::default();
+    let mut persistence_frontier =
+        parchmint_project_format::CanonicalPersistenceFrontier::default();
+    if let Some(manifest) =
+        resources.get(&CanonicalRelativePath::parse("project.toml").expect("static path"))
+    {
+        let manifest = codec.decode_manifest(manifest).map_err(|error| {
+            ProjectFilesystemError::failed("decode project manifest", error.to_string())
+        })?;
+        persistence_frontier = codec
+            .decode_persistence_frontier(&manifest)
+            .map_err(|error| {
+                ProjectFilesystemError::failed("decode persistence frontier", error.to_string())
+            })?;
+        if let Some((decoded, paths)) =
+            codec
+                .decode_domain_project(&manifest, project_id)
+                .map_err(|error| {
+                    ProjectFilesystemError::failed("decode project structure", error.to_string())
+                })?
+        {
+            project = decoded;
+            canonical_paths = paths;
+        } else {
+            let project_table = manifest.value().get("project");
+            project.display_title = project_table
+                .and_then(|project| project.get("title"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            project.author = project_table
+                .and_then(|project| project.get("author"))
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+        }
+    }
     let mut documents = Vec::new();
     let mut projections = Vec::new();
+    if !canonical_paths.documents.is_empty() {
+        for (index, (document_id, path)) in canonical_paths.documents.iter().enumerate() {
+            let bytes = resources.get(path).ok_or_else(|| {
+                ProjectFilesystemError::failed(
+                    "decode project structure",
+                    format!("manifest document is missing: {}", path.as_str()),
+                )
+            })?;
+            let canonical = codec.decode_document(bytes).map_err(|error| {
+                ProjectFilesystemError::failed("decode canonical document", error.to_string())
+            })?;
+            let body = canonical.as_html().to_owned();
+            documents.push(DocumentSnapshot {
+                document_id: *document_id,
+                body: body.clone(),
+                revision: persistence_frontier
+                    .document_revisions
+                    .get(document_id)
+                    .copied()
+                    .unwrap_or_default()
+                    .into(),
+                visibility: if index == 0 {
+                    DocumentVisibility::Open
+                } else {
+                    DocumentVisibility::Closed
+                },
+            });
+            projections.push(SearchDocumentProjection {
+                document_id: *document_id,
+                revision: RevisionId::from(0),
+                texts: search_texts(&project, *document_id, &body),
+            });
+        }
+        return Ok((
+            project,
+            documents,
+            CanonicalSearchSource(projections),
+            canonical_paths,
+            persistence_frontier,
+        ));
+    }
     let mut section_counts = BTreeMap::from([
         (NodeId::manuscript_root(), 0usize),
         (NodeId::research_root(), 0usize),
@@ -1354,6 +2111,7 @@ fn application_state(
         })?;
         let id = stable_id(b"document", path.as_str().as_bytes());
         let document_id = DocumentId::from_bytes(id);
+        canonical_paths.documents.insert(document_id, path.clone());
         let node_id = NodeId::from_bytes(stable_id(b"node", path.as_str().as_bytes()));
         let parent = if path.as_str().starts_with("research/") {
             NodeId::research_root()
@@ -1363,11 +2121,15 @@ fn application_state(
         let index = section_counts
             .get_mut(&parent)
             .expect("both project sections have counters");
-        let title = Path::new(path.as_str())
+        let stem = Path::new(path.as_str())
             .file_stem()
             .and_then(|value| value.to_str())
-            .unwrap_or("Untitled Document")
-            .to_owned();
+            .unwrap_or("untitled-document");
+        let title = if stem == "untitled-document" {
+            "Untitled Document".to_owned()
+        } else {
+            stem.to_owned()
+        };
         let applied = apply_project_command(
             &project,
             project.revision,
@@ -1383,29 +2145,67 @@ fn application_state(
             document_id,
             body: body.clone(),
             revision: Default::default(),
-            visibility: DocumentVisibility::Closed,
+            visibility: if stem == "untitled-document" {
+                DocumentVisibility::Open
+            } else {
+                DocumentVisibility::Closed
+            },
         });
         projections.push(SearchDocumentProjection {
             document_id,
             revision: RevisionId::from(0),
-            texts: vec![SearchTextProjection {
-                block_id: BlockId::from_bytes(id),
-                field: SearchField::Body,
-                text: searchable_text(&body),
-            }],
+            texts: search_texts(&project, document_id, &body),
         });
     }
     project.revision = Default::default();
-    Ok((project, documents, CanonicalSearchSource(projections)))
+    Ok((
+        project,
+        documents,
+        CanonicalSearchSource(projections),
+        canonical_paths,
+        persistence_frontier,
+    ))
+}
+
+fn new_project_manifest(title: &str, author: Option<&str>) -> String {
+    let mut manifest = format!(
+        "[project]\ntitle = {}\nspellcheck-language = \"en-US\"\n",
+        toml_string(title)
+    );
+    if let Some(author) = author {
+        manifest.push_str(&format!("author = {}\n", toml_string(author)));
+    }
+    manifest
+}
+
+fn toml_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 fn recovery_base(
     documents: &[DocumentSnapshot],
     resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    paths: &CanonicalProjectPathMap,
+    frontier: &parchmint_project_format::CanonicalPersistenceFrontier,
 ) -> recovery::RecoveryBaseSnapshot {
     let revisions = documents
         .iter()
-        .map(|document| (document.document_id, recovery::DocumentRevision::default()))
+        .map(|document| {
+            (
+                document.document_id,
+                recovery::DocumentRevision::from(document.revision.value()),
+            )
+        })
         .collect();
     let mut hashes = BTreeMap::new();
     for (path, bytes) in resources {
@@ -1417,7 +2217,15 @@ fn recovery_base(
             path if (path.starts_with("manuscript/") || path.starts_with("research/"))
                 && path.ends_with(".html") =>
             {
-                recovery::ResourceId::Document
+                let document_id = paths
+                    .documents
+                    .iter()
+                    .find_map(|(document, canonical)| {
+                        (canonical.as_str() == path).then_some(*document)
+                    })
+                    .map(|document| stable_id_text(document.as_bytes()))
+                    .unwrap_or_else(|| stable_id_text(&stable_id(b"document", path.as_bytes())));
+                recovery::ResourceId::DocumentById { document_id }
             }
             path if path.starts_with("annotations/") && path.ends_with(".json") => {
                 recovery::ResourceId::Annotations {
@@ -1435,7 +2243,10 @@ fn recovery_base(
         );
     }
     recovery::RecoveryBaseSnapshot {
-        revisions: recovery::RecoveryRevisionVector::new(Default::default(), revisions),
+        revisions: recovery::RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::from(frontier.recovery_project_revision),
+            revisions,
+        ),
         hashes,
     }
 }
@@ -1477,6 +2288,44 @@ fn project_id(
     ProjectId::from_bytes(stable_id(b"project", &identity))
 }
 
+fn search_texts(
+    project: &Project,
+    document_id: DocumentId,
+    body: &str,
+) -> Vec<SearchTextProjection> {
+    let mut texts = vec![SearchTextProjection {
+        block_id: BlockId::from_bytes(*document_id.as_bytes()),
+        field: SearchField::Body,
+        text: searchable_text(body),
+    }];
+    let Some((_, node)) = project.nodes.iter().find(
+        |(_, node)| matches!(node.kind, NodeKind::Document(candidate) if candidate == document_id),
+    ) else {
+        return texts;
+    };
+    texts.push(SearchTextProjection {
+        block_id: BlockId::from_bytes(stable_id(b"search-title", document_id.as_bytes())),
+        field: SearchField::DisplayTitle,
+        text: node.title.clone(),
+    });
+    texts.push(SearchTextProjection {
+        block_id: BlockId::from_bytes(stable_id(b"search-synopsis", document_id.as_bytes())),
+        field: SearchField::Synopsis,
+        text: node.synopsis.clone(),
+    });
+    texts.extend(node.metadata.iter().map(|(field, value)| {
+        let mut identity = Vec::with_capacity(32);
+        identity.extend_from_slice(document_id.as_bytes());
+        identity.extend_from_slice(field.as_bytes());
+        SearchTextProjection {
+            block_id: BlockId::from_bytes(stable_id(b"search-metadata", &identity)),
+            field: SearchField::Metadata(*field),
+            text: value.clone(),
+        }
+    }));
+    texts
+}
+
 fn stable_id(namespace: &[u8], value: &[u8]) -> [u8; 16] {
     let mut digest = Sha256::new();
     digest.update(namespace);
@@ -1486,6 +2335,10 @@ fn stable_id(namespace: &[u8], value: &[u8]) -> [u8; 16] {
     let mut id = [0; 16];
     id.copy_from_slice(&digest[..16]);
     id
+}
+
+fn stable_id_text(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn history_root_id(project: ProjectId) -> u64 {

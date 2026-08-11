@@ -6,7 +6,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use parchmint_domain::{
+    MetadataApplicability as DomainMetadataApplicability,
+    MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSettings,
+    ProjectSection,
+};
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
+use parchmint_ui_api::ProjectSnapshot;
 
 use crate::{EditorFixture, EditorMessage, EditorPane, EditorWorkspace, TabSpec};
 
@@ -70,6 +76,14 @@ enum HierarchyNodeKind {
     Document,
 }
 
+/// Public, read-only hierarchy kind used by Explorer and Cards renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyRowKind {
+    Root,
+    Group,
+    Document,
+}
+
 #[derive(Debug, Clone)]
 struct HierarchyNode {
     id: String,
@@ -78,6 +92,7 @@ struct HierarchyNode {
     parent: Option<String>,
     children: Vec<String>,
     kind: HierarchyNodeKind,
+    document_id: Option<String>,
     synopsis: String,
 }
 
@@ -96,9 +111,26 @@ impl HierarchyNode {
             parent: parent.map(str::to_owned),
             children: Vec::new(),
             kind,
+            document_id: (kind == HierarchyNodeKind::Document).then(|| id.to_owned()),
             synopsis: String::new(),
         }
     }
+}
+
+/// One ordered Explorer row without exposing the mutable hierarchy internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerRow<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub synopsis: &'a str,
+    pub section_id: &'a str,
+    pub parent_id: Option<&'a str>,
+    pub child_ids: Vec<&'a str>,
+    pub kind: HierarchyRowKind,
+    pub document_id: Option<&'a str>,
+    pub expanded: bool,
+    pub selected: bool,
+    pub cut_pending: bool,
 }
 
 /// Shared Explorer/Cards hierarchy and selection presentation.
@@ -200,6 +232,136 @@ impl ExplorerState {
             selection_anchor: None,
             cut_pending: BTreeSet::new(),
         }
+    }
+
+    fn from_project(project: &Project) -> Self {
+        let mut nodes = BTreeMap::new();
+        for (id, node) in project.nodes.iter() {
+            let id = stable_id_string(id.as_bytes());
+            let section = project
+                .nodes
+                .section(node.id)
+                .expect("a validated project node belongs to a fixed section");
+            let kind = match node.kind {
+                NodeKind::Root(_) => HierarchyNodeKind::Root,
+                NodeKind::Group => HierarchyNodeKind::Group,
+                NodeKind::Document(_) => HierarchyNodeKind::Document,
+            };
+            let document_id = match node.kind {
+                NodeKind::Document(document_id) => Some(stable_id_string(document_id.as_bytes())),
+                NodeKind::Root(_) | NodeKind::Group => None,
+            };
+            nodes.insert(
+                id.clone(),
+                HierarchyNode {
+                    id,
+                    title: node.title.clone(),
+                    section_id: stable_id_string(section.root_id().as_bytes()),
+                    parent: project
+                        .nodes
+                        .parent(node.id)
+                        .map(|parent| stable_id_string(parent.as_bytes())),
+                    children: project
+                        .nodes
+                        .children(node.id)
+                        .iter()
+                        .map(|child| stable_id_string(child.as_bytes()))
+                        .collect(),
+                    kind,
+                    document_id,
+                    synopsis: node.synopsis.clone(),
+                },
+            );
+        }
+        let roots = [ProjectSection::Manuscript, ProjectSection::Research]
+            .into_iter()
+            .map(|section| stable_id_string(section.root_id().as_bytes()))
+            .collect::<Vec<_>>();
+        Self {
+            nodes,
+            expanded: roots.iter().cloned().collect(),
+            roots,
+            selected: BTreeSet::new(),
+            selection_anchor: None,
+            cut_pending: BTreeSet::new(),
+        }
+    }
+
+    fn reconcile_project(&mut self, project: &Project) {
+        let mut authoritative = Self::from_project(project);
+        authoritative.expanded = self
+            .expanded
+            .iter()
+            .filter(|id| {
+                authoritative.nodes.get(*id).is_some_and(|node| {
+                    matches!(
+                        node.kind,
+                        HierarchyNodeKind::Root | HierarchyNodeKind::Group
+                    )
+                })
+            })
+            .cloned()
+            .collect();
+        authoritative.selected = self
+            .selected
+            .iter()
+            .filter(|id| authoritative.nodes.contains_key(*id))
+            .cloned()
+            .collect();
+        authoritative.selection_anchor = self
+            .selection_anchor
+            .as_ref()
+            .filter(|id| authoritative.nodes.contains_key(*id))
+            .cloned();
+        authoritative.cut_pending = self
+            .cut_pending
+            .iter()
+            .filter(|id| {
+                authoritative
+                    .nodes
+                    .get(*id)
+                    .is_some_and(|node| node.kind == HierarchyNodeKind::Document)
+            })
+            .cloned()
+            .collect();
+        authoritative.normalize_selection();
+        *self = authoritative;
+    }
+
+    /// All hierarchy rows in canonical root and child order.
+    pub fn rows(&self) -> Vec<ExplorerRow<'_>> {
+        self.preorder_ids()
+            .into_iter()
+            .filter_map(|id| self.row(id))
+            .collect()
+    }
+
+    /// A single hierarchy row by its serialized typed node ID.
+    pub fn row(&self, node_id: &str) -> Option<ExplorerRow<'_>> {
+        let node = self.nodes.get(node_id)?;
+        Some(ExplorerRow {
+            id: &node.id,
+            title: &node.title,
+            synopsis: &node.synopsis,
+            section_id: &node.section_id,
+            parent_id: node.parent.as_deref(),
+            child_ids: node.children.iter().map(String::as_str).collect(),
+            kind: match node.kind {
+                HierarchyNodeKind::Root => HierarchyRowKind::Root,
+                HierarchyNodeKind::Group => HierarchyRowKind::Group,
+                HierarchyNodeKind::Document => HierarchyRowKind::Document,
+            },
+            document_id: node.document_id.as_deref(),
+            expanded: self.expanded.contains(node_id),
+            selected: self.selected.contains(node_id),
+            cut_pending: self.cut_pending.contains(node_id),
+        })
+    }
+
+    fn contains_document(&self, document_id: &str) -> bool {
+        self.nodes
+            .values()
+            .any(|node| node.document_id.as_deref() == Some(document_id))
     }
 
     /// Selected nodes in deterministic visible hierarchy order.
@@ -438,9 +600,23 @@ pub struct CardsState<'a> {
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
+    definitions: &'a BTreeMap<String, MetadataDefinition>,
+    field_order: &'a [String],
+    values: &'a BTreeMap<(String, String), String>,
 }
 
-impl CardsState<'_> {
+/// One ordered Cards item with effective visible metadata values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardItem<'a> {
+    pub node_id: &'a str,
+    pub document_id: Option<&'a str>,
+    pub title: &'a str,
+    pub synopsis: &'a str,
+    pub kind: HierarchyRowKind,
+    pub metadata: Vec<(&'a str, &'a str, Option<&'a str>)>,
+}
+
+impl<'a> CardsState<'a> {
     pub fn section_id(&self) -> &str {
         self.section_id
     }
@@ -476,29 +652,81 @@ impl CardsState<'_> {
     pub fn last_activated_document(&self) -> Option<&str> {
         self.last_activated_document
     }
+
+    /// Items under the selected section in canonical hierarchy order.
+    pub fn items(&self) -> Vec<CardItem<'a>> {
+        self.explorer
+            .preorder_ids()
+            .into_iter()
+            .filter(|id| {
+                *id != self.section_id
+                    && self
+                        .explorer
+                        .nodes
+                        .get(*id)
+                        .is_some_and(|node| node.section_id == self.section_id)
+            })
+            .filter_map(|id| {
+                let node = self.explorer.nodes.get(id)?;
+                let metadata = self
+                    .field_order
+                    .iter()
+                    .filter_map(|field_id| {
+                        let definition = self.definitions.get(field_id)?;
+                        (definition.visible_on_cards
+                            && definition.applicability.applies_to(node.kind))
+                        .then(|| {
+                            let value = self
+                                .values
+                                .get(&(id.to_owned(), field_id.clone()))
+                                .map(String::as_str)
+                                .or(definition.default_value.as_deref());
+                            (field_id.as_str(), definition.label.as_str(), value)
+                        })
+                    })
+                    .collect();
+                Some(CardItem {
+                    node_id: id,
+                    document_id: node.document_id.as_deref(),
+                    title: &node.title,
+                    synopsis: &node.synopsis,
+                    kind: match node.kind {
+                        HierarchyNodeKind::Root => HierarchyRowKind::Root,
+                        HierarchyNodeKind::Group => HierarchyRowKind::Group,
+                        HierarchyNodeKind::Document => HierarchyRowKind::Document,
+                    },
+                    metadata,
+                })
+            })
+            .collect()
+    }
 }
 
+/// Which live hierarchy node kinds expose a metadata field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MetadataApplicability {
+pub enum MetadataFieldApplicability {
     Groups,
     Documents,
     GroupsAndDocuments,
     None,
 }
 
-impl MetadataApplicability {
+/// The text editor shape required by a metadata definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataFieldTextKind {
+    SingleLine,
+    Multiline,
+}
+
+impl MetadataFieldApplicability {
     const fn applies_to(self, kind: HierarchyNodeKind) -> bool {
         matches!(
             (self, kind),
-            (
-                Self::Groups,
-                HierarchyNodeKind::Group | HierarchyNodeKind::Root
-            ) | (Self::Documents, HierarchyNodeKind::Document)
+            (Self::Groups, HierarchyNodeKind::Group)
+                | (Self::Documents, HierarchyNodeKind::Document)
                 | (
                     Self::GroupsAndDocuments,
-                    HierarchyNodeKind::Root
-                        | HierarchyNodeKind::Group
-                        | HierarchyNodeKind::Document
+                    HierarchyNodeKind::Group | HierarchyNodeKind::Document
                 )
         )
     }
@@ -508,7 +736,8 @@ impl MetadataApplicability {
 struct MetadataDefinition {
     label: String,
     description: Option<String>,
-    applicability: MetadataApplicability,
+    applicability: MetadataFieldApplicability,
+    text_kind: MetadataFieldTextKind,
     default_value: Option<String>,
     visible_on_cards: bool,
 }
@@ -521,7 +750,19 @@ pub struct InspectorState<'a> {
     values: &'a BTreeMap<(String, String), String>,
 }
 
-impl InspectorState<'_> {
+/// One Inspector metadata row with both stored and effective values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectorMetadataItem<'a> {
+    pub field_id: &'a str,
+    pub label: &'a str,
+    pub description: Option<&'a str>,
+    pub stored_value: Option<&'a str>,
+    pub effective_value: Option<&'a str>,
+    pub applicability: MetadataFieldApplicability,
+    pub text_kind: MetadataFieldTextKind,
+}
+
+impl<'a> InspectorState<'a> {
     pub const fn synopsis_is_multiline_plain_text(&self) -> bool {
         true
     }
@@ -558,6 +799,37 @@ impl InspectorState<'_> {
             .map(String::as_str)
             .collect()
     }
+
+    /// Ordered metadata rows applicable to one selected hierarchy node.
+    pub fn metadata_items(&self, node_id: &str) -> Vec<InspectorMetadataItem<'a>> {
+        let Some(kind) = self.explorer.nodes.get(node_id).map(|node| node.kind) else {
+            return Vec::new();
+        };
+        let definitions = self.definitions;
+        let field_order = self.field_order;
+        let values = self.values;
+        field_order
+            .iter()
+            .filter_map(|field_id| {
+                let definition = definitions.get(field_id)?;
+                if !definition.applicability.applies_to(kind) {
+                    return None;
+                }
+                let stored_value = values
+                    .get(&(node_id.to_owned(), field_id.clone()))
+                    .map(String::as_str);
+                Some(InspectorMetadataItem {
+                    field_id,
+                    label: &definition.label,
+                    description: definition.description.as_deref(),
+                    stored_value,
+                    effective_value: stored_value.or(definition.default_value.as_deref()),
+                    applicability: definition.applicability,
+                    text_kind: definition.text_kind,
+                })
+            })
+            .collect()
+    }
 }
 
 /// Stable settings definition exposed for headless verification.
@@ -568,6 +840,8 @@ pub struct MetadataFieldSummary<'a> {
     pub description: Option<&'a str>,
     pub default_value: Option<&'a str>,
     pub visible_on_cards: bool,
+    pub applicability: MetadataFieldApplicability,
+    pub text_kind: MetadataFieldTextKind,
 }
 
 /// Presentation state for project Settings.
@@ -588,7 +862,8 @@ impl SettingsState {
                     MetadataDefinition {
                         label: "Point of view".to_owned(),
                         description: Some("Narrative perspective".to_owned()),
-                        applicability: MetadataApplicability::GroupsAndDocuments,
+                        applicability: MetadataFieldApplicability::GroupsAndDocuments,
+                        text_kind: MetadataFieldTextKind::SingleLine,
                         default_value: None,
                         visible_on_cards: true,
                     },
@@ -598,13 +873,50 @@ impl SettingsState {
                     MetadataDefinition {
                         label: "Location".to_owned(),
                         description: None,
-                        applicability: MetadataApplicability::Documents,
+                        applicability: MetadataFieldApplicability::Documents,
+                        text_kind: MetadataFieldTextKind::SingleLine,
                         default_value: Some("Unknown".to_owned()),
                         visible_on_cards: true,
                     },
                 ),
             ]),
             metadata_order: vec!["field-17".to_owned(), "field-18".to_owned()],
+        }
+    }
+
+    fn from_project(project: &Project, appearance: AppearanceMode) -> Self {
+        let mut metadata_definitions = BTreeMap::new();
+        let mut metadata_order = Vec::new();
+        for definition in project.metadata.iter() {
+            let id = stable_id_string(definition.id.as_bytes());
+            metadata_order.push(id.clone());
+            metadata_definitions.insert(
+                id,
+                MetadataDefinition {
+                    label: definition.label.clone(),
+                    description: definition.description.clone(),
+                    applicability: match definition.applicability {
+                        DomainMetadataApplicability::Groups => MetadataFieldApplicability::Groups,
+                        DomainMetadataApplicability::Documents => {
+                            MetadataFieldApplicability::Documents
+                        }
+                        DomainMetadataApplicability::GroupsAndDocuments => {
+                            MetadataFieldApplicability::GroupsAndDocuments
+                        }
+                    },
+                    text_kind: match definition.text_kind {
+                        DomainMetadataTextKind::SingleLine => MetadataFieldTextKind::SingleLine,
+                        DomainMetadataTextKind::Multiline => MetadataFieldTextKind::Multiline,
+                    },
+                    default_value: definition.default_value.clone(),
+                    visible_on_cards: definition.visible_on_cards,
+                },
+            );
+        }
+        Self {
+            appearance,
+            metadata_definitions,
+            metadata_order,
         }
     }
 
@@ -636,6 +948,8 @@ impl SettingsState {
                         description: field.description.as_deref(),
                         default_value: field.default_value.as_deref(),
                         visible_on_cards: field.visible_on_cards,
+                        applicability: field.applicability,
+                        text_kind: field.text_kind,
                     })
             })
             .collect()
@@ -657,6 +971,7 @@ pub struct GlobalSearchResult {
 #[derive(Debug, Clone, Default)]
 pub struct GlobalSearchState {
     query: String,
+    replacement: String,
     case_sensitive: bool,
     whole_word: bool,
     results: Vec<GlobalSearchResult>,
@@ -692,6 +1007,10 @@ impl GlobalSearchState {
 
     pub fn query(&self) -> &str {
         &self.query
+    }
+
+    pub fn replacement(&self) -> &str {
+        &self.replacement
     }
 
     pub const fn case_sensitive(&self) -> bool {
@@ -793,6 +1112,43 @@ impl ReplacementPreviewState {
                 ),
             ]),
             captured_project_revision: 1,
+        }
+    }
+
+    fn prepare(&mut self, results: &[GlobalSearchResult]) {
+        let mut documents = BTreeMap::<String, Vec<String>>::new();
+        for result in results {
+            documents
+                .entry(result.document_id.clone())
+                .or_default()
+                .push(result.match_id.clone());
+        }
+        self.nodes.clear();
+        let document_ids = documents.keys().cloned().collect::<Vec<_>>();
+        self.nodes.insert(
+            "all-matches".to_owned(),
+            ReplacementNode {
+                children: document_ids.clone(),
+                included: true,
+            },
+        );
+        for (document, matches) in documents {
+            self.nodes.insert(
+                document,
+                ReplacementNode {
+                    children: matches.clone(),
+                    included: true,
+                },
+            );
+            for match_id in matches {
+                self.nodes.insert(
+                    match_id,
+                    ReplacementNode {
+                        children: Vec::new(),
+                        included: true,
+                    },
+                );
+            }
         }
     }
 
@@ -924,14 +1280,41 @@ pub enum RestoreLocation {
 
 #[derive(Debug, Clone)]
 struct DeletedItem {
+    title: String,
+    section_id: String,
+    kind: HierarchyRowKind,
+    former: RestoreLocation,
+    former_index: usize,
     location: RestoreLocation,
     fallback: RestoreLocation,
+    deleted_at_unix_millis: u64,
+    restoring_checkpoint_id: Option<String>,
+    preview_document_id: Option<String>,
+    formatted_preview_available: bool,
+}
+
+/// One Recently Deleted item in deterministic tombstone-ID order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentlyDeletedItem<'a> {
+    pub node_id: &'a str,
+    pub title: &'a str,
+    pub section_id: &'a str,
+    pub kind: HierarchyRowKind,
+    pub former_location: &'a RestoreLocation,
+    pub former_index: usize,
+    pub restore_location: &'a RestoreLocation,
+    pub fallback_location: &'a RestoreLocation,
+    pub deleted_at_unix_millis: u64,
+    pub restoring_checkpoint_id: Option<&'a str>,
+    pub preview_document_id: Option<&'a str>,
+    pub formatted_preview_available: bool,
 }
 
 /// Recently Deleted list/detail presentation state.
 #[derive(Debug, Clone)]
 pub struct RecentlyDeletedState {
     items: BTreeMap<String, DeletedItem>,
+    default_root: String,
 }
 
 impl RecentlyDeletedState {
@@ -940,22 +1323,140 @@ impl RecentlyDeletedState {
             items: BTreeMap::from([(
                 "deleted-part".to_owned(),
                 DeletedItem {
+                    title: "Deleted Part".to_owned(),
+                    section_id: "manuscript".to_owned(),
+                    kind: HierarchyRowKind::Group,
+                    former: RestoreLocation::FormerParent("part-one".to_owned()),
+                    former_index: 0,
                     location: RestoreLocation::FormerParent("part-one".to_owned()),
                     fallback: RestoreLocation::SectionRoot("manuscript".to_owned()),
+                    deleted_at_unix_millis: 0,
+                    restoring_checkpoint_id: None,
+                    preview_document_id: Some("deleted-part".to_owned()),
+                    formatted_preview_available: true,
                 },
             )]),
+            default_root: "manuscript".to_owned(),
         }
     }
 
-    pub const fn has_formatted_preview(&self) -> bool {
-        true
+    fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
+        let project = &snapshot.project;
+        let document_ids = snapshot
+            .documents
+            .iter()
+            .map(|document| stable_id_string(document.document_id.as_bytes()))
+            .collect::<BTreeSet<_>>();
+        let mut items = BTreeMap::new();
+        for (node_id, tombstone) in &project.deleted {
+            let id = stable_id_string(node_id.as_bytes());
+            let former_parent = stable_id_string(tombstone.former_parent.as_bytes());
+            let section_id = stable_id_string(tombstone.section.root_id().as_bytes());
+            let fallback = RestoreLocation::SectionRoot(section_id.clone());
+            let former = RestoreLocation::FormerParent(former_parent.clone());
+            let former_is_live_container = project
+                .nodes
+                .get(tombstone.former_parent)
+                .is_some_and(|node| node.kind.can_have_children());
+            let location = if former_is_live_container {
+                former.clone()
+            } else {
+                fallback.clone()
+            };
+            let preview_document_id = tombstone.subtree.iter().find_map(|deleted| {
+                let NodeKind::Document(document_id) = deleted.node.kind else {
+                    return None;
+                };
+                let id = stable_id_string(document_id.as_bytes());
+                document_ids.contains(&id).then_some(id)
+            });
+            let formatted_preview_available = preview_document_id.is_some();
+            items.insert(
+                id,
+                DeletedItem {
+                    title: tombstone.title.clone(),
+                    section_id,
+                    kind: match tombstone.kind {
+                        NodeKind::Root(_) => HierarchyRowKind::Root,
+                        NodeKind::Group => HierarchyRowKind::Group,
+                        NodeKind::Document(_) => HierarchyRowKind::Document,
+                    },
+                    former,
+                    former_index: tombstone.former_index,
+                    location,
+                    fallback,
+                    deleted_at_unix_millis: tombstone.deleted_at_unix_millis,
+                    restoring_checkpoint_id: tombstone
+                        .restoring_checkpoint
+                        .map(|id| stable_id_string(id.as_bytes())),
+                    preview_document_id,
+                    formatted_preview_available,
+                },
+            );
+        }
+        Self {
+            items,
+            default_root: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
+        }
+    }
+
+    fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        let mut authoritative = Self::from_snapshot(snapshot);
+        for (id, item) in &mut authoritative.items {
+            if let Some(previous) = self.items.get(id)
+                && previous.location == previous.fallback
+            {
+                item.location = item.fallback.clone();
+            }
+        }
+        *self = authoritative;
+    }
+
+    pub fn has_formatted_preview(&self) -> bool {
+        self.items
+            .values()
+            .any(|item| item.formatted_preview_available)
     }
 
     pub fn restore_location(&self, node_id: &str) -> RestoreLocation {
         self.items
             .get(node_id)
             .map(|item| item.location.clone())
-            .unwrap_or_else(|| RestoreLocation::SectionRoot("manuscript".to_owned()))
+            .unwrap_or_else(|| RestoreLocation::SectionRoot(self.default_root.clone()))
+    }
+
+    pub fn items(&self) -> Vec<RecentlyDeletedItem<'_>> {
+        let mut items = self
+            .items
+            .iter()
+            .map(|(id, item)| RecentlyDeletedItem {
+                node_id: id,
+                title: &item.title,
+                section_id: &item.section_id,
+                kind: item.kind,
+                former_location: &item.former,
+                former_index: item.former_index,
+                restore_location: &item.location,
+                fallback_location: &item.fallback,
+                deleted_at_unix_millis: item.deleted_at_unix_millis,
+                restoring_checkpoint_id: item.restoring_checkpoint_id.as_deref(),
+                preview_document_id: item.preview_document_id.as_deref(),
+                formatted_preview_available: item.formatted_preview_available,
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|left, right| {
+            right
+                .deleted_at_unix_millis
+                .cmp(&left.deleted_at_unix_millis)
+                .then_with(|| left.node_id.cmp(right.node_id))
+        });
+        items
+    }
+
+    pub fn formatted_preview_available(&self, node_id: &str) -> bool {
+        self.items
+            .get(node_id)
+            .is_some_and(|item| item.formatted_preview_available)
     }
 
     pub const fn has_purge_action(&self) -> bool {
@@ -984,6 +1485,8 @@ pub struct ExportViewState {
     state: ExportState,
     output_name: String,
     numbering_documents: bool,
+    project_settings: ProjectExportSettings,
+    node_settings: BTreeMap<String, ProjectExportSettings>,
 }
 
 impl Default for ExportViewState {
@@ -992,6 +1495,8 @@ impl Default for ExportViewState {
             state: ExportState::Ready,
             output_name: "manuscript.html".to_owned(),
             numbering_documents: false,
+            project_settings: ProjectExportSettings::default(),
+            node_settings: BTreeMap::new(),
         }
     }
 }
@@ -1023,6 +1528,23 @@ impl ExportViewState {
 
     pub const fn can_reveal_result(&self) -> bool {
         self.can_open_result()
+    }
+
+    pub const fn project_settings(&self) -> ProjectExportSettings {
+        self.project_settings
+    }
+
+    pub fn node_settings(&self, node_id: &str) -> Option<ProjectExportSettings> {
+        self.node_settings.get(node_id).copied()
+    }
+
+    fn reconcile_project(&mut self, project: &Project) {
+        self.project_settings = project.export_settings;
+        self.node_settings = project
+            .nodes
+            .iter()
+            .map(|(id, node)| (stable_id_string(id.as_bytes()), node.export_settings))
+            .collect();
     }
 }
 
@@ -1264,6 +1786,7 @@ pub enum ProjectMessage {
         destination: DragDestination,
     },
     SetGlobalSearchQuery(String),
+    SetGlobalReplacement(String),
     SetGlobalSearchOptions {
         case_sensitive: bool,
         whole_word: bool,
@@ -1369,10 +1892,12 @@ pub enum ProjectEffect {
     BuildReplacementPreview {
         query_generation: u64,
         captured_project_revision: u64,
+        replacement: String,
     },
     ApplyGlobalReplacement {
         captured_project_revision: u64,
         included_match_ids: Vec<String>,
+        replacement: String,
     },
     CreateNamedSnapshot(String),
     RestoreHistory {
@@ -1398,7 +1923,7 @@ pub enum ProjectEffect {
 /// Project-facing presentation model integrated with the mounted editor model.
 #[derive(Debug, Clone)]
 pub struct ProjectWorkspace {
-    fixture: ProjectFixture,
+    source: ProjectWorkspaceSource,
     session: u64,
     project_revision: u64,
     sidebar: SidebarSurface,
@@ -1420,6 +1945,12 @@ pub struct ProjectWorkspace {
     editor: EditorWorkspace,
     pending: BTreeMap<ProjectTask, ProjectTaskTicket>,
     next_request: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProjectWorkspaceSource {
+    Fixture(ProjectFixture),
+    Production,
 }
 
 impl ProjectWorkspace {
@@ -1451,7 +1982,7 @@ impl ProjectWorkspace {
             ..HistoryState::default()
         };
         Self {
-            fixture,
+            source: ProjectWorkspaceSource::Fixture(fixture),
             session: 37,
             project_revision: 1,
             sidebar,
@@ -1484,34 +2015,176 @@ impl ProjectWorkspace {
         }
     }
 
+    /// Hydrates a production workspace from one authoritative project snapshot.
+    pub fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
+        let explorer = ExplorerState::from_project(&snapshot.project);
+        let settings = SettingsState::from_project(&snapshot.project, AppearanceMode::System);
+        let metadata_values = metadata_values_from_project(&snapshot.project);
+        let recently_deleted = RecentlyDeletedState::from_snapshot(snapshot);
+        let mut export = ExportViewState::default();
+        export.reconcile_project(&snapshot.project);
+        let has_live_documents = explorer
+            .nodes
+            .values()
+            .any(|node| node.kind == HierarchyNodeKind::Document);
+        Self {
+            source: ProjectWorkspaceSource::Production,
+            session: 0,
+            project_revision: snapshot.project.revision.value(),
+            sidebar: SidebarSurface::Explorer,
+            explorer,
+            cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
+            cards_drag_destination: None,
+            last_activated_document: None,
+            metadata_values,
+            settings,
+            global_search: GlobalSearchState::default(),
+            replacement_preview: ReplacementPreviewState {
+                open: false,
+                nodes: BTreeMap::new(),
+                captured_project_revision: snapshot.project.revision.value(),
+            },
+            history: HistoryState::default(),
+            recently_deleted,
+            export,
+            save: SaveViewState {
+                state: SaveState::SavedThrough(snapshot.project.revision.value()),
+                recovery_intact: true,
+                close_waiting: false,
+            },
+            content_state: if has_live_documents {
+                ContentState::Ready
+            } else {
+                ContentState::Empty
+            },
+            recovery: RecoveryState {
+                accepted: false,
+                durable_save_completed: false,
+            },
+            modal: None,
+            editor: EditorWorkspace::from_snapshot(snapshot),
+            pending: BTreeMap::new(),
+            next_request: 0,
+        }
+    }
+
+    /// Reconciles authoritative project/document data while retaining live UI state.
+    pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        self.project_revision = snapshot.project.revision.value();
+        self.explorer.reconcile_project(&snapshot.project);
+        self.metadata_values = metadata_values_from_project(&snapshot.project);
+        self.settings = SettingsState::from_project(&snapshot.project, self.settings.appearance);
+        self.recently_deleted.reconcile_snapshot(snapshot);
+        self.export.reconcile_project(&snapshot.project);
+        self.editor.reconcile_snapshot(snapshot);
+
+        if !self.explorer.nodes.contains_key(&self.cards_section) {
+            self.cards_section = stable_id_string(ProjectSection::Manuscript.root_id().as_bytes());
+        }
+        self.cards_drag_destination =
+            self.cards_drag_destination
+                .take()
+                .filter(|destination| match destination {
+                    DragDestination::BeforeSibling(id) | DragDestination::IntoGroup(id) => {
+                        self.explorer.nodes.contains_key(id)
+                    }
+                    DragDestination::EditorPane(_) => true,
+                });
+        if self
+            .last_activated_document
+            .as_deref()
+            .is_some_and(|id| !self.explorer.contains_document(id))
+        {
+            self.last_activated_document = None;
+        }
+        self.global_search
+            .results
+            .retain(|result| self.explorer.contains_document(&result.document_id));
+        if self
+            .history
+            .active_document_filter
+            .as_deref()
+            .is_some_and(|id| !self.explorer.contains_document(id))
+        {
+            self.history.active_document_filter = None;
+        }
+        if matches!(
+            &self.modal,
+            Some(ProjectModal::DeleteMetadataField { field_id })
+                if !self.settings.metadata_definitions.contains_key(field_id)
+        ) {
+            self.modal = None;
+        }
+        self.pending
+            .retain(|_, ticket| ticket.captured_project_revision == self.project_revision);
+    }
+
     pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
-        match (self.fixture, appearance) {
-            (ProjectFixture::Explorer, ResolvedAppearance::Light) => "editor-single-light",
-            (ProjectFixture::Explorer, ResolvedAppearance::Dark) => "editor-single-dark",
-            (ProjectFixture::Cards, ResolvedAppearance::Light) => "cards-light",
-            (ProjectFixture::Cards, ResolvedAppearance::Dark) => "cards-dark",
-            (ProjectFixture::GlobalSearch, ResolvedAppearance::Light) => "global-search-light",
-            (ProjectFixture::GlobalSearch, ResolvedAppearance::Dark) => "global-search-dark",
-            (ProjectFixture::History, ResolvedAppearance::Light) => "history-light",
-            (ProjectFixture::History, ResolvedAppearance::Dark) => "history-dark",
-            (ProjectFixture::RecentlyDeleted, ResolvedAppearance::Light) => {
-                "recently-deleted-light"
+        match (self.source, appearance) {
+            (ProjectWorkspaceSource::Production, _) => {
+                panic!("production workspaces do not have fixture references")
             }
-            (ProjectFixture::RecentlyDeleted, ResolvedAppearance::Dark) => "recently-deleted-dark",
-            (ProjectFixture::SettingsAppearance, ResolvedAppearance::Light) => {
-                "settings-appearance-light"
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::Explorer),
+                ResolvedAppearance::Light,
+            ) => "editor-single-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::Explorer),
+                ResolvedAppearance::Dark,
+            ) => "editor-single-dark",
+            (ProjectWorkspaceSource::Fixture(ProjectFixture::Cards), ResolvedAppearance::Light) => {
+                "cards-light"
             }
-            (ProjectFixture::SettingsAppearance, ResolvedAppearance::Dark) => {
-                "settings-appearance-dark"
+            (ProjectWorkspaceSource::Fixture(ProjectFixture::Cards), ResolvedAppearance::Dark) => {
+                "cards-dark"
             }
-            (ProjectFixture::Export, ResolvedAppearance::Light) => {
-                "export-project-output-controls-light"
-            }
-            (ProjectFixture::Export, ResolvedAppearance::Dark) => {
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::GlobalSearch),
+                ResolvedAppearance::Light,
+            ) => "global-search-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::GlobalSearch),
+                ResolvedAppearance::Dark,
+            ) => "global-search-dark",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::History),
+                ResolvedAppearance::Light,
+            ) => "history-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::History),
+                ResolvedAppearance::Dark,
+            ) => "history-dark",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::RecentlyDeleted),
+                ResolvedAppearance::Light,
+            ) => "recently-deleted-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::RecentlyDeleted),
+                ResolvedAppearance::Dark,
+            ) => "recently-deleted-dark",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::SettingsAppearance),
+                ResolvedAppearance::Light,
+            ) => "settings-appearance-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::SettingsAppearance),
+                ResolvedAppearance::Dark,
+            ) => "settings-appearance-dark",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::Export),
+                ResolvedAppearance::Light,
+            ) => "export-project-output-controls-light",
+            (ProjectWorkspaceSource::Fixture(ProjectFixture::Export), ResolvedAppearance::Dark) => {
                 "export-project-output-controls-dark"
             }
-            (ProjectFixture::ErrorRecovery, ResolvedAppearance::Light) => "error-recovery-light",
-            (ProjectFixture::ErrorRecovery, ResolvedAppearance::Dark) => "error-recovery-dark",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::ErrorRecovery),
+                ResolvedAppearance::Light,
+            ) => "error-recovery-light",
+            (
+                ProjectWorkspaceSource::Fixture(ProjectFixture::ErrorRecovery),
+                ResolvedAppearance::Dark,
+            ) => "error-recovery-dark",
         }
     }
 
@@ -1538,6 +2211,9 @@ impl ProjectWorkspace {
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
+            definitions: &self.settings.metadata_definitions,
+            field_order: &self.settings.metadata_order,
+            values: &self.metadata_values,
         }
     }
 
@@ -1745,15 +2421,17 @@ impl ProjectWorkspace {
                     return Vec::new();
                 };
                 field.applicability = match (field.applicability, applies_to_documents) {
-                    (MetadataApplicability::GroupsAndDocuments, false) => {
-                        MetadataApplicability::Groups
+                    (MetadataFieldApplicability::GroupsAndDocuments, false) => {
+                        MetadataFieldApplicability::Groups
                     }
-                    (MetadataApplicability::Groups, true)
-                    | (MetadataApplicability::Documents, true)
-                    | (MetadataApplicability::None, true) => {
-                        MetadataApplicability::GroupsAndDocuments
+                    (MetadataFieldApplicability::Groups, true)
+                    | (MetadataFieldApplicability::Documents, true)
+                    | (MetadataFieldApplicability::None, true) => {
+                        MetadataFieldApplicability::GroupsAndDocuments
                     }
-                    (MetadataApplicability::Documents, false) => MetadataApplicability::None,
+                    (MetadataFieldApplicability::Documents, false) => {
+                        MetadataFieldApplicability::None
+                    }
                     (current, _) => current,
                 };
                 vec![ProjectEffect::SetMetadataApplicability {
@@ -1811,7 +2489,12 @@ impl ProjectWorkspace {
             }
             ProjectMessage::ActivateCard(document_id) => self.activate_card(document_id),
             ProjectMessage::SetCardsSection(section) => {
-                if matches!(section.as_str(), "manuscript" | "research") {
+                if self
+                    .explorer
+                    .nodes
+                    .get(&section)
+                    .is_some_and(|node| node.kind == HierarchyNodeKind::Root)
+                {
                     self.cards_section = section;
                 }
                 Vec::new()
@@ -1875,6 +2558,10 @@ impl ProjectWorkspace {
                 self.global_search.error = None;
                 vec![self.search_effect()]
             }
+            ProjectMessage::SetGlobalReplacement(replacement) => {
+                self.global_search.replacement = replacement;
+                Vec::new()
+            }
             ProjectMessage::SetGlobalSearchOptions {
                 case_sensitive,
                 whole_word,
@@ -1897,9 +2584,14 @@ impl ProjectWorkspace {
             ProjectMessage::OpenReplacementPreview => {
                 self.replacement_preview.open = true;
                 self.replacement_preview.captured_project_revision = self.project_revision;
+                if matches!(self.source, ProjectWorkspaceSource::Production) {
+                    self.replacement_preview
+                        .prepare(&self.global_search.results);
+                }
                 vec![ProjectEffect::BuildReplacementPreview {
                     query_generation: self.global_search.query_generation,
                     captured_project_revision: self.project_revision,
+                    replacement: self.global_search.replacement.clone(),
                 }]
             }
             ProjectMessage::SetReplacementIncluded { node_id, included } => {
@@ -1915,6 +2607,7 @@ impl ProjectWorkspace {
                         .into_iter()
                         .map(str::to_owned)
                         .collect(),
+                    replacement: self.global_search.replacement.clone(),
                 }]
             }
             ProjectMessage::SetHistoryDocumentFilter(document_id) => {
@@ -2071,22 +2764,31 @@ impl ProjectWorkspace {
     }
 
     pub(crate) const fn fixture(&self) -> ProjectFixture {
-        self.fixture
+        match self.source {
+            ProjectWorkspaceSource::Fixture(fixture) => fixture,
+            ProjectWorkspaceSource::Production => {
+                panic!("production workspace has no visual fixture")
+            }
+        }
     }
 
-    fn activate_card(&mut self, document_id: String) -> Vec<ProjectEffect> {
-        let Some(node) = self.explorer.nodes.get(&document_id) else {
+    fn activate_card(&mut self, node_id: String) -> Vec<ProjectEffect> {
+        let Some(node) = self.explorer.nodes.get(&node_id) else {
             return Vec::new();
         };
         if node.kind != HierarchyNodeKind::Document {
-            self.explorer.toggle_expanded(&document_id);
+            self.explorer.toggle_expanded(&node_id);
             return Vec::new();
         }
-        let pane = if node.section_id == "research" {
+        let pane = if is_research_section(&node.section_id) {
             EditorPane::Companion
         } else {
             EditorPane::Primary
         };
+        let document_id = node
+            .document_id
+            .clone()
+            .expect("a document hierarchy node has a document ID");
         self.last_activated_document = Some(document_id.clone());
         let _ = self.editor.update(EditorMessage::OpenTab {
             pane,
@@ -2100,17 +2802,21 @@ impl ProjectWorkspace {
 
     fn open_hierarchy_node(
         &mut self,
-        document_id: String,
+        node_id: String,
         requested_pane: Option<EditorPane>,
     ) -> Vec<ProjectEffect> {
-        let Some(node) = self.explorer.nodes.get(&document_id) else {
+        let Some(node) = self.explorer.nodes.get(&node_id) else {
             return Vec::new();
         };
         if node.kind != HierarchyNodeKind::Document {
             return Vec::new();
         }
+        let document_id = node
+            .document_id
+            .clone()
+            .expect("a document hierarchy node has a document ID");
         let pane = requested_pane.unwrap_or_else(|| {
-            if node.section_id == "research" {
+            if is_research_section(&node.section_id) {
                 EditorPane::Companion
             } else {
                 EditorPane::Primary
@@ -2136,18 +2842,20 @@ impl ProjectWorkspace {
             return Vec::new();
         }
         if let DragDestination::EditorPane(pane) = destination {
-            let title = self
-                .explorer
-                .title(&source_id)
-                .unwrap_or(&source_id)
-                .to_owned();
+            let Some(node) = self.explorer.nodes.get(&source_id) else {
+                return Vec::new();
+            };
+            let Some(document_id) = node.document_id.clone() else {
+                return Vec::new();
+            };
+            let title = node.title.clone();
             let _ = self.editor.update(EditorMessage::OpenTab {
                 pane,
-                tab: TabSpec::new(source_id.clone(), title),
+                tab: TabSpec::new(document_id.clone(), title),
             });
             return match pane {
-                EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(source_id)],
-                EditorPane::Companion => vec![ProjectEffect::OpenDocumentInCompanion(source_id)],
+                EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(document_id)],
+                EditorPane::Companion => vec![ProjectEffect::OpenDocumentInCompanion(document_id)],
             };
         }
         let node_ids = if self.explorer.selected.contains(&source_id) {
@@ -2355,6 +3063,37 @@ fn same_task_family(left: &ProjectTask, right: &ProjectTask) -> bool {
             | (ProjectTask::AcceptRecovery, ProjectTask::AcceptRecovery)
             | (ProjectTask::PersistWorkspace, ProjectTask::PersistWorkspace)
     )
+}
+
+fn stable_id_string(bytes: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+
+    let mut serialized = String::with_capacity(32);
+    for byte in bytes {
+        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    serialized
+}
+
+fn metadata_values_from_project(project: &Project) -> BTreeMap<(String, String), String> {
+    project
+        .nodes
+        .iter()
+        .flat_map(|(node_id, node)| {
+            let node_id = stable_id_string(node_id.as_bytes());
+            node.metadata.iter().map(move |(field_id, value)| {
+                (
+                    (node_id.clone(), stable_id_string(field_id.as_bytes())),
+                    value.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+fn is_research_section(section_id: &str) -> bool {
+    section_id == "research"
+        || section_id == stable_id_string(ProjectSection::Research.root_id().as_bytes())
 }
 
 #[cfg(test)]

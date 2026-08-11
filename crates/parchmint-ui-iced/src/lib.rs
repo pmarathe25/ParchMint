@@ -1,5 +1,8 @@
 //! Iced desktop presentation state for the shell and editor workspace.
 
+mod async_service_feeds;
+pub mod components;
+pub mod design_tokens;
 mod editor_workspace;
 #[allow(
     dead_code,
@@ -12,6 +15,7 @@ mod iced_editor_surface;
 )]
 mod iced_project_surface;
 mod native;
+mod project_runtime;
 mod project_workspace;
 mod visual_verification;
 

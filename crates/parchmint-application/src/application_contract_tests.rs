@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -302,6 +305,59 @@ struct RecordingSave {
     requests: Mutex<Vec<SaveRequest>>,
 }
 
+#[derive(Debug, Default)]
+struct CompletedSave {
+    requests: Mutex<Vec<SaveRequest>>,
+    next: AtomicU64,
+}
+
+impl SaveCoordinator for CompletedSave {
+    fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
+        self.requests.lock().unwrap().push(request.clone());
+        let acknowledgement = SavedAcknowledgement {
+            ticket_id: SaveTicket::pending(id).id(),
+            requested_revisions: request.revisions.clone(),
+            written_revisions: request.revisions,
+            checkpoint: parchmint_domain::CheckpointId::from_bytes([id as u8; 16]),
+        };
+        Ok(SaveTicket::completed(id, acknowledgement))
+    }
+
+    fn status(&self) -> SaveStatusSnapshot {
+        SaveStatusSnapshot::default()
+    }
+
+    fn reconcile_open(&self) -> Result<parchmint_save::OpenReconciliation, SaveError> {
+        Ok(parchmint_save::OpenReconciliation::default())
+    }
+
+    fn cancel_pending(&self, _ticket: SaveTicket) -> parchmint_save::CancelOutcome {
+        parchmint_save::CancelOutcome::TooLate
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailingSave;
+
+impl SaveCoordinator for FailingSave {
+    fn request(&self, _request: SaveRequest) -> Result<SaveTicket, SaveError> {
+        Err(SaveError::WorkerStopped)
+    }
+
+    fn status(&self) -> SaveStatusSnapshot {
+        SaveStatusSnapshot::default()
+    }
+
+    fn reconcile_open(&self) -> Result<parchmint_save::OpenReconciliation, SaveError> {
+        Ok(parchmint_save::OpenReconciliation::default())
+    }
+
+    fn cancel_pending(&self, _ticket: SaveTicket) -> parchmint_save::CancelOutcome {
+        parchmint_save::CancelOutcome::WorkerStopped
+    }
+}
+
 impl SaveCoordinator for RecordingSave {
     fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError> {
         self.requests.lock().unwrap().push(request);
@@ -528,6 +584,249 @@ fn project_commands_undo_redo_with_new_revisions_checkpoints_and_redo_invalidati
 }
 
 #[test]
+fn create_document_publishes_tree_and_default_body_at_one_boundary() {
+    let (dispatcher, documents) = setup();
+    let node = parchmint_domain::NodeId::from_bytes(stable_id(31));
+    let document = DocumentId::from_bytes(stable_id(32));
+
+    let result = wait(dispatcher.execute(ProjectCommand::create_document(
+        node,
+        document,
+        group_id(),
+        0,
+        "New Chapter",
+    )))
+    .expect("document creation succeeds");
+
+    assert_eq!(
+        dispatcher.project().unwrap().nodes.get(node).unwrap().kind,
+        parchmint_domain::NodeKind::Document(document)
+    );
+    assert_eq!(documents.snapshot(document).unwrap().body, "<p></p>");
+    assert_eq!(
+        documents.snapshot(document).unwrap().visibility,
+        DocumentVisibility::Open
+    );
+    assert!(result.dirty_resources.contains(Resource::Manifest));
+}
+
+#[test]
+fn create_document_state_failure_keeps_the_project_tree_unchanged() {
+    let (dispatcher, documents) = setup();
+    let before = dispatcher.project().unwrap();
+    let node = parchmint_domain::NodeId::from_bytes(stable_id(33));
+
+    let result = wait(dispatcher.execute(ProjectCommand::create_document(
+        node,
+        open_document(),
+        group_id(),
+        0,
+        "Conflicting Chapter",
+    )));
+
+    assert!(matches!(
+        result,
+        Err(ApplicationError::DuplicateDocument { document }) if document == open_document()
+    ));
+    assert_eq!(dispatcher.project().unwrap(), before);
+    assert!(dispatcher.project_undo_entries().unwrap().is_empty());
+    assert_eq!(documents.snapshots().unwrap().len(), 2);
+}
+
+fn persisted_project(
+    title: &str,
+    body: &str,
+) -> (
+    Project,
+    Vec<DocumentSnapshot>,
+    parchmint_project_format::CanonicalProjectEncoding,
+) {
+    let node = parchmint_domain::NodeId::from_bytes(stable_id(41));
+    let document = DocumentId::from_bytes(stable_id(42));
+    let project = Project::new(project_id());
+    let project = parchmint_domain::apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::create_group(
+            group_id(),
+            parchmint_domain::NodeId::manuscript_root(),
+            0,
+            "Draft",
+        ),
+    )
+    .unwrap()
+    .project;
+    let mut project = parchmint_domain::apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::create_document(node, document, group_id(), 0, "Chapter"),
+    )
+    .unwrap()
+    .project;
+    project.display_title = title.to_owned();
+    let documents = vec![DocumentSnapshot {
+        document_id: document,
+        body: body.to_owned(),
+        revision: EditorRevision::from(1),
+        visibility: DocumentVisibility::Open,
+    }];
+    let encoding = parchmint_project_format::ProjectFormatCodec::default()
+        .encode_domain_project_with_frontier(
+            &project,
+            &BTreeMap::from([(document, body.to_owned())]),
+            &BTreeMap::new(),
+            &Default::default(),
+            &parchmint_project_format::CanonicalPersistenceFrontier {
+                recovery_project_revision: 1,
+                document_revisions: BTreeMap::from([(document, 1)]),
+            },
+        )
+        .unwrap();
+    (project, documents, encoding)
+}
+
+fn recovery_base_for(
+    encoding: &parchmint_project_format::CanonicalProjectEncoding,
+) -> RecoveryBaseSnapshot {
+    RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::from(
+                encoding.persistence_frontier.recovery_project_revision,
+            ),
+            encoding
+                .persistence_frontier
+                .document_revisions
+                .iter()
+                .map(|(document, revision)| {
+                    (
+                        *document,
+                        parchmint_recovery_api::DocumentRevision::from(*revision),
+                    )
+                })
+                .collect(),
+        ),
+        hashes: encoding
+            .resources
+            .values()
+            .map(|resource| (resource.resource.clone(), resource.hash))
+            .collect(),
+    }
+}
+
+fn restore_plan(
+    encoding: &parchmint_project_format::CanonicalProjectEncoding,
+) -> parchmint_history_api::RestorePlan {
+    parchmint_history_api::RestorePlan::new(
+        parchmint_domain::CheckpointId::from_bytes([77; 16]),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.hash))
+            .collect(),
+        AtomicWritePlan::new(
+            encoding
+                .resources
+                .values()
+                .map(|resource| parchmint_project_repository::StagedResource {
+                    path: resource.path.as_str().to_owned(),
+                    bytes: resource.bytes.clone(),
+                })
+                .collect(),
+        ),
+    )
+    .unwrap()
+}
+
+#[test]
+fn history_restore_rehydrates_authoritative_state_after_restoration_checkpoint() {
+    let (current_project, current_documents, current_encoding) =
+        persisted_project("Current", "<p>current</p>");
+    let (_, _, historical_encoding) = persisted_project("Historical", "<p>historical</p>");
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project.clone(),
+        documents.clone(),
+    ));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents.clone(),
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+
+    let restored = coordinator
+        .restore_history(restore_plan(&historical_encoding))
+        .expect("History restore succeeds");
+
+    assert_eq!(
+        restored.source,
+        parchmint_domain::CheckpointId::from_bytes([77; 16])
+    );
+    assert_eq!(commands.project().unwrap().display_title, "Historical");
+    assert_eq!(
+        commands.project().unwrap().revision,
+        current_project.revision.next()
+    );
+    assert_eq!(documents.snapshots().unwrap()[0].body, "<p>historical</p>");
+    assert!(!commands.undo_state().can_undo);
+    let requests = save.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].checkpoint.category,
+        CheckpointCategory::Restoration
+    );
+}
+
+#[test]
+fn history_restore_save_failure_keeps_current_in_memory_project_open() {
+    let (current_project, current_documents, current_encoding) =
+        persisted_project("Current", "<p>current</p>");
+    let (_, _, historical_encoding) = persisted_project("Historical", "<p>historical</p>");
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project.clone(),
+        documents.clone(),
+    ));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(FailingSave),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents.clone(),
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+
+    assert!(
+        coordinator
+            .restore_history(restore_plan(&historical_encoding))
+            .is_err()
+    );
+    assert_eq!(commands.project().unwrap(), current_project);
+    assert_eq!(documents.snapshots().unwrap()[0].body, "<p>current</p>");
+}
+
+#[test]
 fn unopened_document_commands_create_a_hidden_session_and_use_document_undo() {
     let (dispatcher, documents) = setup();
     let result = dispatcher
@@ -616,6 +915,39 @@ fn save_requests_capture_open_and_closed_revisions_at_one_boundary() {
         2
     );
     assert_eq!(captured.checkpoint_groups.len(), 2);
+}
+
+#[test]
+fn save_acknowledgement_retires_only_the_exact_captured_dirty_frontier() {
+    let (dispatcher, _) = setup();
+    dispatcher
+        .execute_document(DocumentCommand {
+            document_id: open_document(),
+            observed_revision: EditorRevision::from(0),
+            body: "revision one".into(),
+        })
+        .unwrap();
+    let revision_one = dispatcher.capture_save_request().unwrap();
+    dispatcher
+        .execute_document(DocumentCommand {
+            document_id: open_document(),
+            observed_revision: EditorRevision::from(1),
+            body: "revision two".into(),
+        })
+        .unwrap();
+    let revision_two = dispatcher.capture_save_request().unwrap();
+
+    let after_one = dispatcher.acknowledge_save(&revision_one).unwrap();
+    assert!(after_one.contains(Resource::Document(open_document())));
+    assert_eq!(dispatcher.pending_checkpoints().unwrap().len(), 1);
+    assert!(matches!(
+        dispatcher.acknowledge_save(&revision_one),
+        Err(ApplicationError::StaleSaveAcknowledgement)
+    ));
+
+    let after_two = dispatcher.acknowledge_save(&revision_two).unwrap();
+    assert!(after_two.iter().next().is_none());
+    assert!(dispatcher.pending_checkpoints().unwrap().is_empty());
 }
 
 #[test]

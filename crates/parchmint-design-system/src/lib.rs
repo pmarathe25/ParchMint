@@ -1,5 +1,7 @@
 //! Deterministic, framework-neutral data generated from ParchMint's UI source.
 
+pub mod generated_penpot_tokens;
+
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 
@@ -7,6 +9,37 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const REQUIRED_SEMANTIC_ROLES: [&str; 2] = ["color.surface.application", "color.text.primary"];
+
+/// Returns a checked-in production token record by semantic role.
+pub fn production_token(name: &str) -> Option<&'static generated_penpot_tokens::GeneratedToken> {
+    generated_penpot_tokens::TOKENS
+        .iter()
+        .find(|token| token.name == name)
+}
+
+/// Checks that the checked-in generated data remains a complete two-appearance
+/// semantic foundation. The source archive is intentionally not opened here.
+pub fn validate_production_tokens() -> Result<(), GenerationError> {
+    for role in generated_penpot_tokens::REQUIRED_SEMANTIC_ROLES {
+        let Some(token) = production_token(role) else {
+            return Err(GenerationError::MissingSemanticRole {
+                role: (*role).to_owned(),
+            });
+        };
+        if token.light.is_empty() || token.dark.is_empty() {
+            return Err(GenerationError::MissingThemeRole {
+                role: (*role).to_owned(),
+                appearance: if token.light.is_empty() {
+                    "Light"
+                } else {
+                    "Dark"
+                }
+                .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// The source material used to generate a design-system snapshot.
 #[derive(Clone, Debug)]

@@ -14,7 +14,8 @@ use parchmint_recovery_api::{
     RecoveryRevisionVector, VersionedRecoveryPayload,
 };
 use parchmint_save::{
-    SaveCoordinator, SaveRequest, SaveRevisionVector, SaveState, SaveTicket, SavedAcknowledgement,
+    CancelOutcome, SaveCoordinator, SaveRequest, SaveRevisionVector, SaveState, SaveTicket,
+    SaveTicketId, SavedAcknowledgement,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +48,7 @@ impl Default for EditorPersistenceStatus {
 #[derive(Debug)]
 struct SaveQueue {
     latest: Option<(SaveRevisionVector, SaveTicket)>,
+    in_flight: std::collections::BTreeMap<SaveTicketId, (SaveRevisionVector, SaveTicket)>,
     max_depth: usize,
     submitted: usize,
     coalesced: usize,
@@ -82,6 +84,7 @@ impl EditorPersistenceCoordinator {
             status: Mutex::new(EditorPersistenceStatus::default()),
             queue: Mutex::new(SaveQueue {
                 latest: None,
+                in_flight: Default::default(),
                 max_depth: 0,
                 submitted: 0,
                 coalesced: 0,
@@ -98,6 +101,7 @@ impl EditorPersistenceCoordinator {
             status: Mutex::new(EditorPersistenceStatus::default()),
             queue: Mutex::new(SaveQueue {
                 latest: None,
+                in_flight: Default::default(),
                 max_depth: 0,
                 submitted: 0,
                 coalesced: 0,
@@ -205,14 +209,19 @@ impl EditorPersistenceCoordinator {
                 queue.coalesced += 1;
                 ticket
             } else {
-                if let Some((_, ticket)) = &queue.latest
+                if let Some(ticket) = queue.latest.as_ref().map(|(_, ticket)| ticket.clone())
                     && ticket.try_result().is_none()
                 {
-                    self.recovery.cancel_save(ticket.clone());
+                    if self.recovery.cancel_save(ticket.clone()) == CancelOutcome::Cancelled {
+                        queue.in_flight.remove(&ticket.id());
+                    }
                     queue.coalesced += 1;
                 }
                 let ticket = self.recovery.submit_save(projection, request.clone())?;
                 queue.latest = Some((request.revisions.clone(), ticket.clone()));
+                queue
+                    .in_flight
+                    .insert(ticket.id(), (request.revisions.clone(), ticket.clone()));
                 queue.max_depth = queue.max_depth.max(1);
                 queue.submitted += 1;
                 ticket
@@ -240,16 +249,24 @@ impl EditorPersistenceCoordinator {
         status.error = Some(error);
     }
 
+    pub fn retire_recovery_through(
+        &self,
+        base: &parchmint_recovery_api::RecoveryBaseSnapshot,
+    ) -> Result<(), EditorPersistenceError> {
+        self.recovery.retire_recovery_through(base)
+    }
+
     pub fn acknowledge_save(
         &self,
         acknowledgement: &SavedAcknowledgement,
     ) -> Result<(), EditorPersistenceError> {
-        let (requested, ticket) = self
+        let mut queue = self
             .queue
             .lock()
-            .map_err(|_| EditorPersistenceError::StateUnavailable)?
-            .latest
-            .clone()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        let (requested, ticket) = queue
+            .in_flight
+            .remove(&acknowledgement.ticket_id)
             .ok_or(EditorPersistenceError::RevisionMismatch)?;
         if acknowledgement.ticket_id != ticket.id()
             || acknowledgement.requested_revisions != requested
@@ -260,15 +277,23 @@ impl EditorPersistenceCoordinator {
         {
             return Err(EditorPersistenceError::RevisionMismatch);
         }
-        self.queue
-            .lock()
-            .map_err(|_| EditorPersistenceError::StateUnavailable)?
-            .latest = None;
+        if queue
+            .latest
+            .as_ref()
+            .is_some_and(|(_, latest)| latest.id() == acknowledgement.ticket_id)
+        {
+            queue.latest = None;
+        }
+        let active = queue
+            .latest
+            .as_ref()
+            .map(|(revisions, _)| revisions.clone());
+        drop(queue);
         let mut status = self
             .status
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
-        status.active = None;
+        status.active = active;
         status.saved_through = Some(acknowledgement.written_revisions.clone());
         status.error = None;
         status.state = if status

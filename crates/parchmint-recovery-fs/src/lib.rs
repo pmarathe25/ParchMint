@@ -791,6 +791,7 @@ enum WireResourceId {
     Styles,
     Dictionary,
     Document,
+    DocumentById(String),
     Annotations(String),
 }
 
@@ -801,6 +802,9 @@ fn wire_resource(resource: &ResourceId) -> WireResourceId {
         ResourceId::Styles => WireResourceId::Styles,
         ResourceId::Dictionary => WireResourceId::Dictionary,
         ResourceId::Document => WireResourceId::Document,
+        ResourceId::DocumentById { document_id } => {
+            WireResourceId::DocumentById(document_id.clone())
+        }
         ResourceId::Annotations { document_id } => WireResourceId::Annotations(document_id.clone()),
     }
 }
@@ -812,6 +816,7 @@ fn recovery_resource(resource: WireResourceId) -> ResourceId {
         WireResourceId::Styles => ResourceId::Styles,
         WireResourceId::Dictionary => ResourceId::Dictionary,
         WireResourceId::Document => ResourceId::Document,
+        WireResourceId::DocumentById(document_id) => ResourceId::DocumentById { document_id },
         WireResourceId::Annotations(document_id) => ResourceId::Annotations { document_id },
     }
 }
@@ -915,6 +920,8 @@ struct WireCheckpointIntent {
     project: [u8; 16],
     revisions: WireSaveRevisionVector,
     writes: Vec<WireStagedResource>,
+    #[serde(default)]
+    deletions: Vec<String>,
     checkpoint: WireCheckpointInput,
     priority: WireSavePriority,
     state: WireCheckpointIntentState,
@@ -934,6 +941,7 @@ impl From<&CheckpointIntent> for WireCheckpointIntent {
                     bytes: write.bytes.clone(),
                 })
                 .collect(),
+            deletions: intent.writes.deletions.clone(),
             checkpoint: WireCheckpointInput::from(&intent.checkpoint),
             priority: WireSavePriority::from(intent.priority),
             state: WireCheckpointIntentState::from(&intent.state),
@@ -950,7 +958,7 @@ impl TryFrom<WireCheckpointIntent> for CheckpointIntent {
         let intent = Self {
             project: ProjectId::from_bytes(wire.project),
             revisions: SaveRevisionVector::try_from(wire.revisions)?,
-            writes: AtomicWritePlan::new(
+            writes: AtomicWritePlan::with_deletions(
                 wire.writes
                     .into_iter()
                     .map(|write| parchmint_history_api::StagedResource {
@@ -958,6 +966,7 @@ impl TryFrom<WireCheckpointIntent> for CheckpointIntent {
                         bytes: write.bytes,
                     })
                     .collect(),
+                wire.deletions,
             ),
             checkpoint,
             priority: SavePriority::from(wire.priority),
@@ -1283,6 +1292,12 @@ fn validate_write_paths(plan: &AtomicWritePlan) -> Result<(), String> {
         let path = CanonicalRelativePath::parse(&write.path).map_err(|error| error.to_string())?;
         if paths.insert(path, ()).is_some() {
             return Err("checkpoint intent repeats a write path".into());
+        }
+    }
+    for deletion in &plan.deletions {
+        let path = CanonicalRelativePath::parse(deletion).map_err(|error| error.to_string())?;
+        if paths.insert(path, ()).is_some() {
+            return Err("checkpoint intent repeats or writes and deletes the same path".into());
         }
     }
     Ok(())

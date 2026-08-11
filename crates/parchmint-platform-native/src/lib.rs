@@ -14,14 +14,15 @@ pub mod testing;
 use std::{
     error::Error,
     fmt,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
 };
 
 use async_task::dispatch;
 use parchmint_platform_api::{
     ApplicationPathService, ApplicationPaths, AsyncResult, ClipboardContent, ClipboardFormats,
     ClipboardService, DialogService, ExternalOpenService, MenuBinding, MenuService, PathDialog,
-    PlatformError, SemanticMenu, SystemAppearance, SystemAppearanceService,
+    PlatformError, SemanticMenu, SystemAppearance, SystemAppearanceEvent,
+    SystemAppearanceEventService, SystemAppearanceEventStream, SystemAppearanceService,
     UntrustedClipboardContent, UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
     WindowResult,
 };
@@ -57,6 +58,7 @@ pub struct NativePlatform {
     pub clipboard: Arc<dyn ClipboardService>,
     pub external_open: Arc<dyn ExternalOpenService>,
     pub appearance: Arc<dyn SystemAppearanceService>,
+    pub appearance_events: Arc<dyn SystemAppearanceEventService>,
     pub application_paths: Arc<dyn ApplicationPathService>,
     iced_registry: iced_adapter::IcedWindowRegistry,
 }
@@ -84,6 +86,7 @@ impl NativePlatform {
             clipboard: services.clone(),
             external_open: services.clone(),
             appearance: services.clone(),
+            appearance_events: services.clone(),
             application_paths: services.clone(),
             iced_registry: iced_adapter::IcedWindowRegistry::new(registry),
         };
@@ -101,6 +104,8 @@ struct NativeServices {
     backend: Arc<dyn NativeBackend>,
     registry: CapabilityRegistry,
     next_menu_binding: AtomicU64,
+    next_appearance_generation: AtomicU64,
+    appearance_listeners: Mutex<Vec<mpsc::Sender<SystemAppearanceEvent>>>,
 }
 
 impl NativeServices {
@@ -109,6 +114,20 @@ impl NativeServices {
             backend,
             registry,
             next_menu_binding: AtomicU64::new(1),
+            next_appearance_generation: AtomicU64::new(1),
+            appearance_listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn publish_appearance(&self, appearance: SystemAppearance) {
+        let event = SystemAppearanceEvent {
+            generation: self
+                .next_appearance_generation
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            appearance,
+        };
+        if let Ok(mut listeners) = self.appearance_listeners.lock() {
+            listeners.retain(|listener| listener.send(event).is_ok());
         }
     }
 
@@ -206,6 +225,20 @@ impl ApplicationPathService for NativeServices {
 impl SystemAppearanceService for NativeServices {
     fn current_appearance(&self) -> AsyncResult<SystemAppearance> {
         self.spawn_global(|backend| backend.appearance())
+    }
+}
+
+impl SystemAppearanceEventService for NativeServices {
+    fn subscribe(&self) -> Result<SystemAppearanceEventStream, PlatformError> {
+        let (sender, stream) = SystemAppearanceEventStream::channel();
+        self.appearance_listeners
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "subscribe to system appearance",
+                reason: "appearance listener registry is unavailable".into(),
+            })?
+            .push(sender);
+        Ok(stream)
     }
 }
 

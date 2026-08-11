@@ -235,6 +235,74 @@ fn persistence_coordinator_public_contract_reconciles_unacknowledged_batches_exa
     );
 }
 
+#[test]
+fn persistence_coordinator_keeps_distinct_recovery_hashes_for_multiple_documents() {
+    let journal = Arc::new(ContractJournal::default());
+    let first = document_id();
+    let second = DocumentId::from_bytes([2; 16]);
+    let first_resource = document_resource_id(first);
+    let second_resource = document_resource_id(second);
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(ProjectRevision::default(), BTreeMap::new()),
+        hashes: BTreeMap::from([
+            (first_resource.clone(), hash("first base")),
+            (second_resource.clone(), hash("second base")),
+        ]),
+    };
+    let coordinator = EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base);
+    let projection = CanonicalProjection::new(first, revision(1), "first edit", vec![], vec![], 2);
+    let revisions = SaveRevisionVector {
+        project_revision: ProjectRevision::default(),
+        open_documents: BTreeMap::from([(first, DocumentRevision::from(1))]),
+        closed_resources: BTreeMap::new(),
+        canonical_hashes: BTreeMap::new(),
+        generation: SaveGeneration::from(1),
+    };
+
+    let durable = coordinator
+        .persist_projection(&projection, &revisions, payload("first edit"))
+        .expect("first document recovery should become durable");
+    coordinator
+        .acknowledge_recovery(durable)
+        .expect("durable recovery should advance the frontier");
+    let second_projection =
+        CanonicalProjection::new(second, revision(1), "second edit", vec![], vec![], 2);
+    let second_revisions = SaveRevisionVector {
+        project_revision: ProjectRevision::default(),
+        open_documents: BTreeMap::from([(second, DocumentRevision::from(1))]),
+        closed_resources: BTreeMap::new(),
+        canonical_hashes: BTreeMap::new(),
+        generation: SaveGeneration::from(2),
+    };
+    let durable = coordinator
+        .persist_projection(
+            &second_projection,
+            &second_revisions,
+            payload("second edit"),
+        )
+        .expect("second document recovery should become durable");
+    coordinator
+        .acknowledge_recovery(durable)
+        .expect("second durable recovery should advance the frontier");
+
+    let records = journal.records.lock().unwrap();
+    let RecoveryRecord::Complete(first_batch) = &records[0] else {
+        panic!("contract journal records complete batches")
+    };
+    let RecoveryRecord::Complete(second_batch) = &records[1] else {
+        panic!("contract journal records complete batches")
+    };
+    assert_eq!(first_batch.base_hashes.len(), 1);
+    assert_eq!(second_batch.base_hashes.len(), 1);
+    assert!(first_batch.base_hashes.contains_key(&first_resource));
+    assert!(second_batch.base_hashes.contains_key(&second_resource));
+    assert_ne!(first_resource, second_resource);
+    assert_ne!(
+        first_batch.result_hashes[&first_resource],
+        second_batch.result_hashes[&second_resource]
+    );
+}
+
 #[derive(Debug, Default)]
 struct ContractJournal {
     records: Mutex<Vec<RecoveryRecord>>,

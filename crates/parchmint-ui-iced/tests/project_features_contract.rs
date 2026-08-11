@@ -5,11 +5,18 @@
 //! fixture state and presentation effects, never a display server or a service
 //! implementation.
 
+use parchmint_application::{DocumentSnapshot, DocumentVisibility, EditorRevision};
+use parchmint_domain::{
+    DocumentId, MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind,
+    NodeId, Project, ProjectCommand, ProjectExportSettings, ProjectId, apply_project_command,
+};
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
+use parchmint_ui_api::ProjectSnapshot;
 use parchmint_ui_iced::{
-    ContentState, DragDestination, DragValidity, ExportState, HistoryRestoreScope, ProjectEffect,
-    ProjectFixture, ProjectMessage, ProjectModal, ProjectWorkspace, ReplacementCheckState,
-    RestoreLocation, SaveState, SelectionGesture, SidebarSurface,
+    ContentState, DragDestination, DragValidity, EditorMessage, EditorPane, ExportState,
+    HierarchyRowKind, HistoryRestoreScope, ProjectEffect, ProjectFixture, ProjectMessage,
+    ProjectModal, ProjectWorkspace, ReplacementCheckState, RestoreLocation, SaveState,
+    SelectionGesture, SidebarSurface, StatusCount,
 };
 
 #[test]
@@ -398,4 +405,333 @@ fn empty_loading_error_and_recovery_states_keep_shell_context_and_recovery_retur
     );
     workspace.update(ProjectMessage::RecoveryDurablySaved);
     assert!(workspace.recovery().is_disposable_after_durable_save());
+}
+
+#[test]
+fn production_snapshot_hydrates_ordered_hierarchy_metadata_deleted_items_and_editor_counts() {
+    let fixture = production_snapshot();
+    let workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
+    let rows = workspace.explorer().rows();
+
+    assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [
+            id_string(NodeId::manuscript_root().as_bytes()),
+            id_string(fixture.group.as_bytes()),
+            id_string(fixture.manuscript_node.as_bytes()),
+            id_string(NodeId::research_root().as_bytes()),
+            id_string(fixture.research_node.as_bytes()),
+        ]
+    );
+    let manuscript = workspace
+        .explorer()
+        .row(&id_string(fixture.manuscript_node.as_bytes()))
+        .unwrap();
+    assert_eq!(manuscript.kind, HierarchyRowKind::Document);
+    assert_eq!(
+        manuscript.parent_id,
+        Some(id_string(fixture.group.as_bytes()).as_str())
+    );
+    assert_eq!(manuscript.title, "Opening Scene");
+    assert_eq!(manuscript.synopsis, "The river meeting.");
+    assert_eq!(
+        manuscript.document_id,
+        Some(id_string(fixture.manuscript_document.as_bytes()).as_str())
+    );
+
+    let field_id = id_string(fixture.field.as_bytes());
+    let node_id = id_string(fixture.manuscript_node.as_bytes());
+    let inspector_item = workspace.inspector().metadata_items(&node_id)[0].clone();
+    assert_eq!(inspector_item.field_id, field_id);
+    assert_eq!(inspector_item.stored_value, Some("Final"));
+    assert_eq!(inspector_item.effective_value, Some("Final"));
+    assert!(workspace.settings().metadata_fields()[0].visible_on_cards);
+    let manuscript_root = id_string(NodeId::manuscript_root().as_bytes());
+    assert_eq!(workspace.cards().section_id(), manuscript_root);
+    assert_eq!(
+        workspace.cards().items()[1].metadata,
+        [(field_id.as_str(), "Status", Some("Final"))]
+    );
+
+    let deleted_id = id_string(fixture.deleted_group.as_bytes());
+    let deleted = &workspace.recently_deleted().items()[0];
+    assert_eq!(deleted.node_id, deleted_id);
+    assert_eq!(deleted.title, "Discarded Part");
+    assert_eq!(deleted.kind, HierarchyRowKind::Group);
+    assert_eq!(deleted.deleted_at_unix_millis, 123);
+    assert_eq!(
+        deleted.former_location,
+        &RestoreLocation::FormerParent(manuscript_root.clone())
+    );
+    assert_eq!(
+        deleted.restore_location,
+        &RestoreLocation::FormerParent(manuscript_root.clone())
+    );
+    assert_eq!(
+        deleted.fallback_location,
+        &RestoreLocation::SectionRoot(manuscript_root)
+    );
+    assert!(deleted.formatted_preview_available);
+
+    assert_eq!(
+        workspace.project_revision(),
+        fixture.snapshot.project.revision.value()
+    );
+    assert_eq!(
+        workspace.export().project_settings(),
+        ProjectExportSettings {
+            excluded: false,
+            starts_new_page: true,
+        }
+    );
+    assert_eq!(
+        workspace
+            .export()
+            .node_settings(&id_string(fixture.manuscript_node.as_bytes())),
+        Some(ProjectExportSettings {
+            excluded: true,
+            starts_new_page: false,
+        })
+    );
+    assert_eq!(
+        workspace.save().state(),
+        SaveState::SavedThrough(fixture.snapshot.project.revision.value())
+    );
+    assert_eq!(
+        workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .active_document(),
+        Some(id_string(fixture.manuscript_document.as_bytes()).as_str())
+    );
+    assert!(
+        !workspace
+            .editor()
+            .pane(EditorPane::Companion)
+            .is_populated()
+    );
+    assert_eq!(
+        workspace.editor().status_bar().current_count(),
+        StatusCount::ActiveDocument(4)
+    );
+    assert_eq!(workspace.editor().status_bar().manuscript_total(), 4);
+    assert_eq!(
+        workspace
+            .editor()
+            .document_revision(&id_string(fixture.research_document.as_bytes())),
+        Some(5)
+    );
+}
+
+#[test]
+fn snapshot_reconciliation_preserves_surviving_ui_state_and_removes_stale_references() {
+    let fixture = production_snapshot();
+    let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
+    let group_id = id_string(fixture.group.as_bytes());
+    let manuscript_node_id = id_string(fixture.manuscript_node.as_bytes());
+    let research_node_id = id_string(fixture.research_node.as_bytes());
+    let primary_view = workspace.editor().pane(EditorPane::Primary).view();
+
+    workspace.update(ProjectMessage::SelectHierarchy {
+        node_id: manuscript_node_id.clone(),
+        gesture: SelectionGesture::Replace,
+    });
+    workspace.update(ProjectMessage::ToggleHierarchyExpanded(group_id.clone()));
+    workspace.editor_mut().update(EditorMessage::OpenLocalFind);
+    workspace
+        .editor_mut()
+        .update(EditorMessage::SetFindQuery("river".into()));
+    workspace.update(ProjectMessage::ActivateCard(research_node_id.clone()));
+
+    let mut renamed_project = fixture.snapshot.project.clone();
+    renamed_project.nodes.get_mut(fixture.group).unwrap().title = "Part I".into();
+    renamed_project
+        .nodes
+        .get_mut(fixture.manuscript_node)
+        .unwrap()
+        .title = "Opening Revised".into();
+    let renamed_project = apply_project_command(
+        &renamed_project,
+        renamed_project.revision,
+        ProjectCommand::delete_node(fixture.research_node),
+    )
+    .unwrap()
+    .project;
+    let renamed_snapshot = ProjectSnapshot {
+        project: renamed_project,
+        documents: fixture
+            .snapshot
+            .documents
+            .iter()
+            .filter(|document| document.document_id != fixture.research_document)
+            .cloned()
+            .collect(),
+        styles_css: fixture.snapshot.styles_css.clone(),
+    };
+    workspace.reconcile_snapshot(&renamed_snapshot);
+
+    assert_eq!(workspace.explorer().selected_ids(), [manuscript_node_id]);
+    assert!(workspace.explorer().is_expanded(&group_id));
+    assert_eq!(workspace.explorer().title(&group_id), Some("Part I"));
+    assert_eq!(
+        workspace.editor().local_search(primary_view).query(),
+        "river"
+    );
+    assert!(
+        !workspace
+            .editor()
+            .pane(EditorPane::Companion)
+            .is_populated()
+    );
+    assert!(workspace.cards().last_activated_document().is_none());
+    assert_eq!(
+        workspace.editor().pane(EditorPane::Primary).tabs()[0].title(),
+        "Opening Revised"
+    );
+
+    let removed_project = apply_project_command(
+        &renamed_snapshot.project,
+        renamed_snapshot.project.revision,
+        ProjectCommand::delete_node(fixture.manuscript_node),
+    )
+    .unwrap()
+    .project;
+    workspace.reconcile_snapshot(&ProjectSnapshot {
+        project: removed_project,
+        documents: renamed_snapshot.documents,
+        styles_css: renamed_snapshot.styles_css,
+    });
+    assert!(workspace.explorer().selected_ids().is_empty());
+    assert!(!workspace.editor().pane(EditorPane::Primary).is_populated());
+    assert!(!workspace.editor().local_search(primary_view).is_open());
+}
+
+struct ProductionSnapshotFixture {
+    snapshot: ProjectSnapshot,
+    group: NodeId,
+    manuscript_node: NodeId,
+    manuscript_document: DocumentId,
+    research_node: NodeId,
+    research_document: DocumentId,
+    deleted_group: NodeId,
+    field: MetadataFieldId,
+}
+
+fn production_snapshot() -> ProductionSnapshotFixture {
+    let group = NodeId::from_bytes([3; 16]);
+    let manuscript_node = NodeId::from_bytes([4; 16]);
+    let manuscript_document = DocumentId::from_bytes([5; 16]);
+    let research_node = NodeId::from_bytes([6; 16]);
+    let research_document = DocumentId::from_bytes([7; 16]);
+    let deleted_group = NodeId::from_bytes([8; 16]);
+    let deleted_node = NodeId::from_bytes([9; 16]);
+    let deleted_document = DocumentId::from_bytes([10; 16]);
+    let field = MetadataFieldId::from_bytes([11; 16]);
+    let mut project = Project::new(ProjectId::from_bytes([1; 16]));
+    project
+        .metadata
+        .upsert(MetadataFieldDefinition {
+            id: field,
+            label: "Status".into(),
+            description: Some("Draft state".into()),
+            applicability: MetadataApplicability::Documents,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: Some("Draft".into()),
+            visible_on_cards: true,
+        })
+        .unwrap();
+    project
+        .nodes
+        .try_insert_group(group, NodeId::manuscript_root(), 0, "Part One")
+        .unwrap();
+    project
+        .nodes
+        .try_insert_document(
+            manuscript_node,
+            manuscript_document,
+            group,
+            0,
+            "Opening Scene",
+        )
+        .unwrap();
+    project
+        .nodes
+        .try_insert_document(
+            research_node,
+            research_document,
+            NodeId::research_root(),
+            0,
+            "River Notes",
+        )
+        .unwrap();
+    project
+        .nodes
+        .try_insert_group(
+            deleted_group,
+            NodeId::manuscript_root(),
+            1,
+            "Discarded Part",
+        )
+        .unwrap();
+    project
+        .nodes
+        .try_insert_document(
+            deleted_node,
+            deleted_document,
+            deleted_group,
+            0,
+            "Discarded Scene",
+        )
+        .unwrap();
+    let manuscript = project.nodes.get_mut(manuscript_node).unwrap();
+    manuscript.synopsis = "The river meeting.".into();
+    manuscript.metadata.insert(field, "Final".into());
+    manuscript.export_settings.excluded = true;
+    project.export_settings.starts_new_page = true;
+    project.revision = 7_u64.into();
+    let project = apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::delete_node_at(deleted_group, 123),
+    )
+    .unwrap()
+    .project;
+    let documents = vec![
+        DocumentSnapshot {
+            document_id: manuscript_document,
+            body: "one two three four".into(),
+            revision: EditorRevision::from(3),
+            visibility: DocumentVisibility::Closed,
+        },
+        DocumentSnapshot {
+            document_id: research_document,
+            body: "five six".into(),
+            revision: EditorRevision::from(5),
+            visibility: DocumentVisibility::Open,
+        },
+        DocumentSnapshot {
+            document_id: deleted_document,
+            body: "formatted deleted preview".into(),
+            revision: EditorRevision::from(2),
+            visibility: DocumentVisibility::Closed,
+        },
+    ];
+    ProductionSnapshotFixture {
+        snapshot: ProjectSnapshot {
+            project,
+            documents,
+            styles_css: String::new(),
+        },
+        group,
+        manuscript_node,
+        manuscript_document,
+        research_node,
+        research_document,
+        deleted_group,
+        field,
+    }
+}
+
+fn id_string(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

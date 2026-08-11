@@ -1,4 +1,8 @@
-use parchmint_design_system::{DesignSource, GenerationError, generate};
+use parchmint_design_system::{
+    DesignSource, GenerationError, generate,
+    generated_penpot_tokens::{PENPOT_TOKEN_SOURCE_SHA256, REQUIRED_SEMANTIC_ROLES, TOKENS},
+    production_token, validate_production_tokens,
+};
 
 const LIGHT_AND_DARK_TOKENS: &str = r##"
 {
@@ -155,4 +159,23 @@ fn rejects_changed_checksums_and_invalid_vector_catalogs() {
         generate(invalid_svg),
         Err(GenerationError::InvalidSvg { .. })
     ));
+}
+
+#[test]
+fn checked_in_penpot_snapshot_has_complete_light_and_dark_semantic_roles() {
+    validate_production_tokens().expect("generated production tokens remain complete");
+    assert_eq!(
+        PENPOT_TOKEN_SOURCE_SHA256,
+        "ad30015644a1d9c17c3bd8357d5e72c1e2e772a5adbd9288e8ff2b00a431ee70"
+    );
+    assert!(TOKENS.len() >= 50);
+    for role in REQUIRED_SEMANTIC_ROLES {
+        let token = production_token(role).expect("required role is emitted");
+        assert!(!token.light.is_empty());
+        assert!(!token.dark.is_empty());
+    }
+    assert_ne!(
+        production_token("color.surface.manuscript").unwrap().light,
+        production_token("color.surface.manuscript").unwrap().dark
+    );
 }

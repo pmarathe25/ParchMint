@@ -8,8 +8,8 @@ use fixtures::desktop::{
     Event, FakeProjectFilesystem, block_on, final_save_request, fixture, fixture_with_filesystem,
 };
 use parchmint_desktop::{
-    FinalSaveResolution, LaunchIntent, LaunchRequest, OpenProjectResult, ProjectFilesystemError,
-    StartupError,
+    DesktopError, FinalSaveResolution, LaunchIntent, LaunchRequest, NewProjectRequest,
+    OpenProjectResult, ProjectFilesystemError, StartupError,
 };
 use parchmint_platform_api::SystemAppearance;
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
@@ -118,6 +118,53 @@ fn repeated_open_focuses_existing_window_without_registering_another_session() {
             .count(),
         1
     );
+}
+
+#[test]
+fn create_validates_input_and_records_recent_only_after_the_window_opens() {
+    let desktop = fixture(AppearanceMode::System, SystemAppearance::Light);
+    let runtime = block_on(desktop.bootstrap.start(LaunchRequest::launcher())).unwrap();
+
+    assert!(matches!(
+        runtime.create_project(NewProjectRequest::new("  ", "/tmp/blank-title", None)),
+        Err(DesktopError::InvalidNewProject(_))
+    ));
+    assert!(matches!(
+        runtime.create_project(NewProjectRequest::new("Book", "relative/project", None)),
+        Err(DesktopError::InvalidNewProject(_))
+    ));
+
+    desktop.ui.fail_next_project_open();
+    assert!(matches!(
+        runtime.create_project(NewProjectRequest::new(
+            "Failed Book",
+            "/tmp/failed-create-window",
+            None,
+        )),
+        Err(DesktopError::Ui(_))
+    ));
+    assert!(
+        desktop
+            .preferences
+            .snapshot()
+            .values
+            .recent_projects
+            .is_empty()
+    );
+
+    assert!(matches!(
+        runtime.create_project(NewProjectRequest::new(
+            "New Book",
+            "/tmp/new-book",
+            Some("Writer".to_owned()),
+        )),
+        Ok(OpenProjectResult::Opened { .. })
+    ));
+    let recent = desktop.preferences.snapshot().values.recent_projects;
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].name, "New Book");
+    assert_eq!(recent[0].path, "/tmp/new-book");
+    assert!(recent[0].last_opened_unix_seconds > 0);
 }
 
 #[test]

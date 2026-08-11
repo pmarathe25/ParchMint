@@ -15,11 +15,19 @@ default = []
 visual-verification = ["dep:iced_test"]
 
 [dependencies]
-iced = { version = "=0.14.0", default-features = false, features = ["crisp", "fira-sans", "thread-pool", "tiny-skia", "wayland", "x11"] }
+iced = { version = "=0.14.0", default-features = false, features = ["crisp", "fira-sans", "thread-pool", "tiny-skia", "tokio", "wayland", "x11"] }
 iced_test = { version = "=0.14.0", optional = true }
+parchmint-application = { path = "../parchmint-application" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-editor-iced = { path = "../parchmint-editor-iced" }
+parchmint-export-api = { path = "../parchmint-export-api" }
+parchmint-history-api = { path = "../parchmint-history-api" }
+parchmint-design-system = { path = "../parchmint-design-system" }
+parchmint-domain = { path = "../parchmint-domain" }
 parchmint-platform-api = { path = "../parchmint-platform-api" }
 parchmint-preferences = { path = "../parchmint-preferences" }
+parchmint-search-api = { path = "../parchmint-search-api" }
+parchmint-ui-api = { path = "../parchmint-ui-api" }
 
 [dev-dependencies]
 iced_test = "=0.14.0"

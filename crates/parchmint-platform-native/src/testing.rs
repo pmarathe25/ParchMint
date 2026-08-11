@@ -17,8 +17,8 @@ use std::{
 use parchmint_platform_api::{
     ApplicationPaths, ClipboardContent, ClipboardFormats, ClipboardService, DialogService,
     ExternalOpenService, MenuService, PathDialog, PlatformError, SemanticMenu, SystemAppearance,
-    SystemAppearanceService, UntrustedClipboardContent, UntrustedPathSelection,
-    ValidatedExternalIntent, WindowCapability,
+    SystemAppearanceEventService, SystemAppearanceService, UntrustedClipboardContent,
+    UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
 };
 
 use crate::{
@@ -100,6 +100,10 @@ impl NativeFixture {
         self.services.clone()
     }
 
+    pub fn appearance_events(&self) -> Arc<dyn SystemAppearanceEventService> {
+        self.services.clone()
+    }
+
     pub fn application_paths(&self) -> Arc<dyn parchmint_platform_api::ApplicationPathService> {
         self.services.clone()
     }
@@ -136,6 +140,7 @@ impl NativeFixture {
             .appearance
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = appearance;
+        self.services.publish_appearance(appearance);
     }
 
     pub fn registered_window(&self, window: WindowCapability) -> Option<WindowCapability> {

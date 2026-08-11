@@ -10,7 +10,7 @@ use std::{
 use parchmint_preferences::{
     AppearanceController, AppearanceMode, ApplicationPreferences, FilePreferenceStore,
     PreferenceCommand, PreferenceCoordinator, PreferenceError, PreferenceRevision,
-    PreferenceService, PreferenceStore, ResolvedAppearance, ThemeSnapshot,
+    PreferenceService, PreferenceStore, RecentProject, ResolvedAppearance, ThemeSnapshot,
 };
 
 struct TemporaryFile {
@@ -75,8 +75,8 @@ fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_a
     let values = ApplicationPreferences {
         appearance: AppearanceMode::Dark,
         recent_projects: vec![
-            "/work/second.parchment".into(),
-            "/work/first.parchment".into(),
+            RecentProject::new("Second", "/work/second.parchment", 20),
+            RecentProject::new("First", "/work/first.parchment", 10),
         ],
         global_dictionary: ["ParchMint", "reflow"]
             .into_iter()
@@ -91,13 +91,51 @@ fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_a
 
     let raw = fs::read_to_string(file.path()).expect("preference file should exist");
     assert!(
-        raw.contains("\"version\":1"),
+        raw.contains("\"version\":2"),
         "storage must carry its schema version"
     );
     assert_eq!(
         block_on(store.load()).expect("versioned preferences should load"),
         saved
     );
+}
+
+#[test]
+fn version_one_recent_paths_migrate_to_typed_records_and_newest_open_wins() {
+    let file = TemporaryFile::new("recent-migration");
+    fs::write(
+        file.path(),
+        br#"{"version":1,"revision":4,"preferences":{"appearance":"Dark","recent_projects":["/work/old-book","/work/other"],"global_dictionary":["ParchMint"]}}"#,
+    )
+    .expect("legacy preferences should be written");
+    let store: Arc<dyn PreferenceStore> = Arc::new(FilePreferenceStore::new(file.path()));
+    let service = PreferenceCoordinator::new(store);
+
+    let migrated = block_on(service.load()).expect("version one preferences should migrate");
+    assert_eq!(migrated.values.appearance, AppearanceMode::Dark);
+    assert_eq!(migrated.values.global_dictionary, ["ParchMint"]);
+    assert_eq!(
+        migrated.values.recent_projects,
+        [
+            RecentProject::new("old-book", "/work/old-book", 0),
+            RecentProject::new("other", "/work/other", 0),
+        ]
+    );
+
+    let updated = block_on(service.update(
+        migrated.revision,
+        PreferenceCommand::AddRecentProject(RecentProject::new("Old Book", "/work/old-book", 99)),
+    ))
+    .expect("migrated recent project should update in place");
+    assert_eq!(
+        updated.values.recent_projects,
+        [
+            RecentProject::new("Old Book", "/work/old-book", 99),
+            RecentProject::new("other", "/work/other", 0),
+        ]
+    );
+    assert_eq!(updated.values.appearance, AppearanceMode::Dark);
+    assert_eq!(updated.values.global_dictionary, ["ParchMint"]);
 }
 
 #[test]
@@ -158,7 +196,7 @@ fn coordinator_applies_recent_projects_and_global_dictionary_as_application_chan
     let initial = block_on(service.load()).expect("coordinator should load defaults");
     let recent = block_on(service.update(
         initial.revision,
-        PreferenceCommand::AddRecentProject("/work/book.parchment".into()),
+        PreferenceCommand::AddRecentProject(RecentProject::new("Book", "/work/book.parchment", 17)),
     ))
     .expect("recent project update should succeed");
     let dictionary = block_on(service.update(
@@ -167,7 +205,10 @@ fn coordinator_applies_recent_projects_and_global_dictionary_as_application_chan
     ))
     .expect("global dictionary update should succeed");
 
-    assert_eq!(dictionary.values.recent_projects, ["/work/book.parchment"]);
+    assert_eq!(
+        dictionary.values.recent_projects,
+        [RecentProject::new("Book", "/work/book.parchment", 17)]
+    );
     assert_eq!(dictionary.values.global_dictionary, ["ParchMint"]);
     assert!(dictionary.revision > recent.revision);
     assert_eq!(
@@ -258,7 +299,11 @@ fn application_preferences_do_not_modify_project_state() {
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
         appearance: AppearanceMode::Dark,
-        recent_projects: vec![project.path().display().to_string()],
+        recent_projects: vec![RecentProject::new(
+            "Project",
+            project.path().display().to_string(),
+            1,
+        )],
         global_dictionary: vec!["ParchMint".into()],
     };
     block_on(store.compare_and_save(PreferenceRevision::from(0), &values))

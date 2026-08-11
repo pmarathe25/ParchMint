@@ -465,12 +465,21 @@ impl EditorPersistenceCoordinator {
         if last <= previous {
             return Err(EditorPersistenceError::RevisionMismatch);
         }
-        let Some(base_hash) = frontier.hashes.get(&ResourceId::Document).copied() else {
+        let exact_resource = document_resource_id(projection.document_id());
+        let document_resource = if frontier.hashes.contains_key(&exact_resource) {
+            exact_resource
+        } else {
+            // Old single-document recovery bases remain readable until the
+            // next canonical save upgrades their identity.
+            ResourceId::Document
+        };
+        if !frontier.hashes.contains_key(&document_resource) {
             return Err(RecoveryError::MissingBaseHash {
-                resource: ResourceId::Document,
+                resource: document_resource,
             }
             .into());
-        };
+        }
+        let base_hash = frontier.hashes[&document_resource];
         let result_hash = content_hash(projection.body().as_bytes());
         let batch = RecoveryBatch {
             project_revision: frontier.revisions.project_revision.next(),
@@ -478,8 +487,8 @@ impl EditorPersistenceCoordinator {
                 projection.document_id(),
                 EditorRevisionRange::new(previous.next(), last)?,
             )]),
-            base_hashes: BTreeMap::from([(ResourceId::Document, base_hash)]),
-            result_hashes: BTreeMap::from([(ResourceId::Document, result_hash)]),
+            base_hashes: BTreeMap::from([(document_resource.clone(), base_hash)]),
+            result_hashes: BTreeMap::from([(document_resource, result_hash)]),
             payload,
         };
         batch.validate_after(None)?;
@@ -512,7 +521,11 @@ impl EditorPersistenceCoordinator {
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
         if durable.batch.project_revision != frontier.revisions.project_revision.next()
-            || durable.batch.base_hashes != frontier.hashes
+            || durable
+                .batch
+                .base_hashes
+                .iter()
+                .any(|(resource, hash)| frontier.hashes.get(resource) != Some(hash))
             || durable.batch.documents.iter().any(|(document, range)| {
                 range.first
                     != frontier
@@ -532,7 +545,7 @@ impl EditorPersistenceCoordinator {
         }
         frontier.revisions.project_revision = durable.batch.project_revision;
         frontier.revisions.documents = durable.batch.revision_vector().documents;
-        frontier.hashes = durable.batch.result_hashes;
+        frontier.hashes.extend(durable.batch.result_hashes);
         Ok(frontier.revisions.clone())
     }
 
@@ -550,7 +563,9 @@ impl EditorPersistenceCoordinator {
                 .map_err(|_| EditorPersistenceError::StateUnavailable)?;
             frontier.revisions.project_revision = last.project_revision;
             frontier.revisions.documents = last.revision_vector().documents;
-            frontier.hashes = last.result_hashes.clone();
+            for batch in &replay.accepted {
+                frontier.hashes.extend(batch.result_hashes.clone());
+            }
         }
         Ok(replay)
     }
@@ -580,10 +595,23 @@ impl EditorPersistenceCoordinator {
         for batch in &replay.accepted[..index] {
             frontier.revisions.project_revision = batch.project_revision;
             frontier.revisions.documents = batch.revision_vector().documents;
-            frontier.hashes = batch.result_hashes.clone();
+            frontier.hashes.extend(batch.result_hashes.clone());
         }
         drop(frontier);
         self.acknowledge_recovery(durable)
+    }
+
+    /// Removes only the recovery prefix represented by a completed canonical
+    /// save. Later document revisions remain in the journal.
+    pub fn retire_recovery_through(
+        &self,
+        base: &RecoveryBaseSnapshot,
+    ) -> Result<(), EditorPersistenceError> {
+        self.recovery
+            .discard_through(parchmint_recovery_api::DurableRevisionVector::new(
+                base.revisions.clone(),
+            ))?;
+        Ok(())
     }
 
     /// Submits the already encoded revisioned save request only when it covers
@@ -627,6 +655,15 @@ impl EditorPersistenceCoordinator {
 
 fn content_hash(bytes: &[u8]) -> parchmint_recovery_api::ContentHash {
     parchmint_recovery_api::ContentHash::from_bytes(Sha256::digest(bytes).into())
+}
+
+fn document_resource_id(document: DocumentId) -> ResourceId {
+    let document_id = document
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    ResourceId::DocumentById { document_id }
 }
 
 impl CanonicalProjection {

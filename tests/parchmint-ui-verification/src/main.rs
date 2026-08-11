@@ -7,10 +7,11 @@ use std::{
 use parchmint_ui_iced::{VisualAppearance, VisualTarget, capture_visual};
 use parchmint_ui_verification::{compare, decode_png, diff_image, encode_png, write_report};
 
-const USAGE: &str = "Usage:\n  parchmint-ui-verify capture --target <launcher|project> --appearance <light|dark> --output-stem <PATH>\n  parchmint-ui-verify compare --reference <PNG> --actual <PNG> --diff <PNG> --report <JSON>";
+const USAGE: &str = "Usage:\n  parchmint-ui-verify list\n  parchmint-ui-verify capture --target <fixture-id> --appearance <light|dark> --output-stem <PATH>\n  parchmint-ui-verify compare --reference <PNG> --actual <PNG> --diff <PNG> --report <JSON>";
 
 #[derive(Debug)]
 enum Command {
+    List,
     Capture(CaptureArguments),
     Compare(CompareArguments),
 }
@@ -42,9 +43,24 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode, String> {
     match parse_arguments(env::args_os().skip(1))? {
+        Command::List => list_targets(),
         Command::Capture(arguments) => capture(arguments),
         Command::Compare(arguments) => compare_images(arguments),
     }
+}
+
+fn list_targets() -> Result<ExitCode, String> {
+    for target in VisualTarget::ALL {
+        for appearance in VisualAppearance::ALL {
+            println!(
+                "{}\t{}\t{}",
+                target.name(),
+                appearance.name(),
+                target.reference_id(appearance)
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn capture(arguments: CaptureArguments) -> Result<ExitCode, String> {
@@ -106,6 +122,13 @@ fn parse_arguments(
     {
         Some("capture") => parse_capture_arguments(arguments).map(Command::Capture),
         Some("compare") => parse_compare_arguments(arguments).map(Command::Compare),
+        Some("list") => {
+            if arguments.next().is_some() {
+                Err(format!("list accepts no arguments\n{USAGE}"))
+            } else {
+                Ok(Command::List)
+            }
+        }
         Some("--help" | "-h") => Err(USAGE.to_owned()),
         Some(command) => Err(format!("unknown command {command}\n{USAGE}")),
         None => Err(USAGE.to_owned()),
@@ -179,14 +202,15 @@ fn next_value(
 }
 
 fn parse_target(value: std::ffi::OsString) -> Result<VisualTarget, String> {
-    match value.to_str() {
-        Some("launcher") => Ok(VisualTarget::Launcher),
-        Some("project") => Ok(VisualTarget::Project),
-        _ => Err(format!(
-            "invalid --target {}; expected launcher or project\n{USAGE}",
-            value.to_string_lossy()
-        )),
-    }
+    VisualTarget::ALL
+        .into_iter()
+        .find(|target| value.to_str() == Some(target.name()))
+        .ok_or_else(|| {
+            format!(
+                "invalid --target {}; use `list` for fixture IDs\n{USAGE}",
+                value.to_string_lossy()
+            )
+        })
 }
 
 fn parse_appearance(value: std::ffi::OsString) -> Result<VisualAppearance, String> {
@@ -277,5 +301,14 @@ mod tests {
             .map(Into::into),
         );
         assert!(result.unwrap_err().contains("only once"));
+    }
+
+    #[test]
+    fn list_parser_accepts_no_arguments_and_rejects_extra_arguments() {
+        assert!(matches!(
+            parse_arguments(["list"].into_iter().map(Into::into)),
+            Ok(Command::List)
+        ));
+        assert!(parse_arguments(["list", "extra"].into_iter().map(Into::into)).is_err());
     }
 }

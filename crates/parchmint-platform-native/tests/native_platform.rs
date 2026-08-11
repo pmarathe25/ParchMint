@@ -169,6 +169,30 @@ fn appearance_tracks_the_native_system_value() {
 }
 
 #[test]
+fn injectable_appearance_stream_preserves_ordered_generations() {
+    let native = fixture();
+    let stream = native
+        .appearance_events()
+        .subscribe()
+        .expect("appearance subscription");
+
+    native.set_system_appearance(SystemAppearance::Dark);
+    native.set_system_appearance(SystemAppearance::Light);
+
+    let dark = stream.try_next().unwrap().expect("dark event");
+    let light = stream.try_next().unwrap().expect("light event");
+    assert_eq!(
+        (dark.generation, dark.appearance),
+        (1, SystemAppearance::Dark)
+    );
+    assert_eq!(
+        (light.generation, light.appearance),
+        (2, SystemAppearance::Light)
+    );
+    assert_eq!(stream.try_next(), Ok(None));
+}
+
+#[test]
 fn stale_capabilities_reject_every_window_scoped_native_service() {
     let native = fixture();
     let live = native.register_window(live_window());

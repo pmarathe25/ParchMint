@@ -8,9 +8,9 @@ use std::{path::Path, sync::Arc};
 use parchmint_platform_api::{
     ApplicationPathService, ApplicationPaths, AsyncResult, ClipboardContent, ClipboardFormats,
     ClipboardService, DialogService, ExternalOpenService, MenuBinding, MenuService, PathDialog,
-    PlatformError, SemanticMenu, SystemAppearance, SystemAppearanceService,
-    UntrustedClipboardContent, UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
-    WindowResult,
+    PlatformError, SemanticMenu, SystemAppearance, SystemAppearanceEventService,
+    SystemAppearanceService, UntrustedClipboardContent, UntrustedPathSelection,
+    ValidatedExternalIntent, WindowCapability, WindowResult,
 };
 
 fn live_window() -> WindowCapability {
@@ -75,6 +75,7 @@ fn platform_services_are_async_without_native_handles() {
     assert_service::<dyn ExternalOpenService>();
     assert_service::<dyn ApplicationPathService>();
     assert_service::<dyn SystemAppearanceService>();
+    assert_service::<dyn SystemAppearanceEventService>();
     let _services: Option<Arc<dyn MenuService>> = None;
 }
 

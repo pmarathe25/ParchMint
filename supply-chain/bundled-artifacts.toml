@@ -1,5 +1,34 @@
 format-version = 1
-artifact = []
+
+[[artifact]]
+path = "crates/parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Regular.ttf"
+sha256 = "4644c81b86ec9caaa76b634889968ed3c4f4f52f054855933acc7c2b21e53b0f"
+source = "https://github.com/adobe-fonts/source-sans/blob/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/TTF/SourceSans3-Regular.ttf"
+license = "OFL-1.1"
+
+[[artifact]]
+path = "crates/parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Medium.ttf"
+sha256 = "a7af35c1cab5dd0b29d742f86f2edfdf83fa7ec213643e765c5c51a2dc24edbc"
+source = "https://github.com/adobe-fonts/source-sans/blob/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/TTF/SourceSans3-Medium.ttf"
+license = "OFL-1.1"
+
+[[artifact]]
+path = "crates/parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Semibold.ttf"
+sha256 = "a3f4f8dcf343a8f24dc61951de93f3ba1558b15cd250ba24af8a40e957081b7d"
+source = "https://github.com/adobe-fonts/source-sans/blob/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/TTF/SourceSans3-Semibold.ttf"
+license = "OFL-1.1"
+
+[[artifact]]
+path = "crates/parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Bold.ttf"
+sha256 = "9214b9d95e4231c609802815c2646c98174e2102d0d37f88978a7f8e71006e6a"
+source = "https://github.com/adobe-fonts/source-sans/blob/87b37a2daaed80fcb8e8ccb0085c4d72ddade12e/TTF/SourceSans3-Bold.ttf"
+license = "OFL-1.1"
+
+[[artifact]]
+path = "crates/parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
+sha256 = "e5a4ee6a3d87bb9024796be390c6771e2a0eb1883dae25effaf57ca01668e24b"
+source = "https://github.com/adobe-fonts/source-serif/blob/5f220b17d27ed64873f22cde0dd593685387bd19/TTF/SourceSerif4-Regular.ttf"
+license = "OFL-1.1"
 
 # List every bundled non-source artifact here.
 # [[artifact]]

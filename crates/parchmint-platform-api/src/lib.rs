@@ -12,6 +12,8 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
 };
 
 /// A `Send` future returned by a platform operation that may wait on native
@@ -511,6 +513,71 @@ pub enum SystemAppearance {
     Dark,
 }
 
+/// One ordered operating-system appearance notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemAppearanceEvent {
+    pub generation: u64,
+    pub appearance: SystemAppearance,
+}
+
+/// Injectable pull boundary for framework-neutral appearance subscriptions.
+/// Native backends may retain a sender and feed this stream from their event
+/// loop without exposing framework callback types.
+pub struct SystemAppearanceEventStream {
+    receiver: Arc<Mutex<mpsc::Receiver<SystemAppearanceEvent>>>,
+}
+
+impl SystemAppearanceEventStream {
+    pub fn channel() -> (mpsc::Sender<SystemAppearanceEvent>, Self) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            sender,
+            Self {
+                receiver: Arc::new(Mutex::new(receiver)),
+            },
+        )
+    }
+
+    pub fn try_next(&self) -> Result<Option<SystemAppearanceEvent>, PlatformError> {
+        match self
+            .receiver
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "read system appearance event",
+                reason: "event stream is unavailable".into(),
+            })?
+            .try_recv()
+        {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(PlatformError::Unavailable {
+                operation: "system appearance events",
+            }),
+        }
+    }
+
+    pub fn next_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<SystemAppearanceEvent>, PlatformError> {
+        match self
+            .receiver
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "read system appearance event",
+                reason: "event stream is unavailable".into(),
+            })?
+            .recv_timeout(timeout)
+        {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(PlatformError::Unavailable {
+                operation: "system appearance events",
+            }),
+        }
+    }
+}
+
 /// Installs semantic menus for a live window.
 pub trait MenuService: Send + Sync {
     /// Implementations authorize `window` immediately before native dispatch.
@@ -564,4 +631,10 @@ pub trait ApplicationPathService: Send + Sync {
 /// framework values.
 pub trait SystemAppearanceService: Send + Sync {
     fn current_appearance(&self) -> AsyncResult<SystemAppearance>;
+}
+
+/// Subscribes to changes produced by the native event loop. Implementations
+/// may be injectable even when the current system backend cannot yet emit.
+pub trait SystemAppearanceEventService: Send + Sync {
+    fn subscribe(&self) -> Result<SystemAppearanceEventStream, PlatformError>;
 }

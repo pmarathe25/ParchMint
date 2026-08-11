@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
+use parchmint_application::DocumentVisibility;
+use parchmint_domain::{NodeKind, ProjectSection};
 use parchmint_editor_api::ViewId;
 use parchmint_preferences::ResolvedAppearance;
+use parchmint_ui_api::ProjectSnapshot;
 
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
@@ -73,6 +76,17 @@ pub struct EditorPaneState {
 }
 
 impl EditorPaneState {
+    fn empty(pane: EditorPane, view: ViewId) -> Self {
+        Self {
+            pane,
+            view,
+            tabs: Vec::new(),
+            active_tab: None,
+            scroll_offset: 0.0,
+            mount_generation: 1,
+        }
+    }
+
     fn populated(
         pane: EditorPane,
         view: ViewId,
@@ -164,6 +178,27 @@ impl EditorPaneState {
             .as_deref()
             .and_then(|active| self.tabs.iter().position(|tab| tab.id == active));
         true
+    }
+
+    fn reconcile_tabs(&mut self, titles: &BTreeMap<String, String>) -> bool {
+        let previous_active = self.active_document().map(str::to_owned);
+        let previous_tabs = self.tabs.len();
+        self.tabs.retain_mut(|tab| {
+            let Some(title) = titles.get(&tab.id) else {
+                return false;
+            };
+            tab.title.clone_from(title);
+            true
+        });
+        self.active_tab = previous_active
+            .as_deref()
+            .and_then(|active| self.tabs.iter().position(|tab| tab.id == active))
+            .or_else(|| (!self.tabs.is_empty()).then_some(0));
+        let active_survived = previous_active.as_deref() == self.active_document();
+        if previous_tabs != self.tabs.len() || !active_survived {
+            self.mount_generation = self.mount_generation.saturating_add(1);
+        }
+        active_survived
     }
 }
 
@@ -1016,7 +1051,7 @@ pub enum EditorEffect {
 /// Deterministic editor workspace presentation state.
 #[derive(Debug, Clone)]
 pub struct EditorWorkspace {
-    fixture: EditorFixture,
+    source: EditorWorkspaceSource,
     primary: EditorPaneState,
     companion: EditorPaneState,
     focused_pane: EditorPane,
@@ -1033,6 +1068,12 @@ pub struct EditorWorkspace {
     inspector: InspectorContext,
     pending: BTreeMap<EditorTask, AsyncEditorTicket>,
     next_request: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EditorWorkspaceSource {
+    Fixture(EditorFixture),
+    Production,
 }
 
 impl EditorWorkspace {
@@ -1081,7 +1122,7 @@ impl EditorWorkspace {
             document_id: "chapter-one".to_owned(),
         };
         Self {
-            fixture,
+            source: EditorWorkspaceSource::Fixture(fixture),
             primary,
             companion,
             focused_pane: EditorPane::Primary,
@@ -1101,11 +1142,181 @@ impl EditorWorkspace {
         }
     }
 
+    /// Hydrates editor tabs, document revisions, and word counts from production state.
+    pub fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
+        let hydrated = HydratedDocuments::from_snapshot(snapshot);
+        let primary_view = production_view_id(snapshot, EditorPane::Primary);
+        let companion_view = production_view_id(snapshot, EditorPane::Companion);
+        let primary_tabs = hydrated
+            .ordered
+            .iter()
+            .filter(|document| {
+                hydrated.visibility.get(&document.id) == Some(&DocumentVisibility::Open)
+                    || hydrated.initial_document.as_deref() == Some(document.id.as_str())
+            })
+            .map(|document| TabSpec::new(document.id.clone(), document.title.clone()))
+            .collect::<Vec<_>>();
+        let primary = if primary_tabs.is_empty() {
+            EditorPaneState::empty(EditorPane::Primary, primary_view)
+        } else {
+            let active = hydrated
+                .initial_document
+                .as_deref()
+                .and_then(|id| primary_tabs.iter().position(|tab| tab.id() == id))
+                .unwrap_or_default();
+            EditorPaneState::populated(EditorPane::Primary, primary_view, primary_tabs, active, 0.0)
+        };
+        let companion = EditorPaneState::empty(EditorPane::Companion, companion_view);
+        let local_search = BTreeMap::from([
+            (primary_view, LocalSearchState::default()),
+            (companion_view, LocalSearchState::default()),
+        ]);
+        let decorations = BTreeMap::from([
+            (primary_view, EditorDecorations::default()),
+            (companion_view, EditorDecorations::default()),
+        ]);
+        let selection_word_counts = BTreeMap::from([(primary_view, None), (companion_view, None)]);
+        let mut last_focused_view = BTreeMap::new();
+        let inspector = if let Some(document_id) = primary.active_document() {
+            last_focused_view.insert(document_id.to_owned(), primary_view);
+            InspectorContext::Document {
+                document_id: document_id.to_owned(),
+            }
+        } else {
+            InspectorContext::None
+        };
+        Self {
+            source: EditorWorkspaceSource::Production,
+            primary,
+            companion,
+            focused_pane: EditorPane::Primary,
+            toolbar_focused: false,
+            local_search,
+            decorations,
+            selection_word_counts,
+            document_word_counts: hydrated.word_counts,
+            document_revisions: hydrated.revisions,
+            manuscript_total: hydrated.manuscript_total,
+            last_focused_view,
+            comments: BTreeMap::new(),
+            spellcheck_errors: BTreeMap::new(),
+            inspector,
+            pending: BTreeMap::new(),
+            next_request: 0,
+        }
+    }
+
+    /// Reconciles authoritative documents without resetting surviving pane/view state.
+    pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        let hydrated = HydratedDocuments::from_snapshot(snapshot);
+        let titles = hydrated
+            .ordered
+            .iter()
+            .map(|document| (document.id.clone(), document.title.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let primary_active_survived = self.primary.reconcile_tabs(&titles);
+        let companion_active_survived = self.companion.reconcile_tabs(&titles);
+
+        for document in &hydrated.ordered {
+            if hydrated.visibility.get(&document.id) == Some(&DocumentVisibility::Open)
+                && !self.primary.tabs.iter().any(|tab| tab.id == document.id)
+                && !self.companion.tabs.iter().any(|tab| tab.id == document.id)
+            {
+                self.primary
+                    .tabs
+                    .push(TabSpec::new(document.id.clone(), document.title.clone()));
+                if self.primary.active_tab.is_none() {
+                    self.primary.active_tab = Some(self.primary.tabs.len() - 1);
+                    self.primary.mount_generation = self.primary.mount_generation.saturating_add(1);
+                }
+            }
+        }
+        if self.primary.tabs.is_empty()
+            && self.companion.tabs.is_empty()
+            && let Some(initial) = hydrated.initial_document.as_deref()
+            && let Some(title) = titles.get(initial)
+        {
+            self.primary.tabs.push(TabSpec::new(initial, title));
+            self.primary.active_tab = Some(0);
+            self.primary.mount_generation = self.primary.mount_generation.saturating_add(1);
+        }
+
+        if !primary_active_survived {
+            self.reset_view_transients(self.primary.view);
+        }
+        if !companion_active_survived {
+            self.reset_view_transients(self.companion.view);
+        }
+        self.document_word_counts = hydrated.word_counts;
+        self.document_revisions = hydrated.revisions;
+        self.manuscript_total = hydrated.manuscript_total;
+        self.last_focused_view.retain(|document_id, view| {
+            [&self.primary, &self.companion].into_iter().any(|pane| {
+                pane.view == *view && pane.tabs.iter().any(|tab| tab.id == *document_id)
+            })
+        });
+        self.comments
+            .retain(|_, anchor| titles.contains_key(anchor.document_id()));
+        if matches!(
+            &self.inspector,
+            InspectorContext::Document { document_id } if !titles.contains_key(document_id)
+        ) || matches!(
+            &self.inspector,
+            InspectorContext::Group { group_id } if !snapshot.project.nodes.iter().any(|(id, node)| {
+                stable_id_string(id.as_bytes()) == *group_id && node.kind.can_have_children()
+            })
+        ) {
+            self.inspector = self
+                .pane(self.focused_pane)
+                .active_document()
+                .map(|document_id| InspectorContext::Document {
+                    document_id: document_id.to_owned(),
+                })
+                .unwrap_or(InspectorContext::None);
+        }
+        if !self.pane(self.focused_pane).is_populated() {
+            self.focused_pane = if self.primary.is_populated() {
+                EditorPane::Primary
+            } else if self.companion.is_populated() {
+                EditorPane::Companion
+            } else {
+                EditorPane::Primary
+            };
+            self.toolbar_focused = false;
+        }
+        self.pending.retain(|task, ticket| {
+            let pane = [&self.primary, &self.companion]
+                .into_iter()
+                .find(|pane| pane.view == task.view() && pane.is_populated());
+            pane.is_some_and(|pane| {
+                pane.mount_generation == ticket.mount_generation
+                    && pane.active_document() == ticket.document_id.as_deref()
+                    && ticket.document_id.as_deref().is_some_and(|document_id| {
+                        self.document_revisions
+                            .get(document_id)
+                            .copied()
+                            .unwrap_or_default()
+                            == ticket.document_revision
+                    })
+            })
+        });
+    }
+
     pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
-        match (self.fixture, appearance) {
-            (EditorFixture::DualPane, ResolvedAppearance::Light) => "editor-dual-light",
-            (EditorFixture::DualPane, ResolvedAppearance::Dark) => "editor-dual-dark",
-            (EditorFixture::SameDocumentTwoViews, _) => "editor-same-document-two-views-light",
+        match (self.source, appearance) {
+            (EditorWorkspaceSource::Production, _) => {
+                panic!("production workspaces do not have fixture references")
+            }
+            (
+                EditorWorkspaceSource::Fixture(EditorFixture::DualPane),
+                ResolvedAppearance::Light,
+            ) => "editor-dual-light",
+            (EditorWorkspaceSource::Fixture(EditorFixture::DualPane), ResolvedAppearance::Dark) => {
+                "editor-dual-dark"
+            }
+            (EditorWorkspaceSource::Fixture(EditorFixture::SameDocumentTwoViews), _) => {
+                "editor-same-document-two-views-light"
+            }
         }
     }
 
@@ -1145,6 +1356,14 @@ impl EditorWorkspace {
 
     pub fn spellcheck_error(&self, view: ViewId) -> Option<&str> {
         self.spellcheck_errors.get(&view).map(String::as_str)
+    }
+
+    pub fn document_word_count(&self, document_id: &str) -> Option<usize> {
+        self.document_word_counts.get(document_id).copied()
+    }
+
+    pub fn document_revision(&self, document_id: &str) -> Option<u64> {
+        self.document_revisions.get(document_id).copied()
     }
 
     pub const fn toolbar_is_focused(&self) -> bool {
@@ -1583,6 +1802,14 @@ impl EditorWorkspace {
         self.local_search.entry(view).or_default()
     }
 
+    fn reset_view_transients(&mut self, view: ViewId) {
+        self.local_search.insert(view, LocalSearchState::default());
+        self.decorations.insert(view, EditorDecorations::default());
+        self.selection_word_counts.insert(view, None);
+        self.spellcheck_errors.remove(&view);
+        self.invalidate_view_tasks(view);
+    }
+
     fn pane_for_view(&self, view: ViewId) -> Option<&EditorPaneState> {
         [&self.primary, &self.companion]
             .into_iter()
@@ -1663,6 +1890,133 @@ impl EditorWorkspace {
             }
         }
     }
+}
+
+struct HydratedDocument {
+    id: String,
+    title: String,
+}
+
+struct HydratedDocuments {
+    ordered: Vec<HydratedDocument>,
+    initial_document: Option<String>,
+    visibility: BTreeMap<String, DocumentVisibility>,
+    word_counts: BTreeMap<String, usize>,
+    revisions: BTreeMap<String, u64>,
+    manuscript_total: usize,
+}
+
+impl HydratedDocuments {
+    fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
+        let snapshots = snapshot
+            .documents
+            .iter()
+            .map(|document| (stable_id_string(document.document_id.as_bytes()), document))
+            .collect::<BTreeMap<_, _>>();
+        let mut ordered = Vec::new();
+        let mut manuscript_documents = Vec::new();
+        let mut research_documents = Vec::new();
+        for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+            append_section_documents(
+                &snapshot.project,
+                section.root_id(),
+                section,
+                &snapshots,
+                &mut ordered,
+                &mut manuscript_documents,
+                &mut research_documents,
+            );
+        }
+        let initial_document = manuscript_documents
+            .first()
+            .or_else(|| research_documents.first())
+            .cloned();
+        let visibility = snapshots
+            .iter()
+            .map(|(id, document)| (id.clone(), document.visibility))
+            .collect();
+        let word_counts = snapshots
+            .iter()
+            .map(|(id, document)| (id.clone(), count_words(&document.body)))
+            .collect();
+        let revisions = snapshots
+            .iter()
+            .map(|(id, document)| (id.clone(), document.revision.value()))
+            .collect();
+        let manuscript_total = manuscript_documents
+            .iter()
+            .filter_map(|id| snapshots.get(id))
+            .map(|document| count_words(&document.body))
+            .sum();
+        Self {
+            ordered,
+            initial_document,
+            visibility,
+            word_counts,
+            revisions,
+            manuscript_total,
+        }
+    }
+}
+
+fn append_section_documents(
+    project: &parchmint_domain::Project,
+    node_id: parchmint_domain::NodeId,
+    section: ProjectSection,
+    snapshots: &BTreeMap<String, &parchmint_application::DocumentSnapshot>,
+    ordered: &mut Vec<HydratedDocument>,
+    manuscript_documents: &mut Vec<String>,
+    research_documents: &mut Vec<String>,
+) {
+    if let Some(node) = project.nodes.get(node_id)
+        && let NodeKind::Document(document_id) = node.kind
+    {
+        let id = stable_id_string(document_id.as_bytes());
+        if snapshots.contains_key(&id) {
+            ordered.push(HydratedDocument {
+                id: id.clone(),
+                title: node.title.clone(),
+            });
+            match section {
+                ProjectSection::Manuscript => manuscript_documents.push(id),
+                ProjectSection::Research => research_documents.push(id),
+            }
+        }
+    }
+    for child in project.nodes.children(node_id) {
+        append_section_documents(
+            project,
+            *child,
+            section,
+            snapshots,
+            ordered,
+            manuscript_documents,
+            research_documents,
+        );
+    }
+}
+
+fn production_view_id(snapshot: &ProjectSnapshot, pane: EditorPane) -> ViewId {
+    let mut bytes = *snapshot.project.id.as_bytes();
+    bytes[15] ^= match pane {
+        EditorPane::Primary => 0xa1,
+        EditorPane::Companion => 0xa2,
+    };
+    ViewId::from_bytes(bytes)
+}
+
+fn count_words(body: &str) -> usize {
+    body.split_whitespace().count()
+}
+
+fn stable_id_string(bytes: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+
+    let mut serialized = String::with_capacity(32);
+    for byte in bytes {
+        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    serialized
 }
 
 fn search_active(search: Option<&LocalSearchState>) -> Option<FindMatch> {

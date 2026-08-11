@@ -16,16 +16,21 @@ use std::{
     error::Error,
     ffi::OsString,
     fmt,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    path::{Component, Path, PathBuf},
+    sync::{Arc, Mutex, Weak},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_platform_api::{SystemAppearance, SystemAppearanceService, WindowCapability};
 use parchmint_preferences::{
-    AppearanceService, PreferenceError, PreferenceService, ResolvedAppearance, ThemeSnapshot,
+    AppearanceService, PreferenceCommand, PreferenceError, PreferenceService, RecentProject,
+    ResolvedAppearance, ThemeSnapshot,
 };
 pub use parchmint_ui_api::{ExitCode, RequestedProjectPath, UiError as DesktopUiError};
-use parchmint_ui_api::{ProjectSessionCapability, ProjectSessionRegistry};
+use parchmint_ui_api::{
+    ProjectQueryError, ProjectSessionAuthority, ProjectSessionCapability, ProjectSessionRegistry,
+    ProjectUiPorts, ProjectUiProject, ProjectUiServices,
+};
 
 /// The intent parsed from a process launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +136,16 @@ impl Error for ProjectFilesystemError {}
 /// Filesystem operations the desktop lifecycle needs from an injected or
 /// production project graph.
 pub trait ProjectFilesystemService: Send + Sync {
+    fn create(
+        &self,
+        _request: &NewProjectRequest,
+    ) -> Result<Box<dyn ProjectSession>, ProjectFilesystemError> {
+        Err(ProjectFilesystemError::failed(
+            "create",
+            "project creation is not available from this injected filesystem",
+        ))
+    }
+
     fn open(
         &self,
         path: &RequestedProjectPath,
@@ -139,6 +154,15 @@ pub trait ProjectFilesystemService: Send + Sync {
     /// Starts the last save for `session`; completion is reported through
     /// [`DesktopRuntime::resolve_final_save`].
     fn begin_final_save(&self, session: &dyn ProjectSession) -> Result<(), ProjectFilesystemError>;
+
+    /// Returns typed UI services backed by this exact writable lease.
+    /// Injected filesystems may omit them to preserve the legacy callback seam.
+    fn ui_services(
+        &self,
+        _session: &dyn ProjectSession,
+    ) -> Result<Option<ProjectUiServices>, ProjectFilesystemError> {
+        Ok(None)
+    }
 }
 
 /// Ready-to-use services handed to an injected UI.
@@ -155,6 +179,7 @@ pub struct DesktopServices {
 #[derive(Clone)]
 pub struct DesktopStartup {
     pub appearance: ThemeSnapshot,
+    pub preferences: parchmint_preferences::PreferenceSnapshot,
     pub launch_intent: LaunchIntent,
     pub services: DesktopServices,
     pub runtime: DesktopRuntime,
@@ -170,6 +195,19 @@ pub trait DesktopUi: Send + Sync {
         window: WindowCapability,
         session: ProjectSessionCapability,
     ) -> Result<(), DesktopUiError>;
+
+    /// Receives authoritative hydration state and typed session-scoped ports.
+    ///
+    /// The default preserves injected UIs that only need the historical
+    /// path/window/session callback.
+    fn project_opened_with_ui(
+        &self,
+        project: &RequestedProjectPath,
+        window: WindowCapability,
+        project_ui: ProjectUiProject,
+    ) -> Result<(), DesktopUiError> {
+        self.project_opened(project, window, project_ui.session())
+    }
 
     fn focus_window(&self, window: WindowCapability) -> Result<(), DesktopUiError>;
 
@@ -321,6 +359,7 @@ impl DesktopBootstrap {
         self.ui
             .start(DesktopStartup {
                 appearance,
+                preferences,
                 launch_intent: request.intent(),
                 services,
                 runtime: runtime.clone(),
@@ -357,6 +396,68 @@ pub enum OpenProjectResult {
     },
     Focused(WindowCapability),
     Locked,
+}
+
+/// Validated input for creating one new project directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProjectRequest {
+    pub title: String,
+    pub destination: PathBuf,
+    pub author: Option<String>,
+}
+
+impl NewProjectRequest {
+    pub fn new(
+        title: impl Into<String>,
+        destination: impl Into<PathBuf>,
+        author: Option<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            destination: destination.into(),
+            author,
+        }
+    }
+
+    fn validated(&self) -> Result<Self, DesktopError> {
+        let title = self.title.trim();
+        if title.is_empty() || title.chars().any(char::is_control) {
+            return Err(DesktopError::InvalidNewProject(
+                "project title must contain visible text".to_owned(),
+            ));
+        }
+        if self.destination.as_os_str().is_empty()
+            || !self.destination.is_absolute()
+            || self.destination.file_name().is_none()
+            || self
+                .destination
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+        {
+            return Err(DesktopError::InvalidNewProject(
+                "project destination must be an absolute, non-root directory".to_owned(),
+            ));
+        }
+        let author = self
+            .author
+            .as_deref()
+            .map(str::trim)
+            .filter(|author| !author.is_empty())
+            .map(str::to_owned);
+        if author
+            .as_deref()
+            .is_some_and(|author| author.chars().any(char::is_control))
+        {
+            return Err(DesktopError::InvalidNewProject(
+                "project author cannot contain control characters".to_owned(),
+            ));
+        }
+        Ok(Self {
+            title: title.to_owned(),
+            destination: self.destination.clone(),
+            author,
+        })
+    }
 }
 
 /// Exact generations retained while the final save runs.
@@ -414,10 +515,11 @@ impl DesktopRuntime {
             state
                 .projects
                 .get(project.as_path())
-                .map(|live| live.window)
+                .map(|live| (live.window, live.session))
         };
-        if let Some(window) = existing {
+        if let Some((window, session)) = existing {
             self.ui.focus_window(window).map_err(DesktopError::Ui)?;
+            self.record_recent_project(&project, session, None);
             return Ok(OpenProjectResult::Focused(window));
         }
 
@@ -429,13 +531,50 @@ impl DesktopRuntime {
             }
             Err(error) => return Err(DesktopError::Project(error)),
         };
+        let result = self.register_project(project.clone(), session)?;
+        if let OpenProjectResult::Opened { session, .. } = result {
+            self.record_recent_project(&project, session, None);
+        }
+        Ok(result)
+    }
+
+    /// Creates, opens, and focuses a new project only after repository
+    /// validation and durable creation succeed.
+    pub fn create_project(
+        &self,
+        request: NewProjectRequest,
+    ) -> Result<OpenProjectResult, DesktopError> {
+        let request = request.validated()?;
+        let project = RequestedProjectPath::new(request.destination.clone());
+        let session = self
+            .services
+            .project_filesystem
+            .create(&request)
+            .map_err(DesktopError::Project)?;
+        let result = self.register_project(project.clone(), session)?;
+        if let OpenProjectResult::Opened { session, .. } = result {
+            self.record_recent_project(&project, session, Some(&request.title));
+        }
+        Ok(result)
+    }
+
+    fn register_project(
+        &self,
+        project: RequestedProjectPath,
+        session: Box<dyn ProjectSession>,
+    ) -> Result<OpenProjectResult, DesktopError> {
+        let ui_services = self
+            .services
+            .project_filesystem
+            .ui_services(session.as_ref())
+            .map_err(DesktopError::Project)?;
 
         let registration = {
             let mut state = self.state.lock().expect("desktop state mutex poisoned");
             if let Some(live) = state.projects.get(project.as_path()) {
                 Err(live.window)
             } else {
-                Ok(state.register(project.clone(), session))
+                Ok(state.register(project.clone(), session, ui_services))
             }
         };
 
@@ -445,12 +584,63 @@ impl DesktopRuntime {
                 Ok(OpenProjectResult::Focused(window))
             }
             Ok((window, session)) => {
-                if let Err(error) = self.ui.project_opened(&project, window, session) {
+                let project_ui = match self.project_ui(session) {
+                    Ok(project_ui) => project_ui,
+                    Err(error) => {
+                        self.unregister(project.as_path(), session);
+                        return Err(error);
+                    }
+                };
+                let opened = match project_ui {
+                    Some(project_ui) => {
+                        self.ui.project_opened_with_ui(&project, window, project_ui)
+                    }
+                    None => self.ui.project_opened(&project, window, session),
+                };
+                if let Err(error) = opened {
                     self.unregister(project.as_path(), session);
                     return Err(DesktopError::Ui(error));
                 }
                 Ok(OpenProjectResult::Opened { window, session })
             }
+        }
+    }
+
+    fn record_recent_project(
+        &self,
+        project: &RequestedProjectPath,
+        session: ProjectSessionCapability,
+        preferred_name: Option<&str>,
+    ) {
+        let snapshot_name = self
+            .project_ui(session)
+            .ok()
+            .flatten()
+            .map(|project| project.snapshot.project.display_title.clone())
+            .filter(|name| !name.trim().is_empty());
+        let fallback = project
+            .as_path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Untitled Project");
+        let recent = RecentProject::new(
+            preferred_name
+                .filter(|name| !name.trim().is_empty())
+                .map_or_else(
+                    || snapshot_name.unwrap_or_else(|| fallback.to_owned()),
+                    str::to_owned,
+                ),
+            project.as_path().display().to_string(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        );
+        if let Ok(current) = production::block_on(self.services.preferences.load()) {
+            let _ = production::block_on(self.services.preferences.update(
+                current.revision,
+                PreferenceCommand::AddRecentProject(recent),
+            ));
         }
     }
 
@@ -552,6 +742,44 @@ impl DesktopRuntime {
             && state.session_registry.is_current(session)
     }
 
+    /// Loads authoritative UI state and ports for the exact current session.
+    pub fn project_ui(
+        &self,
+        session: ProjectSessionCapability,
+    ) -> Result<Option<ProjectUiProject>, DesktopError> {
+        let services = {
+            let state = self.state.lock().expect("desktop state mutex poisoned");
+            if !state.session_registry.is_current(session) {
+                return Ok(None);
+            }
+            state
+                .projects
+                .values()
+                .find(|live| live.session == session)
+                .and_then(|live| live.ui_services.clone())
+        };
+        let Some(services) = services else {
+            return Ok(None);
+        };
+        let ports = ProjectUiPorts::new(
+            session,
+            services,
+            Arc::new(DesktopSessionAuthority {
+                state: Arc::downgrade(&self.state),
+            }),
+        );
+        let snapshot = ports
+            .access()
+            .map_err(|error| DesktopError::ProjectQuery(ProjectQueryError::new(error.to_string())))?
+            .snapshot(|query| query.snapshot())
+            .map_err(|error| DesktopError::ProjectQuery(ProjectQueryError::new(error.to_string())))?
+            .map_err(DesktopError::ProjectQuery)?;
+        Ok(Some(ProjectUiProject {
+            snapshot: Arc::new(snapshot),
+            ports,
+        }))
+    }
+
     fn clear_final_save_pending(&self, project: &Path, session: ProjectSessionCapability) {
         let mut state = self.state.lock().expect("desktop state mutex poisoned");
         if let Some(live) = state.projects.get_mut(project)
@@ -583,15 +811,18 @@ impl DesktopRuntime {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopError {
     Project(ProjectFilesystemError),
+    ProjectQuery(ProjectQueryError),
     Ui(DesktopUiError),
     MissingProject(PathBuf),
     FinalSaveAlreadyPending(PathBuf),
+    InvalidNewProject(String),
 }
 
 impl fmt::Display for DesktopError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Project(error) => error.fmt(formatter),
+            Self::ProjectQuery(error) => error.fmt(formatter),
             Self::Ui(error) => error.fmt(formatter),
             Self::MissingProject(path) => {
                 write!(formatter, "project is not open: {}", path.display())
@@ -603,6 +834,7 @@ impl fmt::Display for DesktopError {
                     path.display()
                 )
             }
+            Self::InvalidNewProject(reason) => write!(formatter, "invalid new project: {reason}"),
         }
     }
 }
@@ -613,6 +845,7 @@ impl From<DesktopError> for StartupError {
     fn from(error: DesktopError) -> Self {
         match error {
             DesktopError::Project(error) => Self::Project(error),
+            DesktopError::ProjectQuery(error) => Self::Ui(DesktopUiError::new(error.to_string())),
             DesktopError::Ui(error) => Self::Ui(error),
             other => Self::Ui(DesktopUiError::new(other.to_string())),
         }
@@ -632,6 +865,7 @@ impl DesktopState {
         &mut self,
         project: RequestedProjectPath,
         session_handle: Box<dyn ProjectSession>,
+        ui_services: Option<ProjectUiServices>,
     ) -> (WindowCapability, ProjectSessionCapability) {
         let project = project.into_path();
         let identity = self.identities.entry(project.clone()).or_insert_with(|| {
@@ -650,6 +884,7 @@ impl DesktopState {
                 window,
                 session,
                 session_handle,
+                ui_services,
                 final_save_pending: false,
             },
         );
@@ -675,5 +910,24 @@ struct LiveProject {
     window: WindowCapability,
     session: ProjectSessionCapability,
     session_handle: Box<dyn ProjectSession>,
+    ui_services: Option<ProjectUiServices>,
     final_save_pending: bool,
+}
+
+struct DesktopSessionAuthority {
+    state: Weak<Mutex<DesktopState>>,
+}
+
+impl ProjectSessionAuthority for DesktopSessionAuthority {
+    fn is_current(&self, session: ProjectSessionCapability) -> bool {
+        self.state
+            .upgrade()
+            .and_then(|state| {
+                state
+                    .lock()
+                    .ok()
+                    .map(|state| state.session_registry.is_current(session))
+            })
+            .unwrap_or(false)
+    }
 }

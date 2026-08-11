@@ -11,6 +11,10 @@ use std::{
 };
 
 use parchmint_contracts::generated::AnnotationSidecarV1;
+use parchmint_domain::{
+    DocumentId as DomainDocumentId, NodeId, NodeKind, Project, ProjectExportSettings, ProjectId,
+    ProjectSection,
+};
 use sha2::{Digest, Sha256};
 
 const FORMAT_CONTROL_V1: &[u8] = b"1\n";
@@ -171,8 +175,15 @@ pub enum ResourceId {
     Manifest,
     Styles,
     Dictionary,
+    /// Legacy document resource identity used by v1 recovery records.
     Document,
-    Annotations { document_id: String },
+    /// Stable identity for one exact document in a multi-document project.
+    DocumentById {
+        document_id: String,
+    },
+    Annotations {
+        document_id: String,
+    },
 }
 
 /// Canonical bytes ready for the repository layer to write.
@@ -276,6 +287,32 @@ pub struct CanonicalResourceSet {
     pub resources: BTreeMap<CanonicalRelativePath, CanonicalBytes>,
 }
 
+/// Stable document locations retained alongside a decoded project session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CanonicalProjectPathMap {
+    pub documents: BTreeMap<DomainDocumentId, CanonicalRelativePath>,
+}
+
+/// Revision frontier represented by the canonical files in one completed save.
+///
+/// The recovery sequence is distinct from the domain project's structural
+/// revision. Persisting it lets recovery safely discard a saved journal prefix
+/// while retaining and replaying later document edits after restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CanonicalPersistenceFrontier {
+    pub recovery_project_revision: u64,
+    pub document_revisions: BTreeMap<DomainDocumentId, u64>,
+}
+
+/// A deterministic complete project encoding and paths removed by this save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalProjectEncoding {
+    pub resources: BTreeMap<CanonicalRelativePath, CanonicalBytes>,
+    pub paths: CanonicalProjectPathMap,
+    pub persistence_frontier: CanonicalPersistenceFrontier,
+    pub deletions: Vec<CanonicalRelativePath>,
+}
+
 /// An in-memory snapshot used as migration input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFormatSnapshot {
@@ -364,6 +401,566 @@ impl ProjectFormatCodec {
             entries.insert(entry.to_owned());
         }
         Ok(CanonicalDictionary { entries })
+    }
+
+    /// Encodes a complete application project without exposing canonical
+    /// write assembly to the UI layer.
+    pub fn encode_domain_project(
+        &self,
+        project: &Project,
+        documents: &BTreeMap<DomainDocumentId, String>,
+        existing: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+        previous_paths: &CanonicalProjectPathMap,
+    ) -> Result<CanonicalProjectEncoding, FormatError> {
+        self.encode_domain_project_with_frontier(
+            project,
+            documents,
+            existing,
+            previous_paths,
+            &CanonicalPersistenceFrontier::default(),
+        )
+    }
+
+    pub fn encode_domain_project_with_frontier(
+        &self,
+        project: &Project,
+        documents: &BTreeMap<DomainDocumentId, String>,
+        existing: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+        previous_paths: &CanonicalProjectPathMap,
+        frontier: &CanonicalPersistenceFrontier,
+    ) -> Result<CanonicalProjectEncoding, FormatError> {
+        project
+            .validate()
+            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+        let (manifest, paths) = domain_manifest(project, frontier)?;
+        let mut resources = BTreeMap::new();
+        let control = self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?;
+        resources.insert(control.path.clone(), control);
+        let manifest = self.encode(&CanonicalResource::Manifest(CanonicalManifest(manifest)))?;
+        resources.insert(manifest.path.clone(), manifest);
+
+        let dictionary_text = project.dictionary.iter().collect::<Vec<_>>().join("\n");
+        let dictionary_text = if dictionary_text.is_empty() {
+            String::new()
+        } else {
+            format!("{dictionary_text}\n")
+        };
+        let dictionary = self.decode_dictionary(dictionary_text.as_bytes())?;
+        let dictionary = self.encode(&CanonicalResource::Dictionary(dictionary))?;
+        resources.insert(dictionary.path.clone(), dictionary);
+
+        for (path, bytes) in existing {
+            if matches!(
+                path.as_str(),
+                ".parchmint/format-version" | "project.toml" | "dictionary.txt"
+            ) || is_document_path(path.as_str())
+            {
+                continue;
+            }
+            resources.insert(
+                path.clone(),
+                CanonicalBytes {
+                    resource: resource_for_path(path),
+                    path: path.clone(),
+                    bytes: bytes.clone(),
+                    hash: ContentHash(Sha256::digest(bytes).into()),
+                },
+            );
+        }
+        if !resources.keys().any(|path| path.as_str() == "styles.css") {
+            let styles = self.decode_styles(b"")?;
+            let styles = self.encode(&CanonicalResource::Styles(styles))?;
+            resources.insert(styles.path.clone(), styles);
+        }
+        for (document, path) in &paths.documents {
+            let body = documents.get(document).ok_or_else(|| {
+                FormatError::InvalidDocument(format!(
+                    "document {} has no captured body",
+                    stable_id_text(document.as_bytes())
+                ))
+            })?;
+            let decoded = self.decode_document(body.as_bytes())?;
+            let mut encoded = self.encode(&CanonicalResource::Document(decoded))?;
+            encoded.path = path.clone();
+            encoded.resource = ResourceId::DocumentById {
+                document_id: stable_id_text(document.as_bytes()),
+            };
+            resources.insert(path.clone(), encoded);
+        }
+        let current_paths: BTreeSet<_> = paths.documents.values().cloned().collect();
+        let deletions = previous_paths
+            .documents
+            .values()
+            .filter(|path| !current_paths.contains(*path))
+            .cloned()
+            .collect();
+        Ok(CanonicalProjectEncoding {
+            resources,
+            paths,
+            persistence_frontier: frontier.clone(),
+            deletions,
+        })
+    }
+
+    /// Decodes the structure extension written by [`Self::encode_domain_project`].
+    /// Legacy manifests without this extension return `Ok(None)`.
+    pub fn decode_domain_project(
+        &self,
+        manifest: &CanonicalManifest,
+        project_id: ProjectId,
+    ) -> Result<Option<(Project, CanonicalProjectPathMap)>, FormatError> {
+        decode_domain_manifest(manifest.value(), project_id)
+    }
+
+    pub fn decode_persistence_frontier(
+        &self,
+        manifest: &CanonicalManifest,
+    ) -> Result<CanonicalPersistenceFrontier, FormatError> {
+        decode_persistence_frontier(manifest.value())
+    }
+}
+
+fn domain_manifest(
+    project: &Project,
+    frontier: &CanonicalPersistenceFrontier,
+) -> Result<(toml::Value, CanonicalProjectPathMap), FormatError> {
+    let mut root = toml::map::Map::new();
+    let mut project_table = toml::map::Map::new();
+    project_table.insert(
+        "title".into(),
+        toml::Value::String(project.display_title.clone()),
+    );
+    project_table.insert(
+        "spellcheck-language".into(),
+        toml::Value::String("en-US".into()),
+    );
+    project_table.insert(
+        "revision".into(),
+        toml::Value::Integer(project.revision.value() as i64),
+    );
+    if let Some(author) = &project.author {
+        project_table.insert("author".into(), toml::Value::String(author.clone()));
+    }
+    project_table.insert(
+        "export-excluded".into(),
+        toml::Value::Boolean(project.export_settings.excluded),
+    );
+    project_table.insert(
+        "export-starts-new-page".into(),
+        toml::Value::Boolean(project.export_settings.starts_new_page),
+    );
+    root.insert("project".into(), toml::Value::Table(project_table));
+
+    let mut structure = toml::map::Map::new();
+    structure.insert("version".into(), toml::Value::Integer(1));
+    let mut nodes = Vec::new();
+    let mut paths = CanonicalProjectPathMap::default();
+    for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+        encode_node_children(project, section.root_id(), section, &mut nodes, &mut paths)?;
+    }
+    structure.insert("nodes".into(), toml::Value::Array(nodes));
+    let metadata_fields = project
+        .metadata
+        .iter()
+        .map(|field| {
+            use parchmint_domain::{MetadataApplicability, MetadataTextKind};
+            let mut value = toml::map::Map::new();
+            value.insert(
+                "id".into(),
+                toml::Value::String(stable_id_text(field.id.as_bytes())),
+            );
+            value.insert("label".into(), toml::Value::String(field.label.clone()));
+            if let Some(description) = &field.description {
+                value.insert(
+                    "description".into(),
+                    toml::Value::String(description.clone()),
+                );
+            }
+            value.insert(
+                "applicability".into(),
+                toml::Value::String(
+                    match field.applicability {
+                        MetadataApplicability::Groups => "groups",
+                        MetadataApplicability::Documents => "documents",
+                        MetadataApplicability::GroupsAndDocuments => "groups-and-documents",
+                    }
+                    .into(),
+                ),
+            );
+            value.insert(
+                "text-kind".into(),
+                toml::Value::String(
+                    match field.text_kind {
+                        MetadataTextKind::SingleLine => "single-line",
+                        MetadataTextKind::Multiline => "multiline",
+                    }
+                    .into(),
+                ),
+            );
+            if let Some(default) = &field.default_value {
+                value.insert("default".into(), toml::Value::String(default.clone()));
+            }
+            value.insert(
+                "visible-on-cards".into(),
+                toml::Value::Boolean(field.visible_on_cards),
+            );
+            toml::Value::Table(value)
+        })
+        .collect();
+    structure.insert(
+        "metadata-fields".into(),
+        toml::Value::Array(metadata_fields),
+    );
+    root.insert("parchmint-structure".into(), toml::Value::Table(structure));
+    let mut persistence = toml::map::Map::new();
+    persistence.insert(
+        "recovery-project-revision".into(),
+        toml::Value::Integer(frontier.recovery_project_revision as i64),
+    );
+    persistence.insert(
+        "document-revisions".into(),
+        toml::Value::Table(
+            frontier
+                .document_revisions
+                .iter()
+                .map(|(document, revision)| {
+                    (
+                        stable_id_text(document.as_bytes()),
+                        toml::Value::Integer(*revision as i64),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    root.insert(
+        "parchmint-persistence".into(),
+        toml::Value::Table(persistence),
+    );
+    Ok((toml::Value::Table(root), paths))
+}
+
+fn decode_persistence_frontier(
+    value: &toml::Value,
+) -> Result<CanonicalPersistenceFrontier, FormatError> {
+    let Some(table) = value
+        .get("parchmint-persistence")
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(CanonicalPersistenceFrontier::default());
+    };
+    let recovery_project_revision = table
+        .get("recovery-project-revision")
+        .and_then(toml::Value::as_integer)
+        .and_then(|revision| u64::try_from(revision).ok())
+        .ok_or_else(|| FormatError::InvalidManifest("invalid recovery project revision".into()))?;
+    let mut document_revisions = BTreeMap::new();
+    for (document, revision) in table
+        .get("document-revisions")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        let revision = revision
+            .as_integer()
+            .and_then(|revision| u64::try_from(revision).ok())
+            .ok_or_else(|| FormatError::InvalidManifest("invalid document revision".into()))?;
+        document_revisions.insert(
+            DomainDocumentId::from_bytes(parse_stable_id(document)?),
+            revision,
+        );
+    }
+    Ok(CanonicalPersistenceFrontier {
+        recovery_project_revision,
+        document_revisions,
+    })
+}
+
+fn encode_node_children(
+    project: &Project,
+    parent: NodeId,
+    section: ProjectSection,
+    output: &mut Vec<toml::Value>,
+    paths: &mut CanonicalProjectPathMap,
+) -> Result<(), FormatError> {
+    for (order, id) in project.nodes.children(parent).iter().copied().enumerate() {
+        let node = project.nodes.get(id).ok_or_else(|| {
+            FormatError::InvalidManifest("project tree references a missing node".into())
+        })?;
+        let mut value = toml::map::Map::new();
+        value.insert(
+            "id".into(),
+            toml::Value::String(stable_id_text(id.as_bytes())),
+        );
+        value.insert(
+            "parent".into(),
+            toml::Value::String(stable_id_text(parent.as_bytes())),
+        );
+        value.insert("order".into(), toml::Value::Integer(order as i64));
+        value.insert("title".into(), toml::Value::String(node.title.clone()));
+        value.insert(
+            "synopsis".into(),
+            toml::Value::String(node.synopsis.clone()),
+        );
+        value.insert(
+            "export-excluded".into(),
+            toml::Value::Boolean(node.export_settings.excluded),
+        );
+        value.insert(
+            "export-starts-new-page".into(),
+            toml::Value::Boolean(node.export_settings.starts_new_page),
+        );
+        let metadata = node
+            .metadata
+            .iter()
+            .map(|(field, value)| {
+                (
+                    stable_id_text(field.as_bytes()),
+                    toml::Value::String(value.clone()),
+                )
+            })
+            .collect();
+        value.insert("metadata".into(), toml::Value::Table(metadata));
+        match node.kind {
+            NodeKind::Group => {
+                value.insert("kind".into(), toml::Value::String("group".into()));
+            }
+            NodeKind::Document(document) => {
+                value.insert("kind".into(), toml::Value::String("document".into()));
+                value.insert(
+                    "document-id".into(),
+                    toml::Value::String(stable_id_text(document.as_bytes())),
+                );
+                let directory = match section {
+                    ProjectSection::Manuscript => "manuscript",
+                    ProjectSection::Research => "research",
+                };
+                let path = CanonicalRelativePath::parse(format!(
+                    "{directory}/{}.html",
+                    stable_id_text(document.as_bytes())
+                ))?;
+                value.insert("path".into(), toml::Value::String(path.as_str().into()));
+                paths.documents.insert(document, path);
+            }
+            NodeKind::Root(_) => {
+                return Err(FormatError::InvalidManifest(
+                    "fixed project roots cannot be nested".into(),
+                ));
+            }
+        }
+        output.push(toml::Value::Table(value));
+        if node.kind == NodeKind::Group {
+            encode_node_children(project, id, section, output, paths)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_domain_manifest(
+    value: &toml::Value,
+    project_id: ProjectId,
+) -> Result<Option<(Project, CanonicalProjectPathMap)>, FormatError> {
+    use parchmint_domain::{
+        MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind,
+    };
+    let Some(structure) = value
+        .get("parchmint-structure")
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(None);
+    };
+    if structure.get("version").and_then(toml::Value::as_integer) != Some(1) {
+        return Err(FormatError::InvalidManifest(
+            "unsupported parchmint structure version".into(),
+        ));
+    }
+    let project_value = value.get("project").and_then(toml::Value::as_table);
+    let mut project = Project::new(project_id);
+    project.display_title = project_value
+        .and_then(|table| table.get("title"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    project.author = project_value
+        .and_then(|table| table.get("author"))
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+    project.export_settings = ProjectExportSettings {
+        excluded: project_value
+            .and_then(|table| table.get("export-excluded"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        starts_new_page: project_value
+            .and_then(|table| table.get("export-starts-new-page"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+    };
+    project.revision = project_value
+        .and_then(|table| table.get("revision"))
+        .and_then(toml::Value::as_integer)
+        .and_then(|revision| u64::try_from(revision).ok())
+        .map(Into::into)
+        .unwrap_or_default();
+    for field in structure
+        .get("metadata-fields")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let table = required_table(field, "metadata field")?;
+        let applicability = match required_str(table, "applicability")? {
+            "groups" => MetadataApplicability::Groups,
+            "documents" => MetadataApplicability::Documents,
+            "groups-and-documents" => MetadataApplicability::GroupsAndDocuments,
+            _ => {
+                return Err(FormatError::InvalidManifest(
+                    "invalid metadata applicability".into(),
+                ));
+            }
+        };
+        let text_kind = match required_str(table, "text-kind")? {
+            "single-line" => MetadataTextKind::SingleLine,
+            "multiline" => MetadataTextKind::Multiline,
+            _ => {
+                return Err(FormatError::InvalidManifest(
+                    "invalid metadata text kind".into(),
+                ));
+            }
+        };
+        project
+            .metadata
+            .upsert(MetadataFieldDefinition {
+                id: MetadataFieldId::from_bytes(parse_stable_id(required_str(table, "id")?)?),
+                label: required_str(table, "label")?.to_owned(),
+                description: table
+                    .get("description")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+                applicability,
+                text_kind,
+                default_value: table
+                    .get("default")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_owned),
+                visible_on_cards: table
+                    .get("visible-on-cards")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false),
+            })
+            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+    }
+    let mut paths = CanonicalProjectPathMap::default();
+    for node in structure
+        .get("nodes")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let table = required_table(node, "project node")?;
+        let id = NodeId::from_bytes(parse_stable_id(required_str(table, "id")?)?);
+        let parent = NodeId::from_bytes(parse_stable_id(required_str(table, "parent")?)?);
+        let order = table
+            .get("order")
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| FormatError::InvalidManifest("node order is invalid".into()))?;
+        let title = required_str(table, "title")?;
+        match required_str(table, "kind")? {
+            "group" => project.nodes.try_insert_group(id, parent, order, title),
+            "document" => {
+                let document = DomainDocumentId::from_bytes(parse_stable_id(required_str(
+                    table,
+                    "document-id",
+                )?)?);
+                let path = CanonicalRelativePath::parse(required_str(table, "path")?)?;
+                paths.documents.insert(document, path);
+                project
+                    .nodes
+                    .try_insert_document(id, document, parent, order, title)
+            }
+            _ => return Err(FormatError::InvalidManifest("node kind is invalid".into())),
+        }
+        .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+        let inserted = project.nodes.get_mut(id).expect("inserted node exists");
+        inserted.synopsis = table
+            .get("synopsis")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        inserted.export_settings = ProjectExportSettings {
+            excluded: table
+                .get("export-excluded")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false),
+            starts_new_page: table
+                .get("export-starts-new-page")
+                .and_then(toml::Value::as_bool)
+                .unwrap_or(false),
+        };
+        if let Some(metadata) = table.get("metadata").and_then(toml::Value::as_table) {
+            for (field, value) in metadata {
+                let field = MetadataFieldId::from_bytes(parse_stable_id(field)?);
+                let value = value.as_str().ok_or_else(|| {
+                    FormatError::InvalidManifest("metadata value is not text".into())
+                })?;
+                inserted.metadata.insert(field, value.to_owned());
+            }
+        }
+    }
+    project
+        .validate()
+        .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+    Ok(Some((project, paths)))
+}
+
+fn required_table<'a>(
+    value: &'a toml::Value,
+    field: &'static str,
+) -> Result<&'a toml::Table, FormatError> {
+    value
+        .as_table()
+        .ok_or_else(|| FormatError::InvalidManifest(format!("{field} is not a table")))
+}
+
+fn required_str<'a>(table: &'a toml::Table, field: &'static str) -> Result<&'a str, FormatError> {
+    table
+        .get(field)
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| FormatError::InvalidManifest(format!("{field} is missing or invalid")))
+}
+
+fn stable_id_text(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn parse_stable_id(value: &str) -> Result<[u8; 16], FormatError> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(FormatError::InvalidManifest(
+            "stable ID is not 32 hexadecimal digits".into(),
+        ));
+    }
+    let mut bytes = [0; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+    }
+    Ok(bytes)
+}
+
+fn resource_for_path(path: &CanonicalRelativePath) -> ResourceId {
+    match path.as_str() {
+        ".parchmint/format-version" => ResourceId::FormatControl,
+        "project.toml" => ResourceId::Manifest,
+        "styles.css" => ResourceId::Styles,
+        "dictionary.txt" => ResourceId::Dictionary,
+        path if path.starts_with("annotations/") && path.ends_with(".json") => {
+            ResourceId::Annotations {
+                document_id: path
+                    .trim_start_matches("annotations/")
+                    .trim_end_matches(".json")
+                    .to_owned(),
+            }
+        }
+        _ => ResourceId::Document,
     }
 }
 
@@ -1390,5 +1987,103 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn domain_project_round_trip_preserves_structure_metadata_and_stable_document_paths() {
+        use parchmint_domain::{
+            MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind,
+            ProjectCommand, apply_project_command,
+        };
+
+        let project_id = ProjectId::from_bytes([1; 16]);
+        let group = NodeId::from_bytes([2; 16]);
+        let node = NodeId::from_bytes([3; 16]);
+        let document = DomainDocumentId::from_bytes([4; 16]);
+        let metadata = MetadataFieldId::from_bytes([5; 16]);
+        let mut project = Project::new(project_id);
+        for command in [
+            ProjectCommand::create_group(group, NodeId::manuscript_root(), 0, "Drafts"),
+            ProjectCommand::create_document(node, document, group, 0, "Chapter One"),
+            ProjectCommand::UpsertMetadataField {
+                definition: MetadataFieldDefinition {
+                    id: metadata,
+                    label: "Status".into(),
+                    description: Some("Draft status".into()),
+                    applicability: MetadataApplicability::Documents,
+                    text_kind: MetadataTextKind::SingleLine,
+                    default_value: None,
+                    visible_on_cards: true,
+                },
+            },
+            ProjectCommand::SetMetadataValue {
+                id: node,
+                field: metadata,
+                value: Some("Revised".into()),
+            },
+            ProjectCommand::move_node(node, NodeId::research_root(), 0),
+            ProjectCommand::rename_node(node, "Research Note"),
+        ] {
+            let revision = project.revision;
+            project = apply_project_command(&project, revision, command)
+                .unwrap()
+                .project;
+        }
+        project.display_title = "Round Trip".into();
+        let previous_path = CanonicalRelativePath::parse("manuscript/old-name.html").unwrap();
+        let previous = CanonicalProjectPathMap {
+            documents: BTreeMap::from([(document, previous_path.clone())]),
+        };
+        let documents = BTreeMap::from([(document, "<p>Body</p>".to_owned())]);
+        let frontier = CanonicalPersistenceFrontier {
+            recovery_project_revision: 7,
+            document_revisions: BTreeMap::from([(document, 11)]),
+        };
+        let encoding = codec()
+            .encode_domain_project_with_frontier(
+                &project,
+                &documents,
+                &BTreeMap::new(),
+                &previous,
+                &frontier,
+            )
+            .unwrap();
+        let repeated = codec()
+            .encode_domain_project_with_frontier(
+                &project,
+                &documents,
+                &BTreeMap::new(),
+                &previous,
+                &frontier,
+            )
+            .unwrap();
+        assert_eq!(encoding, repeated);
+        assert_eq!(encoding.deletions, [previous_path]);
+        let document_path = encoding.paths.documents[&document].clone();
+        assert!(document_path.as_str().starts_with("research/"));
+
+        let manifest = codec()
+            .decode_manifest(
+                &encoding.resources[&CanonicalRelativePath::parse("project.toml").unwrap()].bytes,
+            )
+            .unwrap();
+        let (decoded, decoded_paths) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            codec().decode_persistence_frontier(&manifest).unwrap(),
+            frontier
+        );
+        let decoded_node = decoded.nodes.get(node).unwrap();
+        assert_eq!(decoded.display_title, "Round Trip");
+        assert_eq!(decoded.revision, project.revision);
+        assert_eq!(decoded_node.title, "Research Note");
+        assert_eq!(decoded.nodes.parent(node), Some(NodeId::research_root()));
+        assert_eq!(
+            decoded_node.metadata.get(&metadata).map(String::as_str),
+            Some("Revised")
+        );
+        assert_eq!(decoded_paths.documents[&document], document_path);
     }
 }

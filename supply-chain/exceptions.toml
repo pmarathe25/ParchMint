@@ -1,5 +1,20 @@
 format-version = 1
-exception = []
+
+[[exception]]
+id = "RUSTSEC-2024-0436"
+check = "advisory"
+package = "paste@1.0.15"
+owner = "@parchmint-maintainers"
+reason = "The advisory records an unmaintained transitive macro crate, not a vulnerability. Harper has no patched dependency path yet; reevaluate when its dependency changes."
+expires = "2026-11-10"
+
+[[exception]]
+id = "RUSTSEC-2026-0192"
+check = "advisory"
+package = "ttf-parser@0.25.1"
+owner = "@parchmint-maintainers"
+reason = "The advisory records an unmaintained transitive font parser, not a vulnerability. Iced has no patched dependency path yet; reevaluate when its font stack changes."
+expires = "2026-11-10"
 
 # Every exception uses this shape. Expired entries fail CI.
 # [[exception]]

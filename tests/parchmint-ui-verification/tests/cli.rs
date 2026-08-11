@@ -173,7 +173,7 @@ fn capture_writes_a_2x_launcher_png_and_prints_its_renderer_path() {
         .args([
             "capture",
             "--target",
-            "launcher",
+            "launcher-default",
             "--appearance",
             "light",
             "--output-stem",
@@ -198,7 +198,7 @@ fn capture_refuses_to_replace_an_existing_renderer_output() {
     let arguments = [
         "capture",
         "--target",
-        "launcher",
+        "launcher-default",
         "--appearance",
         "dark",
         "--output-stem",
@@ -217,4 +217,23 @@ fn capture_refuses_to_replace_an_existing_renderer_output() {
         .unwrap();
     assert_eq!(repeated.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&repeated.stderr).contains("capture output already exists"));
+}
+
+#[test]
+fn list_prints_every_fixture_appearance_and_reference_id() {
+    let output = Command::new(env!("CARGO_BIN_EXE_parchmint-ui-verify"))
+        .arg("list")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let lines = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(lines.len(), 20);
+    assert!(lines.contains(&"editor-single-default\tdark\teditor-single-dark".to_owned()));
+    assert!(
+        lines.contains(&"export-default\tlight\texport-project-output-controls-light".to_owned())
+    );
 }

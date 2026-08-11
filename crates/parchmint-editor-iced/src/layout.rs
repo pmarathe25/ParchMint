@@ -240,6 +240,20 @@ impl BlockLayoutGeometry {
             .map(|(_, rectangle)| *rectangle)
     }
 
+    pub(crate) fn previous_caret(&self, position: DocumentPosition) -> Option<DocumentPosition> {
+        self.carets
+            .iter()
+            .filter_map(|(candidate, _)| (*candidate < position).then_some(*candidate))
+            .max()
+    }
+
+    pub(crate) fn next_caret(&self, position: DocumentPosition) -> Option<DocumentPosition> {
+        self.carets
+            .iter()
+            .filter_map(|(candidate, _)| (*candidate > position).then_some(*candidate))
+            .min()
+    }
+
     pub fn selection_rectangles(&self, selection: EditorSelection) -> Vec<EditorRectangle> {
         let start = selection.start().value();
         let end = selection.end().value();

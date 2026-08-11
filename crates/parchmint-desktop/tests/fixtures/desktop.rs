@@ -9,8 +9,8 @@ use std::{
 
 use parchmint_desktop::{
     ApplicationServices, DesktopBootstrap, DesktopRuntime, DesktopStartup, DesktopUi,
-    DesktopUiError, FinalSaveRequest, LaunchIntent, PlatformServices, ProjectFilesystemError,
-    ProjectFilesystemService, ProjectSession, RequestedProjectPath,
+    DesktopUiError, FinalSaveRequest, LaunchIntent, NewProjectRequest, PlatformServices,
+    ProjectFilesystemError, ProjectFilesystemService, ProjectSession, RequestedProjectPath,
 };
 use parchmint_editor_api::EventStream;
 use parchmint_platform_api::{
@@ -190,6 +190,13 @@ impl FakeProjectFilesystem {
 }
 
 impl ProjectFilesystemService for FakeProjectFilesystem {
+    fn create(
+        &self,
+        request: &NewProjectRequest,
+    ) -> Result<Box<dyn ProjectSession>, ProjectFilesystemError> {
+        self.open(&RequestedProjectPath::new(&request.destination))
+    }
+
     fn open(
         &self,
         project: &RequestedProjectPath,
@@ -232,36 +239,65 @@ impl Drop for ProjectLease {
     }
 }
 
-struct FakePreferences {
-    snapshot: PreferenceSnapshot,
+pub struct FakePreferences {
+    snapshot: Mutex<PreferenceSnapshot>,
 }
 
 impl FakePreferences {
     fn new(mode: AppearanceMode) -> Self {
         Self {
-            snapshot: PreferenceSnapshot {
+            snapshot: Mutex::new(PreferenceSnapshot {
                 revision: PreferenceRevision::default(),
                 values: ApplicationPreferences {
                     appearance: mode,
                     ..ApplicationPreferences::default()
                 },
-            },
+            }),
         }
+    }
+
+    pub fn snapshot(&self) -> PreferenceSnapshot {
+        self.snapshot
+            .lock()
+            .expect("preference snapshot mutex poisoned")
+            .clone()
     }
 }
 
 impl PreferenceService for FakePreferences {
     fn load(&self) -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>> {
-        let snapshot = self.snapshot.clone();
+        let snapshot = self.snapshot();
         Box::pin(async move { Ok(snapshot) })
     }
 
     fn update(
         &self,
-        _expected: PreferenceRevision,
-        _command: PreferenceCommand,
+        expected: PreferenceRevision,
+        command: PreferenceCommand,
     ) -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>> {
-        Box::pin(async { Err(PreferenceError::NotInitialized) })
+        let result = {
+            let mut snapshot = self
+                .snapshot
+                .lock()
+                .expect("preference snapshot mutex poisoned");
+            if snapshot.revision != expected {
+                Err(PreferenceError::StaleRevision {
+                    expected,
+                    actual: snapshot.revision,
+                })
+            } else if let PreferenceCommand::AddRecentProject(project) = command {
+                snapshot
+                    .values
+                    .recent_projects
+                    .retain(|existing| existing.path != project.path);
+                snapshot.values.recent_projects.insert(0, project);
+                snapshot.revision = PreferenceRevision::from(snapshot.revision.value() + 1);
+                Ok(snapshot.clone())
+            } else {
+                Err(PreferenceError::NotInitialized)
+            }
+        };
+        Box::pin(async move { result })
     }
 
     fn changes(&self) -> EventStream<PreferenceChange> {
@@ -337,6 +373,7 @@ impl SystemAppearanceService for FakeSystemAppearance {
 pub struct Fixture {
     pub bootstrap: DesktopBootstrap,
     pub filesystem: Arc<FakeProjectFilesystem>,
+    pub preferences: Arc<FakePreferences>,
     pub ui: Arc<RecordingUi>,
 }
 
@@ -351,10 +388,11 @@ pub fn fixture_with_filesystem(
     system_appearance: SystemAppearance,
 ) -> Fixture {
     let ui = Arc::new(RecordingUi::default());
+    let preferences = Arc::new(FakePreferences::new(preference_mode));
     let bootstrap = DesktopBootstrap::new(
         Arc::new(FixtureApplicationServices) as ApplicationServices,
         filesystem.clone(),
-        Arc::new(FakePreferences::new(preference_mode)),
+        preferences.clone(),
         Arc::new(FakeAppearance::default()),
         Arc::new(FakeSystemAppearance(system_appearance)) as PlatformServices,
         ui.clone(),
@@ -362,6 +400,7 @@ pub fn fixture_with_filesystem(
     Fixture {
         bootstrap,
         filesystem,
+        preferences,
         ui,
     }
 }

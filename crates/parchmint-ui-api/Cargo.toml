@@ -12,8 +12,14 @@ workspace = true
 
 [dependencies]
 parchmint-application = { path = "../parchmint-application" }
+parchmint-domain = { path = "../parchmint-domain" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-export-api = { path = "../parchmint-export-api" }
+parchmint-history-api = { path = "../parchmint-history-api" }
 parchmint-platform-api = { path = "../parchmint-platform-api" }
 parchmint-preferences = { path = "../parchmint-preferences" }
+parchmint-recovery-api = { path = "../parchmint-recovery-api" }
+parchmint-save = { path = "../parchmint-save" }
+parchmint-search-api = { path = "../parchmint-search-api" }
 parchmint-spellcheck-api = { path = "../parchmint-spellcheck-api" }
 parchmint-workspace-state = { path = "../parchmint-workspace-state" }

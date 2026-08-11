@@ -1,8 +1,10 @@
 //! Application command ownership, undo routing, and revision capture.
 
 mod editor_persistence;
+mod project_persistence;
 
 pub use editor_persistence::{EditorPersistenceCoordinator, EditorPersistenceStatus};
+pub use project_persistence::*;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -17,7 +19,7 @@ pub use parchmint_domain::{
     DocumentId, DomainError, Project, ProjectCommand, ProjectId, ProjectOperationId,
     ProjectRevision, Resource, ResourceSet,
 };
-pub use parchmint_editor_api::EditorRevision;
+pub use parchmint_editor_api::{CanonicalProjection, EditorRevision};
 
 const PROJECT_UNDO_LIMIT: usize = 100;
 const PROJECT_UNDO_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -228,6 +230,14 @@ pub trait DocumentStateOwner: Send + Sync {
     ) -> Result<BTreeMap<DocumentId, EditorRevision>, ApplicationError>;
     fn revisions(&self) -> Result<DocumentRevisionVector, ApplicationError>;
     fn reset_undo(&self, reason: UndoResetReason) -> Result<(), ApplicationError>;
+    fn accept_projection(
+        &self,
+        document: DocumentId,
+        revision: EditorRevision,
+        body: String,
+    ) -> Result<(), ApplicationError>;
+    fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError>;
+    fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -289,6 +299,7 @@ pub struct RevisionedSaveRequest {
     pub dirty_resources: ResourceSet,
     pub checkpoint_groups: Vec<CheckpointGroupId>,
     pub generation: u64,
+    pub mutation_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +340,7 @@ pub enum ApplicationError {
     DocumentRedoEmpty {
         document: DocumentId,
     },
+    StaleSaveAcknowledgement,
     StateUnavailable,
 }
 
@@ -365,6 +377,9 @@ impl fmt::Display for ApplicationError {
             }
             Self::DocumentRedoEmpty { document } => {
                 write!(formatter, "document redo is empty for {document:?}")
+            }
+            Self::StaleSaveAcknowledgement => {
+                formatter.write_str("save acknowledgement does not match a captured frontier")
             }
             Self::StateUnavailable => formatter.write_str("application state is unavailable"),
         }
@@ -466,6 +481,20 @@ impl NativeDocumentStateOwner {
             revision: record.revision,
             visibility: record.visibility,
         })
+    }
+
+    pub fn snapshots(&self) -> Result<Vec<DocumentSnapshot>, ApplicationError> {
+        let state = lock(&self.state)?;
+        Ok(state
+            .documents
+            .iter()
+            .map(|(document, record)| DocumentSnapshot {
+                document_id: *document,
+                body: record.body.clone(),
+                revision: record.revision,
+                visibility: record.visibility,
+            })
+            .collect())
     }
 
     pub fn document_undo_len(&self, document: DocumentId) -> Result<usize, ApplicationError> {
@@ -668,6 +697,76 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         }
         Ok(())
     }
+
+    fn accept_projection(
+        &self,
+        document: DocumentId,
+        revision: EditorRevision,
+        body: String,
+    ) -> Result<(), ApplicationError> {
+        let mut state = lock(&self.state)?;
+        let record = state
+            .documents
+            .get_mut(&document)
+            .ok_or(ApplicationError::MissingDocument { document })?;
+        if revision < record.revision || (revision == record.revision && body != record.body) {
+            return Err(ApplicationError::StaleDocument {
+                document,
+                observed: revision,
+                current: record.revision,
+            });
+        }
+        record.revision = revision;
+        record.body = body;
+        Ok(())
+    }
+
+    fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError> {
+        let mut state = lock(&self.state)?;
+        if state.documents.contains_key(&document.document_id) {
+            return Err(ApplicationError::DuplicateDocument {
+                document: document.document_id,
+            });
+        }
+        state.documents.insert(
+            document.document_id,
+            DocumentRecord {
+                body: document.body,
+                revision: document.revision,
+                visibility: document.visibility,
+                undo: Vec::new(),
+                redo: Vec::new(),
+                project_boundaries: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
+    fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError> {
+        let mut replacement = BTreeMap::new();
+        for document in documents {
+            if replacement
+                .insert(
+                    document.document_id,
+                    DocumentRecord {
+                        body: document.body,
+                        revision: document.revision,
+                        visibility: document.visibility,
+                        undo: Vec::new(),
+                        redo: Vec::new(),
+                        project_boundaries: Vec::new(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(ApplicationError::DuplicateDocument {
+                    document: document.document_id,
+                });
+            }
+        }
+        lock(&self.state)?.documents = replacement;
+        Ok(())
+    }
 }
 
 struct DispatcherState {
@@ -675,11 +774,13 @@ struct DispatcherState {
     undo: VecDeque<ProjectUndoEntry>,
     redo: Vec<ProjectUndoEntry>,
     undo_bytes: usize,
-    dirty: ResourceSet,
-    pending_checkpoints: Vec<CheckpointGroupId>,
+    dirty: BTreeMap<Resource, u64>,
+    pending_checkpoints: Vec<(CheckpointGroupId, u64)>,
+    captured_saves: BTreeMap<u64, RevisionedSaveRequest>,
     next_operation: u64,
     next_checkpoint: u64,
     save_generation: u64,
+    mutation_generation: u64,
 }
 
 impl DispatcherState {
@@ -695,20 +796,27 @@ impl DispatcherState {
         CheckpointGroupId(self.next_checkpoint)
     }
 
-    fn stage_checkpoint(&mut self) -> CheckpointGroupId {
+    fn stage_checkpoint(&mut self, mutation_generation: u64) -> CheckpointGroupId {
         let checkpoint = self.checkpoint_group();
-        self.pending_checkpoints.push(checkpoint);
+        self.pending_checkpoints
+            .push((checkpoint, mutation_generation));
         checkpoint
     }
 
-    fn mark_dirty(&mut self, resources: &ResourceSet) {
+    fn mark_dirty(&mut self, resources: &ResourceSet) -> u64 {
+        self.mutation_generation = self.mutation_generation.saturating_add(1);
+        let generation = self.mutation_generation;
         for resource in resources.iter() {
-            self.dirty.insert(*resource);
+            self.dirty.insert(*resource, generation);
         }
+        generation
     }
 
-    fn mark_document_dirty(&mut self, document: DocumentId) {
-        self.dirty.insert(Resource::Document(document));
+    fn mark_document_dirty(&mut self, document: DocumentId) -> u64 {
+        self.mutation_generation = self.mutation_generation.saturating_add(1);
+        let generation = self.mutation_generation;
+        self.dirty.insert(Resource::Document(document), generation);
+        generation
     }
 
     fn push_undo(&mut self, entry: ProjectUndoEntry) {
@@ -744,11 +852,13 @@ impl NativeProjectCommandDispatcher {
                 undo: VecDeque::new(),
                 redo: Vec::new(),
                 undo_bytes: 0,
-                dirty: ResourceSet::default(),
+                dirty: BTreeMap::new(),
                 pending_checkpoints: Vec::new(),
+                captured_saves: BTreeMap::new(),
                 next_operation: 0,
                 next_checkpoint: 0,
                 save_generation: 0,
+                mutation_generation: 0,
             }),
             documents,
         }
@@ -763,7 +873,11 @@ impl NativeProjectCommandDispatcher {
     }
 
     pub fn pending_checkpoints(&self) -> Result<Vec<CheckpointGroupId>, ApplicationError> {
-        Ok(lock(&self.state)?.pending_checkpoints.clone())
+        Ok(lock(&self.state)?
+            .pending_checkpoints
+            .iter()
+            .map(|(checkpoint, _)| *checkpoint)
+            .collect())
     }
 
     pub fn execute_document(
@@ -772,9 +886,24 @@ impl NativeProjectCommandDispatcher {
     ) -> Result<DocumentCommandResult, ApplicationError> {
         let mut state = lock(&self.state)?;
         let result = self.documents.execute(command)?;
-        state.mark_document_dirty(result.document_id);
-        state.stage_checkpoint();
+        let mutation = state.mark_document_dirty(result.document_id);
+        state.stage_checkpoint(mutation);
         Ok(result)
+    }
+
+    pub fn accept_editor_projection(
+        &self,
+        projection: &CanonicalProjection,
+    ) -> Result<(), ApplicationError> {
+        self.documents.accept_projection(
+            projection.document_id(),
+            projection.revision(),
+            projection.body().to_owned(),
+        )?;
+        let mut state = lock(&self.state)?;
+        let mutation = state.mark_document_dirty(projection.document_id());
+        state.stage_checkpoint(mutation);
+        Ok(())
     }
 
     pub fn undo_focused(&self, focus: FocusTarget) -> Result<FocusedUndoResult, ApplicationError> {
@@ -797,8 +926,8 @@ impl NativeProjectCommandDispatcher {
             UndoDomain::Document(document) => {
                 let mut state = lock(&self.state)?;
                 let result = direction.edit_document(self.documents.as_ref(), document)?;
-                state.mark_document_dirty(document);
-                state.stage_checkpoint();
+                let mutation = state.mark_document_dirty(document);
+                state.stage_checkpoint(mutation);
                 Ok(FocusedUndoResult::Document {
                     document_id: document,
                     revision: result.revision,
@@ -812,15 +941,97 @@ impl NativeProjectCommandDispatcher {
         let mut state = lock(&self.state)?;
         let revisions = self.documents.revisions()?;
         state.save_generation = state.save_generation.saturating_add(1);
+        let mut dirty_resources = ResourceSet::default();
+        for resource in state.dirty.keys() {
+            dirty_resources.insert(*resource);
+        }
+        let request = RevisionedSaveRequest {
+            project_id: state.project.id,
+            project_revision: state.project.revision,
+            open_documents: revisions.open,
+            closed_documents: revisions.closed,
+            dirty_resources,
+            checkpoint_groups: state
+                .pending_checkpoints
+                .iter()
+                .map(|(checkpoint, _)| *checkpoint)
+                .collect(),
+            generation: state.save_generation,
+            mutation_generation: state.mutation_generation,
+        };
+        state
+            .captured_saves
+            .insert(request.generation, request.clone());
+        Ok(request)
+    }
+
+    pub(crate) fn recovery_revision_request(
+        &self,
+    ) -> Result<RevisionedSaveRequest, ApplicationError> {
+        let state = lock(&self.state)?;
+        let revisions = self.documents.revisions()?;
+        let mut dirty_resources = ResourceSet::default();
+        for resource in state.dirty.keys() {
+            dirty_resources.insert(*resource);
+        }
         Ok(RevisionedSaveRequest {
             project_id: state.project.id,
             project_revision: state.project.revision,
             open_documents: revisions.open,
             closed_documents: revisions.closed,
-            dirty_resources: state.dirty.clone(),
-            checkpoint_groups: state.pending_checkpoints.clone(),
-            generation: state.save_generation,
+            dirty_resources,
+            checkpoint_groups: state
+                .pending_checkpoints
+                .iter()
+                .map(|(checkpoint, _)| *checkpoint)
+                .collect(),
+            generation: state.mutation_generation,
+            mutation_generation: state.mutation_generation,
         })
+    }
+
+    /// Retires only resources and checkpoint groups unchanged since this
+    /// exact captured save frontier. Later mutations remain dirty.
+    pub fn acknowledge_save(
+        &self,
+        saved: &RevisionedSaveRequest,
+    ) -> Result<ResourceSet, ApplicationError> {
+        let mut state = lock(&self.state)?;
+        if state.captured_saves.remove(&saved.generation).as_ref() != Some(saved) {
+            return Err(ApplicationError::StaleSaveAcknowledgement);
+        }
+        state.dirty.retain(|resource, generation| {
+            !saved.dirty_resources.contains(*resource) || *generation > saved.mutation_generation
+        });
+        state
+            .pending_checkpoints
+            .retain(|(_, generation)| *generation > saved.mutation_generation);
+        let mut remaining = ResourceSet::default();
+        for resource in state.dirty.keys() {
+            remaining.insert(*resource);
+        }
+        Ok(remaining)
+    }
+
+    /// Publishes a fully validated restored snapshot at one application
+    /// boundary. Document replacement succeeds before the project becomes
+    /// visible; all remaining state changes are infallible while locked.
+    pub fn publish_restored_state(
+        &self,
+        project: Project,
+        documents: Vec<DocumentSnapshot>,
+    ) -> Result<(), ApplicationError> {
+        project.validate()?;
+        let mut state = lock(&self.state)?;
+        self.documents.replace_documents(documents)?;
+        state.project = project;
+        state.undo.clear();
+        state.redo.clear();
+        state.undo_bytes = 0;
+        state.dirty.clear();
+        state.pending_checkpoints.clear();
+        state.captured_saves.clear();
+        Ok(())
     }
 
     fn execute_now(
@@ -831,8 +1042,21 @@ impl NativeProjectCommandDispatcher {
         let before = state.project.revision;
         let forward = command.clone();
         let applied = parchmint_domain::apply_project_command(&state.project, before, command)?;
+
+        // A document node and its canonical editor state are one application
+        // mutation. The project lock remains held until both are published, so
+        // snapshot queries can never observe a node without its default body.
+        if let ProjectCommand::CreateDocument { document_id, .. } = &forward {
+            self.documents.insert_document(DocumentSnapshot {
+                document_id: *document_id,
+                body: "<p></p>".to_owned(),
+                revision: EditorRevision::default(),
+                visibility: DocumentVisibility::Open,
+            })?;
+        }
         let operation_id = state.operation_id();
-        let checkpoint_group = state.stage_checkpoint();
+        let mutation = state.mark_dirty(&applied.changed_resources);
+        let checkpoint_group = state.stage_checkpoint(mutation);
         let label = command_label(&forward).to_owned();
         let inverse = applied.inverse.clone();
         let byte_cost = patch_byte_cost(&forward) + patch_byte_cost(&inverse);
@@ -850,7 +1074,6 @@ impl NativeProjectCommandDispatcher {
             checkpoint_group,
         };
         state.project = applied.project;
-        state.mark_dirty(&applied.changed_resources);
         state.redo.clear();
         state.push_undo(entry);
         Ok(ProjectCommandResult {
@@ -888,9 +1111,9 @@ impl NativeProjectCommandDispatcher {
         self.documents
             .apply_composite(operation_id, &patch, PatchDirection::Forward)?;
         state.project.revision = after;
-        state.mark_dirty(&affected);
+        let mutation = state.mark_dirty(&affected);
         state.redo.clear();
-        let checkpoint_group = state.stage_checkpoint();
+        let checkpoint_group = state.stage_checkpoint(mutation);
         let entry = ProjectUndoEntry {
             operation_id,
             label: selection.label,
@@ -925,9 +1148,9 @@ impl NativeProjectCommandDispatcher {
         let removed = state.undo.pop_back().expect("undo entry was observed");
         state.undo_bytes = state.undo_bytes.saturating_sub(removed.byte_cost);
         state.project = project;
-        state.mark_dirty(&affected);
+        let mutation = state.mark_dirty(&affected);
         state.redo.push(entry);
-        let checkpoint_group = state.stage_checkpoint();
+        let checkpoint_group = state.stage_checkpoint(mutation);
         Ok(ProjectCommandResult {
             operation_id,
             revision: state.project.revision,
@@ -948,8 +1171,8 @@ impl NativeProjectCommandDispatcher {
         let (project, affected) = self.apply_patch(&state.project, operation_id, &entry.forward)?;
         state.redo.pop();
         state.project = project;
-        state.mark_dirty(&affected);
-        let checkpoint_group = state.stage_checkpoint();
+        let mutation = state.mark_dirty(&affected);
+        let checkpoint_group = state.stage_checkpoint(mutation);
         state.push_undo(entry);
         Ok(ProjectCommandResult {
             operation_id,

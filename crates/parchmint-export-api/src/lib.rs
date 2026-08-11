@@ -443,6 +443,12 @@ pub struct ExportValidationReport {
 }
 
 impl ExportValidationReport {
+    pub fn from_issue(issue: ExportValidationIssue) -> Self {
+        Self {
+            issues: vec![issue],
+        }
+    }
+
     pub fn issues(&self) -> &[ExportValidationIssue] {
         &self.issues
     }

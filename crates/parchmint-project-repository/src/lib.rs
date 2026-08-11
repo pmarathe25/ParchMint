@@ -281,6 +281,8 @@ impl ProjectRootCapability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicWritePlan {
     pub writes: Vec<StagedResource>,
+    /// Canonical project-relative files removed by the same transaction.
+    pub deletions: Vec<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedResource {
@@ -289,7 +291,14 @@ pub struct StagedResource {
 }
 impl AtomicWritePlan {
     pub fn new(writes: Vec<StagedResource>) -> Self {
-        Self { writes }
+        Self {
+            writes,
+            deletions: Vec::new(),
+        }
+    }
+
+    pub fn with_deletions(writes: Vec<StagedResource>, deletions: Vec<String>) -> Self {
+        Self { writes, deletions }
     }
 }
 
@@ -426,6 +435,10 @@ impl InMemoryAtomicWriter {
         plan.writes
             .iter()
             .all(|write| !write.path.is_empty() && !write.path.contains(".."))
+            && plan
+                .deletions
+                .iter()
+                .all(|path| !path.is_empty() && !path.contains(".."))
     }
     fn is_staged(state: &WriterState, staged: &StagedWrite) -> bool {
         state.staged.get(&(staged.root, staged.generation)) == Some(&staged.plan)

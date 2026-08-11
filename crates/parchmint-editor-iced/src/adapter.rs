@@ -489,6 +489,26 @@ impl EditorIcedAdapter {
         })
     }
 
+    /// Returns the complete initial cache entry for the session's primary block.
+    ///
+    /// Production hosts use this immediately after attaching a view, before a
+    /// viewport is rendered. The editor core continues to own the primary-block
+    /// identity and canonical body.
+    pub fn primary_visible_block(
+        &self,
+        session: SharedEditorSession,
+    ) -> Result<VisibleEditorBlock, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            let projection = state.core.canonical_projection();
+            Ok(VisibleEditorBlock::new(
+                state.core.primary_block(),
+                projection.body(),
+                DocumentPosition::default(),
+            ))
+        })
+    }
+
     fn replace_selection(
         &self,
         session: SharedEditorSession,

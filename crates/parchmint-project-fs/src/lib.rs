@@ -29,7 +29,8 @@ const ROOT_ID_PATH: &str = ".parchmint/root-id";
 const LOCK_PATH: &str = ".parchmint/write.lock";
 const TRANSACTIONS_PATH: &str = ".parchmint/transactions";
 const RECORD_NAME: &str = "record.bin";
-const RECORD_MAGIC: &[u8; 8] = b"PMTXN001";
+const RECORD_MAGIC_V1: &[u8; 8] = b"PMTXN001";
+const RECORD_MAGIC_V2: &[u8; 8] = b"PMTXN002";
 
 static UNIQUE_ID: OnceLock<AtomicU64> = OnceLock::new();
 
@@ -580,8 +581,13 @@ fn validate_manifest(codec: &ProjectFormatCodec, bytes: &[u8]) -> Result<(), Str
         .map_err(|error| error.to_string())
 }
 
-fn validate_plan_paths(plan: &AtomicWritePlan) -> Result<Vec<CanonicalRelativePath>, WriteError> {
-    if plan.writes.is_empty() {
+struct ValidatedPlanPaths {
+    writes: Vec<CanonicalRelativePath>,
+    deletions: Vec<CanonicalRelativePath>,
+}
+
+fn validate_plan_paths(plan: &AtomicWritePlan) -> Result<ValidatedPlanPaths, WriteError> {
+    if plan.writes.is_empty() && plan.deletions.is_empty() {
         return Err(WriteError::InvalidTransition);
     }
     let mut seen = BTreeMap::new();
@@ -598,7 +604,23 @@ fn validate_plan_paths(plan: &AtomicWritePlan) -> Result<Vec<CanonicalRelativePa
         }
         paths.push(path);
     }
-    Ok(paths)
+    let mut deletions = Vec::with_capacity(plan.deletions.len());
+    for deletion in &plan.deletions {
+        let path = CanonicalRelativePath::parse(deletion)
+            .map_err(|error| WriteError::UnsafePath(error.to_string()))?;
+        let key = portable_key(path.as_str());
+        if let Some(first) = seen.insert(key, path.as_str().to_owned()) {
+            return Err(WriteError::UnsafePath(format!(
+                "portable path collision between {first:?} and {:?}",
+                path.as_str()
+            )));
+        }
+        deletions.push(path);
+    }
+    Ok(ValidatedPlanPaths {
+        writes: paths,
+        deletions,
+    })
 }
 
 fn ensure_portable_component(directory: &Path, requested: &str) -> Result<(), FsError> {
@@ -736,6 +758,14 @@ pub trait AtomicFileOps: Send + Sync {
     fn write_temporary(&self, write: TemporaryWrite) -> Result<TemporaryFile, FsError>;
     fn flush_file(&self, file: &TemporaryFile) -> Result<(), FsError>;
     fn replace(&self, file: TemporaryFile, target: &CheckedTarget) -> Result<(), FsError>;
+    fn remove(&self, target: &CheckedTarget) -> Result<(), FsError> {
+        recheck_target(target)?;
+        if target.identity == FileIdentity::MISSING {
+            return Ok(());
+        }
+        fs::remove_file(&target.path)
+            .map_err(|error| FsError::io("remove canonical file", &target.path, error))
+    }
     fn flush_parent(&self, target: &CheckedTarget) -> Result<(), FsError>;
 
     fn root(&self) -> Option<&ProjectRootCapability> {
@@ -803,6 +833,15 @@ impl AtomicFileOps for NativeAtomicFileOps {
         replace_path(&file.path, &target.path)
     }
 
+    fn remove(&self, target: &CheckedTarget) -> Result<(), FsError> {
+        recheck_target(target)?;
+        if target.identity == FileIdentity::MISSING {
+            return Ok(());
+        }
+        fs::remove_file(&target.path)
+            .map_err(|error| FsError::io("remove canonical file", &target.path, error))
+    }
+
     fn flush_parent(&self, target: &CheckedTarget) -> Result<(), FsError> {
         recheck_parent(target)?;
         sync_directory(target.path.parent().expect("checked target has a parent"))
@@ -847,10 +886,17 @@ struct TransactionItem {
 }
 
 #[derive(Debug, Clone)]
+struct TransactionDeletion {
+    relative: CanonicalRelativePath,
+    backup_relative: Option<CanonicalRelativePath>,
+}
+
+#[derive(Debug, Clone)]
 struct DiskTransaction {
     root_id: u64,
     generation: u64,
     items: Vec<TransactionItem>,
+    deletions: Vec<TransactionDeletion>,
 }
 
 #[derive(Debug, Clone)]
@@ -888,7 +934,7 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
         let paths = validate_plan_paths(&plan)?;
         let generation = next_unique_id();
         let mut temporary = Vec::with_capacity(plan.writes.len());
-        for (ordinal, (write, path)) in plan.writes.iter().zip(paths).enumerate() {
+        for (ordinal, (write, path)) in plan.writes.iter().zip(paths.writes).enumerate() {
             match self.files.write_temporary(TemporaryWrite {
                 path,
                 bytes: write.bytes.clone(),
@@ -909,11 +955,12 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
                 }
             }
         }
-        let root = temporary
-            .first()
-            .expect("empty plans are rejected")
-            .root
-            .clone();
+        let root = self
+            .files
+            .root()
+            .cloned()
+            .or_else(|| temporary.first().map(|file| file.root.clone()))
+            .ok_or(WriteError::ForeignRoot)?;
         if temporary
             .iter()
             .any(|file| file.root.root_id != root.root_id)
@@ -921,7 +968,8 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
             cleanup_temporary(&temporary);
             return Err(WriteError::ForeignRoot);
         }
-        let disk = match persist_transaction(&root, generation, &plan, &temporary) {
+        let disk = match persist_transaction(&root, generation, &plan, &temporary, &paths.deletions)
+        {
             Ok(record) => record,
             Err(error) => {
                 cleanup_temporary(&temporary);
@@ -953,9 +1001,21 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
     }
 
     fn commit(&self, staged: StagedWrite) -> Result<CommitReceipt, WriteError> {
-        if let Some(root) = self.files.root()
-            && root.contract_root() != staged.root()
-        {
+        let root = self
+            .files
+            .root()
+            .cloned()
+            .or_else(|| {
+                self.state.lock().ok().and_then(|state| {
+                    state
+                        .staged
+                        .get(&staged.generation())
+                        .and_then(|transaction| transaction.temporary.first())
+                        .map(|file| file.root.clone())
+                })
+            })
+            .ok_or(WriteError::ForeignRoot)?;
+        if root.contract_root() != staged.root() {
             return Err(WriteError::ForeignRoot);
         }
         let transaction = {
@@ -981,8 +1041,13 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
                 .flush_parent(&temporary.target)
                 .map_err(map_write_error)?;
         }
-        cleanup_transaction(&transaction.temporary[0].root, &transaction.disk)
-            .map_err(map_write_error)?;
+        for deletion in &transaction.disk.deletions {
+            let target =
+                checked_target(&root, &deletion.relative, false).map_err(map_write_error)?;
+            self.files.remove(&target).map_err(map_write_error)?;
+            self.files.flush_parent(&target).map_err(map_write_error)?;
+        }
+        cleanup_transaction(&root, &transaction.disk).map_err(map_write_error)?;
         let mut state = self.state.lock().expect("writer state lock");
         state.staged.remove(&staged.generation());
         state.next_receipt += 1;
@@ -1019,8 +1084,13 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
                 .remove(&staged.generation())
                 .expect("staged transaction still exists")
         };
-        cleanup_transaction(&transaction.temporary[0].root, &transaction.disk)
-            .map_err(map_write_error)?;
+        let root = self
+            .files
+            .root()
+            .cloned()
+            .or_else(|| transaction.temporary.first().map(|file| file.root.clone()))
+            .ok_or(WriteError::ForeignRoot)?;
+        cleanup_transaction(&root, &transaction.disk).map_err(map_write_error)?;
         Ok(Abandonment::new(true))
     }
 }
@@ -1054,6 +1124,7 @@ fn persist_transaction(
     generation: u64,
     plan: &AtomicWritePlan,
     temporary: &[TemporaryFile],
+    deletion_paths: &[CanonicalRelativePath],
 ) -> Result<DiskTransaction, FsError> {
     verify_lock_owner(root)?;
     let transactions = root.path.join(TRANSACTIONS_PATH);
@@ -1084,10 +1155,28 @@ fn persist_transaction(
                 new_hash: Sha256::digest(&write.bytes).into(),
             });
         }
+        let mut deletions = Vec::with_capacity(deletion_paths.len());
+        for (offset, relative) in deletion_paths.iter().enumerate() {
+            let target = checked_target(root, relative, false)?;
+            let backup_relative = if target.identity == FileIdentity::MISSING {
+                None
+            } else {
+                let bytes = fs::read(&target.path)
+                    .map_err(|error| FsError::io("read deletion backup", &target.path, error))?;
+                let backup_path = directory.join(format!("backup-{}", temporary.len() + offset));
+                write_new_synced(&backup_path, &bytes)?;
+                Some(relative_from_root(root, &backup_path)?)
+            };
+            deletions.push(TransactionDeletion {
+                relative: relative.clone(),
+                backup_relative,
+            });
+        }
         let record = DiskTransaction {
             root_id: root.root_id,
             generation,
             items,
+            deletions,
         };
         let record_path = directory.join(RECORD_NAME);
         write_new_synced(&record_path, &encode_transaction(&record)?)?;
@@ -1125,7 +1214,7 @@ fn relative_from_root(
 
 fn encode_transaction(record: &DiskTransaction) -> Result<Vec<u8>, FsError> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(RECORD_MAGIC);
+    bytes.extend_from_slice(RECORD_MAGIC_V2);
     bytes.extend_from_slice(&record.root_id.to_le_bytes());
     bytes.extend_from_slice(&record.generation.to_le_bytes());
     let count = u32::try_from(record.items.len()).map_err(|error| FsError::Corrupt {
@@ -1144,6 +1233,22 @@ fn encode_transaction(record: &DiskTransaction) -> Result<Vec<u8>, FsError> {
             None => bytes.push(0),
         }
         bytes.extend_from_slice(&item.new_hash);
+    }
+    let deletion_count =
+        u32::try_from(record.deletions.len()).map_err(|error| FsError::Corrupt {
+            path: PathBuf::from(RECORD_NAME),
+            reason: error.to_string(),
+        })?;
+    bytes.extend_from_slice(&deletion_count.to_le_bytes());
+    for deletion in &record.deletions {
+        encode_string(&mut bytes, deletion.relative.as_str())?;
+        match &deletion.backup_relative {
+            Some(path) => {
+                bytes.push(1);
+                encode_string(&mut bytes, path.as_str())?;
+            }
+            None => bytes.push(0),
+        }
     }
     Ok(bytes)
 }
@@ -1191,7 +1296,7 @@ fn decode_transaction(path: &Path, bytes: &[u8]) -> Result<DiskTransaction, FsEr
     cursor
         .read_exact(&mut magic)
         .map_err(|error| corrupt_record(path, error))?;
-    if &magic != RECORD_MAGIC {
+    if &magic != RECORD_MAGIC_V1 && &magic != RECORD_MAGIC_V2 {
         return Err(FsError::Corrupt {
             path: path.to_path_buf(),
             reason: "unknown transaction record version".into(),
@@ -1229,6 +1334,32 @@ fn decode_transaction(path: &Path, bytes: &[u8]) -> Result<DiskTransaction, FsEr
             new_hash,
         });
     }
+    let mut deletions = Vec::new();
+    if &magic == RECORD_MAGIC_V2 {
+        let count = read_u32(&mut cursor, path)?;
+        deletions.reserve(count as usize);
+        for _ in 0..count {
+            let relative = decode_relative(&mut cursor, path)?;
+            let mut present = [0];
+            cursor
+                .read_exact(&mut present)
+                .map_err(|error| corrupt_record(path, error))?;
+            let backup_relative = match present[0] {
+                0 => None,
+                1 => Some(decode_relative(&mut cursor, path)?),
+                _ => {
+                    return Err(FsError::Corrupt {
+                        path: path.to_path_buf(),
+                        reason: "invalid deletion backup marker".into(),
+                    });
+                }
+            };
+            deletions.push(TransactionDeletion {
+                relative,
+                backup_relative,
+            });
+        }
+    }
     if cursor.position() != bytes.len() as u64 {
         return Err(FsError::Corrupt {
             path: path.to_path_buf(),
@@ -1239,6 +1370,7 @@ fn decode_transaction(path: &Path, bytes: &[u8]) -> Result<DiskTransaction, FsEr
         root_id,
         generation,
         items,
+        deletions,
     };
     validate_transaction_paths(path, &record)?;
     Ok(record)
@@ -1272,6 +1404,18 @@ fn validate_transaction_paths(path: &Path, record: &DiskTransaction) -> Result<(
             return Err(FsError::Corrupt {
                 path: path.to_path_buf(),
                 reason: "transaction backup is outside its transaction".into(),
+            });
+        }
+    }
+    for deletion in &record.deletions {
+        if deletion
+            .backup_relative
+            .as_ref()
+            .is_some_and(|backup| !backup.as_str().starts_with(&backup_prefix))
+        {
+            return Err(FsError::Corrupt {
+                path: path.to_path_buf(),
+                reason: "transaction deletion backup is outside its transaction".into(),
             });
         }
     }
@@ -1339,7 +1483,7 @@ fn reconcile_transaction<F: AtomicFileOps>(
     root: &ProjectRootCapability,
     record: &DiskTransaction,
 ) -> Result<(), WriteError> {
-    let can_finish_new = record.items.iter().try_fold(true, |possible, item| {
+    let writes_can_finish = record.items.iter().try_fold(true, |possible, item| {
         let target_is_new =
             target_hash(root, item).map_err(map_write_error)? == Some(item.new_hash);
         let temp_exists = checked_target(root, &item.temp_relative, false)
@@ -1351,6 +1495,34 @@ fn reconcile_transaction<F: AtomicFileOps>(
             .map_err(map_write_error)?;
         Ok::<_, WriteError>(possible && (target_is_new || temp_exists))
     })?;
+    let deletions_can_finish = record
+        .deletions
+        .iter()
+        .try_fold(true, |possible, deletion| {
+            let target_exists = checked_target(root, &deletion.relative, false)
+                .map(|target| target.identity != FileIdentity::MISSING)
+                .or_else(|error| match error {
+                    FsError::Missing { .. } => Ok(false),
+                    other => Err(other),
+                })
+                .map_err(map_write_error)?;
+            let backup_exists = deletion
+                .backup_relative
+                .as_ref()
+                .map(|backup| checked_target(root, backup, false))
+                .transpose()
+                .map_err(map_write_error)?
+                .is_some_and(|backup| backup.identity != FileIdentity::MISSING);
+            Ok::<_, WriteError>(
+                possible
+                    && if deletion.backup_relative.is_some() {
+                        backup_exists
+                    } else {
+                        !target_exists
+                    },
+            )
+        })?;
+    let can_finish_new = writes_can_finish && deletions_can_finish;
     if can_finish_new {
         for item in &record.items {
             if target_hash(root, item).map_err(map_write_error)? == Some(item.new_hash) {
@@ -1365,12 +1537,25 @@ fn reconcile_transaction<F: AtomicFileOps>(
             files.replace(temporary, &target).map_err(map_write_error)?;
             files.flush_parent(&target).map_err(map_write_error)?;
         }
+        for deletion in &record.deletions {
+            let target =
+                checked_target(root, &deletion.relative, false).map_err(map_write_error)?;
+            files.remove(&target).map_err(map_write_error)?;
+            files.flush_parent(&target).map_err(map_write_error)?;
+        }
     } else {
         restore_old_generation(files, root, record)?;
     }
     if can_finish_new {
         for item in &record.items {
             if target_hash(root, item).map_err(map_write_error)? != Some(item.new_hash) {
+                return Err(WriteError::Interrupted);
+            }
+        }
+        for deletion in &record.deletions {
+            let target =
+                checked_target(root, &deletion.relative, false).map_err(map_write_error)?;
+            if target.identity != FileIdentity::MISSING {
                 return Err(WriteError::Interrupted);
             }
         }
@@ -1423,6 +1608,34 @@ fn restore_old_generation<F: AtomicFileOps>(
                 Err(error) => return Err(map_write_error(error)),
             }
         }
+    }
+    for (offset, deletion) in record.deletions.iter().enumerate() {
+        let Some(backup) = &deletion.backup_relative else {
+            continue;
+        };
+        let backup = checked_target(root, backup, false).map_err(map_write_error)?;
+        if backup.identity == FileIdentity::MISSING {
+            return Err(WriteError::Stale);
+        }
+        let bytes = fs::read(&backup.path).map_err(|error| {
+            map_write_error(FsError::io(
+                "read deletion recovery backup",
+                &backup.path,
+                error,
+            ))
+        })?;
+        let temporary = files
+            .write_temporary(TemporaryWrite {
+                path: deletion.relative.clone(),
+                bytes,
+                generation: record.generation,
+                ordinal: record.items.len() + offset,
+            })
+            .map_err(map_write_error)?;
+        files.flush_file(&temporary).map_err(map_write_error)?;
+        let target = checked_target(root, &deletion.relative, true).map_err(map_write_error)?;
+        files.replace(temporary, &target).map_err(map_write_error)?;
+        files.flush_parent(&target).map_err(map_write_error)?;
     }
     Ok(())
 }

@@ -183,6 +183,103 @@ fn successful_commit_replaces_every_target_and_clears_recovery_state() {
 }
 
 #[test]
+fn successful_commit_removes_paths_in_the_same_atomic_generation() {
+    let parent = TestDir::new("delete-commit");
+    let project_path = parent.join("novel");
+    let files = NativeProjectFileSystem::new();
+    let (root, lease) = files
+        .create_root(UntrustedProjectPath::new(project_path.clone()))
+        .expect("project root should be created");
+    fs::create_dir(project_path.join("manuscript")).expect("document directory should be created");
+    fs::write(project_path.join("manuscript/old.html"), b"old body")
+        .expect("old document should be written");
+    let writer = FsAtomicWriter::new(NativeAtomicFileOps::new(root.clone()));
+    let plan = AtomicWritePlan::with_deletions(
+        vec![StagedResource {
+            path: "manuscript/new.html".into(),
+            bytes: b"new body".to_vec(),
+        }],
+        vec!["manuscript/old.html".into()],
+    );
+
+    let staged = writer.stage(plan).expect("move generation should stage");
+    writer
+        .commit(staged)
+        .expect("move generation should become durable");
+
+    assert_eq!(
+        fs::read(project_path.join("manuscript/new.html"))
+            .expect("new document should be readable"),
+        b"new body"
+    );
+    assert!(!project_path.join("manuscript/old.html").exists());
+    assert!(
+        files
+            .transaction_records(&root)
+            .expect("transaction directory should be readable")
+            .is_empty()
+    );
+    drop(lease);
+}
+
+#[test]
+fn interrupted_move_reconciliation_does_not_resurrect_the_deleted_path() {
+    let parent = TestDir::new("delete-reconcile");
+    let project_path = parent.join("novel");
+    let files = NativeProjectFileSystem::new();
+    let (root, lease) = files
+        .create_root(UntrustedProjectPath::new(project_path.clone()))
+        .expect("project root should be created");
+    fs::create_dir(project_path.join("manuscript")).expect("document directory should be created");
+    fs::write(project_path.join("manuscript/old.html"), b"old body")
+        .expect("old document should be written");
+    let writer = FsAtomicWriter::new(FaultingOps::new(
+        NativeAtomicFileOps::new(root.clone()),
+        ReplaceFault::AfterFirstReplace,
+    ));
+    let plan = AtomicWritePlan::with_deletions(
+        vec![StagedResource {
+            path: "manuscript/new.html".into(),
+            bytes: b"new body".to_vec(),
+        }],
+        vec!["manuscript/old.html".into()],
+    );
+
+    let staged = writer.stage(plan).expect("move generation should stage");
+    assert!(matches!(
+        writer.commit(staged),
+        Err(WriteError::Interrupted)
+    ));
+    drop(writer);
+    drop(lease);
+
+    let (root, lease) = files
+        .acquire(UntrustedProjectPath::new(project_path.clone()))
+        .expect("project should reopen after the interrupted writer exits");
+    let record = files
+        .transaction_records(&root)
+        .expect("transaction record should be readable")
+        .into_iter()
+        .next()
+        .expect("interrupted generation should leave a transaction record");
+    FsAtomicWriter::new(NativeAtomicFileOps::new(root.clone()))
+        .reconcile(record)
+        .expect("interrupted move should reconcile");
+
+    assert_eq!(
+        fs::read(project_path.join("manuscript/new.html"))
+            .expect("new document should be readable after reconciliation"),
+        b"new body"
+    );
+    assert!(
+        !project_path.join("manuscript/old.html").exists(),
+        "a reconciled move must not resurrect its deleted source"
+    );
+    assert!(files.transaction_records(&root).unwrap().is_empty());
+    drop(lease);
+}
+
+#[test]
 fn stage_rejects_portable_path_collisions_without_touching_targets() {
     let parent = TestDir::new("collisions");
     let project_path = parent.join("novel");

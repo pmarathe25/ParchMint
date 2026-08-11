@@ -21,7 +21,7 @@ use std::{
 use parchmint_editor_api::EventStream;
 use serde::{Deserialize, Serialize};
 
-const PREFERENCE_FILE_VERSION: u32 = 1;
+const PREFERENCE_FILE_VERSION: u32 = 2;
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// A `Send` future returned by a preference operation.
@@ -69,8 +69,40 @@ pub enum ResolvedAppearance {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationPreferences {
     pub appearance: AppearanceMode,
-    pub recent_projects: Vec<String>,
+    pub recent_projects: Vec<RecentProject>,
     pub global_dictionary: Vec<String>,
+}
+
+/// One typed recent-project entry stored outside project data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentProject {
+    pub name: String,
+    pub path: String,
+    pub last_opened_unix_seconds: u64,
+}
+
+impl RecentProject {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        last_opened_unix_seconds: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            last_opened_unix_seconds,
+        }
+    }
+
+    fn migrated(path: String) -> Self {
+        let name = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&path)
+            .to_owned();
+        Self::new(name, path, 0)
+    }
 }
 
 /// The complete preference model returned by loads and updates.
@@ -84,7 +116,7 @@ pub struct PreferenceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreferenceCommand {
     SetAppearance(AppearanceMode),
-    AddRecentProject(String),
+    AddRecentProject(RecentProject),
     RemoveRecentProject(String),
     ClearRecentProjects,
     AddGlobalDictionaryWord(String),
@@ -180,6 +212,25 @@ struct StoredPreferences {
     preferences: ApplicationPreferences,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredPreferencesV1 {
+    version: u32,
+    revision: PreferenceRevision,
+    preferences: ApplicationPreferencesV1,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplicationPreferencesV1 {
+    #[serde(default)]
+    appearance: AppearanceMode,
+    #[serde(default)]
+    recent_projects: Vec<String>,
+    #[serde(default)]
+    global_dictionary: Vec<String>,
+}
+
 /// Native, versioned application preference storage.
 #[derive(Debug)]
 pub struct FilePreferenceStore {
@@ -210,17 +261,39 @@ impl FilePreferenceStore {
             }
             Err(error) => return Err(self.unreadable(error.to_string())),
         };
-        let stored: StoredPreferences =
-            serde_json::from_slice(&bytes).map_err(|error| self.unreadable(error.to_string()))?;
-        if stored.version != PREFERENCE_FILE_VERSION {
-            return Err(
-                self.unreadable(format!("unsupported preference version {}", stored.version))
-            );
+        let version = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("version").and_then(serde_json::Value::as_u64))
+            .ok_or_else(|| self.unreadable("preference file has no valid version"))?;
+        match version {
+            1 => {
+                let stored: StoredPreferencesV1 = serde_json::from_slice(&bytes)
+                    .map_err(|error| self.unreadable(error.to_string()))?;
+                debug_assert_eq!(stored.version, 1);
+                Ok(PreferenceSnapshot {
+                    revision: stored.revision,
+                    values: ApplicationPreferences {
+                        appearance: stored.preferences.appearance,
+                        recent_projects: stored
+                            .preferences
+                            .recent_projects
+                            .into_iter()
+                            .map(RecentProject::migrated)
+                            .collect(),
+                        global_dictionary: stored.preferences.global_dictionary,
+                    },
+                })
+            }
+            2 => {
+                let stored: StoredPreferences = serde_json::from_slice(&bytes)
+                    .map_err(|error| self.unreadable(error.to_string()))?;
+                Ok(PreferenceSnapshot {
+                    revision: stored.revision,
+                    values: stored.preferences,
+                })
+            }
+            version => Err(self.unreadable(format!("unsupported preference version {version}"))),
         }
-        Ok(PreferenceSnapshot {
-            revision: stored.revision,
-            values: stored.preferences,
-        })
     }
 
     fn save_now(
@@ -422,13 +495,18 @@ fn apply_command(values: &mut ApplicationPreferences, command: PreferenceCommand
         PreferenceCommand::AddRecentProject(project) => {
             values
                 .recent_projects
-                .retain(|existing| existing != &project);
+                .retain(|existing| existing.path != project.path);
             values.recent_projects.insert(0, project);
+            values.recent_projects.sort_by(|left, right| {
+                right
+                    .last_opened_unix_seconds
+                    .cmp(&left.last_opened_unix_seconds)
+            });
         }
         PreferenceCommand::RemoveRecentProject(project) => {
             values
                 .recent_projects
-                .retain(|existing| existing != &project);
+                .retain(|existing| existing.path != project);
         }
         PreferenceCommand::ClearRecentProjects => values.recent_projects.clear(),
         PreferenceCommand::AddGlobalDictionaryWord(word) => {

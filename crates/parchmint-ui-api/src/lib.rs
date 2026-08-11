@@ -12,15 +12,33 @@ use std::{
     sync::Arc,
 };
 
-use parchmint_application::{GlobalReplacement, ProjectCommandDispatcher};
+use parchmint_application::{DocumentSnapshot, GlobalReplacement, ProjectCommandDispatcher};
+use parchmint_domain::Project;
 use parchmint_editor_api::EditorAdapter;
+use parchmint_export_api::ExportRunOptions;
+use parchmint_export_api::Exporter;
+use parchmint_history_api::{CheckpointId, HistoryStore};
 use parchmint_platform_api::{
     ApplicationPathService, ClipboardService, DialogService, ExternalOpenService, MenuService,
-    SystemAppearanceService, WindowCapability,
+    SystemAppearanceEventService, SystemAppearanceService, UntrustedPathSelection,
+    WindowCapability,
 };
 use parchmint_preferences::{AppearanceService, PreferenceService, ThemeSnapshot};
+use parchmint_recovery_api::RecoveryJournal;
+use parchmint_save::SaveStatusSnapshot;
+use parchmint_search_api::SearchIndex;
 use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_workspace_state::WorkspaceStateStore;
+
+pub use parchmint_application::{
+    CreateDocumentWorkflow, CreatedDocumentRevision, DurableProjectionAck,
+    PersistenceRecoveryState as ProjectRecoveryState,
+    PersistenceRevision as ProjectPersistenceRevision, PersistenceSaveHandle as ProjectSaveHandle,
+    PersistenceSaveKind as ProjectSaveKind, PersistenceSavedRevision as SavedProjectRevision,
+    PersistenceStatus as ProjectPersistenceStatus, ProjectPersistenceError,
+    RecoveryAcceptance as ProjectRecoveryAcceptance, RestoredProjectRevision,
+};
+pub use parchmint_editor_api::CanonicalProjection;
 
 /// The exit status returned when a desktop UI finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +161,219 @@ impl ProjectSessionRegistry {
     }
 }
 
+/// An immutable, framework-neutral view of the authored project state.
+///
+/// The snapshot is suitable for initial UI hydration. Consumers that need a
+/// newer view must ask the session-scoped [`ProjectSnapshotQuery`] again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSnapshot {
+    pub project: Project,
+    pub documents: Vec<DocumentSnapshot>,
+    /// Canonical authored project styles used by export planning.
+    pub styles_css: String,
+}
+
+/// A failure while reading current project state for the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectQueryError {
+    message: String,
+}
+
+impl ProjectQueryError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ProjectQueryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for ProjectQueryError {}
+
+/// Authoritative current-project reads supplied beside mutation commands.
+pub trait ProjectSnapshotQuery: Send + Sync {
+    fn snapshot(&self) -> Result<ProjectSnapshot, ProjectQueryError>;
+}
+
+/// Read-only save state exposed to the UI.
+///
+/// Save initiation, final-save reconciliation, and writable-lease ownership
+/// remain with the desktop runtime.
+pub trait ProjectSaveStatus: Send + Sync {
+    fn status(&self) -> SaveStatusSnapshot;
+}
+
+/// High-level persistence operations for one exact writable project session.
+/// Canonical writes, recovery payloads, and History inputs stay behind this port.
+pub trait ProjectPersistencePort: Send + Sync {
+    fn persist_editor_projection(
+        &self,
+        projection: CanonicalProjection,
+    ) -> Result<DurableProjectionAck, ProjectPersistenceError>;
+
+    fn request_save(
+        &self,
+        kind: ProjectSaveKind,
+    ) -> Result<(ProjectSaveHandle, ProjectPersistenceRevision), ProjectPersistenceError>;
+
+    fn await_save(
+        &self,
+        handle: ProjectSaveHandle,
+    ) -> Result<SavedProjectRevision, ProjectPersistenceError>;
+
+    fn status(&self) -> ProjectPersistenceStatus;
+
+    fn reconcile_recovery(&self) -> Result<ProjectRecoveryState, ProjectPersistenceError>;
+
+    fn accept_recovery(
+        &self,
+        acceptance: ProjectRecoveryAcceptance,
+    ) -> Result<ProjectRecoveryState, ProjectPersistenceError>;
+}
+
+/// Result of a high-level authored-project mutation after its structural save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectWorkflowSnapshot {
+    pub snapshot: ProjectSnapshot,
+    pub checkpoint: CheckpointId,
+}
+
+/// Production-owned workflows that must coordinate domain, document, and
+/// storage state rather than exposing low-level write plans to the UI.
+pub trait ProjectWorkflowPort: Send + Sync {
+    fn create_document(
+        &self,
+        request: CreateDocumentWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
+    fn restore_checkpoint(
+        &self,
+        checkpoint: CheckpointId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
+    fn create_named_snapshot(
+        &self,
+        name: String,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+}
+
+/// Opaque proof of a completed production export. It deliberately does not
+/// expose an operating-system path back to UI code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExportArtifactToken(u64);
+
+impl ExportArtifactToken {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportArtifact {
+    pub token: ExportArtifactToken,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportArtifactAction {
+    Open,
+    Reveal,
+}
+
+/// Validates an untrusted SaveFile selection, acquires the writable target,
+/// runs planning/validation/export, and retains the completed artifact for
+/// later file-specific open or reveal actions.
+pub trait ProjectExportPort: Send + Sync {
+    fn export_to_path(
+        &self,
+        selection: UntrustedPathSelection,
+        options: ExportRunOptions,
+    ) -> Result<ExportArtifact, ProjectQueryError>;
+
+    fn act_on_artifact(
+        &self,
+        artifact: ExportArtifactToken,
+        action: ExportArtifactAction,
+    ) -> Result<(), ProjectQueryError>;
+}
+
+impl ProjectPersistencePort for parchmint_application::ProjectPersistenceCoordinator {
+    fn persist_editor_projection(
+        &self,
+        projection: CanonicalProjection,
+    ) -> Result<DurableProjectionAck, ProjectPersistenceError> {
+        self.persist_editor_projection(projection)
+    }
+
+    fn request_save(
+        &self,
+        kind: ProjectSaveKind,
+    ) -> Result<(ProjectSaveHandle, ProjectPersistenceRevision), ProjectPersistenceError> {
+        self.request_save(kind)
+    }
+
+    fn await_save(
+        &self,
+        handle: ProjectSaveHandle,
+    ) -> Result<SavedProjectRevision, ProjectPersistenceError> {
+        self.await_save(handle)
+    }
+
+    fn status(&self) -> ProjectPersistenceStatus {
+        self.status()
+    }
+
+    fn reconcile_recovery(&self) -> Result<ProjectRecoveryState, ProjectPersistenceError> {
+        self.reconcile_recovery()
+    }
+
+    fn accept_recovery(
+        &self,
+        acceptance: ProjectRecoveryAcceptance,
+    ) -> Result<ProjectRecoveryState, ProjectPersistenceError> {
+        self.accept_recovery(acceptance)
+    }
+}
+
+/// Decides whether an exact project-session generation may still start work.
+pub trait ProjectSessionAuthority: Send + Sync {
+    fn is_current(&self, session: ProjectSessionCapability) -> bool;
+}
+
+/// An attempt to use ports after their exact project session was retired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleProjectSession {
+    session: ProjectSessionCapability,
+}
+
+impl StaleProjectSession {
+    pub const fn session(self) -> ProjectSessionCapability {
+        self.session
+    }
+}
+
+impl fmt::Display for StaleProjectSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "project session {} generation {} is no longer current",
+            self.session.session_id(),
+            self.session.generation()
+        )
+    }
+}
+
+impl Error for StaleProjectSession {}
+
 /// Application command services used by a desktop UI.
 #[derive(Clone)]
 pub struct ApplicationServices {
@@ -171,6 +402,313 @@ pub struct PlatformServices {
     pub external_open: Arc<dyn ExternalOpenService>,
     pub application_paths: Arc<dyn ApplicationPathService>,
     pub system_appearance: Arc<dyn SystemAppearanceService>,
+    pub system_appearance_events: Option<Arc<dyn SystemAppearanceEventService>>,
+}
+
+/// Typed framework-neutral services belonging to one writable project lease.
+///
+/// The fields are private so a UI cannot clone a raw service and accidentally
+/// bypass session authorization. Use [`ProjectUiPorts::access`] to obtain a
+/// short-lived typed view after checking the exact session generation.
+#[derive(Clone)]
+pub struct ProjectUiServices {
+    application: ApplicationServices,
+    query: Arc<dyn ProjectSnapshotQuery>,
+    history: Arc<dyn HistoryStore>,
+    recovery: Arc<dyn RecoveryJournal>,
+    search: Arc<dyn SearchIndex>,
+    save_status: Arc<dyn ProjectSaveStatus>,
+    persistence: Arc<dyn ProjectPersistencePort>,
+    workflows: Arc<dyn ProjectWorkflowPort>,
+    export_target: Arc<dyn ProjectExportPort>,
+    exporter: Arc<dyn Exporter>,
+    editor: Arc<dyn EditorAdapter>,
+    spellcheck: Arc<dyn SpellcheckService>,
+    workspace_state: Arc<dyn WorkspaceStateStore>,
+    preferences: Arc<dyn PreferenceService>,
+    appearance: Arc<dyn AppearanceService>,
+    platform: PlatformServices,
+}
+
+impl ProjectUiServices {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        application: ApplicationServices,
+        query: Arc<dyn ProjectSnapshotQuery>,
+        history: Arc<dyn HistoryStore>,
+        recovery: Arc<dyn RecoveryJournal>,
+        search: Arc<dyn SearchIndex>,
+        save_status: Arc<dyn ProjectSaveStatus>,
+        persistence: Arc<dyn ProjectPersistencePort>,
+        workflows: Arc<dyn ProjectWorkflowPort>,
+        export_target: Arc<dyn ProjectExportPort>,
+        exporter: Arc<dyn Exporter>,
+        editor: Arc<dyn EditorAdapter>,
+        spellcheck: Arc<dyn SpellcheckService>,
+        workspace_state: Arc<dyn WorkspaceStateStore>,
+        preferences: Arc<dyn PreferenceService>,
+        appearance: Arc<dyn AppearanceService>,
+        platform: PlatformServices,
+    ) -> Self {
+        Self {
+            application,
+            query,
+            history,
+            recovery,
+            search,
+            save_status,
+            persistence,
+            workflows,
+            export_target,
+            exporter,
+            editor,
+            spellcheck,
+            workspace_state,
+            preferences,
+            appearance,
+            platform,
+        }
+    }
+}
+
+/// Session-scoped access to every typed project UI port.
+#[derive(Clone)]
+pub struct ProjectUiPorts {
+    session: ProjectSessionCapability,
+    services: Arc<ProjectUiServices>,
+    authority: Arc<dyn ProjectSessionAuthority>,
+}
+
+impl fmt::Debug for ProjectUiPorts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectUiPorts")
+            .field("session", &self.session)
+            .field("current", &self.is_current())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProjectUiPorts {
+    pub fn new(
+        session: ProjectSessionCapability,
+        services: ProjectUiServices,
+        authority: Arc<dyn ProjectSessionAuthority>,
+    ) -> Self {
+        Self {
+            session,
+            services: Arc::new(services),
+            authority,
+        }
+    }
+
+    pub const fn session(&self) -> ProjectSessionCapability {
+        self.session
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.authority.is_current(self.session)
+    }
+
+    /// Authorizes this exact generation and returns borrowed typed services.
+    /// Callers reacquire access for each user action or asynchronous task.
+    pub fn access(&self) -> Result<ProjectUiAccess<'_>, StaleProjectSession> {
+        if !self.is_current() {
+            return Err(StaleProjectSession {
+                session: self.session,
+            });
+        }
+        Ok(ProjectUiAccess { ports: self })
+    }
+}
+
+/// Borrowed typed services for one authorization check.
+pub struct ProjectUiAccess<'a> {
+    ports: &'a ProjectUiPorts,
+}
+
+impl ProjectUiAccess<'_> {
+    fn services(&self) -> Result<&ProjectUiServices, StaleProjectSession> {
+        if !self.ports.is_current() {
+            return Err(StaleProjectSession {
+                session: self.ports.session,
+            });
+        }
+        Ok(self.ports.services.as_ref())
+    }
+
+    pub fn snapshot<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectSnapshotQuery) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.query.as_ref()))
+    }
+
+    pub fn commands<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectCommandDispatcher) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.application.commands.as_ref()))
+    }
+
+    /// Borrows the command port for an async call whose future is awaited
+    /// while this authorized access value remains alive.
+    pub fn commands_service(&self) -> Result<&dyn ProjectCommandDispatcher, StaleProjectSession> {
+        Ok(self.services()?.application.commands.as_ref())
+    }
+
+    pub fn replacements<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn GlobalReplacement) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(
+            self.services()?.application.replacements.as_ref(),
+        ))
+    }
+
+    /// Borrows the replacement port for an async call whose future is awaited
+    /// while this authorized access value remains alive.
+    pub fn replacements_service(&self) -> Result<&dyn GlobalReplacement, StaleProjectSession> {
+        Ok(self.services()?.application.replacements.as_ref())
+    }
+
+    pub fn history<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn HistoryStore) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.history.as_ref()))
+    }
+
+    pub fn recovery<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn RecoveryJournal) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.recovery.as_ref()))
+    }
+
+    pub fn search<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn SearchIndex) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.search.as_ref()))
+    }
+
+    pub fn save_status<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectSaveStatus) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.save_status.as_ref()))
+    }
+
+    pub fn persistence<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectPersistencePort) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.persistence.as_ref()))
+    }
+
+    pub fn workflows<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectWorkflowPort) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.workflows.as_ref()))
+    }
+
+    pub fn export_target<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectExportPort) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.export_target.as_ref()))
+    }
+
+    pub fn exporter<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn Exporter) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.exporter.as_ref()))
+    }
+
+    pub fn editor<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn EditorAdapter) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.editor.as_ref()))
+    }
+
+    pub fn spellcheck<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn SpellcheckService) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.spellcheck.as_ref()))
+    }
+
+    pub fn workspace_state<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn WorkspaceStateStore) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.workspace_state.as_ref()))
+    }
+
+    pub fn preferences<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn PreferenceService) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.preferences.as_ref()))
+    }
+
+    /// Borrows preferences for an async call without cloning a service past
+    /// this session capability's authorization boundary.
+    pub fn preferences_service(&self) -> Result<&dyn PreferenceService, StaleProjectSession> {
+        Ok(self.services()?.preferences.as_ref())
+    }
+
+    pub fn appearance<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn AppearanceService) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.appearance.as_ref()))
+    }
+
+    /// Borrows appearance preferences for an async call scoped to this access.
+    pub fn appearance_service(&self) -> Result<&dyn AppearanceService, StaleProjectSession> {
+        Ok(self.services()?.appearance.as_ref())
+    }
+
+    pub fn platform<R>(
+        &self,
+        use_services: impl for<'a> FnOnce(&'a PlatformServices) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_services(&self.services()?.platform))
+    }
+
+    /// Borrows platform services for an async call whose future is awaited
+    /// while this authorized access value remains alive.
+    pub fn platform_services(&self) -> Result<&PlatformServices, StaleProjectSession> {
+        Ok(&self.services()?.platform)
+    }
+}
+
+/// Initial hydration data and live ports for one exact project session.
+#[derive(Clone)]
+pub struct ProjectUiProject {
+    pub snapshot: Arc<ProjectSnapshot>,
+    pub ports: ProjectUiPorts,
+}
+
+impl fmt::Debug for ProjectUiProject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectUiProject")
+            .field("snapshot", &self.snapshot)
+            .field("ports", &self.ports)
+            .finish()
+    }
+}
+
+impl ProjectUiProject {
+    pub const fn session(&self) -> ProjectSessionCapability {
+        self.ports.session()
+    }
 }
 
 impl PlatformServices {
@@ -189,7 +727,16 @@ impl PlatformServices {
             external_open,
             application_paths,
             system_appearance,
+            system_appearance_events: None,
         }
+    }
+
+    pub fn with_system_appearance_events(
+        mut self,
+        events: Arc<dyn SystemAppearanceEventService>,
+    ) -> Self {
+        self.system_appearance_events = Some(events);
+        self
     }
 }
 

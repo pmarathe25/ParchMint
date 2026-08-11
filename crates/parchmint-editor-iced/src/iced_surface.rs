@@ -4,17 +4,205 @@ use iced::widget::canvas::{self, Action, Canvas, Frame, Path, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use parchmint_editor_api::{
     BlockId, DocumentPosition, EditorAdapter, EditorCommand, EditorCommandKind,
-    EditorCommandOrigin, EditorSelection, SharedEditorSession, ViewId,
+    EditorCommandOrigin, EditorError, EditorRevision, EditorSelection, SharedEditorSession, ViewId,
 };
 use std::sync::{Arc, Mutex};
 
 use crate::adapter::EditorIcedAdapter;
-use crate::layout::{BlockLayoutGeometry, EditorRectangle};
+use crate::layout::{BlockLayoutGeometry, EditorRectangle, EditorViewport};
 
+/// An sRGB surface color owned by the ParchMint editor boundary.
+///
+/// Iced conversion is intentionally private so callers supply semantic colors
+/// without taking a dependency on the renderer's color type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorSurfaceColor {
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+}
+
+impl EditorSurfaceColor {
+    pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
+        Self::rgba(red, green, blue, u8::MAX)
+    }
+
+    pub const fn rgba(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
+        Self {
+            red,
+            green,
+            blue,
+            alpha,
+        }
+    }
+
+    pub const fn red(self) -> u8 {
+        self.red
+    }
+
+    pub const fn green(self) -> u8 {
+        self.green
+    }
+
+    pub const fn blue(self) -> u8 {
+        self.blue
+    }
+
+    pub const fn alpha(self) -> u8 {
+        self.alpha
+    }
+
+    fn iced(self) -> Color {
+        Color::from_rgba8(
+            self.red,
+            self.green,
+            self.blue,
+            f32::from(self.alpha) / 255.0,
+        )
+    }
+}
+
+/// Semantic colors for the manuscript canvas and its editable prose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorSurfaceTheme {
+    manuscript: EditorSurfaceColor,
+    text: EditorSurfaceColor,
+    selection: EditorSurfaceColor,
+    caret: EditorSurfaceColor,
+}
+
+impl EditorSurfaceTheme {
+    pub const fn new(
+        manuscript: EditorSurfaceColor,
+        text: EditorSurfaceColor,
+        selection: EditorSurfaceColor,
+        caret: EditorSurfaceColor,
+    ) -> Self {
+        Self {
+            manuscript,
+            text,
+            selection,
+            caret,
+        }
+    }
+
+    /// The established ParchMint light manuscript palette.
+    pub const fn light() -> Self {
+        Self::new(
+            EditorSurfaceColor::rgb(252, 251, 247),
+            EditorSurfaceColor::rgb(37, 42, 39),
+            EditorSurfaceColor::rgba(73, 162, 128, 71),
+            EditorSurfaceColor::rgb(44, 126, 94),
+        )
+    }
+
+    /// A fully dark ParchMint manuscript palette; no light prose sheet remains.
+    pub const fn dark() -> Self {
+        Self::new(
+            EditorSurfaceColor::rgb(29, 32, 30),
+            EditorSurfaceColor::rgb(232, 235, 230),
+            EditorSurfaceColor::rgba(115, 202, 164, 96),
+            EditorSurfaceColor::rgb(142, 223, 184),
+        )
+    }
+
+    pub const fn manuscript(self) -> EditorSurfaceColor {
+        self.manuscript
+    }
+
+    pub const fn text(self) -> EditorSurfaceColor {
+        self.text
+    }
+
+    pub const fn selection(self) -> EditorSurfaceColor {
+        self.selection
+    }
+
+    pub const fn caret(self) -> EditorSurfaceColor {
+        self.caret
+    }
+}
+
+impl Default for EditorSurfaceTheme {
+    fn default() -> Self {
+        Self::light()
+    }
+}
+
+/// A keyboard action supported by the mounted manuscript surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountedEditorKeyCommand {
+    Backspace,
+    Delete,
+    MoveLeft,
+    MoveRight,
+}
+
+/// A ParchMint-owned interaction emitted by a mounted editor surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SurfaceMessage {
+pub enum MountedEditorMessage {
     Focus(DocumentPosition),
-    Insert(String),
+    InsertText(String),
+    KeyCommand(MountedEditorKeyCommand),
+}
+
+/// The session-local identity and semantic appearance of one mounted surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MountedEditorConfig {
+    session: SharedEditorSession,
+    view: ViewId,
+    block: BlockId,
+    theme: EditorSurfaceTheme,
+}
+
+impl MountedEditorConfig {
+    pub const fn new(
+        session: SharedEditorSession,
+        view: ViewId,
+        block: BlockId,
+        theme: EditorSurfaceTheme,
+    ) -> Self {
+        Self {
+            session,
+            view,
+            block,
+            theme,
+        }
+    }
+
+    pub fn session(&self) -> SharedEditorSession {
+        self.session.clone()
+    }
+
+    pub const fn view(&self) -> ViewId {
+        self.view
+    }
+
+    pub const fn block(&self) -> BlockId {
+        self.block
+    }
+
+    pub const fn theme(&self) -> EditorSurfaceTheme {
+        self.theme
+    }
+}
+
+/// The result of routing one editor interaction through the shared session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MountedEditorUpdate {
+    revision: EditorRevision,
+    document_changed: bool,
+}
+
+impl MountedEditorUpdate {
+    pub const fn revision(self) -> EditorRevision {
+        self.revision
+    }
+
+    pub const fn document_changed(self) -> bool {
+        self.document_changed
+    }
 }
 
 #[derive(Clone)]
@@ -27,6 +215,8 @@ struct SurfaceContent {
     geometry: BlockLayoutGeometry,
     selection: EditorSelection,
     focused: bool,
+    viewport: EditorViewport,
+    theme: EditorSurfaceTheme,
 }
 
 #[derive(Default)]
@@ -34,7 +224,7 @@ struct SurfaceState {
     focused: bool,
 }
 
-impl canvas::Program<SurfaceMessage> for EditorSurface {
+impl canvas::Program<MountedEditorMessage> for EditorSurface {
     type State = SurfaceState;
 
     fn update(
@@ -43,7 +233,7 @@ impl canvas::Program<SurfaceMessage> for EditorSurface {
         event: &canvas::Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> Option<Action<SurfaceMessage>> {
+    ) -> Option<Action<MountedEditorMessage>> {
         self.sync_focus(state);
         let content = self.content();
         match event {
@@ -52,12 +242,30 @@ impl canvas::Program<SurfaceMessage> for EditorSurface {
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
                 self.set_focus(true);
-                Some(Action::publish(SurfaceMessage::Focus(document)).and_capture())
+                Some(Action::publish(MountedEditorMessage::Focus(document)).and_capture())
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 text: Some(text), ..
-            }) if state.focused && is_supported_en_us(text) => {
-                Some(Action::publish(SurfaceMessage::Insert(text.to_string())).and_capture())
+            }) if state.focused && is_supported_en_us(text) => Some(
+                Action::publish(MountedEditorMessage::InsertText(text.to_string())).and_capture(),
+            ),
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) if state.focused => {
+                let command = match key.as_ref() {
+                    keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                        MountedEditorKeyCommand::Backspace
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Delete) => {
+                        MountedEditorKeyCommand::Delete
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+                        MountedEditorKeyCommand::MoveLeft
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+                        MountedEditorKeyCommand::MoveRight
+                    }
+                    _ => return None,
+                };
+                Some(Action::publish(MountedEditorMessage::KeyCommand(command)).and_capture())
             }
             _ => None,
         }
@@ -74,10 +282,10 @@ impl canvas::Program<SurfaceMessage> for EditorSurface {
         let content = self.content();
         let mut frame = Frame::new(renderer, bounds.size());
         let background = Path::rectangle(Point::ORIGIN, bounds.size());
-        frame.fill(&background, Color::from_rgb8(252, 251, 247));
+        frame.fill(&background, content.theme.manuscript().iced());
 
         for selection in content.geometry.selection_rectangles(content.selection) {
-            fill_rectangle(&mut frame, selection, Color::from_rgba8(73, 162, 128, 0.28));
+            fill_rectangle(&mut frame, selection, content.theme.selection().iced());
         }
 
         for scalar in content.geometry.draw_scalars() {
@@ -87,7 +295,7 @@ impl canvas::Program<SurfaceMessage> for EditorSurface {
             frame.fill_text(Text {
                 content: scalar.character.to_string(),
                 position: Point::new(scalar.bounds.x, scalar.bounds.y),
-                color: Color::from_rgb8(37, 42, 39),
+                color: content.theme.text().iced(),
                 size: iced::Pixels::from(16.0),
                 ..Text::default()
             });
@@ -96,7 +304,7 @@ impl canvas::Program<SurfaceMessage> for EditorSurface {
         if self.draws_focused_caret(state, &content)
             && let Some(caret) = content.geometry.caret(content.selection.head())
         {
-            fill_rectangle(&mut frame, caret, Color::from_rgb8(44, 126, 94));
+            fill_rectangle(&mut frame, caret, content.theme.caret().iced());
         }
 
         vec![frame.into_geometry()]
@@ -142,11 +350,18 @@ impl EditorSurface {
 
 /// A retained handle for refreshing the state observed by an existing Canvas.
 #[derive(Clone)]
-pub(crate) struct SurfaceHandle {
+struct SurfaceHandle {
     content: Arc<Mutex<SurfaceContent>>,
 }
 
 impl SurfaceHandle {
+    fn content(&self) -> SurfaceContent {
+        self.content
+            .lock()
+            .expect("editor surface content lock")
+            .clone()
+    }
+
     #[cfg(test)]
     fn is_focused(&self) -> bool {
         self.content
@@ -155,7 +370,7 @@ impl SurfaceHandle {
             .focused
     }
 
-    pub(crate) fn refresh_from_adapter(
+    fn refresh_from_adapter(
         &self,
         adapter: &EditorIcedAdapter,
         session: SharedEditorSession,
@@ -174,32 +389,47 @@ impl SurfaceHandle {
         content.geometry = geometry;
         content.selection = selection;
         content.focused = presentation.focused;
+        content.viewport = presentation.viewport;
         Ok(())
+    }
+
+    fn set_theme(&self, theme: EditorSurfaceTheme) {
+        self.content
+            .lock()
+            .expect("editor surface content lock")
+            .theme = theme;
+    }
+
+    fn element(&self) -> Element<'static, MountedEditorMessage> {
+        let viewport = self
+            .content
+            .lock()
+            .expect("editor surface content lock")
+            .viewport;
+        editor_surface(
+            Arc::clone(&self.content),
+            Size::new(viewport.width, viewport.height),
+        )
     }
 }
 
 fn editor_surface(
     content: Arc<Mutex<SurfaceContent>>,
     size: Size,
-) -> Element<'static, SurfaceMessage> {
+) -> Element<'static, MountedEditorMessage> {
     Canvas::new(EditorSurface { content })
         .width(Length::Fixed(size.width))
         .height(Length::Fixed(size.height))
         .into()
 }
 
-/// Builds the private Iced surface from the adapter's mounted cache and core selection.
-///
-/// Keeping this constructor here prevents callers from manufacturing a surface
-/// from an unrelated geometry snapshot. The public adapter boundary continues
-/// to expose only ParchMint values.
-pub(crate) fn mounted_surface(
+fn mounted_surface(
     adapter: &EditorIcedAdapter,
     session: SharedEditorSession,
     view: ViewId,
     block: BlockId,
-    size: Size,
-) -> Result<(Element<'static, SurfaceMessage>, SurfaceHandle), parchmint_editor_api::EditorError> {
+    theme: EditorSurfaceTheme,
+) -> Result<SurfaceHandle, EditorError> {
     let presentation = adapter.view_snapshot(session.clone(), view)?.presentation;
     let geometry = adapter.geometry(session.clone(), view, block)?;
     let selection = adapter.selection(session, view)?;
@@ -207,25 +437,28 @@ pub(crate) fn mounted_surface(
         geometry,
         selection,
         focused: presentation.focused,
+        viewport: presentation.viewport,
+        theme,
     }));
     let handle = SurfaceHandle {
         content: Arc::clone(&content),
     };
-    Ok((editor_surface(content, size), handle))
+    Ok(handle)
 }
 
 /// Applies messages emitted by the mounted surface through the adapter boundary.
 ///
 /// This is a synthetic/headless event bridge. It deliberately does not access
 /// the operating-system clipboard or native compositor.
-pub(crate) fn apply_surface_message(
+fn apply_surface_message(
     adapter: &EditorIcedAdapter,
     session: SharedEditorSession,
     view: ViewId,
-    message: SurfaceMessage,
-) -> Result<(), parchmint_editor_api::EditorError> {
+    surface: Option<&SurfaceHandle>,
+    message: MountedEditorMessage,
+) -> Result<(), EditorError> {
     match message {
-        SurfaceMessage::Focus(position) => {
+        MountedEditorMessage::Focus(position) => {
             let revision = adapter.revision(session.clone())?;
             adapter.execute(
                 session.clone(),
@@ -247,8 +480,63 @@ pub(crate) fn apply_surface_message(
                 },
             )
         }
-        SurfaceMessage::Insert(text) => adapter.input_en_us(session, view, &text),
+        MountedEditorMessage::InsertText(text) => adapter.input_en_us(session, view, &text),
+        MountedEditorMessage::KeyCommand(command) => {
+            let surface = surface.ok_or(EditorError::InvalidCommand {
+                reason: "mounted editor key input requires retained surface state",
+            })?;
+            apply_key_command(adapter, session, view, surface, command)
+        }
     }
+}
+
+fn apply_key_command(
+    adapter: &EditorIcedAdapter,
+    session: SharedEditorSession,
+    view: ViewId,
+    surface: &SurfaceHandle,
+    command: MountedEditorKeyCommand,
+) -> Result<(), EditorError> {
+    let selection = adapter.selection(session.clone(), view)?;
+    let geometry = surface.content().geometry;
+    let head = selection.head();
+    let selection_or_adjacent = match command {
+        MountedEditorKeyCommand::Backspace => selection
+            .is_collapsed()
+            .then(|| geometry.previous_caret(head))
+            .flatten()
+            .map(|previous| EditorSelection::new(previous, head))
+            .or((!selection.is_collapsed()).then_some(selection)),
+        MountedEditorKeyCommand::Delete => selection
+            .is_collapsed()
+            .then(|| geometry.next_caret(head))
+            .flatten()
+            .map(|next| EditorSelection::new(head, next))
+            .or((!selection.is_collapsed()).then_some(selection)),
+        MountedEditorKeyCommand::MoveLeft => geometry
+            .previous_caret(head)
+            .map(|previous| EditorSelection::new(previous, previous)),
+        MountedEditorKeyCommand::MoveRight => geometry
+            .next_caret(head)
+            .map(|next| EditorSelection::new(next, next)),
+    };
+    let Some(range) = selection_or_adjacent else {
+        return Ok(());
+    };
+    let revision = adapter.revision(session.clone())?;
+    let kind = match command {
+        MountedEditorKeyCommand::Backspace | MountedEditorKeyCommand::Delete => {
+            EditorCommandKind::DeleteRange { range }
+        }
+        MountedEditorKeyCommand::MoveLeft | MountedEditorKeyCommand::MoveRight => {
+            EditorCommandKind::SetSelection { selection: range }
+        }
+    };
+    adapter.execute(
+        session,
+        EditorCommandOrigin::new(view),
+        EditorCommand::new(revision, kind),
+    )
 }
 
 fn is_supported_en_us(text: &str) -> bool {
@@ -256,6 +544,93 @@ fn is_supported_en_us(text: &str) -> bool {
         && text
             .chars()
             .all(|character| character.is_ascii_graphic() || matches!(character, ' ' | '\n' | '\t'))
+}
+
+/// A retained, ParchMint-owned host for one adapter-mounted Iced manuscript.
+///
+/// The only renderer type exposed is the final `Element` needed by the
+/// production Iced composition. Session, view, cache, and Canvas state stay
+/// owned by this crate.
+#[derive(Clone)]
+pub struct MountedEditorHost {
+    adapter: EditorIcedAdapter,
+    config: MountedEditorConfig,
+    surface: SurfaceHandle,
+}
+
+impl MountedEditorHost {
+    /// Mounts the real Iced surface from an already attached adapter view.
+    pub fn mount(
+        adapter: &EditorIcedAdapter,
+        config: MountedEditorConfig,
+    ) -> Result<Self, EditorError> {
+        let surface = mounted_surface(
+            adapter,
+            config.session(),
+            config.view(),
+            config.block(),
+            config.theme(),
+        )?;
+        Ok(Self {
+            adapter: adapter.clone(),
+            config,
+            surface,
+        })
+    }
+
+    pub fn config(&self) -> MountedEditorConfig {
+        self.config.clone()
+    }
+
+    /// Builds an implementation-scoped Iced element for the outer UI crate.
+    pub fn element(&self) -> Element<'static, MountedEditorMessage> {
+        self.surface.element()
+    }
+
+    /// Routes a Canvas interaction through the shared editor session.
+    ///
+    /// `document_changed` tells the outer UI whether it should schedule its
+    /// existing persistence and reprojection work.
+    pub fn update(
+        &self,
+        message: MountedEditorMessage,
+    ) -> Result<MountedEditorUpdate, EditorError> {
+        let before = self.adapter.revision(self.config.session())?;
+        apply_surface_message(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            Some(&self.surface),
+            message,
+        )?;
+        let revision = self.adapter.revision(self.config.session())?;
+        self.surface.refresh_from_adapter(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            self.config.block(),
+        )?;
+        Ok(MountedEditorUpdate {
+            revision,
+            document_changed: revision != before,
+        })
+    }
+
+    /// Refreshes retained Canvas state after the outer UI has advanced a frame.
+    pub fn refresh(&self) -> Result<(), EditorError> {
+        self.surface.refresh_from_adapter(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            self.config.block(),
+        )
+    }
+
+    /// Rebinds only the semantic colors; the shared session is unaffected.
+    pub fn set_theme(&mut self, theme: EditorSurfaceTheme) {
+        self.config.theme = theme;
+        self.surface.set_theme(theme);
+    }
 }
 
 fn fill_rectangle(frame: &mut Frame, rectangle: EditorRectangle, color: Color) {
@@ -345,14 +720,15 @@ mod tests {
                 )],
             )
             .expect("layout");
-        let (element, surface) = mounted_surface(
+        let surface = mounted_surface(
             &adapter,
             session.clone(),
             left,
             block,
-            Size::new(viewport.width, viewport.height),
+            EditorSurfaceTheme::light(),
         )
         .expect("surface");
+        let element = surface.element();
         let mut simulator = Simulator::with_size(
             Settings::default(),
             Size::new(viewport.width, viewport.height),
@@ -415,7 +791,8 @@ mod tests {
             &adapter,
             session.clone(),
             missing,
-            SurfaceMessage::Focus(DocumentPosition::default()),
+            None,
+            MountedEditorMessage::Focus(DocumentPosition::default()),
         );
         assert!(matches!(
             result,
@@ -486,14 +863,15 @@ mod tests {
                 .y,
             12.0
         );
-        let (element, surface) = mounted_surface(
+        let surface = mounted_surface(
             &adapter,
             session.clone(),
             view,
             block,
-            Size::new(viewport.width, viewport.height),
+            EditorSurfaceTheme::light(),
         )
         .expect("mounted surface");
+        let element = surface.element();
         let mut simulator = Simulator::with_size(
             Settings::default(),
             Size::new(viewport.width, viewport.height),
@@ -509,7 +887,7 @@ mod tests {
         );
         assert_eq!(simulator.typewrite("A\n\t"), iced::event::Status::Captured);
 
-        let focus = SurfaceMessage::Focus(
+        let focus = MountedEditorMessage::Focus(
             adapter
                 .geometry(session.clone(), view, block)
                 .expect("focus geometry")
@@ -518,11 +896,11 @@ mod tests {
         );
         for message in [
             focus,
-            SurfaceMessage::Insert("A".into()),
-            SurfaceMessage::Insert("\n".into()),
-            SurfaceMessage::Insert("\t".into()),
+            MountedEditorMessage::InsertText("A".into()),
+            MountedEditorMessage::InsertText("\n".into()),
+            MountedEditorMessage::InsertText("\t".into()),
         ] {
-            apply_surface_message(&adapter, session.clone(), view, message)
+            apply_surface_message(&adapter, session.clone(), view, None, message)
                 .expect("surface message reaches adapter");
         }
         assert_eq!(
@@ -562,13 +940,16 @@ mod tests {
         assert_tiny_skia_golden(&updated_snapshot, "post_edit_surface");
 
         let messages = simulator.into_messages().collect::<Vec<_>>();
-        assert!(matches!(messages.first(), Some(SurfaceMessage::Focus(_))));
+        assert!(matches!(
+            messages.first(),
+            Some(MountedEditorMessage::Focus(_))
+        ));
         assert_eq!(
             &messages[1..],
             &[
-                SurfaceMessage::Insert("A".into()),
-                SurfaceMessage::Insert("\n".into()),
-                SurfaceMessage::Insert("\t".into()),
+                MountedEditorMessage::InsertText("A".into()),
+                MountedEditorMessage::InsertText("\n".into()),
+                MountedEditorMessage::InsertText("\t".into()),
             ]
         );
     }
@@ -612,14 +993,15 @@ mod tests {
                 )],
             )
             .expect("layout");
-        let (element, _surface) = mounted_surface(
+        let surface = mounted_surface(
             &adapter,
             session.clone(),
             view,
             block,
-            Size::new(240.0, 100.0),
+            EditorSurfaceTheme::light(),
         )
         .expect("surface");
+        let element = surface.element();
         let mut simulator =
             Simulator::with_size(Settings::default(), Size::new(240.0, 100.0), element);
 
@@ -637,6 +1019,8 @@ mod tests {
                     .selection(session.clone(), view)
                     .expect("initial selection"),
                 focused: true,
+                viewport: EditorViewport::new(240.0, 100.0).expect("viewport"),
+                theme: EditorSurfaceTheme::light(),
             })),
         };
         assert!(surface.draws_focused_caret(&SurfaceState::default(), &surface.content()));
@@ -645,6 +1029,6 @@ mod tests {
 
         assert_eq!(simulator.typewrite("A"), iced::event::Status::Captured);
         let messages = simulator.into_messages().collect::<Vec<_>>();
-        assert_eq!(messages, vec![SurfaceMessage::Insert("A".into())]);
+        assert_eq!(messages, vec![MountedEditorMessage::InsertText("A".into())]);
     }
 }

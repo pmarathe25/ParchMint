@@ -5,6 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use parchmint_ui_iced::{VisualAppearance, VisualTarget, visual_target_spec};
 use parchmint_ui_verification::decode_png;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -93,6 +94,26 @@ fn checked_in_penpot_references_match_their_manifest_and_checksums() {
         assert!(checksummed_paths.insert(relative));
     }
     assert_eq!(checksummed_paths, paths);
+}
+
+#[test]
+fn visual_catalog_maps_every_target_to_a_checked_in_reference() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("references/penpot");
+    for target in VisualTarget::ALL {
+        let spec = visual_target_spec(target);
+        assert_eq!((spec.width, spec.height), (1440, 900));
+        assert_eq!(spec.physical_size(), (2880, 1800));
+        for appearance in VisualAppearance::ALL {
+            let path = root
+                .join(appearance.name())
+                .join(format!("{}.png", target.reference_id(appearance)));
+            assert!(
+                path.is_file(),
+                "missing visual reference {}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn safe_reference_path(root: &Path, relative: &str) -> PathBuf {
