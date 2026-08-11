@@ -23,3 +23,5 @@ drawn at physical x=240 at 2x, instead of x=140.
 The package declares the MIT license in `Cargo.toml`. The crates.io package did
 not include a license file. The official Iced license text is available at
 <https://github.com/iced-rs/iced/blob/master/LICENSE>.
+
+REMOVE THIS PACKAGE WHEN WE UPDATE OUR DEPENDENCIES TO A VERSION INCLUDING THE FIX!
