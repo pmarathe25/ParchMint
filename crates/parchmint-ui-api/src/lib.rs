@@ -31,7 +31,8 @@ use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_workspace_state::WorkspaceStateStore;
 
 pub use parchmint_application::{
-    CreateDocumentWorkflow, CreatedDocumentRevision, DurableProjectionAck,
+    CreateDocumentWorkflow, CreatedDocumentRevision, DuplicateSubtreeWorkflow,
+    DuplicatedSubtreeRevision, DurableProjectionAck, MoveNodeWorkflow, MoveNodesWorkflow,
     PersistenceRecoveryState as ProjectRecoveryState,
     PersistenceRevision as ProjectPersistenceRevision, PersistenceSaveHandle as ProjectSaveHandle,
     PersistenceSaveKind as ProjectSaveKind, PersistenceSavedRevision as SavedProjectRevision,
@@ -243,6 +244,15 @@ pub struct ProjectWorkflowSnapshot {
     pub checkpoint: CheckpointId,
 }
 
+/// Authoritative result of one atomic subtree duplicate workflow.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectDuplicateWorkflowSnapshot {
+    pub workflow: ProjectWorkflowSnapshot,
+    pub created_root: parchmint_domain::NodeId,
+    pub node_ids: BTreeMap<parchmint_domain::NodeId, parchmint_domain::NodeId>,
+    pub document_ids: BTreeMap<parchmint_domain::DocumentId, parchmint_domain::DocumentId>,
+}
+
 /// Production-owned workflows that must coordinate domain, document, and
 /// storage state rather than exposing low-level write plans to the UI.
 pub trait ProjectWorkflowPort: Send + Sync {
@@ -260,6 +270,16 @@ pub trait ProjectWorkflowPort: Send + Sync {
         &self,
         name: String,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
+    fn move_nodes(
+        &self,
+        request: MoveNodesWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
+    fn duplicate_subtree(
+        &self,
+        request: DuplicateSubtreeWorkflow,
+    ) -> Result<ProjectDuplicateWorkflowSnapshot, ProjectQueryError>;
 }
 
 /// Opaque proof of a completed production export. It deliberately does not

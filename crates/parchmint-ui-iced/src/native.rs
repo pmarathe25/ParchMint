@@ -1092,7 +1092,17 @@ impl NativeDesktop {
                     ProjectMessage::SetAppearance(mode) => Some(*mode),
                     _ => None,
                 };
+                let clipboard_status = match &message {
+                    ProjectMessage::CopySelection => Some("Project item copied"),
+                    ProjectMessage::CutSelection => Some("Project item ready to move"),
+                    ProjectMessage::CancelCut => Some("Project move cancelled"),
+                    ProjectMessage::PasteSelection { .. } => Some("Pasting project item…"),
+                    _ => None,
+                };
                 let effects = workspace.update(message);
+                if let Some(status) = clipboard_status {
+                    self.status = Some(status.to_owned());
+                }
                 if let Some(mode) = appearance {
                     let callbacks = Arc::clone(&self.callbacks);
                     return Task::perform(
@@ -1850,6 +1860,29 @@ impl NativeDesktop {
                     workspace.update(ProjectMessage::StartSave(through_revision));
                 }
                 Self::save_task(window, ports, ProjectSaveKind::Structural)
+            }
+            Ok(ProjectEffectCompletion::TreePaste { snapshot, kind }) => {
+                let snapshot = Arc::new(*snapshot);
+                if let Some(project_ui) = state.project.project_ui.as_mut() {
+                    project_ui.snapshot = Arc::clone(&snapshot);
+                }
+                if let Some(workspace) = state.workspace.as_mut() {
+                    workspace.reconcile_snapshot(&snapshot);
+                    workspace.complete_tree_paste(kind);
+                    workspace.update(ProjectMessage::SaveCompleted(
+                        snapshot.project.revision.value(),
+                    ));
+                }
+                state.effect_executor = state
+                    .project
+                    .ports()
+                    .cloned()
+                    .map(|ports| NativeProjectEffectExecutor::new(ports, snapshot));
+                self.status = Some(match kind {
+                    crate::TreeClipboardKind::Copy => "Project item pasted".to_owned(),
+                    crate::TreeClipboardKind::Cut => "Project item moved".to_owned(),
+                });
+                Task::none()
             }
             Ok(ProjectEffectCompletion::OpenDocuments(documents)) => {
                 for document in documents {

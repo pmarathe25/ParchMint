@@ -162,7 +162,7 @@ fn explorer_rail<'a>(
     let paste_destination = creation_parent
         .as_ref()
         .map(|parent| DragDestination::IntoGroup(parent.clone()));
-    let has_cut_selection = explorer.rows().iter().any(|row| row.cut_pending);
+    let has_tree_clipboard = workspace.tree_clipboard_kind().is_some();
     let rows = explorer
         .rows()
         .into_iter()
@@ -281,8 +281,22 @@ fn explorer_rail<'a>(
                     }),
             );
     }
-    if !selected.is_empty() {
+    if workspace.can_copy_or_cut_selection() {
         actions = actions
+            .push(
+                button(text("Copy").size(11))
+                    .padding([4, 6])
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::CopySelection,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+            )
             .push(
                 button(text("Cut").size(11))
                     .padding([4, 6])
@@ -310,7 +324,7 @@ fn explorer_rail<'a>(
                     }),
             );
     }
-    if has_cut_selection && let Some(destination) = paste_destination {
+    if has_tree_clipboard && let Some(destination) = paste_destination {
         actions = actions.push(
             button(text("Paste").size(11))
                 .padding([4, 6])
@@ -1464,6 +1478,55 @@ mod tests {
                 )),
             ]
         );
+    }
+
+    #[test]
+    fn explorer_exposes_copy_cut_and_session_clipboard_paste_messages() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut selection_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+            ),
+        );
+        assert!(selection_surface.find("Copy").is_ok());
+        assert!(selection_surface.find("Cut").is_ok());
+        selection_surface.click("Copy").unwrap();
+        assert_eq!(
+            selection_surface.into_messages().collect::<Vec<_>>(),
+            [ProjectSurfaceMessage::Project(
+                ProjectMessage::CopySelection
+            )]
+        );
+
+        workspace.update(ProjectMessage::CopySelection);
+        let mut clipboard_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+            ),
+        );
+        assert!(clipboard_surface.find("Paste").is_ok());
+        clipboard_surface.click("Paste").unwrap();
+        assert!(matches!(
+            clipboard_surface.into_messages().next(),
+            Some(ProjectSurfaceMessage::Project(
+                ProjectMessage::PasteSelection { .. }
+            ))
+        ));
     }
 
     #[test]

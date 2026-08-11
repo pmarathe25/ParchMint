@@ -15,7 +15,10 @@ use std::{
     },
 };
 
-use parchmint_application::{ApplicationError, CreateDocumentWorkflow};
+use parchmint_application::{
+    ApplicationError, CreateDocumentWorkflow, DuplicateSubtreeWorkflow, MoveNodeWorkflow,
+    MoveNodesWorkflow,
+};
 use parchmint_domain::{
     DocumentId, MetadataApplicability, MetadataFieldId, NodeId, NodeKind, ProjectCommand,
     ProjectRevision, apply_project_command,
@@ -31,6 +34,7 @@ use parchmint_ui_api::{ProjectSaveKind, ProjectSnapshot, ProjectUiPorts};
 use crate::{
     DragDestination, EditorCommand, EditorEffect, EditorPane, FindMatch, HierarchyItemKind,
     HistoryRestoreScope, ProjectEffect, RestoreLocation, SpellingDictionaryScope, SpellingMenu,
+    TreeClipboardKind,
 };
 
 type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -278,10 +282,59 @@ impl NativeProjectEffectExecutor {
                     snapshot,
                 )))
             }
-            ProjectEffect::CopyDocuments(_)
-            | ProjectEffect::PasteCopiedDocuments { .. }
-            | ProjectEffect::PasteCutDocuments { .. }
-            | ProjectEffect::SearchProject { .. }
+            ProjectEffect::PasteCopiedSubtrees {
+                node_ids,
+                destination,
+            } => {
+                if node_ids.len() != 1 {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "copy paste requires one normalized subtree root",
+                    ));
+                }
+                let source = resolvers.node(&node_ids[0])?;
+                let (parent, index) = paste_location(&current, &resolvers, &destination)?;
+                let snapshot = self
+                    .ports
+                    .duplicate_subtree(DuplicateSubtreeWorkflow {
+                        source,
+                        parent,
+                        index,
+                    })
+                    .await?;
+                Ok(ProjectEffectCompletion::TreePaste {
+                    snapshot: Box::new(snapshot),
+                    kind: TreeClipboardKind::Copy,
+                })
+            }
+            ProjectEffect::PasteCutSubtrees {
+                node_ids,
+                destination,
+            } => {
+                let nodes = resolve_distinct_nodes(&resolvers, node_ids)?;
+                if nodes.is_empty() {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "cut paste requires at least one subtree root",
+                    ));
+                }
+                let commands = plan_moves(&current, &resolvers, nodes, destination)?;
+                let moves = commands
+                    .into_iter()
+                    .map(|command| match command {
+                        ProjectCommand::MoveNode { id, parent, index } => MoveNodeWorkflow {
+                            node: id,
+                            parent,
+                            index,
+                        },
+                        _ => unreachable!("move planner returns only MoveNode commands"),
+                    })
+                    .collect();
+                let snapshot = self.ports.move_nodes(MoveNodesWorkflow { moves }).await?;
+                Ok(ProjectEffectCompletion::TreePaste {
+                    snapshot: Box::new(snapshot),
+                    kind: TreeClipboardKind::Cut,
+                })
+            }
+            ProjectEffect::SearchProject { .. }
             | ProjectEffect::BuildReplacementPreview { .. }
             | ProjectEffect::ApplyGlobalReplacement { .. }
             | ProjectEffect::ExportEntireManuscript { .. }
@@ -457,6 +510,10 @@ impl NativeProjectEffectExecutor {
 pub(crate) enum ProjectEffectCompletion {
     RefreshedSnapshot(Box<ProjectSnapshot>),
     WorkflowSnapshot(Box<ProjectSnapshot>),
+    TreePaste {
+        snapshot: Box<ProjectSnapshot>,
+        kind: TreeClipboardKind,
+    },
     OpenDocuments(Vec<ResolvedDocumentMount>),
     ApplyAppearance(ThemeSnapshot),
     SavedThrough(u64),
@@ -521,7 +578,6 @@ pub(crate) enum StableIdKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnsupportedCategory {
-    CopyPaste,
     Search,
     Replacement,
     Export,
@@ -646,6 +702,28 @@ trait RuntimeProjectPorts: Send + Sync {
         Box::pin(async {
             Err(PortError::Failed {
                 service: "ProjectWorkflowPort::create_document",
+                message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
+    fn move_nodes(
+        &self,
+        _request: MoveNodesWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::move_nodes",
+                message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
+    fn duplicate_subtree(
+        &self,
+        _request: DuplicateSubtreeWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::duplicate_subtree",
                 message: "workflow port is unavailable".to_owned(),
             })
         })
@@ -888,6 +966,54 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
         })
     }
 
+    fn move_nodes(
+        &self,
+        request: MoveNodesWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .workflows(|workflows| workflows.move_nodes(request))
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .map(|result| result.snapshot)
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::move_nodes",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn duplicate_subtree(
+        &self,
+        request: DuplicateSubtreeWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .workflows(|workflows| workflows.duplicate_subtree(request))
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .map(|result| result.workflow.snapshot)
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::duplicate_subtree",
+                    message: error.to_string(),
+                })
+        })
+    }
+
     fn create_named_snapshot(
         &self,
         name: String,
@@ -1087,12 +1213,83 @@ fn plan_moves(
                         .ok_or(ProjectRuntimeError::InvalidEffect(
                             "move sibling is absent from its parent",
                         ))?;
+                    let old_index = simulated
+                        .nodes
+                        .parent(node)
+                        .filter(|old_parent| *old_parent == parent)
+                        .and_then(|_| {
+                            simulated
+                                .nodes
+                                .children(parent)
+                                .iter()
+                                .position(|candidate| *candidate == node)
+                        });
+                    let index = if old_index.is_some_and(|old| old < index) {
+                        index.saturating_sub(1)
+                    } else {
+                        index
+                    };
+                    (parent, index)
+                }
+                DragDestination::AfterSibling(target) => {
+                    let sibling = resolvers.node(target)?;
+                    let parent = simulated.nodes.parent(sibling).ok_or(
+                        ProjectRuntimeError::InvalidEffect("a fixed root cannot be a move sibling"),
+                    )?;
+                    let mut index = simulated
+                        .nodes
+                        .children(parent)
+                        .iter()
+                        .position(|candidate| *candidate == sibling)
+                        .ok_or(ProjectRuntimeError::InvalidEffect(
+                            "move sibling is absent from its parent",
+                        ))?
+                        .saturating_add(1);
+                    let old_index = simulated
+                        .nodes
+                        .parent(node)
+                        .filter(|old_parent| *old_parent == parent)
+                        .and_then(|_| {
+                            simulated
+                                .nodes
+                                .children(parent)
+                                .iter()
+                                .position(|candidate| *candidate == node)
+                        });
+                    if old_index.is_some_and(|old| old < index) {
+                        index = index.saturating_sub(1);
+                    }
                     (parent, index)
                 }
                 DragDestination::EditorPane(_) => {
                     unreachable!("editor drops resolve before planning")
                 }
             };
+        let old_parent = simulated
+            .nodes
+            .parent(node)
+            .ok_or(ProjectRuntimeError::InvalidEffect(
+                "a fixed root cannot be moved",
+            ))?;
+        let old_index = simulated
+            .nodes
+            .children(old_parent)
+            .iter()
+            .position(|candidate| *candidate == node)
+            .ok_or(ProjectRuntimeError::InvalidEffect(
+                "move source is absent from its parent",
+            ))?;
+        let available_slots = simulated
+            .nodes
+            .children(parent)
+            .len()
+            .saturating_sub(usize::from(old_parent == parent));
+        let index = index.min(available_slots);
+        if old_parent == parent && old_index == index {
+            return Err(ProjectRuntimeError::InvalidEffect(
+                "move destination is the current location",
+            ));
+        }
         let command = ProjectCommand::move_node(node, parent, index);
         simulated = apply_project_command(&simulated, simulated.revision, command.clone())
             .map_err(|error| ProjectRuntimeError::Port {
@@ -1103,6 +1300,51 @@ fn plan_moves(
         commands.push(command);
     }
     Ok(commands)
+}
+
+fn paste_location(
+    snapshot: &ProjectSnapshot,
+    resolvers: &StableIdResolvers,
+    destination: &DragDestination,
+) -> Result<(NodeId, usize), ProjectRuntimeError> {
+    match destination {
+        DragDestination::IntoGroup(target) => {
+            let parent = resolvers.node(target)?;
+            if !snapshot
+                .project
+                .nodes
+                .get(parent)
+                .is_some_and(|node| node.kind.can_have_children())
+            {
+                return Err(ProjectRuntimeError::InvalidEffect(
+                    "paste destination is not a container",
+                ));
+            }
+            Ok((parent, snapshot.project.nodes.children(parent).len()))
+        }
+        DragDestination::BeforeSibling(target) | DragDestination::AfterSibling(target) => {
+            let sibling = resolvers.node(target)?;
+            let parent = snapshot.project.nodes.parent(sibling).ok_or(
+                ProjectRuntimeError::InvalidEffect("a fixed root cannot be a paste sibling"),
+            )?;
+            let index = snapshot
+                .project
+                .nodes
+                .children(parent)
+                .iter()
+                .position(|candidate| *candidate == sibling)
+                .ok_or(ProjectRuntimeError::InvalidEffect(
+                    "paste sibling is absent from its parent",
+                ))?;
+            Ok((
+                parent,
+                index + usize::from(matches!(destination, DragDestination::AfterSibling(_))),
+            ))
+        }
+        DragDestination::EditorPane(_) => Err(ProjectRuntimeError::InvalidEffect(
+            "tree clipboard cannot paste into an editor pane",
+        )),
+    }
 }
 
 fn validate_restore_location(
@@ -1228,12 +1470,6 @@ fn node_id_is_available(snapshot: &ProjectSnapshot, candidate: NodeId) -> bool {
 
 fn unsupported_project_effect(effect: &ProjectEffect) -> Option<UnsupportedEffect> {
     let (category, missing_boundary) = match effect {
-        ProjectEffect::CopyDocuments(_)
-        | ProjectEffect::PasteCopiedDocuments { .. }
-        | ProjectEffect::PasteCutDocuments { .. } => (
-            UnsupportedCategory::CopyPaste,
-            "session-scoped clipboard payload feed",
-        ),
         ProjectEffect::SearchProject { .. } => (
             UnsupportedCategory::Search,
             "generation-scoped SearchIndex completion feed",
@@ -1449,6 +1685,31 @@ mod tests {
             });
             Box::pin(async move { result })
         }
+
+        fn move_nodes(
+            &self,
+            request: MoveNodesWorkflow,
+        ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+            let result = self.authorize().and_then(|_| {
+                let mut snapshot = self.snapshot.lock().expect("snapshot mutex poisoned");
+                let mut project = snapshot.project.clone();
+                for movement in request.moves {
+                    project = apply_project_command(
+                        &project,
+                        project.revision,
+                        ProjectCommand::move_node(movement.node, movement.parent, movement.index),
+                    )
+                    .map_err(|error| PortError::Failed {
+                        service: "fake move workflow",
+                        message: error.to_string(),
+                    })?
+                    .project;
+                }
+                snapshot.project = project;
+                Ok(snapshot.clone())
+            });
+            Box::pin(async move { result })
+        }
     }
 
     fn executor(snapshot: ProjectSnapshot) -> (NativeProjectEffectExecutor, Arc<FakePorts>) {
@@ -1642,21 +1903,82 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_effect_has_typed_category_and_is_not_success() {
+    fn unsupported_search_effect_has_typed_category_and_is_not_success() {
         let (snapshot, _, _, _) = fixture();
         let (executor, _) = executor(snapshot);
 
         let result = block_on(
-            executor
-                .execute_project_effect(ProjectEffect::CopyDocuments(vec!["anything".to_owned()])),
+            executor.execute_project_effect(ProjectEffect::SearchProject {
+                query: "anything".to_owned(),
+                case_sensitive: false,
+                whole_word: false,
+                generation: 1,
+            }),
         );
 
         assert_eq!(
             result,
             Err(ProjectRuntimeError::Unsupported(UnsupportedEffect {
-                category: UnsupportedCategory::CopyPaste,
-                missing_boundary: "session-scoped clipboard payload feed",
+                category: UnsupportedCategory::Search,
+                missing_boundary: "generation-scoped SearchIndex completion feed",
             }))
         );
+    }
+
+    #[test]
+    fn cut_paste_moves_through_the_durable_workflow_and_returns_refresh() {
+        let (snapshot, node, _, _) = fixture();
+        let (executor, ports) = executor(snapshot);
+        let node_id = stable_id_string(node.as_bytes());
+        let research = stable_id_string(NodeId::research_root().as_bytes());
+
+        let result = block_on(
+            executor.execute_project_effect(ProjectEffect::PasteCutSubtrees {
+                node_ids: vec![node_id],
+                destination: DragDestination::IntoGroup(research),
+            }),
+        )
+        .expect("valid cut paste succeeds");
+
+        assert!(matches!(
+            result,
+            ProjectEffectCompletion::TreePaste {
+                kind: TreeClipboardKind::Cut,
+                ..
+            }
+        ));
+        assert_eq!(
+            ports.snapshot.lock().unwrap().project.nodes.parent(node),
+            Some(NodeId::research_root())
+        );
+    }
+
+    #[test]
+    fn invalid_and_stale_cut_pastes_fail_before_the_move_workflow() {
+        let (snapshot, node, _, _) = fixture();
+        let node_id = stable_id_string(node.as_bytes());
+        let (invalid_executor, ports) = executor(snapshot.clone());
+        let invalid = block_on(invalid_executor.execute_project_effect(
+            ProjectEffect::PasteCutSubtrees {
+                node_ids: vec![node_id.clone()],
+                destination: DragDestination::IntoGroup(node_id.clone()),
+            },
+        ));
+        assert!(invalid.is_err());
+        assert_eq!(ports.snapshot.lock().unwrap().project, snapshot.project);
+
+        let (stale_executor, stale_ports) = executor(snapshot);
+        stale_ports.retire();
+        assert!(matches!(
+            block_on(
+                stale_executor.execute_project_effect(ProjectEffect::PasteCutSubtrees {
+                    node_ids: vec![node_id],
+                    destination: DragDestination::IntoGroup(stable_id_string(
+                        NodeId::research_root().as_bytes()
+                    )),
+                })
+            ),
+            Err(ProjectRuntimeError::StaleSession { .. })
+        ));
     }
 }

@@ -55,8 +55,22 @@ pub enum HierarchyItemKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DragDestination {
     BeforeSibling(String),
+    AfterSibling(String),
     IntoGroup(String),
     EditorPane(EditorPane),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TreeClipboardKind {
+    Copy,
+    Cut,
+}
+
+#[derive(Debug, Clone)]
+struct TreeClipboard {
+    session: u64,
+    kind: TreeClipboardKind,
+    node_ids: Vec<String>,
 }
 
 /// Deterministic validation for one drag operation.
@@ -320,7 +334,7 @@ impl ExplorerState {
                 authoritative
                     .nodes
                     .get(*id)
-                    .is_some_and(|node| node.kind == HierarchyNodeKind::Document)
+                    .is_some_and(|node| node.kind != HierarchyNodeKind::Root)
             })
             .cloned()
             .collect();
@@ -427,7 +441,8 @@ impl ExplorerState {
                 }
                 DragValidity::Allowed
             }
-            DragDestination::BeforeSibling(target_id) => {
+            DragDestination::BeforeSibling(target_id)
+            | DragDestination::AfterSibling(target_id) => {
                 let Some(target) = self.nodes.get(&target_id) else {
                     return DragValidity::RejectedMissingNode;
                 };
@@ -520,7 +535,7 @@ impl ExplorerState {
             || selected.iter().any(|id| {
                 self.nodes
                     .get(*id)
-                    .is_none_or(|node| node.kind != HierarchyNodeKind::Document)
+                    .is_none_or(|node| node.kind == HierarchyNodeKind::Root)
             })
         {
             return false;
@@ -1845,11 +1860,11 @@ pub enum ProjectEffect {
         node_ids: Vec<String>,
         destination: DragDestination,
     },
-    CopyDocuments(Vec<String>),
-    PasteCopiedDocuments {
+    PasteCopiedSubtrees {
+        node_ids: Vec<String>,
         destination: DragDestination,
     },
-    PasteCutDocuments {
+    PasteCutSubtrees {
         node_ids: Vec<String>,
         destination: DragDestination,
     },
@@ -1928,6 +1943,7 @@ pub struct ProjectWorkspace {
     project_revision: u64,
     sidebar: SidebarSurface,
     explorer: ExplorerState,
+    tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
     cards_drag_destination: Option<DragDestination>,
     last_activated_document: Option<String>,
@@ -1987,6 +2003,7 @@ impl ProjectWorkspace {
             project_revision: 1,
             sidebar,
             explorer: ExplorerState::fixture(),
+            tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
@@ -2033,6 +2050,7 @@ impl ProjectWorkspace {
             project_revision: snapshot.project.revision.value(),
             sidebar: SidebarSurface::Explorer,
             explorer,
+            tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_drag_destination: None,
             last_activated_document: None,
@@ -2085,9 +2103,9 @@ impl ProjectWorkspace {
             self.cards_drag_destination
                 .take()
                 .filter(|destination| match destination {
-                    DragDestination::BeforeSibling(id) | DragDestination::IntoGroup(id) => {
-                        self.explorer.nodes.contains_key(id)
-                    }
+                    DragDestination::BeforeSibling(id)
+                    | DragDestination::AfterSibling(id)
+                    | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
                     DragDestination::EditorPane(_) => true,
                 });
         if self
@@ -2196,6 +2214,33 @@ impl ProjectWorkspace {
         &self.explorer
     }
 
+    pub fn tree_clipboard_kind(&self) -> Option<TreeClipboardKind> {
+        self.tree_clipboard
+            .as_ref()
+            .filter(|clipboard| clipboard.session == self.session)
+            .map(|clipboard| clipboard.kind)
+    }
+
+    pub fn can_copy_or_cut_selection(&self) -> bool {
+        let selected = self.explorer.normalized_selected_ids();
+        !selected.is_empty()
+            && selected.iter().all(|id| {
+                self.explorer
+                    .nodes
+                    .get(*id)
+                    .is_some_and(|node| node.kind != HierarchyNodeKind::Root)
+            })
+    }
+
+    /// Clears a cut payload only after the runtime reports a durable move and
+    /// refreshed authoritative snapshot. Copy payloads remain reusable.
+    pub fn complete_tree_paste(&mut self, kind: TreeClipboardKind) {
+        if kind == TreeClipboardKind::Cut {
+            self.explorer.complete_cut();
+            self.tree_clipboard = None;
+        }
+    }
+
     pub fn cards(&self) -> CardsState<'_> {
         let labels = self
             .settings
@@ -2291,6 +2336,8 @@ impl ProjectWorkspace {
         self.project_revision = project_revision;
         self.pending.clear();
         self.next_request = 0;
+        self.tree_clipboard = None;
+        self.explorer.cancel_cut();
     }
 
     /// Starts one task and invalidates an older request for the same task key.
@@ -2513,40 +2560,61 @@ impl ProjectWorkspace {
                     self.explorer
                         .nodes
                         .get(*id)
-                        .is_none_or(|node| node.kind != HierarchyNodeKind::Document)
+                        .is_none_or(|node| node.kind == HierarchyNodeKind::Root)
                 }) {
                     return Vec::new();
                 }
-                let documents = selected.into_iter().map(str::to_owned).collect::<Vec<_>>();
-                (!documents.is_empty())
-                    .then_some(ProjectEffect::CopyDocuments(documents))
-                    .into_iter()
-                    .collect()
+                let node_ids = selected.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                if !node_ids.is_empty() {
+                    self.explorer.cancel_cut();
+                    self.tree_clipboard = Some(TreeClipboard {
+                        session: self.session,
+                        kind: TreeClipboardKind::Copy,
+                        node_ids,
+                    });
+                }
+                Vec::new()
             }
             ProjectMessage::CutSelection => {
-                self.explorer.mark_cut();
+                if self.explorer.mark_cut() {
+                    self.tree_clipboard = Some(TreeClipboard {
+                        session: self.session,
+                        kind: TreeClipboardKind::Cut,
+                        node_ids: self
+                            .explorer
+                            .preorder_ids()
+                            .into_iter()
+                            .filter(|id| self.explorer.cut_pending.contains(*id))
+                            .map(str::to_owned)
+                            .collect(),
+                    });
+                }
                 Vec::new()
             }
             ProjectMessage::CancelCut => {
                 self.explorer.cancel_cut();
+                if self.tree_clipboard_kind() == Some(TreeClipboardKind::Cut) {
+                    self.tree_clipboard = None;
+                }
                 Vec::new()
             }
             ProjectMessage::PasteSelection { destination } => {
-                if self.explorer.cut_pending.is_empty() {
-                    vec![ProjectEffect::PasteCopiedDocuments { destination }]
-                } else {
-                    let node_ids = self
-                        .explorer
-                        .preorder_ids()
-                        .into_iter()
-                        .filter(|id| self.explorer.cut_pending.contains(*id))
-                        .map(str::to_owned)
-                        .collect();
-                    self.explorer.complete_cut();
-                    vec![ProjectEffect::PasteCutDocuments {
-                        node_ids,
+                let Some(clipboard) = self
+                    .tree_clipboard
+                    .as_ref()
+                    .filter(|clipboard| clipboard.session == self.session)
+                else {
+                    return Vec::new();
+                };
+                match clipboard.kind {
+                    TreeClipboardKind::Copy => vec![ProjectEffect::PasteCopiedSubtrees {
+                        node_ids: clipboard.node_ids.clone(),
                         destination,
-                    }]
+                    }],
+                    TreeClipboardKind::Cut => vec![ProjectEffect::PasteCutSubtrees {
+                        node_ids: clipboard.node_ids.clone(),
+                        destination,
+                    }],
                 }
             }
             ProjectMessage::SetGlobalSearchQuery(query) => {
@@ -3205,15 +3273,67 @@ mod tests {
     }
 
     #[test]
-    fn group_copy_and_keyboard_cut_remain_deferred() {
+    fn group_clipboard_survives_navigation_and_cut_clears_only_on_completion() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
             node_id: "part-one".to_owned(),
             gesture: SelectionGesture::Replace,
         });
         assert!(workspace.update(ProjectMessage::CopySelection).is_empty());
+        assert_eq!(
+            workspace.tree_clipboard_kind(),
+            Some(TreeClipboardKind::Copy)
+        );
+        workspace.update(ProjectMessage::ShowGlobalSearch);
+        workspace.update(ProjectMessage::ShowExplorer);
+        assert_eq!(
+            workspace.update(ProjectMessage::PasteSelection {
+                destination: DragDestination::IntoGroup("research".to_owned()),
+            }),
+            [ProjectEffect::PasteCopiedSubtrees {
+                node_ids: vec!["part-one".to_owned()],
+                destination: DragDestination::IntoGroup("research".to_owned()),
+            }]
+        );
         assert!(workspace.update(ProjectMessage::CutSelection).is_empty());
+        assert!(workspace.explorer().is_cut_pending("part-one"));
+        assert_eq!(
+            workspace.tree_clipboard_kind(),
+            Some(TreeClipboardKind::Cut)
+        );
+        assert_eq!(
+            workspace.update(ProjectMessage::PasteSelection {
+                destination: DragDestination::AfterSibling("chapter-three".to_owned()),
+            }),
+            [ProjectEffect::PasteCutSubtrees {
+                node_ids: vec!["part-one".to_owned()],
+                destination: DragDestination::AfterSibling("chapter-three".to_owned()),
+            }]
+        );
+        assert!(workspace.explorer().is_cut_pending("part-one"));
+        workspace.complete_tree_paste(TreeClipboardKind::Cut);
         assert!(!workspace.explorer().is_cut_pending("part-one"));
+        assert_eq!(workspace.tree_clipboard_kind(), None);
+    }
+
+    #[test]
+    fn new_project_session_rejects_the_previous_tree_clipboard_payload() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::CopySelection);
+        workspace.begin_session(38, 1);
+
+        assert_eq!(workspace.tree_clipboard_kind(), None);
+        assert!(
+            workspace
+                .update(ProjectMessage::PasteSelection {
+                    destination: DragDestination::IntoGroup("research".to_owned()),
+                })
+                .is_empty()
+        );
     }
 
     #[test]

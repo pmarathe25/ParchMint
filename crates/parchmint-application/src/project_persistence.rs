@@ -6,7 +6,10 @@ use std::{
 };
 
 use parchmint_contracts::generated::RecoveryRecordV1;
-use parchmint_domain::{CheckpointId, DocumentId, NodeId, NodeKind, ProjectRevision, Resource};
+use parchmint_domain::{
+    CheckpointId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectRevision, Resource,
+    apply_project_command,
+};
 use parchmint_editor_api::{CanonicalProjection, EditorPersistenceError, EditorRevision};
 use parchmint_history_api::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, RestorePlan, SnapshotName,
@@ -92,6 +95,39 @@ pub struct CreateDocumentWorkflow {
     pub title: String,
 }
 
+/// One authoritative tree move prepared by the UI from a current snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveNodeWorkflow {
+    pub node: NodeId,
+    pub parent: NodeId,
+    pub index: usize,
+}
+
+/// A structurally saved set of tree moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveNodesWorkflow {
+    pub moves: Vec<MoveNodeWorkflow>,
+}
+
+/// An application-owned request to clone one complete live subtree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateSubtreeWorkflow {
+    pub source: NodeId,
+    pub parent: NodeId,
+    pub index: usize,
+}
+
+/// Durable duplicate result. Comments, annotations, and source History are
+/// intentionally not copied; the duplicate receives only this new structural
+/// checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicatedSubtreeRevision {
+    pub created_root: NodeId,
+    pub node_ids: BTreeMap<NodeId, NodeId>,
+    pub document_ids: BTreeMap<DocumentId, DocumentId>,
+    pub revision: PersistenceSavedRevision,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistenceStatus {
     pub state: SaveState,
@@ -153,6 +189,12 @@ impl Error for ProjectPersistenceError {}
 
 impl From<ApplicationError> for ProjectPersistenceError {
     fn from(error: ApplicationError) -> Self {
+        Self::Application(error.to_string())
+    }
+}
+
+impl From<parchmint_domain::DomainError> for ProjectPersistenceError {
+    fn from(error: parchmint_domain::DomainError) -> Self {
         Self::Application(error.to_string())
     }
 }
@@ -453,6 +495,190 @@ impl ProjectPersistenceCoordinator {
         Ok(CreatedDocumentRevision {
             document: request.document,
             revision,
+        })
+    }
+
+    /// Applies preflighted domain `MoveNode` commands and durably commits the
+    /// resulting hierarchy before returning to the session.
+    pub fn move_nodes(
+        &self,
+        request: MoveNodesWorkflow,
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        if request.moves.is_empty() {
+            return Err(ProjectPersistenceError::Application(
+                "move workflow requires at least one node".to_owned(),
+            ));
+        }
+
+        if !self
+            .pending_saves
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .is_empty()
+        {
+            return Err(ProjectPersistenceError::OperationInProgress);
+        }
+        let mut simulated = self.commands.project()?;
+        for movement in &request.moves {
+            let command = ProjectCommand::move_node(movement.node, movement.parent, movement.index);
+            simulated = apply_project_command(&simulated, simulated.revision, command)?.project;
+        }
+        self.persist_prepared_state(simulated, self.documents.snapshots()?)
+    }
+
+    /// Clones one group or document subtree with fresh identities. The entire
+    /// canonical image is written before the prepared project and documents
+    /// become visible, so save failure cannot publish a partial duplicate.
+    pub fn duplicate_subtree(
+        &self,
+        request: DuplicateSubtreeWorkflow,
+    ) -> Result<DuplicatedSubtreeRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        if !self
+            .pending_saves
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .is_empty()
+        {
+            return Err(ProjectPersistenceError::OperationInProgress);
+        }
+
+        let current_project = self.commands.project()?;
+        let current_documents = self.documents.snapshots()?;
+        let prepared = prepare_duplicate(&current_project, &current_documents, &request)?;
+        let revision =
+            self.persist_prepared_state(prepared.project.clone(), prepared.documents.clone())?;
+
+        Ok(DuplicatedSubtreeRevision {
+            created_root: prepared.created_root,
+            node_ids: prepared.node_ids,
+            document_ids: prepared.document_ids,
+            revision,
+        })
+    }
+
+    fn persist_prepared_state(
+        &self,
+        project: Project,
+        documents: Vec<DocumentSnapshot>,
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        let recovery_project_revision = self
+            .editor
+            .frontier()
+            .ok_or(ProjectPersistenceError::StateUnavailable)?
+            .project_revision
+            .next();
+        let frontier = CanonicalPersistenceFrontier {
+            recovery_project_revision: recovery_project_revision.value(),
+            document_revisions: documents
+                .iter()
+                .map(|document| (document.document_id, document.revision.value()))
+                .collect(),
+        };
+        let canonical = self
+            .canonical
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let encoding = ProjectFormatCodec::default().encode_domain_project_with_frontier(
+            &project,
+            &documents
+                .iter()
+                .map(|document| (document.document_id, document.body.clone()))
+                .collect(),
+            &canonical.resources,
+            &canonical.paths,
+            &frontier,
+        )?;
+        drop(canonical);
+
+        let capture = self.commands.capture_save_request()?;
+        let mut revisions = save_revisions(&capture, Some(&encoding));
+        revisions.project_revision = project.revision;
+        revisions.open_documents.clear();
+        revisions.closed_resources.retain(|resource, _| {
+            !matches!(
+                resource,
+                parchmint_project_format::ResourceId::DocumentById { .. }
+            )
+        });
+        for document in &documents {
+            match document.visibility {
+                crate::DocumentVisibility::Open | crate::DocumentVisibility::Hidden => {
+                    revisions.open_documents.insert(
+                        document.document_id,
+                        parchmint_recovery_api::DocumentRevision::from(document.revision.value()),
+                    );
+                }
+                crate::DocumentVisibility::Closed => {
+                    revisions.closed_resources.insert(
+                        parchmint_project_format::ResourceId::DocumentById {
+                            document_id: stable_id_text(document.document_id.as_bytes()),
+                        },
+                        ResourceRevision::from(document.revision.value()),
+                    );
+                }
+            }
+        }
+        let request = materialize_save_request(
+            PersistenceSaveKind::Structural,
+            None,
+            &capture,
+            revisions,
+            &encoding,
+        );
+        let projection = documents.first().ok_or_else(|| {
+            ProjectPersistenceError::Application("project has no documents".into())
+        })?;
+        let projection = CanonicalProjection::new(
+            projection.document_id,
+            projection.revision,
+            projection.body.clone(),
+            Vec::new(),
+            Vec::new(),
+            0,
+        );
+        let ticket = self.editor.submit_save(&projection, request)?;
+        let acknowledgement = match ticket.wait() {
+            Ok(acknowledgement) => acknowledgement,
+            Err(error) => {
+                self.editor
+                    .mark_error(EditorPersistenceError::Save(error.clone()));
+                return Err(error.into());
+            }
+        };
+
+        let recovery_base = recovery_base_from_encoding(&encoding);
+        self.editor.retire_recovery_through(&recovery_base)?;
+        self.editor.acknowledge_save(&acknowledgement)?;
+        {
+            let mut canonical = self
+                .canonical
+                .lock()
+                .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+            canonical.resources = encoding
+                .resources
+                .iter()
+                .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+                .collect();
+            canonical.paths = encoding.paths;
+        }
+        *self
+            .recovery_base
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)? = recovery_base;
+        self.commands.publish_restored_state(project, documents)?;
+
+        Ok(PersistenceSavedRevision {
+            requested: persistence_revision(&acknowledgement.requested_revisions),
+            written: persistence_revision(&acknowledgement.written_revisions),
+            checkpoint: acknowledgement.checkpoint,
         })
     }
 
@@ -770,6 +996,239 @@ impl ProjectPersistenceCoordinator {
     }
 }
 
+pub(crate) struct PreparedDuplicate {
+    pub(crate) project: Project,
+    pub(crate) documents: Vec<DocumentSnapshot>,
+    pub(crate) created_root: NodeId,
+    pub(crate) node_ids: BTreeMap<NodeId, NodeId>,
+    pub(crate) document_ids: BTreeMap<DocumentId, DocumentId>,
+}
+
+pub(crate) fn prepare_duplicate(
+    project: &Project,
+    documents: &[DocumentSnapshot],
+    request: &DuplicateSubtreeWorkflow,
+) -> Result<PreparedDuplicate, ProjectPersistenceError> {
+    if request.source.is_fixed_root() {
+        return Err(ProjectPersistenceError::Application(
+            "fixed project roots cannot be copied".to_owned(),
+        ));
+    }
+    project
+        .nodes
+        .get(request.source)
+        .ok_or_else(|| ProjectPersistenceError::Application("copy source is stale".to_owned()))?;
+    if !project
+        .nodes
+        .get(request.parent)
+        .is_some_and(|node| node.kind.can_have_children())
+    {
+        return Err(ProjectPersistenceError::Application(
+            "copy destination is not a live container".to_owned(),
+        ));
+    }
+
+    let mut preorder = Vec::new();
+    collect_subtree_ids(project, request.source, &mut preorder);
+    let mut draft = project.clone();
+    let mut node_ids = BTreeMap::new();
+    let mut document_ids = BTreeMap::new();
+    let mut reserved_nodes = std::collections::BTreeSet::new();
+    let mut reserved_documents = std::collections::BTreeSet::new();
+    for (ordinal, source_id) in preorder.iter().copied().enumerate() {
+        let node = project
+            .nodes
+            .get(source_id)
+            .expect("preorder source exists");
+        let fresh_node = fresh_node_id(&draft, source_id, ordinal as u64, &reserved_nodes);
+        reserved_nodes.insert(fresh_node);
+        node_ids.insert(source_id, fresh_node);
+        if let NodeKind::Document(document) = node.kind {
+            let fresh_document =
+                fresh_document_id(&draft, document, ordinal as u64, &reserved_documents);
+            reserved_documents.insert(fresh_document);
+            document_ids.insert(document, fresh_document);
+        }
+    }
+
+    let mut duplicated_documents = Vec::new();
+    for source_id in preorder {
+        let source_node = project
+            .nodes
+            .get(source_id)
+            .expect("preorder source exists");
+        let fresh_node = node_ids[&source_id];
+        let (parent, index) = if source_id == request.source {
+            (request.parent, request.index)
+        } else {
+            let source_parent = project
+                .nodes
+                .parent(source_id)
+                .expect("non-root subtree child has a parent");
+            let parent = node_ids[&source_parent];
+            (parent, draft.nodes.children(parent).len())
+        };
+        let command = match source_node.kind {
+            NodeKind::Group => {
+                ProjectCommand::create_group(fresh_node, parent, index, source_node.title.clone())
+            }
+            NodeKind::Document(document) => ProjectCommand::create_document(
+                fresh_node,
+                document_ids[&document],
+                parent,
+                index,
+                source_node.title.clone(),
+            ),
+            NodeKind::Root(_) => unreachable!("fixed roots were rejected"),
+        };
+        draft = apply_project_command(&draft, draft.revision, command)?.project;
+
+        if !source_node.synopsis.is_empty() {
+            draft = apply_project_command(
+                &draft,
+                draft.revision,
+                ProjectCommand::set_synopsis(fresh_node, source_node.synopsis.clone()),
+            )?
+            .project;
+        }
+        if source_node.export_settings != Default::default() {
+            draft = apply_project_command(
+                &draft,
+                draft.revision,
+                ProjectCommand::set_node_export_settings(fresh_node, source_node.export_settings),
+            )?
+            .project;
+        }
+        let default_metadata = draft
+            .nodes
+            .get(fresh_node)
+            .expect("created duplicate exists")
+            .metadata
+            .clone();
+        for field in default_metadata
+            .keys()
+            .filter(|field| !source_node.metadata.contains_key(field))
+        {
+            draft = apply_project_command(
+                &draft,
+                draft.revision,
+                ProjectCommand::set_metadata_value(fresh_node, *field, None),
+            )?
+            .project;
+        }
+        for (field, value) in &source_node.metadata {
+            draft = apply_project_command(
+                &draft,
+                draft.revision,
+                ProjectCommand::set_metadata_value(fresh_node, *field, Some(value.clone())),
+            )?
+            .project;
+        }
+
+        if let NodeKind::Document(source_document) = source_node.kind {
+            let source_snapshot = documents
+                .iter()
+                .find(|document| document.document_id == source_document)
+                .ok_or_else(|| {
+                    ProjectPersistenceError::Application(
+                        "copy source document body is unavailable".to_owned(),
+                    )
+                })?;
+            duplicated_documents.push(DocumentSnapshot {
+                document_id: document_ids[&source_document],
+                // The node title is preserved exactly, so an existing first
+                // document-title block remains synchronized without rewriting
+                // or normalizing the authored body.
+                body: source_snapshot.body.clone(),
+                revision: Default::default(),
+                visibility: crate::DocumentVisibility::Closed,
+            });
+        }
+    }
+
+    let mut all_documents = documents.to_vec();
+    all_documents.extend(duplicated_documents);
+    Ok(PreparedDuplicate {
+        project: draft,
+        documents: all_documents,
+        created_root: node_ids[&request.source],
+        node_ids,
+        document_ids,
+    })
+}
+
+fn collect_subtree_ids(project: &Project, node: NodeId, output: &mut Vec<NodeId>) {
+    output.push(node);
+    for child in project.nodes.children(node) {
+        collect_subtree_ids(project, *child, output);
+    }
+}
+
+fn fresh_node_id(
+    project: &Project,
+    source: NodeId,
+    ordinal: u64,
+    reserved: &std::collections::BTreeSet<NodeId>,
+) -> NodeId {
+    for attempt in 1_u64.. {
+        let mut digest = Sha256::new();
+        digest.update(b"parchmint duplicate node\0");
+        digest.update(project.id.as_bytes());
+        digest.update(source.as_bytes());
+        digest.update(project.revision.value().to_be_bytes());
+        digest.update(ordinal.to_be_bytes());
+        digest.update(attempt.to_be_bytes());
+        let hash = digest.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        let candidate = NodeId::from_bytes(bytes);
+        let live = project.nodes.contains(candidate);
+        let deleted = project
+            .deleted
+            .values()
+            .flat_map(|tombstone| &tombstone.subtree)
+            .any(|snapshot| snapshot.node.id == candidate);
+        if !candidate.is_fixed_root() && !live && !deleted && !reserved.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("finite project cannot exhaust node identity space")
+}
+
+fn fresh_document_id(
+    project: &Project,
+    source: DocumentId,
+    ordinal: u64,
+    reserved: &std::collections::BTreeSet<DocumentId>,
+) -> DocumentId {
+    for attempt in 1_u64.. {
+        let mut digest = Sha256::new();
+        digest.update(b"parchmint duplicate document\0");
+        digest.update(project.id.as_bytes());
+        digest.update(source.as_bytes());
+        digest.update(project.revision.value().to_be_bytes());
+        digest.update(ordinal.to_be_bytes());
+        digest.update(attempt.to_be_bytes());
+        let hash = digest.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&hash[..16]);
+        let candidate = DocumentId::from_bytes(bytes);
+        let used = project.nodes.iter().any(|(_, node)| {
+            matches!(node.kind, NodeKind::Document(document) if document == candidate)
+        }) || project
+            .deleted
+            .values()
+            .flat_map(|tombstone| &tombstone.subtree)
+            .any(|snapshot| {
+                matches!(snapshot.node.kind, NodeKind::Document(document) if document == candidate)
+            });
+        if !used && !reserved.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("finite project cannot exhaust document identity space")
+}
+
 fn validated_restore_resources(
     plan: &RestorePlan,
 ) -> Result<BTreeMap<CanonicalRelativePath, Vec<u8>>, ProjectPersistenceError> {
@@ -1071,7 +1530,7 @@ fn persistence_status(status: EditorPersistenceStatus) -> PersistenceStatus {
     }
 }
 
-fn stable_id_text(bytes: &[u8; 16]) -> String {
+pub(crate) fn stable_id_text(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 

@@ -65,9 +65,10 @@ use parchmint_search_sqlite::SqliteSearchIndex;
 use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_spellcheck_en_us::{EnUsSpellcheckService, SpellcheckError, SpellcheckOperation};
 use parchmint_ui_api::{
-    ApplicationServices as UiApplicationServices, CreateDocumentWorkflow, ExportArtifact,
-    ExportArtifactAction, ExportArtifactToken, PlatformServices as UiPlatformServices,
-    ProjectExportPort, ProjectQueryError, ProjectSaveStatus, ProjectSnapshot as UiProjectSnapshot,
+    ApplicationServices as UiApplicationServices, CreateDocumentWorkflow, DuplicateSubtreeWorkflow,
+    ExportArtifact, ExportArtifactAction, ExportArtifactToken, MoveNodesWorkflow,
+    PlatformServices as UiPlatformServices, ProjectDuplicateWorkflowSnapshot, ProjectExportPort,
+    ProjectQueryError, ProjectSaveStatus, ProjectSnapshot as UiProjectSnapshot,
     ProjectSnapshotQuery, ProjectUiProject, ProjectUiServices, ProjectWorkflowPort,
     ProjectWorkflowSnapshot,
 };
@@ -842,6 +843,39 @@ impl ProjectWorkflowPort for ProductionProjectWorkflows {
         Ok(ProjectWorkflowSnapshot {
             snapshot: self.query.snapshot()?,
             checkpoint: saved.checkpoint,
+        })
+    }
+
+    fn move_nodes(
+        &self,
+        request: MoveNodesWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let saved = self
+            .persistence
+            .move_nodes(request)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.checkpoint,
+        })
+    }
+
+    fn duplicate_subtree(
+        &self,
+        request: DuplicateSubtreeWorkflow,
+    ) -> Result<ProjectDuplicateWorkflowSnapshot, ProjectQueryError> {
+        let duplicated = self
+            .persistence
+            .duplicate_subtree(request)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectDuplicateWorkflowSnapshot {
+            workflow: ProjectWorkflowSnapshot {
+                snapshot: self.query.snapshot()?,
+                checkpoint: duplicated.revision.checkpoint,
+            },
+            created_root: duplicated.created_root,
+            node_ids: duplicated.node_ids,
+            document_ids: duplicated.document_ids,
         })
     }
 }

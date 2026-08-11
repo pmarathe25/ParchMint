@@ -827,6 +827,272 @@ fn history_restore_save_failure_keeps_current_in_memory_project_open() {
 }
 
 #[test]
+fn prepared_group_duplicate_preserves_authored_subtree_with_fresh_ids_and_bodies() {
+    use parchmint_domain::{
+        MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind, NodeId,
+        ProjectExportSettings,
+    };
+
+    let field = MetadataFieldId::from_bytes(stable_id(51));
+    let group = NodeId::from_bytes(stable_id(52));
+    let node = NodeId::from_bytes(stable_id(53));
+    let document = DocumentId::from_bytes(stable_id(54));
+    let mut project = Project::new(project_id());
+    for command in [
+        ProjectCommand::upsert_metadata_field(MetadataFieldDefinition {
+            id: field,
+            label: "Status".into(),
+            description: Some("Editorial status".into()),
+            applicability: MetadataApplicability::GroupsAndDocuments,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: true,
+        }),
+        ProjectCommand::create_group(group, NodeId::manuscript_root(), 0, "Part One"),
+        ProjectCommand::set_synopsis(group, "Opening movement"),
+        ProjectCommand::set_metadata_value(group, field, Some("Draft".into())),
+        ProjectCommand::set_node_export_settings(
+            group,
+            ProjectExportSettings {
+                excluded: true,
+                starts_new_page: true,
+            },
+        ),
+        ProjectCommand::create_document(node, document, group, 0, "Chapter One"),
+        ProjectCommand::set_metadata_value(node, field, Some("Revised".into())),
+    ] {
+        project = parchmint_domain::apply_project_command(&project, project.revision, command)
+            .unwrap()
+            .project;
+    }
+    let body = "<p data-style-id=\"document-title\">Chapter One</p><p>Body</p>";
+    let prepared = project_persistence::prepare_duplicate(
+        &project,
+        &[DocumentSnapshot {
+            document_id: document,
+            body: body.into(),
+            revision: EditorRevision::from(7),
+            visibility: DocumentVisibility::Open,
+        }],
+        &DuplicateSubtreeWorkflow {
+            source: group,
+            parent: NodeId::research_root(),
+            index: 0,
+        },
+    )
+    .expect("group subtree can be prepared");
+
+    let copied_group = prepared.project.nodes.get(prepared.created_root).unwrap();
+    assert_ne!(prepared.created_root, group);
+    assert_eq!(copied_group.title, "Part One");
+    assert_eq!(copied_group.synopsis, "Opening movement");
+    assert_eq!(copied_group.metadata[&field], "Draft");
+    assert!(copied_group.export_settings.excluded);
+    assert!(copied_group.export_settings.starts_new_page);
+    let copied_node = prepared.node_ids[&node];
+    let copied_document = prepared.document_ids[&document];
+    assert_ne!(copied_node, node);
+    assert_ne!(copied_document, document);
+    assert_eq!(
+        prepared.project.nodes.get(copied_node).unwrap().title,
+        "Chapter One"
+    );
+    assert_eq!(
+        prepared
+            .documents
+            .iter()
+            .find(|snapshot| snapshot.document_id == copied_document)
+            .unwrap()
+            .body,
+        body
+    );
+}
+
+#[test]
+fn duplicate_save_failure_publishes_no_partial_project_or_document_state() {
+    let (current_project, current_documents, current_encoding) =
+        persisted_project("Current", "<p>current</p>");
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project.clone(),
+        documents.clone(),
+    ));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(FailingSave),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents.clone(),
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+    let source = *current_project.nodes.children(group_id()).first().unwrap();
+
+    assert!(
+        coordinator
+            .duplicate_subtree(DuplicateSubtreeWorkflow {
+                source,
+                parent: group_id(),
+                index: 1,
+            })
+            .is_err()
+    );
+    assert_eq!(commands.project().unwrap(), current_project);
+    assert_eq!(documents.snapshots().unwrap().len(), 1);
+    assert_eq!(documents.snapshots().unwrap()[0].body, "<p>current</p>");
+}
+
+#[test]
+fn duplicate_does_not_create_an_annotation_sidecar_for_the_fresh_document() {
+    let (current_project, current_documents, mut current_encoding) =
+        persisted_project("Current", "<p>current</p>");
+    let source = *current_project.nodes.children(group_id()).first().unwrap();
+    let source_document = match current_project.nodes.get(source).unwrap().kind {
+        parchmint_domain::NodeKind::Document(document) => document,
+        _ => unreachable!(),
+    };
+    let document_text = project_persistence::stable_id_text(source_document.as_bytes());
+    let annotation_path = parchmint_project_format::CanonicalRelativePath::parse(format!(
+        "annotations/{document_text}.json"
+    ))
+    .unwrap();
+    let annotation_bytes = format!(
+        "{{\"document_id\":\"{document_text}\",\"schema\":\"parchmint.annotation-sidecar/v1\",\"threads\":[]}}\n"
+    )
+    .into_bytes();
+    current_encoding.resources.insert(
+        annotation_path.clone(),
+        parchmint_project_format::CanonicalBytes {
+            resource: parchmint_project_format::ResourceId::Annotations {
+                document_id: document_text.clone(),
+            },
+            path: annotation_path,
+            hash: ContentHash::from_bytes(Sha256::digest(&annotation_bytes).into()),
+            bytes: annotation_bytes,
+        },
+    );
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project,
+        documents.clone(),
+    ));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        documents,
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+
+    let result = coordinator
+        .duplicate_subtree(DuplicateSubtreeWorkflow {
+            source,
+            parent: group_id(),
+            index: 1,
+        })
+        .expect("duplicate is durable");
+    let fresh_document = result.document_ids[&source_document];
+    let fresh_text = project_persistence::stable_id_text(fresh_document.as_bytes());
+    let requests = save.requests.lock().unwrap();
+    assert!(
+        requests[0]
+            .writes
+            .writes
+            .iter()
+            .any(|write| write.path == format!("annotations/{document_text}.json"))
+    );
+    assert!(
+        !requests[0]
+            .writes
+            .writes
+            .iter()
+            .any(|write| write.path == format!("annotations/{fresh_text}.json"))
+    );
+}
+
+#[test]
+fn move_workflow_uses_domain_move_validation_and_a_structural_save() {
+    let (current_project, current_documents, current_encoding) =
+        persisted_project("Current", "<p>current</p>");
+    let source = *current_project.nodes.children(group_id()).first().unwrap();
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project,
+        documents.clone(),
+    ));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents,
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+
+    coordinator
+        .move_nodes(MoveNodesWorkflow {
+            moves: vec![MoveNodeWorkflow {
+                node: source,
+                parent: parchmint_domain::NodeId::research_root(),
+                index: 0,
+            }],
+        })
+        .expect("move saves structurally");
+    assert_eq!(
+        commands.project().unwrap().nodes.parent(source),
+        Some(parchmint_domain::NodeId::research_root())
+    );
+    assert_eq!(
+        save.requests.lock().unwrap()[0].checkpoint.category,
+        CheckpointCategory::StructuralChange
+    );
+
+    let before_invalid = commands.project().unwrap();
+    assert!(
+        coordinator
+            .move_nodes(MoveNodesWorkflow {
+                moves: vec![MoveNodeWorkflow {
+                    node: source,
+                    parent: source,
+                    index: 0,
+                }],
+            })
+            .is_err()
+    );
+    assert_eq!(commands.project().unwrap(), before_invalid);
+    assert_eq!(save.requests.lock().unwrap().len(), 1);
+}
+
+#[test]
 fn unopened_document_commands_create_a_hidden_session_and_use_document_undo() {
     let (dispatcher, documents) = setup();
     let result = dispatcher
