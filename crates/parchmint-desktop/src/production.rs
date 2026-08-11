@@ -62,8 +62,13 @@ use parchmint_search_api::{
     SearchProjectionSource, SearchProjectionVisitor, SearchTextProjection,
 };
 use parchmint_search_sqlite::SqliteSearchIndex;
-use parchmint_spellcheck_api::SpellcheckService;
-use parchmint_spellcheck_en_us::{EnUsSpellcheckService, SpellcheckError, SpellcheckOperation};
+use parchmint_spellcheck_api::{
+    DictionaryRevision, ProjectId as SpellcheckProjectId, SpellcheckService,
+};
+use parchmint_spellcheck_en_us::{
+    DictionaryLoadError, EnUsSpellcheckConfig, EnUsSpellcheckService, SavedDictionarySource,
+    SpellcheckError, SpellcheckOperation,
+};
 use parchmint_ui_api::{
     ApplicationServices as UiApplicationServices, CreateDocumentWorkflow, DuplicateSubtreeWorkflow,
     ExportArtifact, ExportArtifactAction, ExportArtifactToken, MoveNodesWorkflow,
@@ -590,12 +595,72 @@ impl Exporter for ControlledExporter {
 struct SharedServices {
     editor: Arc<EditorIcedAdapter>,
     spellcheck: Arc<EnUsSpellcheckService>,
+    dictionary_source: Arc<ProductionDictionarySource>,
     exporter: Arc<ControlledExporter>,
     workspace_state: Arc<FileWorkspaceStateStore>,
     preferences: Arc<dyn PreferenceService>,
     appearance: Arc<dyn AppearanceService>,
     platform: UiPlatformServices,
     controls: ProductionControls,
+}
+
+/// Reads the authoritative persisted dictionaries at reload time. Project
+/// entries are resolved through their live project query; global entries come
+/// from the preference store. The spellcheck worker therefore never owns a
+/// second, divergent dictionary store.
+struct ProductionDictionarySource {
+    projects: Mutex<BTreeMap<ProjectId, Arc<dyn ProjectSnapshotQuery>>>,
+    preferences: Arc<dyn PreferenceService>,
+}
+
+impl ProductionDictionarySource {
+    fn new(preferences: Arc<dyn PreferenceService>) -> Self {
+        Self {
+            projects: Mutex::new(BTreeMap::new()),
+            preferences,
+        }
+    }
+
+    fn register_project(&self, project: ProjectId, query: Arc<dyn ProjectSnapshotQuery>) {
+        self.projects
+            .lock()
+            .expect("production dictionary project registry lock")
+            .insert(project, query);
+    }
+}
+
+impl SavedDictionarySource for ProductionDictionarySource {
+    fn project_words(
+        &self,
+        project: SpellcheckProjectId,
+        _revision: DictionaryRevision,
+    ) -> Result<Vec<String>, DictionaryLoadError> {
+        let query = self
+            .projects
+            .lock()
+            .map_err(|_| DictionaryLoadError::new("project dictionary registry lock is poisoned"))?
+            .get(&project)
+            .cloned()
+            .ok_or_else(|| DictionaryLoadError::new("project dictionary source is unavailable"))?;
+        let snapshot = query
+            .snapshot()
+            .map_err(|error| DictionaryLoadError::new(error.to_string()))?;
+        Ok(snapshot
+            .project
+            .dictionary
+            .iter()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    fn global_words(
+        &self,
+        _revision: DictionaryRevision,
+    ) -> Result<Vec<String>, DictionaryLoadError> {
+        block_on(self.preferences.load())
+            .map(|snapshot| snapshot.values.global_dictionary)
+            .map_err(|error| DictionaryLoadError::new(error.to_string()))
+    }
 }
 
 /// Concrete application-wide services retained by the production bootstrap.
@@ -1408,6 +1473,34 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             documents: document_owner,
             persistence: project_persistence.clone(),
         });
+        self.shared
+            .dictionary_source
+            .register_project(project_id, query.clone());
+        let dictionary_revision = query
+            .snapshot()
+            .map_err(|error| {
+                ProjectFilesystemError::failed("read project dictionary", error.to_string())
+            })?
+            .project
+            .revision
+            .value();
+        block_on(
+            self.shared.spellcheck.reload_project_dictionary(
+                project_id,
+                DictionaryRevision::from(dictionary_revision),
+            ),
+        )
+        .map_err(|error| {
+            ProjectFilesystemError::failed("hydrate project dictionary", error.to_string())
+        })?;
+        block_on(
+            self.shared
+                .spellcheck
+                .reload_global_dictionary(DictionaryRevision::default()),
+        )
+        .map_err(|error| {
+            ProjectFilesystemError::failed("hydrate global dictionary", error.to_string())
+        })?;
         let workflows = Arc::new(ProductionProjectWorkflows {
             history: history.clone(),
             persistence: project_persistence.clone(),
@@ -1846,13 +1939,17 @@ pub(crate) fn assemble_with_controls(
     let preferences: Arc<dyn PreferenceService> =
         Arc::new(PreferenceCoordinator::new(preference_store));
     let appearance = Arc::new(AppearanceController::new(Arc::clone(&preferences)));
+    let dictionary_source = Arc::new(ProductionDictionarySource::new(preferences.clone()));
     let editor = Arc::new(
         EditorIcedAdapter::new(EditorIcedConfig::default())
             .map_err(|error| StartupError::production("editor", error))?,
     );
     let spellcheck = Arc::new(
-        EnUsSpellcheckService::new(Default::default())
-            .map_err(|error| StartupError::production("spellcheck", error))?,
+        EnUsSpellcheckService::new(EnUsSpellcheckConfig {
+            saved_dictionaries: dictionary_source.clone(),
+            ..EnUsSpellcheckConfig::default()
+        })
+        .map_err(|error| StartupError::production("spellcheck", error))?,
     );
     let ui_platform = UiPlatformServices::new(
         platform.menus.clone(),
@@ -1866,6 +1963,7 @@ pub(crate) fn assemble_with_controls(
     let shared = Arc::new(SharedServices {
         editor,
         spellcheck,
+        dictionary_source,
         exporter: Arc::new(ControlledExporter {
             inner: HtmlExporter,
             controls: controls.clone(),
@@ -2442,5 +2540,128 @@ pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
             Poll::Ready(value) => return value,
             Poll::Pending => thread::park(),
         }
+    }
+}
+
+#[cfg(test)]
+mod dictionary_source_tests {
+    use super::*;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use parchmint_preferences::PreferenceCommand;
+    use parchmint_spellcheck_api::{
+        EditorRevision, LanguageId, RevisionedTextRange, SpellcheckGeneration, SpellcheckPriority,
+        SpellcheckRequest,
+    };
+
+    struct FixedProjectQuery {
+        snapshot: UiProjectSnapshot,
+    }
+
+    impl ProjectSnapshotQuery for FixedProjectQuery {
+        fn snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
+            Ok(self.snapshot.clone())
+        }
+    }
+
+    fn project_snapshot(id: ProjectId, word: &str) -> UiProjectSnapshot {
+        let mut project = Project::new(id);
+        project
+            .dictionary
+            .insert(word)
+            .expect("test dictionary word");
+        UiProjectSnapshot {
+            project,
+            documents: Vec::new(),
+            styles_css: String::new(),
+        }
+    }
+
+    #[test]
+    fn persisted_dictionary_source_scopes_projects_and_reloads_global_preferences() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("parchmint-dictionary-source-{nonce}.json"));
+        let preferences: Arc<dyn PreferenceService> = Arc::new(PreferenceCoordinator::new(
+            Arc::new(FilePreferenceStore::new(&path)),
+        ));
+        let source = Arc::new(ProductionDictionarySource::new(preferences.clone()));
+        let first = ProjectId::from_bytes([11; 16]);
+        let second = ProjectId::from_bytes([12; 16]);
+        source.register_project(
+            first,
+            Arc::new(FixedProjectQuery {
+                snapshot: project_snapshot(first, "Quillflux"),
+            }),
+        );
+        source.register_project(
+            second,
+            Arc::new(FixedProjectQuery {
+                snapshot: project_snapshot(second, "Fablewright"),
+            }),
+        );
+
+        assert_eq!(
+            source
+                .project_words(first, DictionaryRevision::from(1))
+                .expect("first project dictionary"),
+            ["Quillflux"]
+        );
+        assert_eq!(
+            source
+                .project_words(second, DictionaryRevision::from(1))
+                .expect("second project dictionary"),
+            ["Fablewright"]
+        );
+
+        let current = block_on(preferences.load()).expect("load preferences");
+        let updated = block_on(preferences.update(
+            current.revision,
+            PreferenceCommand::AddGlobalDictionaryWord("Globalthread".to_owned()),
+        ))
+        .expect("persist global dictionary word");
+        assert_eq!(
+            source
+                .global_words(DictionaryRevision::from(updated.revision.value()))
+                .expect("global dictionary"),
+            ["Globalthread"]
+        );
+
+        let service = EnUsSpellcheckService::new(EnUsSpellcheckConfig {
+            saved_dictionaries: source,
+            ..EnUsSpellcheckConfig::default()
+        })
+        .expect("spellcheck service");
+        block_on(service.reload_project_dictionary(first, DictionaryRevision::from(1)))
+            .expect("hydrate project dictionary");
+        block_on(
+            service.reload_global_dictionary(DictionaryRevision::from(updated.revision.value())),
+        )
+        .expect("hydrate global dictionary");
+        let request = SpellcheckRequest {
+            language: LanguageId::EnUs,
+            document_id: DocumentId::from_bytes([13; 16]),
+            document_revision: EditorRevision::default(),
+            blocks: vec![RevisionedTextRange {
+                block_id: BlockId::from_bytes([13; 16]),
+                range: parchmint_editor_api::EditorSelection::new(0_u64.into(), 22_u64.into()),
+                text: "Quillflux Globalthread".to_owned(),
+            }],
+            project_dictionary: DictionaryRevision::from(1),
+            global_dictionary: DictionaryRevision::from(updated.revision.value()),
+            generation: SpellcheckGeneration::from(1),
+            priority: SpellcheckPriority::Visible,
+        };
+        let mut results = block_on(service.check(request)).expect("spellcheck request");
+        assert!(
+            results.next().expect("spellcheck result").issues.is_empty(),
+            "both persisted dictionary scopes must be active before recheck"
+        );
+        let _ = fs::remove_file(path);
     }
 }

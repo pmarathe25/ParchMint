@@ -27,7 +27,6 @@ use parchmint_preferences::{AppearanceService, PreferenceService, ThemeSnapshot}
 use parchmint_recovery_api::RecoveryJournal;
 use parchmint_save::SaveStatusSnapshot;
 use parchmint_search_api::SearchIndex;
-use parchmint_spellcheck_api::SpellcheckService;
 use parchmint_workspace_state::WorkspaceStateStore;
 
 pub use parchmint_application::{
@@ -40,6 +39,10 @@ pub use parchmint_application::{
     RecoveryAcceptance as ProjectRecoveryAcceptance, RestoredProjectRevision,
 };
 pub use parchmint_editor_api::CanonicalProjection;
+pub use parchmint_spellcheck_api::{
+    DictionaryRevision, LanguageId, RevisionedTextRange, SpellcheckGeneration, SpellcheckPriority,
+    SpellcheckRequest, SpellcheckResult, SpellcheckService,
+};
 
 /// The exit status returned when a desktop UI finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

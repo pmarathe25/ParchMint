@@ -440,6 +440,25 @@ impl EditorIcedAdapter {
         })
     }
 
+    /// Returns the current spelling ranges for one mounted view. The renderer
+    /// uses this short-lived snapshot to draw decorations without exposing the
+    /// adapter's retained view state.
+    pub fn spellcheck_decorations(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Vec<SpellcheckDecoration>, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            Ok(state
+                .views
+                .get(&view)
+                .ok_or(EditorError::UnknownView { view })?
+                .spellcheck
+                .clone())
+        })
+    }
+
     pub fn input_en_us(
         &self,
         session: SharedEditorSession,

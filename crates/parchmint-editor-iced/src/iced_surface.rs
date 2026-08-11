@@ -5,7 +5,7 @@ use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, DocumentPosition, EditorAdapter, EditorCommand,
     EditorCommandKind, EditorCommandOrigin, EditorError, EditorRevision, EditorSelection,
-    InlineMarkKind, SharedEditorSession, StyleId, ViewId,
+    InlineMarkKind, SharedEditorSession, SpellcheckDecoration, StyleId, ViewId,
 };
 use std::sync::{Arc, Mutex};
 
@@ -72,6 +72,7 @@ pub struct EditorSurfaceTheme {
     selection: EditorSurfaceColor,
     caret: EditorSurfaceColor,
     link: EditorSurfaceColor,
+    spellcheck: EditorSurfaceColor,
 }
 
 impl EditorSurfaceTheme {
@@ -87,6 +88,7 @@ impl EditorSurfaceTheme {
             selection,
             caret,
             link: caret,
+            spellcheck: EditorSurfaceColor::rgb(190, 62, 54),
         }
     }
 
@@ -129,6 +131,12 @@ impl EditorSurfaceTheme {
     pub const fn link(self) -> EditorSurfaceColor {
         self.link
     }
+
+    /// The semantic spelling-warning underline, selected for legibility on
+    /// both manuscript palettes.
+    pub const fn spellcheck(self) -> EditorSurfaceColor {
+        self.spellcheck
+    }
 }
 
 impl Default for EditorSurfaceTheme {
@@ -167,6 +175,8 @@ pub enum MountedEditorMessage {
     ToggleBlockFormat(BlockFormatKind),
     InsertAtomicBlock(AtomicBlockKind),
     ApplyParagraphStyle(StyleId),
+    /// A secondary-button hit on one currently underlined spelling range.
+    OpenSpellingMenu(EditorSelection),
 }
 
 /// The session-local identity and semantic appearance of one mounted surface.
@@ -239,6 +249,7 @@ struct SurfaceContent {
     focused: bool,
     viewport: EditorViewport,
     theme: EditorSurfaceTheme,
+    spellcheck: Vec<SpellcheckDecoration>,
 }
 
 #[derive(Default)]
@@ -265,6 +276,11 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 state.focused = true;
                 self.set_focus(true);
                 Some(Action::publish(MountedEditorMessage::Focus(document)).and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
+                let position = cursor.position_in(bounds)?;
+                let range = spelling_range_at(&content, position.x, position.y)?;
+                Some(Action::publish(MountedEditorMessage::OpenSpellingMenu(range)).and_capture())
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                 if state.focused && clipboard_shortcut(key.as_ref(), *modifiers).is_some() =>
@@ -399,6 +415,21 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             }
         }
 
+        for decoration in &content.spellcheck {
+            for rectangle in content.geometry.selection_rectangles(decoration.range()) {
+                fill_rectangle(
+                    &mut frame,
+                    EditorRectangle {
+                        x: rectangle.x,
+                        y: rectangle.y + rectangle.height - 1.0,
+                        width: rectangle.width,
+                        height: 2.0,
+                    },
+                    content.theme.spellcheck().iced(),
+                );
+            }
+        }
+
         if self.draws_focused_caret(state, &content)
             && let Some(caret) = content.geometry.caret(content.selection.head())
         {
@@ -446,6 +477,17 @@ impl EditorSurface {
     }
 }
 
+fn spelling_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSelection> {
+    let document = content.geometry.hit_test(x, y)?;
+    content
+        .spellcheck
+        .iter()
+        .map(SpellcheckDecoration::range)
+        .find(|range| {
+            range.start().value() <= document.value() && document.value() < range.end().value()
+        })
+}
+
 /// A retained handle for refreshing the state observed by an existing Canvas.
 #[derive(Clone)]
 struct SurfaceHandle {
@@ -477,7 +519,8 @@ impl SurfaceHandle {
     ) -> Result<(), parchmint_editor_api::EditorError> {
         let presentation = adapter.view_snapshot(session.clone(), view)?.presentation;
         let geometry = adapter.geometry(session.clone(), view, block)?;
-        let selection = adapter.selection(session, view)?;
+        let selection = adapter.selection(session.clone(), view)?;
+        let spellcheck = adapter.spellcheck_decorations(session.clone(), view)?;
         let mut content =
             self.content
                 .lock()
@@ -486,6 +529,7 @@ impl SurfaceHandle {
                 })?;
         content.geometry = geometry;
         content.selection = selection;
+        content.spellcheck = spellcheck;
         content.focused = presentation.focused;
         content.viewport = presentation.viewport;
         Ok(())
@@ -530,13 +574,15 @@ fn mounted_surface(
 ) -> Result<SurfaceHandle, EditorError> {
     let presentation = adapter.view_snapshot(session.clone(), view)?.presentation;
     let geometry = adapter.geometry(session.clone(), view, block)?;
-    let selection = adapter.selection(session, view)?;
+    let selection = adapter.selection(session.clone(), view)?;
+    let spellcheck = adapter.spellcheck_decorations(session.clone(), view)?;
     let content = Arc::new(Mutex::new(SurfaceContent {
         geometry,
         selection,
         focused: presentation.focused,
         viewport: presentation.viewport,
         theme,
+        spellcheck,
     }));
     let handle = SurfaceHandle {
         content: Arc::clone(&content),
@@ -643,6 +689,10 @@ fn apply_surface_message(
                 ),
             )
         }
+        // The native shell owns the popover and validates its exact revision
+        // before it executes an action. The canvas has already performed the
+        // range hit test before publishing this message.
+        MountedEditorMessage::OpenSpellingMenu(_) => Ok(()),
     }
 }
 
@@ -1182,6 +1232,58 @@ mod tests {
     }
 
     #[test]
+    fn spelling_ranges_produce_visible_underline_geometry_and_secondary_hits() {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let session = adapter
+            .open_session(CanonicalDocumentLoad::new(
+                DocumentId::from_bytes([34; 16]),
+                "teh",
+            ))
+            .expect("session");
+        let view = ViewId::from_bytes([2; 16]);
+        let host = adapter
+            .create_view_host(parchmint_platform_api::WindowCapability::new(2, 1), view)
+            .expect("host");
+        adapter
+            .attach_view(session.clone(), view, host)
+            .expect("mount");
+        let viewport = EditorViewport::new(240.0, 100.0).expect("viewport");
+        adapter
+            .set_view_presentation(
+                session.clone(),
+                view,
+                crate::MountedViewPresentation::new(viewport),
+            )
+            .expect("presentation");
+        let block = BlockId::from_bytes([34; 16]);
+        adapter
+            .cache_visible_blocks(
+                session.clone(),
+                view,
+                [VisibleEditorBlock::new(
+                    block,
+                    "teh",
+                    DocumentPosition::default(),
+                )],
+            )
+            .expect("layout");
+        let range = EditorSelection::new(0_u64.into(), 3_u64.into());
+        adapter
+            .set_spellcheck_decorations(
+                session.clone(),
+                view,
+                vec![SpellcheckDecoration::new(range)],
+            )
+            .expect("decoration");
+        let surface = mounted_surface(&adapter, session, view, block, EditorSurfaceTheme::light())
+            .expect("surface");
+        let content = surface.content();
+        assert_eq!(content.geometry.selection_rectangles(range).len(), 3);
+        assert_eq!(spelling_range_at(&content, 18.0, 18.0), Some(range));
+        assert_eq!(spelling_range_at(&content, 200.0, 80.0), None);
+    }
+
+    #[test]
     fn prefocused_mounted_surface_initializes_canvas_focus_before_input() {
         let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
         let session = adapter
@@ -1248,6 +1350,7 @@ mod tests {
                 focused: true,
                 viewport: EditorViewport::new(240.0, 100.0).expect("viewport"),
                 theme: EditorSurfaceTheme::light(),
+                spellcheck: Vec::new(),
             })),
         };
         assert!(surface.draws_focused_caret(&SurfaceState::default(), &surface.content()));

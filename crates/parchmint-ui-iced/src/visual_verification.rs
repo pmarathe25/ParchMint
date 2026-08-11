@@ -305,7 +305,7 @@ fn production_element(
     let workspace: &'static ProjectWorkspace = Box::leak(Box::new(workspace));
     let slots = editor_slots(target);
     let theme = presentation(appearance);
-    let editor = editor_center_surface(workspace.editor(), theme, &slots)
+    let editor = editor_center_surface(workspace.editor(), theme, &slots, None)
         .map(ProjectSurfaceMessage::EditorCenter);
     let destination = match target {
         VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::ErrorRecovery => {

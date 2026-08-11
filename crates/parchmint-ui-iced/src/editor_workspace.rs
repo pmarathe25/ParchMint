@@ -541,6 +541,7 @@ pub enum SpellingMenuAction {
     Replace(String),
     AddToDictionary(SpellingDictionaryScope),
     RemoveFromDictionary(SpellingDictionaryScope),
+    Ignore,
 }
 
 /// The fully placed spelling menu, independent of a native compositor.
@@ -590,6 +591,7 @@ impl SpellingMenu {
         } else {
             SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Global)
         });
+        actions.push(SpellingMenuAction::Ignore);
         Self {
             pane: request.pane,
             word: request.word,
@@ -1899,6 +1901,7 @@ impl EditorWorkspace {
                     add: false,
                 }]
             }
+            SpellingMenuAction::Ignore => Vec::new(),
         }
     }
 
@@ -2302,6 +2305,7 @@ mod tests {
                 SpellingMenuAction::Replace("tech".to_owned()),
                 SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Project),
                 SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Global),
+                SpellingMenuAction::Ignore,
             ]
         );
     }

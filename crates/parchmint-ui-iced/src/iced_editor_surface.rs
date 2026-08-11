@@ -16,7 +16,7 @@ use parchmint_editor_iced::{MountedEditorHost, MountedEditorMessage, MountedEdit
 
 use crate::{
     EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, FindDirection, FormattingCommand,
-    LocalSearchState, TabSpec,
+    LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
 };
@@ -141,6 +141,8 @@ pub(crate) enum EditorCenterMessage {
         pane: EditorPane,
         value: String,
     },
+    ChooseSpellingAction(SpellingMenuAction),
+    DismissSpellingMenu,
 }
 
 impl EditorCenterMessage {
@@ -155,6 +157,7 @@ impl EditorCenterMessage {
             }
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
+            Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
         }
     }
 }
@@ -165,6 +168,7 @@ pub(crate) fn editor_center_surface(
     workspace: &EditorWorkspace,
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
+    spelling_menu: Option<&SpellingMenu>,
 ) -> Element<'static, EditorCenterMessage> {
     let toolbar = formatting_toolbar(theme);
     let primary = editor_pane_surface(workspace, EditorPane::Primary, theme, slots);
@@ -193,22 +197,89 @@ pub(crate) fn editor_center_surface(
         .height(Length::Fill)
         .padding([6, 12])
         .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest));
+    let mut layers = stack![center].width(Length::Fill).height(Length::Fill);
     if workspace.link_editor().is_open() {
-        stack![
-            center,
+        layers = layers.push(
             container(link_editor_popover(workspace, theme))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .padding([52, 12])
                 .align_x(Horizontal::Center)
                 .align_y(Vertical::Top),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    } else {
-        center.into()
+        );
     }
+    if let Some(menu) = spelling_menu {
+        layers = layers.push(
+            container(spelling_menu_popover(menu, theme))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([82, 24])
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Top),
+        );
+    }
+    layers.into()
+}
+
+fn spelling_menu_popover(
+    menu: &SpellingMenu,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    let actions = menu.actions().iter().cloned().fold(
+        column![text(menu.word().to_owned()).size(13)],
+        |column, action| {
+            let label = match &action {
+                SpellingMenuAction::Replace(value) => value.clone(),
+                SpellingMenuAction::AddToDictionary(scope) => match scope {
+                    crate::SpellingDictionaryScope::Project => {
+                        "Add to Project Dictionary".to_owned()
+                    }
+                    crate::SpellingDictionaryScope::Global => "Add to Global Dictionary".to_owned(),
+                },
+                SpellingMenuAction::RemoveFromDictionary(scope) => match scope {
+                    crate::SpellingDictionaryScope::Project => {
+                        "Remove from Project Dictionary".to_owned()
+                    }
+                    crate::SpellingDictionaryScope::Global => {
+                        "Remove from Global Dictionary".to_owned()
+                    }
+                },
+                SpellingMenuAction::Ignore => "Ignore".to_owned(),
+            };
+            column.push(
+                button(text(label).size(12))
+                    .padding([5, 8])
+                    .on_press(EditorCenterMessage::ChooseSpellingAction(action))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            button_interaction(status, false),
+                        )
+                    }),
+            )
+        },
+    );
+    container(
+        actions
+            .push(
+                button(text("Dismiss").size(12))
+                    .padding([5, 8])
+                    .on_press(EditorCenterMessage::DismissSpellingMenu)
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            button_interaction(status, false),
+                        )
+                    }),
+            )
+            .spacing(3),
+    )
+    .padding(10)
+    .width(280)
+    .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
+    .into()
 }
 
 fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMessage> {
@@ -705,7 +776,7 @@ mod tests {
             let mut simulator = Simulator::with_size(
                 Settings::default(),
                 Size::new(960.0, 600.0),
-                editor_center_surface(&workspace, theme, &slots),
+                editor_center_surface(&workspace, theme, &slots, None),
             );
             let snapshot = simulator
                 .snapshot(&theme.iced_theme())
@@ -732,7 +803,7 @@ mod tests {
             let mut simulator = Simulator::with_size(
                 Settings::default(),
                 Size::new(960.0, 600.0),
-                editor_center_surface(&workspace, theme, &slots),
+                editor_center_surface(&workspace, theme, &slots, None),
             );
             let snapshot = simulator
                 .snapshot(&theme.iced_theme())

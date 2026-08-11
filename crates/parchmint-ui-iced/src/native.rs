@@ -36,14 +36,17 @@ use parchmint_preferences::{
     AppearanceMode, RecentProject as PreferenceRecentProject, ResolvedAppearance,
 };
 use parchmint_ui_api::{
-    ExportArtifact, ExportArtifactAction, ExportArtifactToken, ProjectSaveKind,
-    ProjectSessionCapability, ProjectUiPorts, ProjectUiProject,
+    DictionaryRevision, ExportArtifact, ExportArtifactAction, ExportArtifactToken, LanguageId,
+    ProjectSaveKind, ProjectSessionCapability, ProjectUiPorts, ProjectUiProject,
+    RevisionedTextRange, SpellcheckGeneration, SpellcheckPriority, SpellcheckRequest,
+    SpellcheckResult,
 };
 
 use crate::{
     EditorEffect, EditorPane, LauncherState, NewProjectDraft, ProjectEffect, ProjectMessage,
     ProjectTask, ProjectTaskCompletion, ProjectTaskPayload, ProjectTaskTicket, ProjectWorkspace,
-    RecentProject, RibbonDestination, Shell, ShellLayout,
+    RecentProject, RibbonDestination, Shell, ShellLayout, SpellingDecoration, SpellingMenu,
+    SpellingMenuAction, SpellingMenuRequest,
     async_service_feeds::{
         AsyncServiceFeeds, BlockingServiceJob, HistoryListResult, RecoveryAcceptedResult,
         RecoveryReconcileResult, SearchBatchResult, SearchRequest, SearchStart,
@@ -304,6 +307,11 @@ enum Message {
         window: window::Id,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     },
+    SpellcheckFinished {
+        window: window::Id,
+        ticket: NativeSpellcheckTicket,
+        result: Result<SpellcheckResult, String>,
+    },
     SearchFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
@@ -450,6 +458,39 @@ struct NativeProjectState {
     service_feeds: Option<AsyncServiceFeeds>,
     export_artifacts: BTreeMap<String, ExportArtifactToken>,
     autosave: AutosaveState,
+    next_spellcheck_generation: u64,
+    spellcheck_generation: BTreeMap<ViewId, u64>,
+    spelling_issues: BTreeMap<ViewId, Vec<NativeSpellingIssue>>,
+    pending_spelling_menu: Option<NativeSpellingMenuContext>,
+    spelling_menu: Option<SpellingMenu>,
+    refresh_spellcheck_view: Option<ViewId>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSpellcheckTicket {
+    view: ViewId,
+    editor_session: SharedEditorSession,
+    document_id: parchmint_domain::DocumentId,
+    revision: EditorRevision,
+    generation: u64,
+    request: SpellcheckRequest,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSpellingIssue {
+    word: String,
+    range: EditorSelection,
+    suggestions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeSpellingMenuContext {
+    pane: EditorPane,
+    view: ViewId,
+    editor_session: SharedEditorSession,
+    revision: EditorRevision,
+    word: String,
+    range: EditorSelection,
 }
 
 #[derive(Debug, Default)]
@@ -619,6 +660,11 @@ impl NativeDesktop {
             Message::EditorEffectFinished { window, result } => {
                 self.finish_editor_effect(window, result)
             }
+            Message::SpellcheckFinished {
+                window,
+                ticket,
+                result,
+            } => self.finish_spellcheck(window, ticket, result),
             Message::SearchFinished {
                 window,
                 ticket,
@@ -898,6 +944,7 @@ impl NativeDesktop {
                         id,
                         workspace,
                         &state.editor_hosts,
+                        state.spelling_menu.as_ref(),
                         state.shell.destination(),
                         self.appearance,
                         self.close_failures
@@ -1009,17 +1056,22 @@ impl NativeDesktop {
         .map(|_| ())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the native window owns the independently scoped view inputs"
+    )]
     fn typed_project_view<'a>(
         id: window::Id,
         workspace: &'a ProjectWorkspace,
         editor_hosts: &'a EditorHostSlots,
+        spelling_menu: Option<&'a SpellingMenu>,
         destination: RibbonDestination,
         appearance: ResolvedAppearance,
         close_failure: Option<&str>,
         status: Option<&str>,
     ) -> Element<'a, Message> {
         let theme = ParchMintTheme::new(appearance);
-        let editor = editor_center_surface(workspace.editor(), theme, editor_hosts)
+        let editor = editor_center_surface(workspace.editor(), theme, editor_hosts, spelling_menu)
             .map(ProjectSurfaceMessage::EditorCenter);
         let surface =
             workspace_surface(workspace, destination, theme, editor).map(move |message| {
@@ -1449,6 +1501,27 @@ impl NativeDesktop {
                 if let EditorCenterMessage::Mounted {
                     pane,
                     view,
+                    message: parchmint_editor_iced::MountedEditorMessage::OpenSpellingMenu(range),
+                } = message
+                {
+                    return Self::open_spelling_menu(id, state, pane, view, range);
+                }
+
+                match message {
+                    EditorCenterMessage::DismissSpellingMenu => {
+                        state.pending_spelling_menu = None;
+                        state.spelling_menu = None;
+                        return Task::none();
+                    }
+                    EditorCenterMessage::ChooseSpellingAction(action) => {
+                        return Self::choose_spelling_action(id, state, action);
+                    }
+                    _ => {}
+                }
+
+                if let EditorCenterMessage::Mounted {
+                    pane,
+                    view,
                     message,
                 } = message
                 {
@@ -1487,7 +1560,7 @@ impl NativeDesktop {
                                 return Task::none();
                             };
                             let session = binding.session();
-                            return Task::perform(
+                            let persistence = Task::perform(
                                 async move {
                                     let projection = adapter
                                         .project(session, revision)
@@ -1509,6 +1582,12 @@ impl NativeDesktop {
                                     result,
                                 },
                             );
+                            let spellcheck =
+                                Self::spellcheck_task(id, state, view).unwrap_or_else(|error| {
+                                    self.status = Some(error);
+                                    Task::none()
+                                });
+                            return Task::batch([persistence, spellcheck]);
                         }
                         Ok(_) => {}
                         Err(error) => self.status = Some(error.to_string()),
@@ -1535,6 +1614,168 @@ impl NativeDesktop {
                 Message::ProjectEffectFinished { window, result }
             })
         }))
+    }
+
+    fn open_spelling_menu(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        pane: EditorPane,
+        view: ViewId,
+        range: EditorSelection,
+    ) -> Task<Message> {
+        let Some(issue) = state
+            .spelling_issues
+            .get(&view)
+            .and_then(|issues| issues.iter().find(|issue| issue.range == range))
+            .cloned()
+        else {
+            return Task::none();
+        };
+        let Some(binding) = state.editor_bindings.get(&pane) else {
+            return Task::none();
+        };
+        if binding.view() != view {
+            return Task::none();
+        }
+        let Some(adapter) = state.project.editor_adapter() else {
+            return Task::none();
+        };
+        let session = binding.session();
+        let revision = match adapter.revision(session.clone()) {
+            Ok(revision) => revision,
+            Err(_error) => {
+                return Task::none();
+            }
+        };
+        let block = match adapter.primary_visible_block(session.clone()) {
+            Ok(block) => block,
+            Err(_error) => {
+                return Task::none();
+            }
+        };
+        let rectangles = match adapter.geometry(session.clone(), view, block.block()) {
+            Ok(geometry) => geometry.selection_rectangles(range),
+            Err(_error) => {
+                return Task::none();
+            }
+        };
+        let Some(first) = rectangles.first().copied() else {
+            return Task::none();
+        };
+        let word_bounds = crate::Rect::new(first.x, first.y, first.width, first.height);
+        let viewport = match adapter.view_snapshot(session.clone(), view) {
+            Ok(snapshot) => snapshot.presentation.viewport,
+            Err(_) => return Task::none(),
+        };
+        let in_project_dictionary = state
+            .project
+            .project_ui
+            .as_ref()
+            .is_some_and(|project| project.snapshot.project.dictionary.contains(&issue.word));
+        state.pending_spelling_menu = Some(NativeSpellingMenuContext {
+            pane,
+            view,
+            editor_session: session,
+            revision,
+            word: issue.word.clone(),
+            range,
+        });
+        let request = SpellingMenuRequest::new(
+            pane,
+            issue.word,
+            word_bounds,
+            crate::Rect::new(0.0, 0.0, viewport.width, viewport.height),
+        )
+        .with_suggestions(issue.suggestions)
+        .with_dictionary_membership(in_project_dictionary, false);
+        let Some(workspace) = state.workspace.as_mut() else {
+            return Task::none();
+        };
+        let effects = workspace
+            .editor_mut()
+            .update(crate::EditorMessage::OpenSpellingMenu(request));
+        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
+    }
+
+    fn choose_spelling_action(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        action: SpellingMenuAction,
+    ) -> Task<Message> {
+        let Some(context) = state.pending_spelling_menu.take() else {
+            return Task::none();
+        };
+        state.spelling_menu = None;
+        let Some(binding) = state.editor_bindings.get(&context.pane) else {
+            return Task::none();
+        };
+        let Some(adapter) = state.project.editor_adapter() else {
+            return Task::none();
+        };
+        if binding.view() != context.view
+            || binding.session() != context.editor_session
+            || adapter.revision(binding.session()).ok() != Some(context.revision)
+        {
+            return Task::none();
+        }
+        if action == SpellingMenuAction::Ignore {
+            let remaining = state
+                .spelling_issues
+                .get_mut(&context.view)
+                .map(|issues| {
+                    issues.retain(|issue| issue.range != context.range);
+                    issues
+                        .iter()
+                        .map(|issue| {
+                            SpellingDecoration::new(
+                                issue.word.clone(),
+                                crate::FindMatch::new(
+                                    issue.range.start().value(),
+                                    issue.range.end().value(),
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let Some(workspace) = state.workspace.as_mut() else {
+                return Task::none();
+            };
+            let effects =
+                workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::SetSpellingDecorations {
+                        view: context.view,
+                        decorations: remaining,
+                    });
+            return Self::editor_effect_tasks(window, state.effect_executor.clone(), effects);
+        }
+        if let Err(_error) = adapter.execute(
+            binding.session(),
+            EditorCommandOrigin::new(context.view),
+            AdapterEditorCommand::new(
+                context.revision,
+                EditorCommandKind::SetSelection {
+                    selection: context.range,
+                },
+            ),
+        ) {
+            return Task::none();
+        }
+        if !matches!(action, SpellingMenuAction::Replace(_)) {
+            state.refresh_spellcheck_view = Some(context.view);
+        }
+        let Some(workspace) = state.workspace.as_mut() else {
+            return Task::none();
+        };
+        let effects = workspace
+            .editor_mut()
+            .update(crate::EditorMessage::ChooseSpellingAction {
+                pane: context.pane,
+                word: context.word,
+                action,
+            });
+        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
     }
 
     fn clipboard_task(
@@ -1885,15 +2126,25 @@ impl NativeDesktop {
                 Task::none()
             }
             Ok(ProjectEffectCompletion::OpenDocuments(documents)) => {
+                let mut spellcheck_tasks = Vec::new();
                 for document in documents {
+                    let pane = document.pane;
                     if let Err(error) =
                         Self::mount_resolved_document(state, document, self.appearance)
                     {
                         self.status = Some(error);
                         break;
                     }
+                    if let Some(view) = state
+                        .editor_bindings
+                        .get(&pane)
+                        .map(MountedEditorBinding::view)
+                        && let Ok(task) = Self::spellcheck_task(window, state, view)
+                    {
+                        spellcheck_tasks.push(task);
+                    }
                 }
-                Task::none()
+                Task::batch(spellcheck_tasks)
             }
             Ok(ProjectEffectCompletion::ApplyAppearance(snapshot)) => {
                 self.appearance = snapshot.appearance;
@@ -1978,16 +2229,38 @@ impl NativeDesktop {
     ) -> Task<Message> {
         match result {
             Ok(EditorEffectCompletion::ProjectMutation(completion)) => {
-                self.finish_project_effect(window, Ok(completion))
+                let project = self.finish_project_effect(window, Ok(completion));
+                let refresh = self
+                    .windows
+                    .get_mut(&window)
+                    .and_then(|native| match native {
+                        NativeWindow::Project(state) => state
+                            .refresh_spellcheck_view
+                            .take()
+                            .and_then(|view| Self::spellcheck_task(window, state, view).ok()),
+                        NativeWindow::Launcher => None,
+                    })
+                    .unwrap_or_else(Task::none);
+                Task::batch([project, refresh])
             }
             Ok(EditorEffectCompletion::GlobalDictionaryUpdated) => {
                 self.status = None;
-                Task::none()
+                self.windows
+                    .get_mut(&window)
+                    .and_then(|native| match native {
+                        NativeWindow::Project(state) => state
+                            .refresh_spellcheck_view
+                            .take()
+                            .and_then(|view| Self::spellcheck_task(window, state, view).ok()),
+                        NativeWindow::Launcher => None,
+                    })
+                    .unwrap_or_else(Task::none)
             }
             Ok(EditorEffectCompletion::Intent(intent)) => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
+                let spellcheck_view = editor_intent_view(&intent);
                 match Self::apply_editor_intent(state, intent, self.appearance) {
                     Ok(Some((session, revision))) => {
                         let Some(workspace) = state.workspace.as_mut() else {
@@ -2005,9 +2278,18 @@ impl NativeDesktop {
                                 Some("This project session has no editor adapter.".into());
                             return Task::none();
                         };
-                        return Self::persist_projection_task(
+                        let persistence = Self::persist_projection_task(
                             window, ports, adapter, session, revision,
                         );
+                        let spellcheck = spellcheck_view
+                            .map(|view| Self::spellcheck_task(window, state, view))
+                            .transpose()
+                            .unwrap_or_else(|error| {
+                                self.status = Some(error);
+                                None
+                            })
+                            .unwrap_or_else(Task::none);
+                        return Task::batch([persistence, spellcheck]);
                     }
                     Ok(None) => {}
                     Err(error) => self.status = Some(error),
@@ -2144,10 +2426,15 @@ impl NativeDesktop {
                     .ok_or_else(|| "project editor adapter is unavailable".to_owned())?
                     .set_spellcheck_decorations(binding.session(), view, decorations)
                     .map_err(|error| error.to_string())?;
+                binding.refresh().map_err(|error| error.to_string())?;
                 Ok(None)
             }
-            EditorRuntimeIntent::ShowSpellingMenu(_) => {
-                Err("native spelling-menu presentation is not yet available".to_owned())
+            EditorRuntimeIntent::ShowSpellingMenu(menu) => {
+                if state.pending_spelling_menu.is_none() {
+                    return Err("spelling menu has no live word anchor".to_owned());
+                }
+                state.spelling_menu = Some(menu);
+                Ok(None)
             }
             EditorRuntimeIntent::RestoreFocus { view } => {
                 let binding = state
@@ -2364,6 +2651,205 @@ impl NativeDesktop {
         )
     }
 
+    /// Captures the visible mounted block and runs the offline service on a
+    /// worker. The completion carries the exact editor revision and a locally
+    /// monotonic generation so an old result cannot repaint a newer document.
+    fn spellcheck_task(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        view: ViewId,
+    ) -> Result<Task<Message>, String> {
+        let binding = state
+            .editor_bindings
+            .values()
+            .find(|binding| binding.view() == view)
+            .ok_or_else(|| "spellcheck targets an unmounted editor".to_owned())?;
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| "project editor adapter is unavailable".to_owned())?;
+        let session = binding.session();
+        let revision = adapter
+            .revision(session.clone())
+            .map_err(|error| error.to_string())?;
+        let block = adapter
+            .primary_visible_block(session.clone())
+            .map_err(|error| error.to_string())?;
+        let document_id = *state
+            .mounted_documents
+            .iter()
+            .find_map(|(pane, document)| {
+                state
+                    .editor_bindings
+                    .get(pane)
+                    .is_some_and(|mounted| mounted.view() == view)
+                    .then_some(document)
+            })
+            .ok_or_else(|| "spellcheck mounted document is unavailable".to_owned())?;
+        state.next_spellcheck_generation = state.next_spellcheck_generation.saturating_add(1);
+        let generation = state.next_spellcheck_generation;
+        state.spellcheck_generation.insert(view, generation);
+        let project_dictionary = state
+            .project
+            .project_ui
+            .as_ref()
+            .map(|project| DictionaryRevision::from(project.snapshot.project.revision.value()))
+            .unwrap_or_default();
+        let project_id = state
+            .project
+            .project_ui
+            .as_ref()
+            .map(|project| project.snapshot.project.id)
+            .ok_or_else(|| "project spellcheck identity is unavailable".to_owned())?;
+        let request = SpellcheckRequest {
+            language: LanguageId::EnUs,
+            document_id,
+            document_revision: revision,
+            blocks: vec![RevisionedTextRange {
+                block_id: block.block(),
+                range: EditorSelection::new(
+                    block.document_start(),
+                    parchmint_editor_api::DocumentPosition::from(
+                        block.document_start().value() + block.text().chars().count() as u64,
+                    ),
+                ),
+                text: block.text().to_owned(),
+            }],
+            project_dictionary,
+            global_dictionary: DictionaryRevision::default(),
+            generation: SpellcheckGeneration::from(generation),
+            priority: SpellcheckPriority::Visible,
+        };
+        let ticket = NativeSpellcheckTicket {
+            view,
+            editor_session: session,
+            document_id,
+            revision,
+            generation,
+            request: request.clone(),
+        };
+        let ports = state
+            .project
+            .ports()
+            .cloned()
+            .ok_or_else(|| "project spellcheck port is unavailable".to_owned())?;
+        Ok(Task::perform(
+            Self::run_blocking_operation("spellcheck visible text", move || {
+                let access = ports.access().map_err(|error| error.to_string())?;
+                let project_reload = access
+                    .spellcheck(|spellcheck| {
+                        spellcheck.reload_project_dictionary(project_id, request.project_dictionary)
+                    })
+                    .map_err(|error| error.to_string())?;
+                iced::futures::executor::block_on(project_reload);
+                let global_reload = access
+                    .spellcheck(|spellcheck| {
+                        spellcheck.reload_global_dictionary(request.global_dictionary)
+                    })
+                    .map_err(|error| error.to_string())?;
+                iced::futures::executor::block_on(global_reload);
+                let operation = access
+                    .spellcheck(|spellcheck| spellcheck.check(request))
+                    .map_err(|error| error.to_string())?;
+                let mut stream = iced::futures::executor::block_on(operation);
+                stream
+                    .next()
+                    .ok_or_else(|| "spellcheck stopped without a result".to_owned())
+            }),
+            move |result| Message::SpellcheckFinished {
+                window,
+                ticket,
+                result,
+            },
+        ))
+    }
+
+    fn finish_spellcheck(
+        &mut self,
+        window: window::Id,
+        ticket: NativeSpellcheckTicket,
+        result: Result<SpellcheckResult, String>,
+    ) -> Task<Message> {
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            return Task::none();
+        };
+        if state.spellcheck_generation.get(&ticket.view) != Some(&ticket.generation) {
+            return Task::none();
+        }
+        let Some(binding) = state
+            .editor_bindings
+            .values()
+            .find(|binding| binding.view() == ticket.view)
+        else {
+            return Task::none();
+        };
+        if binding.session() != ticket.editor_session
+            || state
+                .project
+                .editor_adapter()
+                .and_then(|adapter| adapter.revision(binding.session()).ok())
+                != Some(ticket.revision)
+        {
+            return Task::none();
+        }
+        if state.mounted_documents.iter().find_map(|(pane, document)| {
+            state
+                .editor_bindings
+                .get(pane)
+                .is_some_and(|mounted| mounted.view() == ticket.view)
+                .then_some(*document)
+        }) != Some(ticket.document_id)
+        {
+            return Task::none();
+        }
+        let result = match result {
+            Ok(result) if ticket.request.accepts(&result) => result,
+            Ok(_) => return Task::none(),
+            Err(error) => {
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        let mut issues = result
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let mut suggestions = issue.suggestions;
+                suggestions.sort_by_key(|suggestion| suggestion.rank);
+                NativeSpellingIssue {
+                    word: issue.word,
+                    range: issue.range,
+                    suggestions: suggestions
+                        .into_iter()
+                        .map(|suggestion| suggestion.word)
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        issues.sort_by_key(|issue| issue.range.start());
+        let decorations = issues
+            .iter()
+            .map(|issue| {
+                SpellingDecoration::new(
+                    issue.word.clone(),
+                    crate::FindMatch::new(issue.range.start().value(), issue.range.end().value()),
+                )
+            })
+            .collect();
+        state.spelling_issues.insert(ticket.view, issues);
+        let Some(workspace) = state.workspace.as_mut() else {
+            return Task::none();
+        };
+        let effects = workspace
+            .editor_mut()
+            .update(crate::EditorMessage::SetSpellingDecorations {
+                view: ticket.view,
+                decorations,
+            });
+        self.status = None;
+        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
+    }
+
     async fn run_service_job<T: Send + 'static>(job: BlockingServiceJob<T>) -> Result<T, String> {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         std::thread::Builder::new()
@@ -2566,9 +3052,29 @@ impl NativeDesktop {
                 service_feeds,
                 export_artifacts: BTreeMap::new(),
                 autosave: AutosaveState::default(),
+                next_spellcheck_generation: 0,
+                spellcheck_generation: BTreeMap::new(),
+                spelling_issues: BTreeMap::new(),
+                pending_spelling_menu: None,
+                spelling_menu: None,
+                refresh_spellcheck_view: None,
             })),
         );
-        task.map(|_| Message::WindowOpened)
+        let spellcheck_tasks = match self.windows.get_mut(&id) {
+            Some(NativeWindow::Project(state)) => state
+                .editor_bindings
+                .values()
+                .map(MountedEditorBinding::view)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .filter_map(|view| Self::spellcheck_task(id, state, view).ok())
+                .collect(),
+            _ => Vec::new(),
+        };
+        Task::batch([
+            task.map(|_| Message::WindowOpened),
+            Task::batch(spellcheck_tasks),
+        ])
     }
 
     fn choose_directory(&mut self, create: bool) -> Task<Message> {
@@ -2870,6 +3376,13 @@ fn set_link_command(selection: EditorSelection, target: Option<String>) -> Edito
     EditorCommandKind::SetLink {
         range: selection,
         target,
+    }
+}
+
+fn editor_intent_view(intent: &EditorRuntimeIntent) -> Option<ViewId> {
+    match intent {
+        EditorRuntimeIntent::Command { view, .. } => Some(*view),
+        _ => None,
     }
 }
 
