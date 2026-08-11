@@ -14,7 +14,13 @@ pub mod testing;
 use std::{
     error::Error,
     fmt,
-    sync::{Arc, Mutex, atomic::AtomicU64, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use async_task::dispatch;
@@ -80,6 +86,7 @@ impl NativePlatform {
     fn with_backend(backend: Arc<dyn NativeBackend>) -> (Self, Arc<NativeServices>) {
         let registry = CapabilityRegistry::new();
         let services = Arc::new(NativeServices::new(Arc::clone(&backend), registry.clone()));
+        services.start_appearance_watcher();
         let platform = Self {
             dialogs: services.clone(),
             menus: services.clone(),
@@ -106,6 +113,9 @@ struct NativeServices {
     next_menu_binding: AtomicU64,
     next_appearance_generation: AtomicU64,
     appearance_listeners: Mutex<Vec<mpsc::Sender<SystemAppearanceEvent>>>,
+    observed_appearance: Mutex<Option<SystemAppearance>>,
+    appearance_watcher: Mutex<Option<AppearanceWatcher>>,
+    appearance_watcher_starts: AtomicU64,
 }
 
 impl NativeServices {
@@ -116,14 +126,83 @@ impl NativeServices {
             next_menu_binding: AtomicU64::new(1),
             next_appearance_generation: AtomicU64::new(1),
             appearance_listeners: Mutex::new(Vec::new()),
+            observed_appearance: Mutex::new(None),
+            appearance_watcher: Mutex::new(None),
+            appearance_watcher_starts: AtomicU64::new(0),
         }
     }
 
+    fn start_appearance_watcher(self: &Arc<Self>) {
+        let Ok(mut watcher) = self.appearance_watcher.lock() else {
+            return;
+        };
+        if watcher.is_some() {
+            return;
+        }
+
+        self.observe_initial_appearance();
+        self.appearance_watcher_starts
+            .fetch_add(1, Ordering::Relaxed);
+        *watcher = Some(AppearanceWatcher::spawn(Arc::downgrade(self)));
+    }
+
+    fn observe_initial_appearance(&self) {
+        let Ok(appearance) = self.backend.appearance() else {
+            return;
+        };
+        if let Ok(mut observed) = self.observed_appearance.lock() {
+            *observed = Some(appearance);
+        }
+    }
+
+    fn poll_appearance(&self) {
+        let Ok(appearance) = self.backend.appearance() else {
+            return;
+        };
+        self.publish_appearance(appearance);
+    }
+
+    fn stop_appearance_watcher(&self) {
+        let watcher = self
+            .appearance_watcher
+            .lock()
+            .ok()
+            .and_then(|mut watcher| watcher.take());
+        if let Some(watcher) = watcher {
+            watcher.stop();
+        }
+    }
+
+    fn has_appearance_watcher(&self) -> bool {
+        self.appearance_watcher
+            .lock()
+            .is_ok_and(|watcher| watcher.is_some())
+    }
+
+    fn appearance_watcher_starts(&self) -> u64 {
+        self.appearance_watcher_starts.load(Ordering::Relaxed)
+    }
+
     fn publish_appearance(&self, appearance: SystemAppearance) {
+        let changed = self
+            .observed_appearance
+            .lock()
+            .map(|mut observed| {
+                if *observed == Some(appearance) {
+                    false
+                } else {
+                    *observed = Some(appearance);
+                    true
+                }
+            })
+            .unwrap_or(false);
+        if !changed {
+            return;
+        }
         let event = SystemAppearanceEvent {
             generation: self
                 .next_appearance_generation
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                .fetch_add(1, Ordering::Relaxed),
             appearance,
         };
         if let Ok(mut listeners) = self.appearance_listeners.lock() {
@@ -159,6 +238,55 @@ impl NativeServices {
     {
         let backend = Arc::clone(&self.backend);
         Box::pin(dispatch(move |sender| sender.send(work(backend))))
+    }
+}
+
+impl Drop for NativeServices {
+    fn drop(&mut self) {
+        let watcher = self
+            .appearance_watcher
+            .get_mut()
+            .ok()
+            .and_then(Option::take);
+        if let Some(watcher) = watcher {
+            watcher.stop();
+        }
+    }
+}
+
+struct AppearanceWatcher {
+    stop: mpsc::Sender<()>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl AppearanceWatcher {
+    const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+    fn spawn(services: std::sync::Weak<NativeServices>) -> Self {
+        let (stop, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            loop {
+                match receiver.recv_timeout(Self::POLL_INTERVAL) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let Some(services) = services.upgrade() else {
+                    break;
+                };
+                services.poll_appearance();
+            }
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+
+    fn stop(mut self) {
+        let _ = self.stop.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 

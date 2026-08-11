@@ -32,7 +32,9 @@ use parchmint_export_api::{
 use parchmint_export_html::HtmlExporter;
 use parchmint_history_api::{self as history, HistoryStore, ProjectRootCapability as HistoryRoot};
 use parchmint_history_git2::Git2HistoryStore;
-use parchmint_platform_api::{PathDialog, PathDialogKind, WindowCapability};
+use parchmint_platform_api::{
+    PathDialog, PathDialogKind, SystemAppearanceEventService, WindowCapability,
+};
 use parchmint_platform_native::{NativePlatform, iced_adapter::IcedWindowRegistry};
 use parchmint_preferences::{
     AppearanceController, AppearanceMode, AppearanceService, FilePreferenceStore,
@@ -1777,6 +1779,10 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
             .system_appearance_changed(appearance)
             .map(|snapshot| snapshot.map(|snapshot| snapshot.appearance))
             .map_err(|error| error.to_string())
+    }
+
+    fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
+        self.platform.system_appearance_events.clone()
     }
 
     fn project_window_created(&self, window: WindowCapability) {

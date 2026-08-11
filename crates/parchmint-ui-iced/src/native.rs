@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    hash::{Hash, Hasher},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -11,6 +12,7 @@ use std::{
 
 use iced::{
     Element, Length, Subscription, Task, Theme,
+    futures::SinkExt,
     widget::{button, column, container, row, text, text_input},
     window,
 };
@@ -26,7 +28,8 @@ use parchmint_editor_iced::{
 };
 use parchmint_export_api::{ExportNumbering, ExportRunOptions};
 use parchmint_platform_api::{
-    ClipboardContent, ClipboardFormats, PathDialog, PathDialogKind, UntrustedClipboardContent,
+    ClipboardContent, ClipboardFormats, PathDialog, PathDialogKind, SystemAppearance,
+    SystemAppearanceEvent, SystemAppearanceEventService, UntrustedClipboardContent,
     WindowCapability,
 };
 use parchmint_preferences::{
@@ -155,14 +158,18 @@ pub trait NativeDesktopCallbacks: Send + Sync {
         Err("appearance settings are unavailable".to_owned())
     }
 
-    /// Accepts a platform-delivered OS appearance event. The platform layer
-    /// currently has no event subscription, so native integrations may also
-    /// call this when refreshing a System selection.
+    /// Accepts a platform-delivered OS appearance event after the native
+    /// subscription has preserved its source ordering.
     fn system_appearance_changed(
         &self,
         _appearance: ResolvedAppearance,
     ) -> Result<Option<ResolvedAppearance>, String> {
         Ok(None)
+    }
+
+    /// Supplies the optional platform event stream to the native driver.
+    fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
+        None
     }
 
     /// Records the platform capability when this driver creates its native
@@ -283,6 +290,8 @@ enum Message {
         result: Result<UntrustedClipboardContent, String>,
     },
     AutosaveTick(Instant),
+    SystemAppearanceEvent(SystemAppearanceEvent),
+    SystemAppearanceStreamFailed(String),
     SaveFinished {
         window: window::Id,
         result: Result<u64, String>,
@@ -345,6 +354,59 @@ enum Message {
     },
 }
 
+#[derive(Clone)]
+struct AppearanceEventSubscription(Arc<dyn SystemAppearanceEventService>);
+
+impl Hash for AppearanceEventSubscription {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Arc::as_ptr(&self.0).cast::<()>().hash(state);
+    }
+}
+
+fn appearance_event_subscription(
+    subscription: &AppearanceEventSubscription,
+) -> iced::futures::stream::BoxStream<'static, Message> {
+    let service = Arc::clone(&subscription.0);
+    Box::pin(iced::stream::channel(1, async move |mut output| {
+        let stream = match service.subscribe() {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = output
+                    .send(Message::SystemAppearanceStreamFailed(error.to_string()))
+                    .await;
+                return;
+            }
+        };
+        loop {
+            match stream.next_timeout(Duration::from_secs(1)) {
+                Ok(Some(event)) => {
+                    if output
+                        .send(Message::SystemAppearanceEvent(event))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = output
+                        .send(Message::SystemAppearanceStreamFailed(error.to_string()))
+                        .await;
+                    break;
+                }
+            }
+        }
+    }))
+}
+
+fn resolved_system_appearance(appearance: SystemAppearance) -> ResolvedAppearance {
+    match appearance {
+        SystemAppearance::Light => ResolvedAppearance::Light,
+        SystemAppearance::Dark => ResolvedAppearance::Dark,
+    }
+}
+
 #[derive(Debug, Clone)]
 struct NativeClipboardRequest {
     capability: WindowCapability,
@@ -368,6 +430,8 @@ pub(crate) struct NativeDesktop {
     creating_project: bool,
     status: Option<String>,
     callbacks: Arc<dyn NativeDesktopCallbacks>,
+    appearance_events: Option<Arc<dyn SystemAppearanceEventService>>,
+    last_appearance_generation: u64,
 }
 
 enum NativeWindow {
@@ -419,6 +483,7 @@ impl AutosaveState {
 
 impl NativeDesktop {
     fn boot(startup: NativeDesktopStartup) -> (Self, Task<Message>) {
+        let appearance_events = startup.callbacks.system_appearance_events();
         let mut desktop = Self {
             appearance: startup.appearance,
             launcher: LauncherState::default(),
@@ -432,6 +497,8 @@ impl NativeDesktop {
                 .locked_project
                 .map(|path| format!("Project is already open: {}", path.display())),
             callbacks: startup.callbacks,
+            appearance_events,
+            last_appearance_generation: 0,
         };
         for project in startup.recent_projects.into_iter().rev() {
             desktop.launcher.add_recent_project(
@@ -517,6 +584,11 @@ impl NativeDesktop {
                 result,
             } => self.finish_clipboard_read(window, request, result),
             Message::AutosaveTick(now) => self.autosave_tick(now),
+            Message::SystemAppearanceEvent(event) => self.system_appearance_event(event),
+            Message::SystemAppearanceStreamFailed(error) => {
+                self.status = Some(error);
+                Task::none()
+            }
             Message::SaveFinished { window, result } => {
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
                     && let Some(workspace) = state.workspace.as_mut()
@@ -780,18 +852,7 @@ impl NativeDesktop {
             Message::AppearanceFinished(result) => {
                 match result {
                     Ok(appearance) => {
-                        self.appearance = appearance;
-                        let theme = match appearance {
-                            ResolvedAppearance::Light => EditorSurfaceTheme::light(),
-                            ResolvedAppearance::Dark => EditorSurfaceTheme::dark(),
-                        };
-                        for native in self.windows.values_mut() {
-                            if let NativeWindow::Project(state) = native {
-                                for binding in state.editor_bindings.values_mut() {
-                                    binding.set_theme(theme);
-                                }
-                            }
-                        }
+                        self.apply_appearance(appearance);
                         self.status = None;
                     }
                     Err(error) => self.status = Some(error),
@@ -872,10 +933,49 @@ impl NativeDesktop {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subscriptions = vec![
             window::close_requests().map(Message::CloseRequested),
             iced::time::every(Duration::from_millis(250)).map(Message::AutosaveTick),
-        ])
+        ];
+        if let Some(events) = &self.appearance_events {
+            subscriptions.push(Subscription::run_with(
+                AppearanceEventSubscription(Arc::clone(events)),
+                appearance_event_subscription,
+            ));
+        }
+        Subscription::batch(subscriptions)
+    }
+
+    fn system_appearance_event(&mut self, event: SystemAppearanceEvent) -> Task<Message> {
+        if event.generation <= self.last_appearance_generation {
+            return Task::none();
+        }
+        self.last_appearance_generation = event.generation;
+        let appearance = resolved_system_appearance(event.appearance);
+        match self.callbacks.system_appearance_changed(appearance) {
+            Ok(Some(appearance)) => {
+                self.apply_appearance(appearance);
+                self.status = None;
+            }
+            Ok(None) => {}
+            Err(error) => self.status = Some(error),
+        }
+        Task::none()
+    }
+
+    fn apply_appearance(&mut self, appearance: ResolvedAppearance) {
+        self.appearance = appearance;
+        let theme = match appearance {
+            ResolvedAppearance::Light => EditorSurfaceTheme::light(),
+            ResolvedAppearance::Dark => EditorSurfaceTheme::dark(),
+        };
+        for native in self.windows.values_mut() {
+            if let NativeWindow::Project(state) = native {
+                for binding in state.editor_bindings.values_mut() {
+                    binding.set_theme(theme);
+                }
+            }
+        }
     }
 
     /// Builds the launcher surface with owned display values. Keeping this
@@ -3112,6 +3212,8 @@ mod tests {
         closed: Mutex<Vec<PathBuf>>,
         created: Mutex<Vec<WindowCapability>>,
         destroyed: Mutex<Vec<WindowCapability>>,
+        system_appearances: Mutex<Vec<ResolvedAppearance>>,
+        system_appearance_result: Mutex<Result<Option<ResolvedAppearance>, String>>,
     }
 
     impl RecordingCallbacks {
@@ -3121,6 +3223,8 @@ mod tests {
                 closed: Mutex::new(Vec::new()),
                 created: Mutex::new(Vec::new()),
                 destroyed: Mutex::new(Vec::new()),
+                system_appearances: Mutex::new(Vec::new()),
+                system_appearance_result: Mutex::new(Ok(None)),
             }
         }
     }
@@ -3154,6 +3258,20 @@ mod tests {
                 .lock()
                 .expect("destroyed windows mutex poisoned")
                 .push(window);
+        }
+
+        fn system_appearance_changed(
+            &self,
+            appearance: ResolvedAppearance,
+        ) -> Result<Option<ResolvedAppearance>, String> {
+            self.system_appearances
+                .lock()
+                .expect("system appearance mutex poisoned")
+                .push(appearance);
+            self.system_appearance_result
+                .lock()
+                .expect("system appearance result mutex poisoned")
+                .clone()
         }
     }
 
@@ -3563,6 +3681,72 @@ mod tests {
         for id in desktop.windows.keys().copied() {
             assert_eq!(desktop.theme(id), expected);
         }
+    }
+
+    #[test]
+    fn ordered_system_events_retheme_all_windows_only_when_the_controller_accepts_them() {
+        let mut registry = parchmint_ui_api::ProjectSessionRegistry::new();
+        let projects = vec![
+            NativeProjectWindow {
+                project: PathBuf::from("/tmp/system-first.parchmint"),
+                window: WindowCapability::new(21, 1),
+                session: registry.register(21),
+                project_ui: None,
+                editor: None,
+            },
+            NativeProjectWindow {
+                project: PathBuf::from("/tmp/system-second.parchmint"),
+                window: WindowCapability::new(22, 1),
+                session: registry.register(22),
+                project_ui: None,
+                editor: None,
+            },
+        ];
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            recent_projects: Vec::new(),
+            projects,
+            locked_project: None,
+            callbacks: callbacks.clone(),
+        });
+        *callbacks
+            .system_appearance_result
+            .lock()
+            .expect("system appearance result mutex poisoned") = Ok(Some(ResolvedAppearance::Dark));
+
+        let _event = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
+            generation: 1,
+            appearance: SystemAppearance::Dark,
+        }));
+        assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
+        let expected = ParchMintTheme::new(ResolvedAppearance::Dark).iced_theme();
+        for id in desktop.windows.keys().copied() {
+            assert_eq!(desktop.theme(id), expected);
+        }
+
+        *callbacks
+            .system_appearance_result
+            .lock()
+            .expect("system appearance result mutex poisoned") = Ok(None);
+        let _system_only = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
+            generation: 2,
+            appearance: SystemAppearance::Light,
+        }));
+        let _duplicate = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
+            generation: 2,
+            appearance: SystemAppearance::Dark,
+        }));
+
+        assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
+        assert_eq!(
+            callbacks
+                .system_appearances
+                .lock()
+                .expect("system appearance mutex poisoned")
+                .as_slice(),
+            [ResolvedAppearance::Dark, ResolvedAppearance::Light]
+        );
     }
 
     #[test]
