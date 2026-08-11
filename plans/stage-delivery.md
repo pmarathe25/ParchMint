@@ -23,8 +23,10 @@ architecture documents to write an implementation that fulfills the documented r
 ### Step 3. Simplification and test reconciliation pass
 
 Launch a `simplification` sub-agent to:
-- Remove redundant or duplicate tests
-- Simplify code to reduce complexity 
+- Remove redundant or duplicate tests; consolidate the tests written
+  by the independent agent with all other tests. This might involve, 
+  for example, moving tests into other files or directories.
+- Simplify code to reduce complexity, removing unnecessary abstractions or indirection that does not add value 
 - Refactor code to reduce duplication - DRY principle 
 - Simplify any verbose comments or docstrings using plain and simple language;
   you may wish to mention the `write-plain-technical-docs` skill.
@@ -52,7 +54,7 @@ Launch a `simplification` sub-agent to:
 ### Step 5. Commit and proceed
 
 Once all tests for the stage pass and the application behavior has been verified, 
-ask the implementing sub-agent to commit the changes. 
+delete the `reports/stageXXX` directory and ask the implementing sub-agent to commit the changes. 
 
 Then, proceed with the next stage, launching a new set of sub-agents following exactly
 the same process above.
