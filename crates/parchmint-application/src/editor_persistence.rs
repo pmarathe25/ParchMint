@@ -151,6 +151,36 @@ impl EditorPersistenceCoordinator {
         Ok(durable)
     }
 
+    pub fn persist_projection_with_document_hash(
+        &self,
+        projection: &CanonicalProjection,
+        revisions: &SaveRevisionVector,
+        payload: VersionedRecoveryPayload,
+        result_hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
+        let durable = match self.recovery.persist_projection_with_document_hash(
+            projection,
+            revisions,
+            payload,
+            result_hash,
+        ) {
+            Ok(durable) => durable,
+            Err(error) => {
+                self.mark_error(error.clone());
+                return Err(error);
+            }
+        };
+        let mut status = self
+            .status
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        let inventory = self.recovery.recovery_inventory()?;
+        status.recovery_retained_records = inventory.records.len();
+        status.recovery_inventory = Some(inventory);
+        status.recovery_isolation = None;
+        Ok(durable)
+    }
+
     pub fn acknowledge_recovery(
         &self,
         durable: DurableProjectionBatch,
@@ -181,6 +211,26 @@ impl EditorPersistenceCoordinator {
             status.error = None;
         }
         Ok(replay)
+    }
+
+    pub fn discard_reconciled_recovery(
+        &self,
+        base: RecoveryBaseSnapshot,
+        replay: &RecoveryReplay,
+    ) -> Result<parchmint_recovery_api::DiscardReport, EditorPersistenceError> {
+        let report = self.recovery.discard_reconciled_recovery(base, replay)?;
+        let inventory = self.recovery.recovery_inventory()?;
+        let mut status = self
+            .status
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        status.state = SaveState::Saved;
+        status.active = None;
+        status.error = None;
+        status.recovery_retained_records = inventory.records.len();
+        status.recovery_inventory = Some(inventory);
+        status.recovery_isolation = None;
+        Ok(report)
     }
 
     pub fn resume_recovery_acknowledgement(
@@ -348,5 +398,15 @@ impl EditorPersistenceCoordinator {
 
     pub fn frontier(&self) -> Option<RecoveryRevisionVector> {
         self.recovery.frontier()
+    }
+
+    pub fn register_document_base(
+        &self,
+        document: parchmint_domain::DocumentId,
+        revision: parchmint_recovery_api::DocumentRevision,
+        hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<(), EditorPersistenceError> {
+        self.recovery
+            .register_document_base(document, revision, hash)
     }
 }

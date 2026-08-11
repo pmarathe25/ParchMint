@@ -207,6 +207,62 @@ pub struct MenuActivation {
     pub command_id: String,
 }
 
+/// Pull boundary for ordered semantic menu activations.
+///
+/// Native adapters retain the sender used by their platform callback and emit
+/// only ParchMint-owned binding and command values through this stream.
+pub struct MenuActivationStream {
+    receiver: Arc<Mutex<mpsc::Receiver<MenuActivation>>>,
+}
+
+impl MenuActivationStream {
+    pub fn channel() -> (mpsc::Sender<MenuActivation>, Self) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            sender,
+            Self {
+                receiver: Arc::new(Mutex::new(receiver)),
+            },
+        )
+    }
+
+    pub fn try_next(&self) -> Result<Option<MenuActivation>, PlatformError> {
+        match self
+            .receiver
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "read menu activation",
+                reason: "menu activation stream is unavailable".into(),
+            })?
+            .try_recv()
+        {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(PlatformError::Unavailable {
+                operation: "menu activations",
+            }),
+        }
+    }
+
+    pub fn next_timeout(&self, timeout: Duration) -> Result<Option<MenuActivation>, PlatformError> {
+        match self
+            .receiver
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "read menu activation",
+                reason: "menu activation stream is unavailable".into(),
+            })?
+            .recv_timeout(timeout)
+        {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(PlatformError::Unavailable {
+                operation: "menu activations",
+            }),
+        }
+    }
+}
+
 /// A request for a native path dialog.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PathDialog {
@@ -582,6 +638,11 @@ impl SystemAppearanceEventStream {
 pub trait MenuService: Send + Sync {
     /// Implementations authorize `window` immediately before native dispatch.
     fn install(&self, window: WindowCapability, menu: SemanticMenu) -> AsyncResult<MenuBinding>;
+}
+
+/// Subscribes to semantic menu activations produced by a native event loop.
+pub trait MenuActivationService: Send + Sync {
+    fn subscribe(&self) -> Result<MenuActivationStream, PlatformError>;
 }
 
 /// Opens native file and directory dialogs for a live window.

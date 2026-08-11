@@ -15,6 +15,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
 };
 
+pub use parchmint_contracts::AnnotationValue;
 use parchmint_recovery_api::{
     EditorRevisionRange, RecoveryBaseSnapshot, RecoveryBatch, RecoveryError, RecoveryInventory,
     RecoveryJournal, RecoveryReceipt, RecoveryRevisionVector, ResourceId, VersionedRecoveryPayload,
@@ -25,7 +26,8 @@ use parchmint_save::{
 use sha2::{Digest, Sha256};
 
 pub use parchmint_domain::{
-    BlockId, CommentId, DocumentId, ProjectOperationId, StyleCatalog, StyleId, ViewId,
+    BlockId, CommentId, DocumentId, ProjectOperationId, StyleCatalog, StyleDefinition, StyleId,
+    StyleProperties, StyleRole, TextAlignment, ViewId,
 };
 
 /// A `Send` future returned by an editor operation that may settle away from
@@ -270,6 +272,36 @@ pub struct SpellcheckDecoration {
     range: EditorSelection,
 }
 
+/// A live comment anchor belonging to one attached view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentDecoration {
+    comment: CommentId,
+    range: EditorSelection,
+    active: bool,
+}
+
+impl CommentDecoration {
+    pub const fn new(comment: CommentId, range: EditorSelection, active: bool) -> Self {
+        Self {
+            comment,
+            range,
+            active,
+        }
+    }
+
+    pub const fn comment(&self) -> CommentId {
+        self.comment
+    }
+
+    pub const fn range(&self) -> EditorSelection {
+        self.range
+    }
+
+    pub const fn active(&self) -> bool {
+        self.active
+    }
+}
+
 impl SpellcheckDecoration {
     pub const fn new(range: EditorSelection) -> Self {
         Self { range }
@@ -300,11 +332,68 @@ impl StyleCatalogProjection {
 }
 
 /// One comment retained with a canonical editor document.
+/// One plain-text message in chronological thread order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalCommentMessage {
+    pub id: CommentId,
+    pub body: String,
+    pub unknown_fields: BTreeMap<String, AnnotationValue>,
+}
+
+/// A durable comment location. Orphaned text anchors retain their evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalCommentAnchor {
+    Document {
+        unknown_fields: BTreeMap<String, AnnotationValue>,
+    },
+    Text {
+        block: BlockId,
+        range: EditorSelection,
+        quote: String,
+        context_before: String,
+        context_after: String,
+        orphaned: bool,
+        unknown_fields: BTreeMap<String, AnnotationValue>,
+    },
+}
+
+/// One durable comment thread retained with a canonical editor document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalComment {
     pub id: CommentId,
-    pub range: EditorSelection,
-    pub body: String,
+    pub messages: Vec<CanonicalCommentMessage>,
+    pub resolved: bool,
+    pub anchor: CanonicalCommentAnchor,
+    pub unknown_fields: BTreeMap<String, AnnotationValue>,
+}
+
+impl CanonicalComment {
+    pub fn new(
+        id: CommentId,
+        range: EditorSelection,
+        body: impl Into<String>,
+        block: BlockId,
+    ) -> Self {
+        Self {
+            id,
+            messages: vec![CanonicalCommentMessage {
+                id,
+                body: body.into(),
+                unknown_fields: BTreeMap::new(),
+            }],
+            resolved: false,
+            anchor: CanonicalCommentAnchor::Text {
+                block,
+                range,
+                quote: String::new(),
+                context_before: String::new(),
+                context_after: String::new(),
+                orphaned: false,
+                unknown_fields: BTreeMap::new(),
+            },
+            unknown_fields: BTreeMap::new(),
+        }
+    }
 }
 
 /// One stable ParchMint anchor retained with a canonical editor document.
@@ -320,6 +409,7 @@ pub struct CanonicalAnchor {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalDocumentLoad {
     pub document_id: DocumentId,
+    pub revision: EditorRevision,
     pub body: String,
     pub comments: Vec<CanonicalComment>,
     pub anchors: Vec<CanonicalAnchor>,
@@ -349,6 +439,9 @@ pub enum InlineMarkKind {
     Italic,
     Underline,
     Strikethrough,
+    SmallCaps,
+    Superscript,
+    Subscript,
 }
 
 impl InlineMarkKind {
@@ -358,6 +451,9 @@ impl InlineMarkKind {
             Self::Italic => SemanticInlineMark::Italic,
             Self::Underline => SemanticInlineMark::Underline,
             Self::Strikethrough => SemanticInlineMark::Strikethrough,
+            Self::SmallCaps => SemanticInlineMark::SmallCaps,
+            Self::Superscript => SemanticInlineMark::Superscript,
+            Self::Subscript => SemanticInlineMark::Subscript,
         }
     }
 }
@@ -413,6 +509,12 @@ pub enum AtomicBlockKind {
     PageBreak,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListDepthChange {
+    Indent,
+    Outdent,
+}
+
 /// One WYSIWYG block projected independently from canonical HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticBlock {
@@ -421,6 +523,7 @@ pub struct SemanticBlock {
     paragraph_style: Option<String>,
     text: String,
     marks: Vec<SemanticMarkRange>,
+    list_depth: usize,
 }
 
 impl SemanticBlock {
@@ -437,6 +540,7 @@ impl SemanticBlock {
             paragraph_style,
             text: text.into(),
             marks,
+            list_depth: 0,
         }
     }
 
@@ -458,6 +562,15 @@ impl SemanticBlock {
 
     pub fn marks(&self) -> &[SemanticMarkRange] {
         &self.marks
+    }
+
+    pub const fn list_depth(&self) -> usize {
+        self.list_depth
+    }
+
+    pub fn with_list_depth(mut self, list_depth: usize) -> Self {
+        self.list_depth = list_depth;
+        self
     }
 }
 
@@ -489,10 +602,82 @@ impl SemanticDocument {
     }
 }
 
+/// One sanitized non-atomic block in a semantic clipboard fragment.
+/// Newlines in `text` are soft breaks; block boundaries are represented by
+/// separate values in [`SemanticFragment`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticFragmentBlock {
+    kind: SemanticBlockKind,
+    text: String,
+    marks: Vec<SemanticMarkRange>,
+    list_depth: usize,
+}
+
+impl SemanticFragmentBlock {
+    pub fn new(
+        kind: SemanticBlockKind,
+        text: impl Into<String>,
+        marks: Vec<SemanticMarkRange>,
+    ) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            marks,
+            list_depth: 0,
+        }
+    }
+
+    pub const fn kind(&self) -> SemanticBlockKind {
+        self.kind
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn marks(&self) -> &[SemanticMarkRange] {
+        &self.marks
+    }
+
+    pub const fn list_depth(&self) -> usize {
+        self.list_depth
+    }
+
+    pub fn with_list_depth(mut self, list_depth: usize) -> Self {
+        self.list_depth = list_depth;
+        self
+    }
+}
+
+/// Sanitized semantic clipboard content inserted as one revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticFragment {
+    blocks: Vec<SemanticFragmentBlock>,
+}
+
+impl SemanticFragment {
+    pub fn new(blocks: Vec<SemanticFragmentBlock>) -> Self {
+        Self { blocks }
+    }
+
+    pub fn blocks(&self) -> &[SemanticFragmentBlock] {
+        &self.blocks
+    }
+
+    pub fn scalar_len(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block.text.chars().count())
+            .sum::<usize>()
+            .saturating_add(self.blocks.len().saturating_sub(1))
+    }
+}
+
 impl CanonicalDocumentLoad {
     pub fn new(document_id: DocumentId, body: impl Into<String>) -> Self {
         Self {
             document_id,
+            revision: EditorRevision::default(),
             body: body.into(),
             comments: Vec::new(),
             anchors: Vec::new(),
@@ -656,6 +841,23 @@ impl EditorPersistenceCoordinator {
         revisions: &SaveRevisionVector,
         payload: VersionedRecoveryPayload,
     ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
+        self.persist_projection_with_document_hash(
+            projection,
+            revisions,
+            payload,
+            content_hash(projection.body().as_bytes()),
+        )
+    }
+
+    /// Persists a projection whose logical document hash also covers
+    /// application-owned sidecars such as annotations.
+    pub fn persist_projection_with_document_hash(
+        &self,
+        projection: &CanonicalProjection,
+        revisions: &SaveRevisionVector,
+        payload: VersionedRecoveryPayload,
+        result_hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
         let frontier = self
             .frontier
             .lock()
@@ -694,7 +896,6 @@ impl EditorPersistenceCoordinator {
             .into());
         }
         let base_hash = frontier.hashes[&document_resource];
-        let result_hash = content_hash(projection.body().as_bytes());
         let batch = RecoveryBatch {
             project_revision: frontier.revisions.project_revision.next(),
             documents: BTreeMap::from([(
@@ -784,6 +985,44 @@ impl EditorPersistenceCoordinator {
         Ok(replay)
     }
 
+    /// Deliberately rejects the exact replay previously reconciled from
+    /// `base`, removes that accepted journal prefix, and restores the
+    /// process-local frontier to the canonical durable base.
+    ///
+    /// This is a user disposition, not a save acknowledgement. Replaying the
+    /// journal again before deletion prevents a stale recovery choice from
+    /// discarding records that arrived after it was presented.
+    pub fn discard_reconciled_recovery(
+        &self,
+        base: RecoveryBaseSnapshot,
+        replay: &parchmint_recovery_api::RecoveryReplay,
+    ) -> Result<parchmint_recovery_api::DiscardReport, EditorPersistenceError> {
+        let Some(endpoint) = replay
+            .accepted
+            .last()
+            .map(parchmint_recovery_api::RecoveryBatch::revision_vector)
+        else {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        };
+        let observed = self.recovery.replay(base.clone())?;
+        if &observed != replay {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        }
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        if frontier.revisions != endpoint {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        }
+        let report = self
+            .recovery
+            .discard_through(parchmint_recovery_api::DurableRevisionVector::new(endpoint))?;
+        frontier.revisions = base.revisions;
+        frontier.hashes = base.hashes;
+        Ok(report)
+    }
+
     /// Reconciles records preceding an interrupted batch, then acknowledges
     /// that exact durable batch using its original receipt identity.
     pub fn resume_recovery_acknowledgement(
@@ -864,6 +1103,37 @@ impl EditorPersistenceCoordinator {
             .lock()
             .ok()
             .map(|frontier| frontier.revisions.clone())
+    }
+
+    /// Supplies the exact canonical base hash when a summary-only document is
+    /// first materialized by the owning project session.
+    pub fn register_document_base(
+        &self,
+        document: DocumentId,
+        revision: parchmint_recovery_api::DocumentRevision,
+        hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<(), EditorPersistenceError> {
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        let resource = document_resource_id(document);
+        if let Some(existing) = frontier.hashes.get(&resource) {
+            return (*existing == hash)
+                .then_some(())
+                .ok_or(EditorPersistenceError::RevisionMismatch);
+        }
+        if frontier
+            .revisions
+            .documents
+            .get(&document)
+            .is_some_and(|known| *known != revision)
+        {
+            return Err(EditorPersistenceError::RevisionMismatch);
+        }
+        frontier.revisions.documents.insert(document, revision);
+        frontier.hashes.insert(resource, hash);
+        Ok(())
     }
 }
 
@@ -992,6 +1262,19 @@ pub enum EditorCommandKind {
         range: EditorSelection,
         text: String,
     },
+    /// Replaces one scalar range and applies relative semantic marks as one
+    /// revision and undo transaction. Mark ranges are relative to `text`.
+    ReplaceRangeWithSemanticText {
+        range: EditorSelection,
+        text: String,
+        marks: Vec<SemanticMarkRange>,
+    },
+    /// Replaces a range with a sanitized multi-block semantic fragment as one
+    /// revision and undo transaction.
+    ReplaceRangeWithSemanticFragment {
+        range: EditorSelection,
+        fragment: SemanticFragment,
+    },
     SetSelection {
         selection: EditorSelection,
     },
@@ -1016,6 +1299,46 @@ pub enum EditorCommandKind {
     InsertAtomicBlock {
         selection: EditorSelection,
         kind: AtomicBlockKind,
+    },
+    SplitBlock {
+        selection: EditorSelection,
+    },
+    InsertSoftBreak {
+        selection: EditorSelection,
+    },
+    AdjustListDepth {
+        range: EditorSelection,
+        change: ListDepthChange,
+    },
+    CreateComment {
+        comment: CanonicalComment,
+    },
+    ReplyToComment {
+        thread: CommentId,
+        message: CanonicalCommentMessage,
+    },
+    SetCommentResolved {
+        thread: CommentId,
+        resolved: bool,
+    },
+    DeleteCommentThread {
+        thread: CommentId,
+    },
+    DeleteCommentMessage {
+        thread: CommentId,
+        message: CommentId,
+    },
+    EditCommentMessage {
+        thread: CommentId,
+        message: CommentId,
+        body: String,
+    },
+    ReattachComment {
+        thread: CommentId,
+        range: EditorSelection,
+    },
+    ConvertCommentToDocument {
+        thread: CommentId,
     },
     Undo,
     Redo,

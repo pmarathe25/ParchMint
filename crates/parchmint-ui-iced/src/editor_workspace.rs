@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use parchmint_application::DocumentVisibility;
 use parchmint_domain::{NodeKind, ProjectSection};
@@ -310,6 +310,9 @@ pub enum FormattingCommand {
     Italic,
     Underline,
     Strikethrough,
+    SmallCaps,
+    Superscript,
+    Subscript,
     BulletedList,
     NumberedList,
     BlockQuote,
@@ -326,6 +329,9 @@ pub enum EditorCommand {
     ToggleItalic,
     ToggleUnderline,
     ToggleStrikethrough,
+    ToggleSmallCaps,
+    ToggleSuperscript,
+    ToggleSubscript,
     ToggleBulletedList,
     ToggleNumberedList,
     ToggleBlockQuote,
@@ -334,6 +340,36 @@ pub enum EditorCommand {
     },
     InsertSceneBreak,
     InsertPageBreak,
+    CreateComment {
+        body: String,
+        document_level: bool,
+    },
+    ReplyToComment {
+        thread_id: String,
+        body: String,
+    },
+    SetCommentResolved {
+        thread_id: String,
+        resolved: bool,
+    },
+    DeleteCommentThread {
+        thread_id: String,
+    },
+    DeleteCommentMessage {
+        thread_id: String,
+        message_id: String,
+    },
+    EditCommentMessage {
+        thread_id: String,
+        message_id: String,
+        body: String,
+    },
+    ReattachComment {
+        thread_id: String,
+    },
+    ConvertCommentToDocument {
+        thread_id: String,
+    },
     Undo,
     Redo,
     NavigateFindMatch {
@@ -361,6 +397,9 @@ impl FormattingCommand {
             FormattingCommand::Italic => Some(EditorCommand::ToggleItalic),
             FormattingCommand::Underline => Some(EditorCommand::ToggleUnderline),
             FormattingCommand::Strikethrough => Some(EditorCommand::ToggleStrikethrough),
+            FormattingCommand::SmallCaps => Some(EditorCommand::ToggleSmallCaps),
+            FormattingCommand::Superscript => Some(EditorCommand::ToggleSuperscript),
+            FormattingCommand::Subscript => Some(EditorCommand::ToggleSubscript),
             FormattingCommand::BulletedList => Some(EditorCommand::ToggleBulletedList),
             FormattingCommand::NumberedList => Some(EditorCommand::ToggleNumberedList),
             FormattingCommand::BlockQuote => Some(EditorCommand::ToggleBlockQuote),
@@ -492,6 +531,7 @@ pub struct SpellingMenuRequest {
     suggestions: Vec<String>,
     in_project_dictionary: bool,
     in_global_dictionary: bool,
+    include_spelling_actions: bool,
 }
 
 impl SpellingMenuRequest {
@@ -509,6 +549,7 @@ impl SpellingMenuRequest {
             suggestions: Vec::new(),
             in_project_dictionary: false,
             in_global_dictionary: false,
+            include_spelling_actions: true,
         }
     }
 
@@ -526,6 +567,11 @@ impl SpellingMenuRequest {
         self.in_global_dictionary = in_global_dictionary;
         self
     }
+
+    pub const fn with_spelling_actions(mut self, include: bool) -> Self {
+        self.include_spelling_actions = include;
+        self
+    }
 }
 
 /// A service-facing dictionary scope available from the spelling menu.
@@ -538,6 +584,7 @@ pub enum SpellingDictionaryScope {
 /// One applicable action in the word-anchored spelling menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpellingMenuAction {
+    AddComment,
     Replace(String),
     AddToDictionary(SpellingDictionaryScope),
     RemoveFromDictionary(SpellingDictionaryScope),
@@ -575,23 +622,27 @@ impl SpellingMenu {
         };
         let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
         let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
-        let mut actions = request
-            .suggestions
-            .iter()
-            .cloned()
-            .map(SpellingMenuAction::Replace)
-            .collect::<Vec<_>>();
-        actions.push(if request.in_project_dictionary {
-            SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Project)
-        } else {
-            SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Project)
-        });
-        actions.push(if request.in_global_dictionary {
-            SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Global)
-        } else {
-            SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Global)
-        });
-        actions.push(SpellingMenuAction::Ignore);
+        let mut actions = vec![SpellingMenuAction::AddComment];
+        if request.include_spelling_actions {
+            actions.extend(
+                request
+                    .suggestions
+                    .iter()
+                    .cloned()
+                    .map(SpellingMenuAction::Replace),
+            );
+            actions.push(if request.in_project_dictionary {
+                SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Project)
+            } else {
+                SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Project)
+            });
+            actions.push(if request.in_global_dictionary {
+                SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Global)
+            } else {
+                SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Global)
+            });
+            actions.push(SpellingMenuAction::Ignore);
+        }
         Self {
             pane: request.pane,
             word: request.word,
@@ -817,7 +868,48 @@ pub enum CommentAnchor {
     },
     Orphaned {
         document_id: String,
+        quote: String,
+        context_before: String,
+        context_after: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentThreadView {
+    id: String,
+    document_id: String,
+    messages: Vec<CommentMessageView>,
+    resolved: bool,
+    anchor: CommentAnchor,
+}
+
+impl CommentThreadView {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn messages(&self) -> &[CommentMessageView] {
+        &self.messages
+    }
+    pub const fn resolved(&self) -> bool {
+        self.resolved
+    }
+    pub const fn anchor(&self) -> &CommentAnchor {
+        &self.anchor
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentMessageView {
+    id: String,
+    body: String,
+}
+impl CommentMessageView {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn body(&self) -> &str {
+        &self.body
+    }
 }
 
 impl CommentAnchor {
@@ -826,7 +918,7 @@ impl CommentAnchor {
             Self::Range { document_id, .. }
             | Self::Position { document_id, .. }
             | Self::Document { document_id }
-            | Self::Orphaned { document_id } => document_id,
+            | Self::Orphaned { document_id, .. } => document_id,
         }
     }
 
@@ -1005,7 +1097,18 @@ pub enum EditorMessage {
         document_id: String,
         target_index: usize,
     },
+    BeginTabDrag {
+        pane: EditorPane,
+        document_id: String,
+    },
+    SetTabDragTarget {
+        pane: EditorPane,
+        target_index: usize,
+    },
+    CommitTabDrag,
+    CancelTabDrag,
     Format(FormattingCommand),
+    SetActiveParagraphStyle(String),
     OpenLinkEditor,
     SetLinkTarget(String),
     ApplyLink,
@@ -1013,6 +1116,7 @@ pub enum EditorMessage {
     CancelLinkEditor,
     Undo,
     Redo,
+    Save,
     OpenLocalFind,
     CloseLocalFind,
     SetFindQuery(String),
@@ -1030,6 +1134,45 @@ pub enum EditorMessage {
         anchor: CommentAnchor,
     },
     SelectComment(String),
+    SetCommentDraft(String),
+    CreateComment {
+        document_level: bool,
+    },
+    BeginCommentAtSelection,
+    SetCommentReplyDraft {
+        thread_id: String,
+        body: String,
+    },
+    SubmitCommentReply {
+        thread_id: String,
+    },
+    ToggleCommentResolved {
+        thread_id: String,
+        resolved: bool,
+    },
+    RequestDeleteCommentThread(String),
+    ConfirmDeleteCommentThread,
+    CancelDeleteCommentThread,
+    ReattachComment(String),
+    ConvertCommentToDocument(String),
+    DeleteCommentMessage {
+        thread_id: String,
+        message_id: String,
+    },
+    BeginEditCommentMessage {
+        thread_id: String,
+        message_id: String,
+        body: String,
+    },
+    SaveEditedCommentMessage {
+        thread_id: String,
+        message_id: String,
+    },
+    CancelEditCommentMessage,
+    ToggleCommentReplies {
+        thread_id: String,
+        collapsed: bool,
+    },
     SetInspectorContext(InspectorContext),
     SetSpellingDecorations {
         view: ViewId,
@@ -1099,6 +1242,7 @@ pub enum EditorEffect {
     RestoreEditorFocus {
         view: ViewId,
     },
+    RequestSave,
 }
 
 /// Deterministic editor workspace presentation state.
@@ -1109,6 +1253,8 @@ pub struct EditorWorkspace {
     companion: EditorPaneState,
     focused_pane: EditorPane,
     toolbar_focused: bool,
+    style_names: Vec<String>,
+    active_style: String,
     link_editor: LinkEditorState,
     local_search: BTreeMap<ViewId, LocalSearchState>,
     decorations: BTreeMap<ViewId, EditorDecorations>,
@@ -1118,10 +1264,26 @@ pub struct EditorWorkspace {
     manuscript_total: usize,
     last_focused_view: BTreeMap<String, ViewId>,
     comments: BTreeMap<String, CommentAnchor>,
+    comment_threads: BTreeMap<String, CommentThreadView>,
+    comment_draft: String,
+    comment_reply_drafts: BTreeMap<String, String>,
+    editing_comment_message: Option<(String, String)>,
+    collapsed_comment_replies: BTreeSet<String>,
+    pending_delete_comment: Option<String>,
+    comment_feedback: Option<String>,
     spellcheck_errors: BTreeMap<ViewId, String>,
     inspector: InspectorContext,
     pending: BTreeMap<EditorTask, AsyncEditorTicket>,
     next_request: u64,
+    split_ratio: f64,
+    tab_drag: Option<TabPointerDrag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabPointerDrag {
+    pane: EditorPane,
+    document_id: String,
+    target_index: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1181,6 +1343,16 @@ impl EditorWorkspace {
             companion,
             focused_pane: EditorPane::Primary,
             toolbar_focused: false,
+            style_names: vec![
+                "Body".into(),
+                "Document Title".into(),
+                "Heading 1".into(),
+                "Heading 2".into(),
+                "Heading 3".into(),
+                "Block Quote".into(),
+                "Verse".into(),
+            ],
+            active_style: "Body".into(),
             link_editor: LinkEditorState::default(),
             local_search,
             decorations,
@@ -1190,10 +1362,19 @@ impl EditorWorkspace {
             manuscript_total: 1_204,
             last_focused_view,
             comments: BTreeMap::new(),
+            comment_threads: BTreeMap::new(),
+            comment_draft: String::new(),
+            comment_reply_drafts: BTreeMap::new(),
+            editing_comment_message: None,
+            collapsed_comment_replies: BTreeSet::new(),
+            pending_delete_comment: None,
+            comment_feedback: None,
             spellcheck_errors: BTreeMap::new(),
             inspector,
             pending: BTreeMap::new(),
             next_request: 0,
+            split_ratio: 0.5,
+            tab_drag: None,
         }
     }
 
@@ -1246,6 +1427,13 @@ impl EditorWorkspace {
             companion,
             focused_pane: EditorPane::Primary,
             toolbar_focused: false,
+            style_names: snapshot
+                .project
+                .styles
+                .iter()
+                .map(|style| style.display_name.clone())
+                .collect(),
+            active_style: "Body".into(),
             link_editor: LinkEditorState::default(),
             local_search,
             decorations,
@@ -1254,17 +1442,43 @@ impl EditorWorkspace {
             document_revisions: hydrated.revisions,
             manuscript_total: hydrated.manuscript_total,
             last_focused_view,
-            comments: BTreeMap::new(),
+            comments: snapshot_comment_anchors(snapshot),
+            comment_threads: snapshot_comment_threads(snapshot),
+            comment_draft: String::new(),
+            comment_reply_drafts: BTreeMap::new(),
+            editing_comment_message: None,
+            collapsed_comment_replies: BTreeSet::new(),
+            pending_delete_comment: None,
+            comment_feedback: None,
             spellcheck_errors: BTreeMap::new(),
             inspector,
             pending: BTreeMap::new(),
             next_request: 0,
+            split_ratio: 0.5,
+            tab_drag: None,
         }
     }
 
     /// Reconciles authoritative documents without resetting surviving pane/view state.
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         let hydrated = HydratedDocuments::from_snapshot(snapshot);
+        self.style_names = snapshot
+            .project
+            .styles
+            .iter()
+            .map(|style| style.display_name.clone())
+            .collect();
+        if !self
+            .style_names
+            .iter()
+            .any(|style| style == &self.active_style)
+        {
+            self.active_style = self
+                .style_names
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Body".into());
+        }
         let titles = hydrated
             .ordered
             .iter()
@@ -1272,6 +1486,12 @@ impl EditorWorkspace {
             .collect::<BTreeMap<_, _>>();
         let primary_active_survived = self.primary.reconcile_tabs(&titles);
         let companion_active_survived = self.companion.reconcile_tabs(&titles);
+        self.tab_drag = self.tab_drag.take().filter(|drag| {
+            self.pane(drag.pane)
+                .tabs()
+                .iter()
+                .any(|tab| tab.id() == drag.document_id)
+        });
 
         for document in &hydrated.ordered {
             if hydrated.visibility.get(&document.id) == Some(&DocumentVisibility::Open)
@@ -1311,8 +1531,26 @@ impl EditorWorkspace {
                 pane.view == *view && pane.tabs.iter().any(|tab| tab.id == *document_id)
             })
         });
-        self.comments
-            .retain(|_, anchor| titles.contains_key(anchor.document_id()));
+        self.comments = snapshot_comment_anchors(snapshot);
+        self.comment_threads = snapshot_comment_threads(snapshot);
+        self.comment_reply_drafts
+            .retain(|thread, _| self.comment_threads.contains_key(thread));
+        self.collapsed_comment_replies
+            .retain(|thread| self.comment_threads.contains_key(thread));
+        if self
+            .editing_comment_message
+            .as_ref()
+            .is_some_and(|(thread, message)| {
+                self.comment_threads.get(thread).is_none_or(|current| {
+                    !current
+                        .messages
+                        .iter()
+                        .any(|candidate| candidate.id == *message)
+                })
+            })
+        {
+            self.editing_comment_message = None;
+        }
         if matches!(
             &self.inspector,
             InspectorContext::Document { document_id } if !titles.contains_key(document_id)
@@ -1394,6 +1632,88 @@ impl EditorWorkspace {
         self.focused_pane
     }
 
+    pub const fn split_ratio(&self) -> f64 {
+        self.split_ratio
+    }
+
+    pub fn tab_drag_source(&self, pane: EditorPane) -> Option<&str> {
+        self.tab_drag
+            .as_ref()
+            .filter(|drag| drag.pane == pane)
+            .map(|drag| drag.document_id.as_str())
+    }
+
+    pub fn tab_drag_target(&self, pane: EditorPane) -> Option<usize> {
+        self.tab_drag
+            .as_ref()
+            .filter(|drag| drag.pane == pane)
+            .map(|drag| drag.target_index)
+    }
+
+    pub fn set_split_ratio(&mut self, ratio: f64) {
+        if ratio.is_finite() {
+            self.split_ratio = ratio.clamp(0.2, 0.8);
+        }
+    }
+
+    pub fn set_scroll_offset(&mut self, pane: EditorPane, offset: f32) {
+        if offset.is_finite() {
+            self.pane_mut(pane).scroll_offset = offset.max(0.0);
+        }
+    }
+
+    pub fn restore_workspace_views(
+        &mut self,
+        tabs: Vec<(ViewId, TabSpec)>,
+        active_view: Option<ViewId>,
+        scroll_offsets: &BTreeMap<ViewId, f32>,
+        active_documents: &BTreeMap<ViewId, String>,
+    ) {
+        self.primary.tabs.clear();
+        self.primary.active_tab = None;
+        self.companion.tabs.clear();
+        self.companion.active_tab = None;
+        for (view, tab) in tabs {
+            if view == self.primary.view {
+                self.primary.tabs.push(tab);
+            } else if view == self.companion.view {
+                self.companion.tabs.push(tab);
+            }
+        }
+        self.primary.active_tab = active_documents
+            .get(&self.primary.view)
+            .and_then(|active| self.primary.tabs.iter().position(|tab| tab.id() == active))
+            .or_else(|| (!self.primary.tabs.is_empty()).then_some(0));
+        self.companion.active_tab = active_documents
+            .get(&self.companion.view)
+            .and_then(|active| {
+                self.companion
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.id() == active)
+            })
+            .or_else(|| (!self.companion.tabs.is_empty()).then_some(0));
+        if let Some(offset) = scroll_offsets.get(&self.primary.view) {
+            self.primary.scroll_offset = *offset;
+        }
+        if let Some(offset) = scroll_offsets.get(&self.companion.view) {
+            self.companion.scroll_offset = *offset;
+        }
+        self.focused_pane =
+            if active_view == Some(self.companion.view) && self.companion.is_populated() {
+                EditorPane::Companion
+            } else {
+                EditorPane::Primary
+            };
+        self.inspector = self
+            .pane(self.focused_pane)
+            .active_document()
+            .map(|document_id| InspectorContext::Document {
+                document_id: document_id.to_owned(),
+            })
+            .unwrap_or(InspectorContext::None);
+    }
+
     pub fn local_search(&self, view: ViewId) -> &LocalSearchState {
         self.local_search
             .get(&view)
@@ -1408,6 +1728,43 @@ impl EditorWorkspace {
 
     pub fn inspector_context(&self) -> &InspectorContext {
         &self.inspector
+    }
+
+    pub fn inspector_comments(&self) -> Vec<&CommentThreadView> {
+        let InspectorContext::Document { document_id } = &self.inspector else {
+            return Vec::new();
+        };
+        self.comment_threads
+            .values()
+            .filter(|thread| &thread.document_id == document_id)
+            .collect()
+    }
+
+    pub fn comment_draft(&self) -> &str {
+        &self.comment_draft
+    }
+    pub fn comment_reply_draft(&self, thread: &str) -> &str {
+        self.comment_reply_drafts
+            .get(thread)
+            .map(String::as_str)
+            .unwrap_or_default()
+    }
+    pub fn editing_comment_message(&self) -> Option<(&str, &str)> {
+        self.editing_comment_message
+            .as_ref()
+            .map(|(thread, message)| (thread.as_str(), message.as_str()))
+    }
+    pub fn comment_replies_collapsed(&self, thread: &str) -> bool {
+        self.collapsed_comment_replies.contains(thread)
+    }
+    pub fn pending_delete_comment(&self) -> Option<&str> {
+        self.pending_delete_comment.as_deref()
+    }
+    pub fn comment_feedback(&self) -> Option<&str> {
+        self.comment_feedback.as_deref()
+    }
+    pub const fn production_comments_enabled(&self) -> bool {
+        matches!(self.source, EditorWorkspaceSource::Production)
     }
 
     pub fn spellcheck_error(&self, view: ViewId) -> Option<&str> {
@@ -1428,6 +1785,14 @@ impl EditorWorkspace {
 
     pub fn link_editor(&self) -> &LinkEditorState {
         &self.link_editor
+    }
+
+    pub fn style_names(&self) -> &[String] {
+        &self.style_names
+    }
+
+    pub fn active_style(&self) -> &str {
+        &self.active_style
     }
 
     pub fn status_bar(&self) -> EditorStatusBar {
@@ -1573,7 +1938,17 @@ impl EditorWorkspace {
             EditorMessage::ActivateTab { pane, document_id } => {
                 self.activate_tab(pane, &document_id)
             }
-            EditorMessage::CloseTab { pane, document_id } => self.close_tab(pane, &document_id),
+            EditorMessage::CloseTab { pane, document_id } => {
+                let effects = self.close_tab(pane, &document_id);
+                if self
+                    .tab_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.pane == pane && drag.document_id == document_id)
+                {
+                    self.tab_drag = None;
+                }
+                effects
+            }
             EditorMessage::MoveTab {
                 pane,
                 document_id,
@@ -1582,17 +1957,65 @@ impl EditorWorkspace {
                 self.pane_mut(pane).move_tab(&document_id, target_index);
                 Vec::new()
             }
+            EditorMessage::BeginTabDrag { pane, document_id } => {
+                if let Some(target_index) = self
+                    .pane(pane)
+                    .tabs()
+                    .iter()
+                    .position(|tab| tab.id() == document_id)
+                {
+                    self.tab_drag = Some(TabPointerDrag {
+                        pane,
+                        document_id,
+                        target_index,
+                    });
+                }
+                Vec::new()
+            }
+            EditorMessage::SetTabDragTarget { pane, target_index } => {
+                let tab_count = self.pane(pane).tabs().len();
+                if let Some(drag) = self.tab_drag.as_mut()
+                    && drag.pane == pane
+                    && target_index < tab_count
+                {
+                    drag.target_index = target_index;
+                }
+                Vec::new()
+            }
+            EditorMessage::CommitTabDrag => {
+                let Some(drag) = self.tab_drag.take() else {
+                    return Vec::new();
+                };
+                self.update(EditorMessage::MoveTab {
+                    pane: drag.pane,
+                    document_id: drag.document_id,
+                    target_index: drag.target_index,
+                })
+            }
+            EditorMessage::CancelTabDrag => {
+                self.tab_drag = None;
+                Vec::new()
+            }
             EditorMessage::OpenLinkEditor => {
                 self.link_editor.open();
                 Vec::new()
             }
             EditorMessage::Format(command) => {
+                if let FormattingCommand::ParagraphStyle(style) = &command {
+                    self.active_style = style.clone();
+                }
                 if let Some(command) = command.editor_command() {
                     self.command(command)
                 } else {
                     self.link_editor.open();
                     Vec::new()
                 }
+            }
+            EditorMessage::SetActiveParagraphStyle(style) => {
+                if self.style_names.iter().any(|candidate| candidate == &style) {
+                    self.active_style = style;
+                }
+                Vec::new()
             }
             EditorMessage::SetLinkTarget(target) => {
                 if self.link_editor.is_open() {
@@ -1608,6 +2031,7 @@ impl EditorWorkspace {
             }
             EditorMessage::Undo => self.command(EditorCommand::Undo),
             EditorMessage::Redo => self.command(EditorCommand::Redo),
+            EditorMessage::Save => vec![EditorEffect::RequestSave],
             EditorMessage::OpenLocalFind => {
                 self.focused_search_mut().open = true;
                 Vec::new()
@@ -1646,6 +2070,142 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::SelectComment(comment_id) => self.select_comment(comment_id),
+            EditorMessage::SetCommentDraft(body) => {
+                self.comment_draft = body;
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::CreateComment { document_level } => {
+                let body = self.comment_draft.trim().to_owned();
+                if body.is_empty() {
+                    self.comment_feedback = Some("Comment text is required.".into());
+                    Vec::new()
+                } else {
+                    self.comment_draft.clear();
+                    self.comment_feedback = Some("Saving comment…".into());
+                    self.command(EditorCommand::CreateComment {
+                        body,
+                        document_level,
+                    })
+                }
+            }
+            EditorMessage::BeginCommentAtSelection => {
+                self.comment_feedback = Some("Write a comment for the selected anchor.".into());
+                Vec::new()
+            }
+            EditorMessage::SetCommentReplyDraft { thread_id, body } => {
+                self.comment_reply_drafts.insert(thread_id, body);
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::SubmitCommentReply { thread_id } => {
+                let body = self
+                    .comment_reply_drafts
+                    .get(&thread_id)
+                    .map(|body| body.trim())
+                    .unwrap_or_default()
+                    .to_owned();
+                if body.is_empty() {
+                    self.comment_feedback = Some("Reply text is required.".into());
+                    Vec::new()
+                } else {
+                    self.comment_reply_drafts.remove(&thread_id);
+                    self.command(EditorCommand::ReplyToComment { thread_id, body })
+                }
+            }
+            EditorMessage::ToggleCommentResolved {
+                thread_id,
+                resolved,
+            } => self.command(EditorCommand::SetCommentResolved {
+                thread_id,
+                resolved,
+            }),
+            EditorMessage::RequestDeleteCommentThread(thread) => {
+                self.pending_delete_comment = Some(thread);
+                self.comment_feedback = Some("Confirm thread deletion.".into());
+                Vec::new()
+            }
+            EditorMessage::ConfirmDeleteCommentThread => {
+                let Some(thread_id) = self.pending_delete_comment.take() else {
+                    return Vec::new();
+                };
+                self.command(EditorCommand::DeleteCommentThread { thread_id })
+            }
+            EditorMessage::CancelDeleteCommentThread => {
+                self.pending_delete_comment = None;
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::ReattachComment(thread_id) => {
+                self.command(EditorCommand::ReattachComment { thread_id })
+            }
+            EditorMessage::ConvertCommentToDocument(thread_id) => {
+                self.command(EditorCommand::ConvertCommentToDocument { thread_id })
+            }
+            EditorMessage::DeleteCommentMessage {
+                thread_id,
+                message_id,
+            } => self.command(EditorCommand::DeleteCommentMessage {
+                thread_id,
+                message_id,
+            }),
+            EditorMessage::BeginEditCommentMessage {
+                thread_id,
+                message_id,
+                body,
+            } => {
+                self.comment_reply_drafts.insert(thread_id.clone(), body);
+                self.editing_comment_message = Some((thread_id, message_id));
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::SaveEditedCommentMessage {
+                thread_id,
+                message_id,
+            } => {
+                if self.editing_comment_message.as_ref()
+                    != Some(&(thread_id.clone(), message_id.clone()))
+                {
+                    self.comment_feedback = Some("Comment edit is stale.".into());
+                    return Vec::new();
+                }
+                let body = self
+                    .comment_reply_drafts
+                    .get(&thread_id)
+                    .map(|body| body.trim())
+                    .unwrap_or_default()
+                    .to_owned();
+                if body.is_empty() {
+                    self.comment_feedback = Some("Comment text is required.".into());
+                    Vec::new()
+                } else {
+                    self.comment_reply_drafts.remove(&thread_id);
+                    self.editing_comment_message = None;
+                    self.command(EditorCommand::EditCommentMessage {
+                        thread_id,
+                        message_id,
+                        body,
+                    })
+                }
+            }
+            EditorMessage::CancelEditCommentMessage => {
+                if let Some((thread, _)) = self.editing_comment_message.take() {
+                    self.comment_reply_drafts.remove(&thread);
+                }
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::ToggleCommentReplies {
+                thread_id,
+                collapsed,
+            } => {
+                if collapsed {
+                    self.collapsed_comment_replies.insert(thread_id);
+                } else {
+                    self.collapsed_comment_replies.remove(&thread_id);
+                }
+                Vec::new()
+            }
             EditorMessage::SetInspectorContext(context) => {
                 self.inspector = context;
                 Vec::new()
@@ -1878,6 +2438,7 @@ impl EditorWorkspace {
     ) -> Vec<EditorEffect> {
         let view = self.pane(pane).view;
         match action {
+            SpellingMenuAction::AddComment => Vec::new(),
             SpellingMenuAction::Replace(replacement) => vec![EditorEffect::Command {
                 view,
                 command: EditorCommand::ReplaceSpelling {
@@ -2016,11 +2577,34 @@ struct HydratedDocuments {
 
 impl HydratedDocuments {
     fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
-        let snapshots = snapshot
+        let loaded = snapshot
             .documents
             .iter()
             .map(|document| (stable_id_string(document.document_id.as_bytes()), document))
             .collect::<BTreeMap<_, _>>();
+        let mut summaries = snapshot
+            .document_summaries
+            .iter()
+            .map(|document| {
+                (
+                    stable_id_string(document.document_id.as_bytes()),
+                    document.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for document in &snapshot.documents {
+            summaries
+                .entry(stable_id_string(document.document_id.as_bytes()))
+                .or_insert_with(|| parchmint_ui_api::DocumentSummary {
+                    document_id: document.document_id,
+                    revision: document.revision,
+                    visibility: document.visibility,
+                    content_hash: None,
+                    word_count: parchmint_ui_api::DocumentWordCount::Known(count_words(
+                        &document.body,
+                    )),
+                });
+        }
         let mut ordered = Vec::new();
         let mut manuscript_documents = Vec::new();
         let mut research_documents = Vec::new();
@@ -2029,7 +2613,7 @@ impl HydratedDocuments {
                 &snapshot.project,
                 section.root_id(),
                 section,
-                &snapshots,
+                &summaries,
                 &mut ordered,
                 &mut manuscript_documents,
                 &mut research_documents,
@@ -2039,22 +2623,30 @@ impl HydratedDocuments {
             .first()
             .or_else(|| research_documents.first())
             .cloned();
-        let visibility = snapshots
+        let visibility = summaries
             .iter()
             .map(|(id, document)| (id.clone(), document.visibility))
             .collect();
-        let word_counts = snapshots
+        let word_counts = summaries
             .iter()
-            .map(|(id, document)| (id.clone(), count_words(&document.body)))
+            .filter_map(|(id, document)| match document.word_count {
+                parchmint_ui_api::DocumentWordCount::Pending => loaded
+                    .get(id)
+                    .map(|document| (id.clone(), count_words(&document.body))),
+                parchmint_ui_api::DocumentWordCount::Known(words) => Some((id.clone(), words)),
+            })
             .collect();
-        let revisions = snapshots
+        let revisions = summaries
             .iter()
             .map(|(id, document)| (id.clone(), document.revision.value()))
             .collect();
         let manuscript_total = manuscript_documents
             .iter()
-            .filter_map(|id| snapshots.get(id))
-            .map(|document| count_words(&document.body))
+            .filter_map(|id| summaries.get(id))
+            .filter_map(|document| match document.word_count {
+                parchmint_ui_api::DocumentWordCount::Pending => None,
+                parchmint_ui_api::DocumentWordCount::Known(words) => Some(words),
+            })
             .sum();
         Self {
             ordered,
@@ -2071,7 +2663,7 @@ fn append_section_documents(
     project: &parchmint_domain::Project,
     node_id: parchmint_domain::NodeId,
     section: ProjectSection,
-    snapshots: &BTreeMap<String, &parchmint_application::DocumentSnapshot>,
+    summaries: &BTreeMap<String, parchmint_ui_api::DocumentSummary>,
     ordered: &mut Vec<HydratedDocument>,
     manuscript_documents: &mut Vec<String>,
     research_documents: &mut Vec<String>,
@@ -2080,7 +2672,7 @@ fn append_section_documents(
         && let NodeKind::Document(document_id) = node.kind
     {
         let id = stable_id_string(document_id.as_bytes());
-        if snapshots.contains_key(&id) {
+        if summaries.contains_key(&id) {
             ordered.push(HydratedDocument {
                 id: id.clone(),
                 title: node.title.clone(),
@@ -2096,7 +2688,7 @@ fn append_section_documents(
             project,
             *child,
             section,
-            snapshots,
+            summaries,
             ordered,
             manuscript_documents,
             research_documents,
@@ -2125,6 +2717,84 @@ fn stable_id_string(bytes: &[u8; 16]) -> String {
         write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
     }
     serialized
+}
+
+fn snapshot_comment_anchors(snapshot: &ProjectSnapshot) -> BTreeMap<String, CommentAnchor> {
+    snapshot
+        .documents
+        .iter()
+        .flat_map(|document| {
+            let document_id = stable_id_string(document.document_id.as_bytes());
+            document.comments.iter().map(move |thread| {
+                let anchor = match &thread.anchor {
+                    parchmint_editor_api::CanonicalCommentAnchor::Document { .. } => {
+                        CommentAnchor::Document {
+                            document_id: document_id.clone(),
+                        }
+                    }
+                    parchmint_editor_api::CanonicalCommentAnchor::Text {
+                        orphaned: true,
+                        quote,
+                        context_before,
+                        context_after,
+                        ..
+                    } => CommentAnchor::Orphaned {
+                        document_id: document_id.clone(),
+                        quote: quote.clone(),
+                        context_before: context_before.clone(),
+                        context_after: context_after.clone(),
+                    },
+                    parchmint_editor_api::CanonicalCommentAnchor::Text { range, .. }
+                        if range.is_collapsed() =>
+                    {
+                        CommentAnchor::Position {
+                            document_id: document_id.clone(),
+                            position: range.start().value(),
+                        }
+                    }
+                    parchmint_editor_api::CanonicalCommentAnchor::Text { range, .. } => {
+                        CommentAnchor::Range {
+                            document_id: document_id.clone(),
+                            range: FindMatch::new(range.start().value(), range.end().value()),
+                        }
+                    }
+                };
+                (stable_id_string(thread.id.as_bytes()), anchor)
+            })
+        })
+        .collect()
+}
+
+fn snapshot_comment_threads(snapshot: &ProjectSnapshot) -> BTreeMap<String, CommentThreadView> {
+    let anchors = snapshot_comment_anchors(snapshot);
+    snapshot
+        .documents
+        .iter()
+        .flat_map(|document| {
+            let document_id = stable_id_string(document.document_id.as_bytes());
+            let anchors = &anchors;
+            document.comments.iter().map(move |thread| {
+                let id = stable_id_string(thread.id.as_bytes());
+                (
+                    id.clone(),
+                    CommentThreadView {
+                        id: id.clone(),
+                        document_id: document_id.clone(),
+                        messages: thread
+                            .messages
+                            .iter()
+                            .map(|message| CommentMessageView {
+                                id: stable_id_string(message.id.as_bytes()),
+                                body: message.body.clone(),
+                            })
+                            .collect(),
+                        resolved: thread.resolved,
+                        anchor: anchors[&id].clone(),
+                    },
+                )
+            })
+        })
+        .collect()
 }
 
 fn search_active(search: Option<&LocalSearchState>) -> Option<FindMatch> {
@@ -2167,6 +2837,29 @@ fn fit_tab_title(title: &str, width: f32) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_toolbar_commands_route_save_and_advanced_inline_marks() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        assert_eq!(
+            workspace.update(EditorMessage::Save),
+            vec![EditorEffect::RequestSave]
+        );
+        for (formatting, expected) in [
+            (FormattingCommand::SmallCaps, EditorCommand::ToggleSmallCaps),
+            (
+                FormattingCommand::Superscript,
+                EditorCommand::ToggleSuperscript,
+            ),
+            (FormattingCommand::Subscript, EditorCommand::ToggleSubscript),
+        ] {
+            let effects = workspace.update(EditorMessage::Format(formatting));
+            assert!(matches!(
+                effects.as_slice(),
+                [EditorEffect::Command { command, .. }] if command == &expected
+            ));
+        }
+    }
 
     #[test]
     fn activating_a_different_tab_invalidates_the_old_document_ticket() {
@@ -2301,6 +2994,7 @@ mod tests {
         assert_eq!(
             menu.actions(),
             [
+                SpellingMenuAction::AddComment,
                 SpellingMenuAction::Replace("the".to_owned()),
                 SpellingMenuAction::Replace("tech".to_owned()),
                 SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Project),
@@ -2308,6 +3002,23 @@ mod tests {
                 SpellingMenuAction::Ignore,
             ]
         );
+    }
+
+    #[test]
+    fn context_menu_exposes_add_comment_without_a_spelling_issue() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let request = SpellingMenuRequest::new(
+            EditorPane::Primary,
+            "Comment",
+            Rect::new(100.0, 100.0, 1.0, 18.0),
+            Rect::new(0.0, 0.0, 500.0, 400.0),
+        )
+        .with_spelling_actions(false);
+        let effects = workspace.update(EditorMessage::OpenSpellingMenu(request));
+        let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
+            panic!("expected comment context menu")
+        };
+        assert_eq!(menu.actions(), [SpellingMenuAction::AddComment]);
     }
 
     #[test]
@@ -2327,6 +3038,40 @@ mod tests {
     }
 
     #[test]
+    fn style_selector_lists_catalog_names_and_tracks_the_applied_style() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        assert!(workspace.style_names().iter().any(|style| style == "Body"));
+        assert!(
+            workspace
+                .style_names()
+                .iter()
+                .any(|style| style == "Heading 1")
+        );
+        assert_eq!(workspace.active_style(), "Body");
+        let effects = workspace.update(EditorMessage::Format(FormattingCommand::ParagraphStyle(
+            "Heading 1".into(),
+        )));
+        assert_eq!(workspace.active_style(), "Heading 1");
+        assert!(matches!(
+            effects.as_slice(),
+            [EditorEffect::Command {
+                command: EditorCommand::ApplyParagraphStyle(style),
+                ..
+            }] if style == "Heading 1"
+        ));
+        assert!(
+            workspace
+                .update(EditorMessage::SetActiveParagraphStyle("Body".into()))
+                .is_empty()
+        );
+        assert_eq!(workspace.active_style(), "Body");
+        workspace.update(EditorMessage::SetActiveParagraphStyle(
+            "Unknown style".into(),
+        ));
+        assert_eq!(workspace.active_style(), "Body");
+    }
+
+    #[test]
     fn document_level_and_orphaned_comments_do_not_claim_a_text_highlight() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::SetCommentAnchor {
@@ -2339,6 +3084,9 @@ mod tests {
             comment_id: "orphaned".to_owned(),
             anchor: CommentAnchor::Orphaned {
                 document_id: "chapter-one".to_owned(),
+                quote: "lost text".to_owned(),
+                context_before: String::new(),
+                context_after: String::new(),
             },
         });
 
@@ -2356,6 +3104,148 @@ mod tests {
             [EditorEffect::ShowOrphanedComment {
                 comment_id: "orphaned".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn comment_composers_reject_empty_text_and_thread_delete_requires_confirmation() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::SetCommentDraft("  ".into()));
+        assert!(
+            workspace
+                .update(EditorMessage::CreateComment {
+                    document_level: false
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.comment_feedback(),
+            Some("Comment text is required.")
+        );
+
+        workspace.update(EditorMessage::SetCommentDraft("A note".into()));
+        assert!(matches!(
+            workspace.update(EditorMessage::CreateComment { document_level: false }).as_slice(),
+            [EditorEffect::Command { command: EditorCommand::CreateComment { body, document_level: false }, .. }] if body == "A note"
+        ));
+        workspace.update(EditorMessage::BeginEditCommentMessage {
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            body: "Before".into(),
+        });
+        assert_eq!(
+            workspace.editing_comment_message(),
+            Some(("thread", "message"))
+        );
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "thread".into(),
+            body: "  ".into(),
+        });
+        assert!(
+            workspace
+                .update(EditorMessage::SaveEditedCommentMessage {
+                    thread_id: "thread".into(),
+                    message_id: "message".into(),
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.comment_feedback(),
+            Some("Comment text is required.")
+        );
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "thread".into(),
+            body: "  After  ".into(),
+        });
+        assert!(matches!(
+            workspace.update(EditorMessage::SaveEditedCommentMessage {
+                thread_id: "thread".into(),
+                message_id: "message".into(),
+            }).as_slice(),
+            [EditorEffect::Command { command: EditorCommand::EditCommentMessage { thread_id, message_id, body }, .. }]
+                if thread_id == "thread" && message_id == "message" && body == "After"
+        ));
+        workspace.update(EditorMessage::BeginEditCommentMessage {
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            body: "Before".into(),
+        });
+        assert!(
+            workspace
+                .update(EditorMessage::CancelEditCommentMessage)
+                .is_empty()
+        );
+        assert_eq!(workspace.editing_comment_message(), None);
+        workspace.update(EditorMessage::ToggleCommentReplies {
+            thread_id: "thread".into(),
+            collapsed: true,
+        });
+        assert!(workspace.comment_replies_collapsed("thread"));
+        workspace.update(EditorMessage::ToggleCommentReplies {
+            thread_id: "thread".into(),
+            collapsed: false,
+        });
+        assert!(!workspace.comment_replies_collapsed("thread"));
+        assert!(matches!(
+            workspace
+                .update(EditorMessage::ConvertCommentToDocument("thread".into()))
+                .as_slice(),
+            [EditorEffect::Command {
+                command: EditorCommand::ConvertCommentToDocument { thread_id },
+                ..
+            }] if thread_id == "thread"
+        ));
+        assert!(
+            workspace
+                .update(EditorMessage::RequestDeleteCommentThread("thread".into()))
+                .is_empty()
+        );
+        assert_eq!(workspace.pending_delete_comment(), Some("thread"));
+        assert!(matches!(
+            workspace.update(EditorMessage::ConfirmDeleteCommentThread).as_slice(),
+            [EditorEffect::Command { command: EditorCommand::DeleteCommentThread { thread_id }, .. }] if thread_id == "thread"
+        ));
+    }
+
+    #[test]
+    fn tab_pointer_drag_commits_through_move_tab_and_cancels_cleanly() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("chapter-three", "Chapter Three"),
+        });
+        workspace.update(EditorMessage::BeginTabDrag {
+            pane: EditorPane::Primary,
+            document_id: "chapter-one".to_owned(),
+        });
+        workspace.update(EditorMessage::SetTabDragTarget {
+            pane: EditorPane::Primary,
+            target_index: 1,
+        });
+        workspace.update(EditorMessage::CommitTabDrag);
+        assert_eq!(
+            workspace
+                .pane(EditorPane::Primary)
+                .tabs()
+                .iter()
+                .map(TabSpec::id)
+                .collect::<Vec<_>>(),
+            ["chapter-three", "chapter-one"]
+        );
+
+        workspace.update(EditorMessage::BeginTabDrag {
+            pane: EditorPane::Primary,
+            document_id: "chapter-three".to_owned(),
+        });
+        workspace.update(EditorMessage::SetTabDragTarget {
+            pane: EditorPane::Primary,
+            target_index: 1,
+        });
+        workspace.update(EditorMessage::CancelTabDrag);
+        assert_eq!(workspace.tab_drag_source(EditorPane::Primary), None);
+        assert_eq!(
+            workspace.pane(EditorPane::Primary).tabs()[0].id(),
+            "chapter-three"
         );
     }
 }

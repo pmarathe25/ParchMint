@@ -12,16 +12,19 @@ use std::{
     sync::Arc,
 };
 
-use parchmint_application::{DocumentSnapshot, GlobalReplacement, ProjectCommandDispatcher};
+use parchmint_application::{
+    DocumentSnapshot, DocumentVisibility, GlobalReplacement, ProjectCommandDispatcher,
+};
 use parchmint_domain::Project;
 use parchmint_editor_api::EditorAdapter;
+use parchmint_editor_api::EditorRevision;
 use parchmint_export_api::ExportRunOptions;
 use parchmint_export_api::Exporter;
 use parchmint_history_api::{CheckpointId, HistoryStore};
 use parchmint_platform_api::{
-    ApplicationPathService, ClipboardService, DialogService, ExternalOpenService, MenuService,
-    SystemAppearanceEventService, SystemAppearanceService, UntrustedPathSelection,
-    WindowCapability,
+    ApplicationPathService, ClipboardService, DialogService, ExternalOpenService,
+    MenuActivationService, MenuService, SystemAppearanceEventService, SystemAppearanceService,
+    UntrustedPathSelection, WindowCapability,
 };
 use parchmint_preferences::{AppearanceService, PreferenceService, ThemeSnapshot};
 use parchmint_recovery_api::RecoveryJournal;
@@ -30,8 +33,9 @@ use parchmint_search_api::SearchIndex;
 use parchmint_workspace_state::WorkspaceStateStore;
 
 pub use parchmint_application::{
-    CreateDocumentWorkflow, CreatedDocumentRevision, DuplicateSubtreeWorkflow,
-    DuplicatedSubtreeRevision, DurableProjectionAck, MoveNodeWorkflow, MoveNodesWorkflow,
+    CreateDocumentWorkflow, CreatedDocumentRevision, DeleteSubtreesWorkflow,
+    DeletedSubtreesRevision, DuplicateSubtreesWorkflow, DuplicatedSubtreesRevision,
+    DurableProjectionAck, MoveNodeWorkflow, MoveNodesWorkflow,
     PersistenceRecoveryState as ProjectRecoveryState,
     PersistenceRevision as ProjectPersistenceRevision, PersistenceSaveHandle as ProjectSaveHandle,
     PersistenceSaveKind as ProjectSaveKind, PersistenceSavedRevision as SavedProjectRevision,
@@ -172,9 +176,27 @@ impl ProjectSessionRegistry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectSnapshot {
     pub project: Project,
+    /// Summaries for every canonical document, including bodies not yet loaded.
+    pub document_summaries: Vec<DocumentSummary>,
+    /// Session-loaded bodies only. Initial hydration normally contains one body.
     pub documents: Vec<DocumentSnapshot>,
     /// Canonical authored project styles used by export planning.
     pub styles_css: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentWordCount {
+    Pending,
+    Known(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentSummary {
+    pub document_id: parchmint_domain::DocumentId,
+    pub revision: EditorRevision,
+    pub visibility: DocumentVisibility,
+    pub content_hash: Option<[u8; 32]>,
+    pub word_count: DocumentWordCount,
 }
 
 /// A failure while reading current project state for the UI.
@@ -202,6 +224,23 @@ impl Error for ProjectQueryError {}
 /// Authoritative current-project reads supplied beside mutation commands.
 pub trait ProjectSnapshotQuery: Send + Sync {
     fn snapshot(&self) -> Result<ProjectSnapshot, ProjectQueryError>;
+
+    /// Materializes every live document body for an off-loop export workflow.
+    fn snapshot_for_export(&self) -> Result<ProjectSnapshot, ProjectQueryError> {
+        self.snapshot()
+    }
+
+    /// Loads and validates one canonical document body for this exact session.
+    fn load_document(
+        &self,
+        document: parchmint_domain::DocumentId,
+    ) -> Result<DocumentSnapshot, ProjectQueryError> {
+        self.snapshot()?
+            .documents
+            .into_iter()
+            .find(|snapshot| snapshot.document_id == document)
+            .ok_or_else(|| ProjectQueryError::new("document body is not loaded"))
+    }
 }
 
 /// Read-only save state exposed to the UI.
@@ -238,6 +277,11 @@ pub trait ProjectPersistencePort: Send + Sync {
         &self,
         acceptance: ProjectRecoveryAcceptance,
     ) -> Result<ProjectRecoveryState, ProjectPersistenceError>;
+
+    fn discard_recovery(
+        &self,
+        acceptance: ProjectRecoveryAcceptance,
+    ) -> Result<ProjectRecoveryState, ProjectPersistenceError>;
 }
 
 /// Result of a high-level authored-project mutation after its structural save.
@@ -251,7 +295,7 @@ pub struct ProjectWorkflowSnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectDuplicateWorkflowSnapshot {
     pub workflow: ProjectWorkflowSnapshot,
-    pub created_root: parchmint_domain::NodeId,
+    pub created_roots: Vec<parchmint_domain::NodeId>,
     pub node_ids: BTreeMap<parchmint_domain::NodeId, parchmint_domain::NodeId>,
     pub document_ids: BTreeMap<parchmint_domain::DocumentId, parchmint_domain::DocumentId>,
 }
@@ -274,14 +318,19 @@ pub trait ProjectWorkflowPort: Send + Sync {
         name: String,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
 
+    fn delete_subtrees(
+        &self,
+        request: DeleteSubtreesWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
     fn move_nodes(
         &self,
         request: MoveNodesWorkflow,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
 
-    fn duplicate_subtree(
+    fn duplicate_subtrees(
         &self,
-        request: DuplicateSubtreeWorkflow,
+        request: DuplicateSubtreesWorkflow,
     ) -> Result<ProjectDuplicateWorkflowSnapshot, ProjectQueryError>;
 }
 
@@ -306,21 +355,73 @@ pub struct ExportArtifact {
     pub display_name: String,
 }
 
+/// Identifies one registered export operation independently of its filename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExportOperationToken(u64);
+
+impl ExportOperationToken {
+    pub const fn from_raw(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportOutcome {
+    Completed(ExportArtifact),
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportArtifactAction {
     Open,
     Reveal,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HistoryMaintenanceStatus {
+    #[default]
+    Available,
+    Reinitializable {
+        problem: String,
+    },
+    Unavailable {
+        problem: String,
+        reason: String,
+    },
+}
+
+pub trait ProjectHistoryMaintenancePort: Send + Sync {
+    fn status(&self) -> Result<HistoryMaintenanceStatus, ProjectQueryError>;
+    fn reinitialize(&self) -> Result<String, ProjectQueryError>;
+}
+
 /// Validates an untrusted SaveFile selection, acquires the writable target,
 /// runs planning/validation/export, and retains the completed artifact for
 /// later file-specific open or reveal actions.
 pub trait ProjectExportPort: Send + Sync {
+    /// Registers the cancellation handle and progress receiver before any
+    /// planning or rendering begins. Registering a new operation makes the
+    /// previous operation stale and requests its cancellation.
+    fn begin_export(
+        &self,
+        progress: Arc<dyn parchmint_export_api::ExportProgressSink>,
+    ) -> Result<ExportOperationToken, ProjectQueryError>;
+
     fn export_to_path(
         &self,
+        operation: ExportOperationToken,
         selection: UntrustedPathSelection,
         options: ExportRunOptions,
-    ) -> Result<ExportArtifact, ProjectQueryError>;
+    ) -> Result<ExportOutcome, ProjectQueryError>;
+
+    fn cancel_export(
+        &self,
+        operation: ExportOperationToken,
+    ) -> Result<parchmint_export_api::CancelOutcome, ProjectQueryError>;
 
     fn act_on_artifact(
         &self,
@@ -364,6 +465,13 @@ impl ProjectPersistencePort for parchmint_application::ProjectPersistenceCoordin
         acceptance: ProjectRecoveryAcceptance,
     ) -> Result<ProjectRecoveryState, ProjectPersistenceError> {
         self.accept_recovery(acceptance)
+    }
+
+    fn discard_recovery(
+        &self,
+        acceptance: ProjectRecoveryAcceptance,
+    ) -> Result<ProjectRecoveryState, ProjectPersistenceError> {
+        self.discard_recovery(acceptance)
     }
 }
 
@@ -420,6 +528,7 @@ impl ApplicationServices {
 #[derive(Clone)]
 pub struct PlatformServices {
     pub menus: Arc<dyn MenuService>,
+    pub menu_activations: Option<Arc<dyn MenuActivationService>>,
     pub dialogs: Arc<dyn DialogService>,
     pub clipboard: Arc<dyn ClipboardService>,
     pub external_open: Arc<dyn ExternalOpenService>,
@@ -438,6 +547,7 @@ pub struct ProjectUiServices {
     application: ApplicationServices,
     query: Arc<dyn ProjectSnapshotQuery>,
     history: Arc<dyn HistoryStore>,
+    history_maintenance: Arc<dyn ProjectHistoryMaintenancePort>,
     recovery: Arc<dyn RecoveryJournal>,
     search: Arc<dyn SearchIndex>,
     save_status: Arc<dyn ProjectSaveStatus>,
@@ -459,6 +569,7 @@ impl ProjectUiServices {
         application: ApplicationServices,
         query: Arc<dyn ProjectSnapshotQuery>,
         history: Arc<dyn HistoryStore>,
+        history_maintenance: Arc<dyn ProjectHistoryMaintenancePort>,
         recovery: Arc<dyn RecoveryJournal>,
         search: Arc<dyn SearchIndex>,
         save_status: Arc<dyn ProjectSaveStatus>,
@@ -477,6 +588,7 @@ impl ProjectUiServices {
             application,
             query,
             history,
+            history_maintenance,
             recovery,
             search,
             save_status,
@@ -602,6 +714,13 @@ impl ProjectUiAccess<'_> {
         Ok(use_service(self.services()?.history.as_ref()))
     }
 
+    pub fn history_maintenance<R>(
+        &self,
+        use_service: impl for<'a> FnOnce(&'a dyn ProjectHistoryMaintenancePort) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.history_maintenance.as_ref()))
+    }
+
     pub fn recovery<R>(
         &self,
         use_service: impl for<'a> FnOnce(&'a dyn RecoveryJournal) -> R,
@@ -670,6 +789,12 @@ impl ProjectUiAccess<'_> {
         use_service: impl for<'a> FnOnce(&'a dyn WorkspaceStateStore) -> R,
     ) -> Result<R, StaleProjectSession> {
         Ok(use_service(self.services()?.workspace_state.as_ref()))
+    }
+
+    /// Borrows workspace persistence for an async load/save while this exact
+    /// project-session access remains authorized.
+    pub fn workspace_state_service(&self) -> Result<&dyn WorkspaceStateStore, StaleProjectSession> {
+        Ok(self.services()?.workspace_state.as_ref())
     }
 
     pub fn preferences<R>(
@@ -745,6 +870,7 @@ impl PlatformServices {
     ) -> Self {
         Self {
             menus,
+            menu_activations: None,
             dialogs,
             clipboard,
             external_open,
@@ -759,6 +885,11 @@ impl PlatformServices {
         events: Arc<dyn SystemAppearanceEventService>,
     ) -> Self {
         self.system_appearance_events = Some(events);
+        self
+    }
+
+    pub fn with_menu_activations(mut self, activations: Arc<dyn MenuActivationService>) -> Self {
+        self.menu_activations = Some(activations);
         self
     }
 }

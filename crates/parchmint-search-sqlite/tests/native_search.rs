@@ -12,8 +12,9 @@ use std::{
 
 use parchmint_search_api::{
     BlockId, DocumentId, ProjectId, RevisionId, SearchBatch, SearchBatchSink,
-    SearchDocumentProjection, SearchField, SearchIndex, SearchIndexProblem, SearchIndexState,
-    SearchProjectionSource, SearchProjectionVisitor, SearchQuery, SearchTextProjection,
+    SearchDocumentProjection, SearchField, SearchFrontierId, SearchIndex, SearchIndexProblem,
+    SearchIndexState, SearchProjectionSource, SearchProjectionVisitor, SearchQuery,
+    SearchRebuildStatus, SearchTextProjection,
 };
 use parchmint_search_sqlite::SqliteSearchIndex;
 
@@ -72,6 +73,71 @@ impl SearchProjectionSource for FailingSource {
         Err(parchmint_search_api::SearchError::Source {
             reason: "injected canonical projection failure".into(),
         })
+    }
+}
+
+struct FrontierSource {
+    frontier: SearchFrontierId,
+    projections: Vec<SearchDocumentProjection>,
+    visits: Arc<AtomicU64>,
+}
+
+struct GatedFrontierSource {
+    frontier: SearchFrontierId,
+    projections: Vec<SearchDocumentProjection>,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+    visits: Arc<AtomicU64>,
+}
+
+impl SearchProjectionSource for GatedFrontierSource {
+    fn visit_projections(
+        &self,
+        visitor: &mut dyn SearchProjectionVisitor,
+    ) -> Result<(), parchmint_search_api::SearchError> {
+        self.entered.wait();
+        self.release.wait();
+        for projection in &self.projections {
+            self.visits.fetch_add(1, Ordering::SeqCst);
+            visitor.visit(projection.clone())?;
+        }
+        Ok(())
+    }
+
+    fn frontier_identity(&self) -> Option<SearchFrontierId> {
+        Some(self.frontier)
+    }
+}
+
+fn wait_for_rebuild(index: &SqliteSearchIndex) -> SearchRebuildStatus {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = index.rebuild_status();
+        if !matches!(status, SearchRebuildStatus::Running { .. }) {
+            return status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "rebuild did not settle"
+        );
+        thread::yield_now();
+    }
+}
+
+impl SearchProjectionSource for FrontierSource {
+    fn visit_projections(
+        &self,
+        visitor: &mut dyn SearchProjectionVisitor,
+    ) -> Result<(), parchmint_search_api::SearchError> {
+        self.visits.fetch_add(1, Ordering::SeqCst);
+        for projection in &self.projections {
+            visitor.visit(projection.clone())?;
+        }
+        Ok(())
+    }
+
+    fn frontier_identity(&self) -> Option<SearchFrontierId> {
+        Some(self.frontier)
     }
 }
 
@@ -368,6 +434,186 @@ fn corrupt_or_incompatible_cache_rebuilds_without_touching_authored_bytes() {
 }
 
 #[test]
+fn warm_index_with_matching_frontier_does_not_visit_canonical_bodies() {
+    let project = TestProject::new("warm-frontier");
+    let frontier = SearchFrontierId::from_bytes([23; 32]);
+    let initial_visits = Arc::new(AtomicU64::new(0));
+    let first = project.index();
+    assert_eq!(
+        first.open_or_rebuild(
+            project_id(1),
+            &FrontierSource {
+                frontier,
+                projections: vec![projection(1, 4, SearchField::Body, "warm body")],
+                visits: initial_visits.clone(),
+            },
+        ),
+        Ok(SearchIndexState::Rebuilt {
+            previous: SearchIndexProblem::Missing,
+        })
+    );
+    assert_eq!(initial_visits.load(Ordering::SeqCst), 1);
+    drop(first);
+
+    let warm_visits = Arc::new(AtomicU64::new(0));
+    let reopened = project.index();
+    assert_eq!(
+        reopened.open_or_rebuild(
+            project_id(1),
+            &FrontierSource {
+                frontier,
+                projections: Vec::new(),
+                visits: warm_visits.clone(),
+            },
+        ),
+        Ok(SearchIndexState::Opened)
+    );
+    assert_eq!(warm_visits.load(Ordering::SeqCst), 0);
+
+    let receipt = reopened
+        .replace_document(projection(1, 4, SearchField::Body, "warm body"))
+        .unwrap();
+    assert!(!receipt.replaced);
+    drop(reopened);
+    let preserved = project.index();
+    let preserved_visits = Arc::new(AtomicU64::new(0));
+    assert_eq!(
+        preserved.open_or_rebuild(
+            project_id(1),
+            &FrontierSource {
+                frontier,
+                projections: Vec::new(),
+                visits: preserved_visits.clone(),
+            },
+        ),
+        Ok(SearchIndexState::Opened)
+    );
+    assert_eq!(preserved_visits.load(Ordering::SeqCst), 0);
+
+    preserved
+        .replace_document(projection(1, 5, SearchField::Body, "unsaved live body"))
+        .unwrap();
+    drop(preserved);
+    let rebuild_visits = Arc::new(AtomicU64::new(0));
+    let after_live_write = project.index();
+    assert_eq!(
+        after_live_write.open_or_rebuild(
+            project_id(1),
+            &FrontierSource {
+                frontier,
+                projections: vec![projection(1, 4, SearchField::Body, "warm body")],
+                visits: rebuild_visits.clone(),
+            },
+        ),
+        Ok(SearchIndexState::Rebuilt {
+            previous: SearchIndexProblem::Incompatible,
+        })
+    );
+    assert_eq!(rebuild_visits.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn background_open_returns_while_source_is_blocked_and_cancel_prevents_publication() {
+    let project = TestProject::new("background-cancel");
+    let index = project.index();
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let visits = Arc::new(AtomicU64::new(0));
+    let state = index
+        .open_or_rebuild_background(
+            project_id(1),
+            Arc::new(GatedFrontierSource {
+                frontier: SearchFrontierId::from_bytes([31; 32]),
+                projections: (1..=32)
+                    .map(|document| projection(document, 1, SearchField::Body, "needle"))
+                    .collect(),
+                entered: entered.clone(),
+                release: release.clone(),
+                visits: visits.clone(),
+            }),
+        )
+        .unwrap();
+    let SearchIndexState::Rebuilding { generation, .. } = state else {
+        panic!("missing index should rebuild in the background")
+    };
+    entered.wait();
+    assert!(matches!(
+        index.query(query("needle", 71), Box::new(Sink::default())),
+        Err(parchmint_search_api::SearchError::Rebuilding {
+            generation: active
+        }) if active == generation
+    ));
+    index.cancel(generation);
+    release.wait();
+    assert_eq!(
+        wait_for_rebuild(&index),
+        SearchRebuildStatus::Cancelled { generation }
+    );
+    assert_eq!(visits.load(Ordering::SeqCst), 1);
+    assert!(!index.verify().unwrap().healthy);
+}
+
+#[test]
+fn background_rebuild_publishes_frontier_only_after_bounded_stream_finishes() {
+    let project = TestProject::new("background-publish");
+    let index = project.index();
+    let frontier = SearchFrontierId::from_bytes([37; 32]);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let visits = Arc::new(AtomicU64::new(0));
+    let state = index
+        .open_or_rebuild_background(
+            project_id(1),
+            Arc::new(GatedFrontierSource {
+                frontier,
+                projections: (1..=48)
+                    .map(|document| projection(document, 1, SearchField::Body, "bounded"))
+                    .collect(),
+                entered: entered.clone(),
+                release: release.clone(),
+                visits: visits.clone(),
+            }),
+        )
+        .unwrap();
+    let SearchIndexState::Rebuilding { generation, .. } = state else {
+        panic!("missing index should rebuild in the background")
+    };
+    entered.wait();
+    assert!(matches!(
+        index.rebuild_status(),
+        SearchRebuildStatus::Running {
+            processed_documents: 0,
+            ..
+        }
+    ));
+    release.wait();
+    assert_eq!(
+        wait_for_rebuild(&index),
+        SearchRebuildStatus::Complete {
+            generation,
+            indexed_documents: 48,
+        }
+    );
+    assert_eq!(visits.load(Ordering::SeqCst), 48);
+    drop(index);
+
+    let warm_visits = Arc::new(AtomicU64::new(0));
+    let reopened = project.index();
+    assert_eq!(
+        reopened.open_or_rebuild_background(
+            project_id(1),
+            Arc::new(FrontierSource {
+                frontier,
+                projections: Vec::new(),
+                visits: warm_visits.clone(),
+            }),
+        ),
+        Ok(SearchIndexState::Opened)
+    );
+    assert_eq!(warm_visits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn failed_projection_stream_rolls_back_and_cannot_publish_an_incomplete_cache() {
     let project = TestProject::new("rollback");
     let index = project.index();
@@ -508,4 +754,42 @@ fn revisioned_transactions_keep_newer_projection_and_delete_revision_atomic() {
         !stale.replaced,
         "an equal-revision projection must not cross a tombstone"
     );
+}
+
+#[test]
+fn equal_document_revision_replaces_changed_project_field_projection() {
+    let project = TestProject::new("equal-document-revision");
+    let index = project.index();
+    open(
+        &index,
+        1,
+        vec![projection(
+            1,
+            7,
+            SearchField::DisplayTitle,
+            "Original title",
+        )],
+    );
+
+    let refreshed = index
+        .replace_document(projection(1, 7, SearchField::DisplayTitle, "Fresh title"))
+        .expect("equal canonical document revision should refresh project fields");
+    assert!(refreshed.replaced);
+
+    let sink = Sink::default();
+    index
+        .query(
+            SearchQuery {
+                fields: fields([SearchField::DisplayTitle]),
+                ..query("Fresh title", 41)
+            },
+            Box::new(sink.clone()),
+        )
+        .expect("fresh title query");
+    let batches = sink.batches();
+    assert_eq!(
+        batches.iter().map(|batch| batch.hits.len()).sum::<usize>(),
+        1
+    );
+    assert_eq!(batches[0].hits[0].indexed_revision, RevisionId::from(7));
 }

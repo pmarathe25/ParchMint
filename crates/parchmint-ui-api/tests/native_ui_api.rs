@@ -5,8 +5,8 @@ use std::sync::Arc;
 use parchmint_application::{GlobalReplacement, ProjectCommandDispatcher};
 use parchmint_editor_api::EditorAdapter;
 use parchmint_platform_api::{
-    ApplicationPathService, ClipboardService, DialogService, ExternalOpenService, MenuService,
-    SystemAppearanceService, WindowCapability,
+    ApplicationPathService, ClipboardService, DialogService, ExternalOpenService,
+    MenuActivationService, MenuService, SystemAppearanceService, WindowCapability,
 };
 use parchmint_preferences::{
     AppearanceService, PreferenceService, ResolvedAppearance, ThemeSnapshot,
@@ -45,6 +45,7 @@ fn fake_ui_accepts_the_framework_neutral_startup_and_service_contract() {
     assert_service::<dyn EditorAdapter>();
     assert_service::<dyn SpellcheckService>();
     assert_service::<dyn MenuService>();
+    assert_service::<dyn MenuActivationService>();
     assert_service::<dyn DialogService>();
     assert_service::<dyn ClipboardService>();
     assert_service::<dyn ExternalOpenService>();

@@ -5,9 +5,11 @@
 //! content and project styling comes from the plan.
 
 use parchmint_export_api::{
-    ExportError, ExportHandle, ExportPlan, ExportRequest, ExportSink, ExportValidationReport,
-    Exporter, ProjectSnapshot, SemanticExportItem, TemporaryExport,
+    ExportCompletion, ExportError, ExportHandle, ExportPlan, ExportProgress, ExportProgressSink,
+    ExportRequest, ExportSink, ExportValidationReport, Exporter, ProjectSnapshot,
+    SemanticExportItem, TemporaryExport,
 };
+use std::sync::Arc;
 
 const CHUNK_BYTES: usize = 8 * 1024;
 
@@ -26,7 +28,8 @@ impl HtmlExporter {
         plan: &ExportPlan,
         sink: &mut dyn ExportSink,
         handle: &ExportHandle,
-    ) -> Result<(), ExportError> {
+        progress: &dyn ExportProgressSink,
+    ) -> Result<ExportCompletion, ExportError> {
         let mut output = handle.begin_temporary(sink, plan.target())?;
         write_chunked(
             &mut output,
@@ -35,14 +38,24 @@ impl HtmlExporter {
         write_chunked(&mut output, &sanitize_css(plan.styles().css()))?;
         write_chunked(&mut output, "</style></head><body>")?;
 
-        for item in plan.items() {
+        let total = u64::try_from(plan.items().len()).unwrap_or(u64::MAX);
+        progress.report(ExportProgress::Rendering {
+            completed: 0,
+            total,
+        });
+        for (index, item) in plan.items().iter().enumerate() {
             let mut rendered = String::new();
             render_item(item, &mut rendered);
             write_chunked(&mut output, &rendered)?;
+            progress.report(ExportProgress::Rendering {
+                completed: u64::try_from(index + 1).unwrap_or(u64::MAX),
+                total,
+            });
         }
 
         write_chunked(&mut output, "</body></html>")?;
-        output.finish().map(|_| ())
+        progress.report(ExportProgress::Committing);
+        output.finish()
     }
 }
 
@@ -65,10 +78,10 @@ impl Exporter for HtmlExporter {
         &self,
         plan: ExportPlan,
         mut sink: Box<dyn ExportSink>,
-    ) -> Result<ExportHandle, ExportError> {
-        let handle = ExportHandle::new();
-        self.render(&plan, sink.as_mut(), &handle)?;
-        Ok(handle)
+        handle: ExportHandle,
+        progress: Arc<dyn ExportProgressSink>,
+    ) -> Result<ExportCompletion, ExportError> {
+        self.render(&plan, sink.as_mut(), &handle, progress.as_ref())
     }
 }
 

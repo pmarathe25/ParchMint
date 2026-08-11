@@ -19,8 +19,9 @@ use parchmint_application::{
 use parchmint_contracts::generated::CliOutputV1;
 use parchmint_domain::{BlockId, CheckpointId, DocumentId, ProjectId, ProjectRevision};
 use parchmint_export_api::{
-    ExportDefaults, ExportNode, ExportRequest, ExportRunOptions, ExportSink, ExportSource,
-    ExportStyleCatalog, Exporter, ProjectSnapshot as ExportProjectSnapshot, SourceRevision,
+    ExportDefaults, ExportHandle, ExportNode, ExportRequest, ExportRunOptions, ExportSink,
+    ExportSource, ExportStyleCatalog, Exporter, IgnoreExportProgress,
+    ProjectSnapshot as ExportProjectSnapshot, SourceRevision,
 };
 use parchmint_export_html::HtmlExporter;
 use parchmint_history_api::{HistoryPageQuery, HistoryStore, SnapshotName};
@@ -390,6 +391,7 @@ fn edit(path: PathBuf, resource: String, text: String) -> Outcome {
         body: String::from_utf8_lossy(&current).into_owned(),
         revision: Default::default(),
         visibility: DocumentVisibility::Open,
+        comments: Vec::new(),
     }]);
     let command = DocumentCommand {
         document_id: document,
@@ -754,7 +756,12 @@ fn export(path: PathBuf, output: PathBuf) -> Outcome {
         Ok(plan) => plan,
         Err(_) => return Outcome::failed(),
     };
-    match exporter.export(plan, Box::new(NativeExportSink::new(destination))) {
+    match exporter.export(
+        plan,
+        Box::new(NativeExportSink::new(destination)),
+        ExportHandle::new(),
+        Arc::new(IgnoreExportProgress),
+    ) {
         Ok(_) => Outcome::success(),
         Err(_) => Outcome::failed(),
     }

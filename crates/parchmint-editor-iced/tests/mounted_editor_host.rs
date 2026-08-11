@@ -3,7 +3,7 @@ use iced_test::Simulator;
 use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, CanonicalDocumentLoad, DocumentId, EditorAdapter,
     EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorSelection, InlineMarkKind,
-    StyleCatalog, ViewId,
+    StyleCatalog, StyleCatalogProjection, ViewId,
 };
 use parchmint_editor_iced::{
     EditorIcedAdapter, EditorIcedConfig, EditorSurfaceTheme, EditorViewport, MountedEditorConfig,
@@ -117,6 +117,37 @@ fn configured_viewport_controls_public_element_size() {
 }
 
 #[test]
+fn mounted_style_refresh_relayouts_without_rewriting_the_document() {
+    let (host, adapter) = mounted_host(EditorSurfaceTheme::light());
+    let session = host.config().session();
+    let view = host.config().view();
+    let block = host.config().block();
+    let before_revision = adapter.revision(session.clone()).unwrap();
+    let before = adapter
+        .geometry(session.clone(), view, block)
+        .unwrap()
+        .draw_scalars()[0]
+        .font_size;
+
+    let mut catalog = StyleCatalog::default();
+    let mut body = catalog.get(StyleCatalog::body_id()).unwrap().clone();
+    body.properties.font_size_points = Some(24.0);
+    catalog.upsert(body).unwrap();
+    adapter
+        .set_style_catalog(session.clone(), StyleCatalogProjection::new(catalog))
+        .unwrap();
+    host.refresh().unwrap();
+
+    let after = adapter
+        .geometry(session.clone(), view, block)
+        .unwrap()
+        .draw_scalars()[0]
+        .font_size;
+    assert!(after > before);
+    assert_eq!(adapter.revision(session).unwrap(), before_revision);
+}
+
+#[test]
 fn semantic_html_mounts_without_tags_and_host_formats_the_selected_text() {
     let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
     let session = adapter
@@ -200,6 +231,9 @@ fn semantic_html_mounts_without_tags_and_host_formats_the_selected_text() {
         (InlineMarkKind::Italic, 3),
         (InlineMarkKind::Underline, 4),
         (InlineMarkKind::Strikethrough, 5),
+        (InlineMarkKind::SmallCaps, 6),
+        (InlineMarkKind::Superscript, 7),
+        (InlineMarkKind::Subscript, 8),
     ] {
         let update = host
             .update(parchmint_editor_iced::MountedEditorMessage::ToggleInlineMark(mark))
@@ -211,7 +245,7 @@ fn semantic_html_mounts_without_tags_and_host_formats_the_selected_text() {
             "https://example.com".into(),
         )))
         .expect("set link through mounted host");
-    assert_eq!(linked.revision().value(), 6);
+    assert_eq!(linked.revision().value(), 9);
     adapter
         .next_frame(session.clone())
         .expect("advance marked frame");
@@ -228,6 +262,9 @@ fn semantic_html_mounts_without_tags_and_host_formats_the_selected_text() {
     assert!(marked.iter().all(|scalar| scalar.italic));
     assert!(marked.iter().all(|scalar| scalar.underline));
     assert!(marked.iter().all(|scalar| scalar.strikethrough));
+    assert!(marked.iter().all(|scalar| scalar.small_caps));
+    assert!(marked.iter().all(|scalar| scalar.superscript));
+    assert!(marked.iter().all(|scalar| scalar.subscript));
     assert!(marked.iter().all(|scalar| scalar.link));
 
     let mut simulator =
@@ -236,6 +273,78 @@ fn semantic_html_mounts_without_tags_and_host_formats_the_selected_text() {
         .snapshot(&Theme::Light)
         .expect("formatted surface snapshot");
     assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
+}
+
+#[test]
+fn mounted_updates_and_remounts_report_the_caret_block_style() {
+    let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+    let session = adapter
+        .open_session(CanonicalDocumentLoad::new(
+            DocumentId::from_bytes([91; 16]),
+            "<p data-style-id=\"body\">a</p><h1 data-style-id=\"heading-1\">b</h1>",
+        ))
+        .expect("styled session");
+    let first_view = ViewId::from_bytes([92; 16]);
+    let first_capability = adapter
+        .create_view_host(WindowCapability::new(91, 1), first_view)
+        .expect("first capability");
+    adapter
+        .attach_view(session.clone(), first_view, first_capability)
+        .expect("first view");
+    let block = BlockId::from_bytes([91; 16]);
+    let visible = adapter
+        .primary_visible_block(session.clone())
+        .expect("visible block");
+    adapter
+        .cache_visible_blocks(session.clone(), first_view, [visible])
+        .expect("first cache");
+    let first = MountedEditorHost::mount(
+        &adapter,
+        MountedEditorConfig::new(
+            session.clone(),
+            first_view,
+            block,
+            EditorSurfaceTheme::light(),
+        ),
+    )
+    .expect("first host");
+    let body = first
+        .update(parchmint_editor_iced::MountedEditorMessage::Focus(1.into()))
+        .expect("focus body boundary");
+    assert_eq!(body.active_style(), StyleCatalog::body_id());
+    let update = first
+        .update(parchmint_editor_iced::MountedEditorMessage::KeyCommand(
+            parchmint_editor_iced::MountedEditorKeyCommand::MoveRight { extend: false },
+        ))
+        .expect("move caret across the block boundary");
+    assert!(!update.document_changed());
+    assert_eq!(update.active_style(), StyleCatalog::heading_1_id());
+
+    adapter
+        .detach_view(session.clone(), first_view)
+        .expect("detach first view");
+    let second_view = ViewId::from_bytes([93; 16]);
+    let second_capability = adapter
+        .create_view_host(WindowCapability::new(91, 1), second_view)
+        .expect("second capability");
+    adapter
+        .attach_view(session.clone(), second_view, second_capability)
+        .expect("second view");
+    let visible = adapter
+        .primary_visible_block(session.clone())
+        .expect("remounted visible block");
+    adapter
+        .cache_visible_blocks(session.clone(), second_view, [visible])
+        .expect("second cache");
+    let remounted = MountedEditorHost::mount(
+        &adapter,
+        MountedEditorConfig::new(session, second_view, block, EditorSurfaceTheme::light()),
+    )
+    .expect("remounted host");
+    assert_eq!(
+        remounted.active_style().expect("remounted style"),
+        StyleCatalog::body_id()
+    );
 }
 
 #[test]

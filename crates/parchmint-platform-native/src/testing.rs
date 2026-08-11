@@ -16,9 +16,9 @@ use std::{
 
 use parchmint_platform_api::{
     ApplicationPaths, ClipboardContent, ClipboardFormats, ClipboardService, DialogService,
-    ExternalOpenService, MenuService, PathDialog, PlatformError, SemanticMenu, SystemAppearance,
-    SystemAppearanceEventService, SystemAppearanceService, UntrustedClipboardContent,
-    UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
+    ExternalOpenService, MenuActivationService, MenuService, PathDialog, PlatformError,
+    SemanticMenu, SystemAppearance, SystemAppearanceEventService, SystemAppearanceService,
+    UntrustedClipboardContent, UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
 };
 
 use crate::{
@@ -82,6 +82,20 @@ impl NativeFixture {
 
     pub fn menus(&self) -> Arc<dyn MenuService> {
         self.services.clone()
+    }
+
+    pub fn menu_activations(&self) -> Arc<dyn MenuActivationService> {
+        self.services.clone()
+    }
+
+    pub fn activate_menu(
+        &self,
+        window: WindowCapability,
+        binding: u64,
+        command_id: impl Into<String>,
+    ) -> Result<(), PlatformError> {
+        self.services
+            .publish_menu_activation(window, binding, command_id)
     }
 
     pub fn dialogs(&self) -> Arc<dyn DialogService> {
@@ -211,6 +225,10 @@ impl Default for NativeFixture {
 pub struct NativeMenuSnapshot(MenuSnapshot);
 
 impl NativeMenuSnapshot {
+    pub fn menu(&self) -> &SemanticMenu {
+        self.0.menu()
+    }
+
     pub fn commands(&self) -> &[String] {
         self.0.commands()
     }
@@ -271,6 +289,13 @@ impl NativeBackend for FixtureBackend {
             .unwrap_or_else(|error| error.into_inner())
             .insert(window, snapshot);
         Ok(())
+    }
+
+    fn remove_menu(&self, window: WindowCapability) {
+        self.menus
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&window);
     }
 
     fn choose_path(

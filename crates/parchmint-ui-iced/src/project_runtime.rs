@@ -13,18 +13,19 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_application::{
-    ApplicationError, CreateDocumentWorkflow, DuplicateSubtreeWorkflow, MoveNodeWorkflow,
-    MoveNodesWorkflow,
+    ApplicationError, CreateDocumentWorkflow, DeleteSubtreesWorkflow, DuplicateSubtreesWorkflow,
+    MoveNodeWorkflow, MoveNodesWorkflow,
 };
 use parchmint_domain::{
-    DocumentId, MetadataApplicability, MetadataFieldId, NodeId, NodeKind, ProjectCommand,
-    ProjectRevision, apply_project_command,
+    DocumentId, MetadataFieldId, NodeId, NodeKind, ProjectCommand, ProjectRevision, StyleId,
+    apply_project_command,
 };
 use parchmint_editor_api::{
-    CanonicalDocumentLoad, DocumentPosition, EditorSelection,
+    CanonicalCommentAnchor, CanonicalDocumentLoad, CommentId, DocumentPosition, EditorSelection,
     SearchDecoration as AdapterSearchDecoration, SpellcheckDecoration as AdapterSpellDecoration,
     StyleCatalogProjection, ViewId,
 };
@@ -59,6 +60,14 @@ impl NativeProjectEffectExecutor {
         }
     }
 
+    pub(crate) fn refreshed(&self, snapshot: Arc<ProjectSnapshot>) -> Self {
+        Self {
+            ports: Arc::clone(&self.ports),
+            snapshot,
+            operation_sequence: Arc::clone(&self.operation_sequence),
+        }
+    }
+
     /// Executes one project effect and returns an owned Iced-task completion.
     pub(crate) async fn execute_project_effect(
         self,
@@ -74,12 +83,14 @@ impl NativeProjectEffectExecutor {
         let resolvers = StableIdResolvers::from_snapshot(&current);
 
         match effect {
-            ProjectEffect::OpenDocumentInPrimary(document_id) => self
-                .open_documents(&resolvers, EditorPane::Primary, [document_id])
-                .map(ProjectEffectCompletion::OpenDocuments),
-            ProjectEffect::OpenDocumentInCompanion(document_id) => self
-                .open_documents(&resolvers, EditorPane::Companion, [document_id])
-                .map(ProjectEffectCompletion::OpenDocuments),
+            ProjectEffect::OpenDocumentInPrimary(document_id) => {
+                self.open_documents(&current, &resolvers, EditorPane::Primary, [document_id])
+                    .await
+            }
+            ProjectEffect::OpenDocumentInCompanion(document_id) => {
+                self.open_documents(&current, &resolvers, EditorPane::Companion, [document_id])
+                    .await
+            }
             ProjectEffect::CreateHierarchy { parent_id, kind } => {
                 let parent = resolvers.node(&parent_id)?;
                 let index = current.project.nodes.children(parent).len();
@@ -115,8 +126,29 @@ impl NativeProjectEffectExecutor {
                         "delete hierarchy requires at least one node",
                     ));
                 }
-                self.execute_commands(nodes.into_iter().map(ProjectCommand::delete_node))
-                    .await
+                let snapshot = self
+                    .ports
+                    .delete_subtrees(DeleteSubtreesWorkflow {
+                        nodes,
+                        deleted_at_unix_millis: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_err(|_| {
+                                ProjectRuntimeError::InvalidEffect(
+                                    "system time predates the Unix epoch",
+                                )
+                            })?
+                            .as_millis()
+                            .try_into()
+                            .map_err(|_| {
+                                ProjectRuntimeError::InvalidEffect(
+                                    "system time exceeds the deletion timestamp range",
+                                )
+                            })?,
+                    })
+                    .await?;
+                Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                    snapshot,
+                )))
             }
             ProjectEffect::MoveHierarchy {
                 node_ids,
@@ -133,9 +165,7 @@ impl NativeProjectEffectExecutor {
                         .into_iter()
                         .map(|node| resolvers.document_for_node(node))
                         .collect::<Result<Vec<_>, _>>()?;
-                    return self
-                        .open_documents_by_id(pane, documents)
-                        .map(ProjectEffectCompletion::OpenDocuments);
+                    return self.open_documents_by_id(&current, pane, documents).await;
                 }
                 let commands = plan_moves(&current, &resolvers, nodes, destination)?;
                 self.execute_commands(commands).await
@@ -164,45 +194,7 @@ impl NativeProjectEffectExecutor {
                 )])
                 .await
             }
-            ProjectEffect::SetMetadataApplicability {
-                field_id,
-                applies_to_documents,
-            } => {
-                let field = resolvers.metadata_field(&field_id)?;
-                let mut definition = current
-                    .project
-                    .metadata
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| unknown_id(StableIdKind::MetadataField, field_id))?;
-                definition.applicability = match (definition.applicability, applies_to_documents) {
-                    (MetadataApplicability::GroupsAndDocuments, false) => {
-                        MetadataApplicability::Groups
-                    }
-                    (MetadataApplicability::Groups, true)
-                    | (MetadataApplicability::Documents, true) => {
-                        MetadataApplicability::GroupsAndDocuments
-                    }
-                    (MetadataApplicability::Documents, false) => {
-                        return Err(ProjectRuntimeError::Unsupported(UnsupportedEffect {
-                            category: UnsupportedCategory::MetadataApplicability,
-                            missing_boundary: "MetadataApplicability::None",
-                        }));
-                    }
-                    (current, _) => current,
-                };
-                self.execute_commands([ProjectCommand::upsert_metadata_field(definition)])
-                    .await
-            }
-            ProjectEffect::RenameMetadataField { field_id, label } => {
-                let field = resolvers.metadata_field(&field_id)?;
-                let mut definition = current
-                    .project
-                    .metadata
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| unknown_id(StableIdKind::MetadataField, field_id))?;
-                definition.label = label;
+            ProjectEffect::UpsertMetadataField(definition) => {
                 self.execute_commands([ProjectCommand::upsert_metadata_field(definition)])
                     .await
             }
@@ -219,6 +211,15 @@ impl NativeProjectEffectExecutor {
                 self.execute_commands([ProjectCommand::delete_metadata_field(field)])
                     .await
             }
+            ProjectEffect::UpsertStyle(definition) => {
+                self.execute_commands([ProjectCommand::upsert_style(definition)])
+                    .await
+            }
+            ProjectEffect::DeleteStyle(style_id) => {
+                let style = resolvers.style(&style_id)?;
+                self.execute_commands([ProjectCommand::delete_style(style)])
+                    .await
+            }
             ProjectEffect::RestoreDeletedSubtree { node_id, location } => {
                 let node = resolvers.deleted_node(&node_id)?;
                 validate_restore_location(&current, &resolvers, node, &location)?;
@@ -228,6 +229,10 @@ impl NativeProjectEffectExecutor {
             ProjectEffect::ApplyAppearanceToAllWindows(mode) => {
                 let theme = self.ports.set_appearance(mode).await?;
                 Ok(ProjectEffectCompletion::ApplyAppearance(theme))
+            }
+            ProjectEffect::SetProjectExportSettings(settings) => {
+                self.execute_commands([ProjectCommand::set_project_export_settings(settings)])
+                    .await
             }
             ProjectEffect::SaveThroughRevision(requested) => {
                 let written = self.ports.save(ProjectSaveKind::Explicit).await?;
@@ -245,20 +250,17 @@ impl NativeProjectEffectExecutor {
             } => {
                 let (document_id, range, indexed_revision) = parse_search_match_id(&match_id)?;
                 let document = resolvers.document(&document_id)?;
-                let source = current
-                    .documents
-                    .iter()
-                    .find(|source| source.document_id == document)
-                    .ok_or_else(|| unknown_id(StableIdKind::Document, document_id.clone()))?;
-                if revalidate_revision && source.revision.value() != indexed_revision {
+                let (load, snapshot) = self.load_document(&current, document).await?;
+                if revalidate_revision && load.revision.value() != indexed_revision {
                     return Err(ProjectRuntimeError::InvalidEffect(
                         "search result no longer matches the current document revision",
                     ));
                 }
                 Ok(ProjectEffectCompletion::NavigateSearch {
+                    snapshot: Box::new(snapshot),
                     document: ResolvedDocumentMount {
                         pane: EditorPane::Primary,
-                        load: canonical_load(&current, document)?,
+                        load,
                     },
                     range,
                 })
@@ -286,24 +288,29 @@ impl NativeProjectEffectExecutor {
                 node_ids,
                 destination,
             } => {
-                if node_ids.len() != 1 {
+                if node_ids.is_empty() {
                     return Err(ProjectRuntimeError::InvalidEffect(
-                        "copy paste requires one normalized subtree root",
+                        "copy paste requires at least one subtree root",
                     ));
                 }
-                let source = resolvers.node(&node_ids[0])?;
+                let sources = resolve_distinct_nodes(&resolvers, node_ids)?;
                 let (parent, index) = paste_location(&current, &resolvers, &destination)?;
                 let snapshot = self
                     .ports
-                    .duplicate_subtree(DuplicateSubtreeWorkflow {
-                        source,
+                    .duplicate_subtrees(DuplicateSubtreesWorkflow {
+                        sources,
                         parent,
                         index,
                     })
                     .await?;
                 Ok(ProjectEffectCompletion::TreePaste {
-                    snapshot: Box::new(snapshot),
+                    snapshot: Box::new(snapshot.snapshot),
                     kind: TreeClipboardKind::Copy,
+                    created_roots: snapshot
+                        .created_roots
+                        .iter()
+                        .map(|node| stable_id_string(node.as_bytes()))
+                        .collect(),
                 })
             }
             ProjectEffect::PasteCutSubtrees {
@@ -332,14 +339,22 @@ impl NativeProjectEffectExecutor {
                 Ok(ProjectEffectCompletion::TreePaste {
                     snapshot: Box::new(snapshot),
                     kind: TreeClipboardKind::Cut,
+                    created_roots: Vec::new(),
                 })
             }
             ProjectEffect::SearchProject { .. }
+            | ProjectEffect::PreviewHistory(_)
+            | ProjectEffect::PreviewDeleted { .. }
             | ProjectEffect::BuildReplacementPreview { .. }
             | ProjectEffect::ApplyGlobalReplacement { .. }
             | ProjectEffect::ExportEntireManuscript { .. }
+            | ProjectEffect::ChooseExportDestination { .. }
+            | ProjectEffect::CancelExport
             | ProjectEffect::OpenExportResult(_)
-            | ProjectEffect::RevealExportResult(_) => {
+            | ProjectEffect::RevealExportResult(_)
+            | ProjectEffect::ReconcileRecovery
+            | ProjectEffect::DiscardRecovery
+            | ProjectEffect::ReinitializeHistory => {
                 unreachable!("unsupported project effects return before snapshot resolution")
             }
         }
@@ -355,17 +370,22 @@ impl NativeProjectEffectExecutor {
         let resolvers = StableIdResolvers::from_snapshot(&current);
 
         match effect {
+            EditorEffect::RequestSave => {
+                let written = self.ports.save(ProjectSaveKind::Explicit).await?;
+                Ok(EditorEffectCompletion::SavedThrough(written))
+            }
             EditorEffect::MountDocument {
                 pane,
                 view,
                 document_id,
             } => {
                 let document = resolvers.document(&document_id)?;
-                let load = canonical_load(&current, document)?;
+                let (load, snapshot) = self.load_document(&current, document).await?;
                 Ok(EditorEffectCompletion::Intent(EditorRuntimeIntent::Mount {
                     pane,
                     view,
                     load,
+                    snapshot: Box::new(snapshot),
                 }))
             }
             EditorEffect::UnmountView { pane, view } => Ok(EditorEffectCompletion::Intent(
@@ -432,25 +452,88 @@ impl NativeProjectEffectExecutor {
             EditorEffect::Command { view, command } => Ok(EditorEffectCompletion::Intent(
                 EditorRuntimeIntent::Command { view, command },
             )),
-            EditorEffect::NavigateCommentAnchor { .. }
-            | EditorEffect::ShowOrphanedComment { .. } => {
-                Err(ProjectRuntimeError::Unsupported(UnsupportedEffect {
-                    category: UnsupportedCategory::CommentNavigation,
-                    missing_boundary: "typed CommentId resolver and mounted comment-anchor feed",
-                }))
+            EditorEffect::NavigateCommentAnchor {
+                view,
+                comment_id,
+                highlight,
+            } => {
+                let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
+                let thread = current
+                    .documents
+                    .iter()
+                    .flat_map(|document| &document.comments)
+                    .find(|thread| thread.id == id)
+                    .ok_or_else(|| unknown_id(StableIdKind::Comment, comment_id))?;
+                let CanonicalCommentAnchor::Text {
+                    range,
+                    orphaned: false,
+                    ..
+                } = &thread.anchor
+                else {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "comment has no live text anchor",
+                    ));
+                };
+                Ok(EditorEffectCompletion::Intent(
+                    EditorRuntimeIntent::NavigateCommentAnchor {
+                        view,
+                        comment: highlight.then_some(id),
+                        range: *range,
+                    },
+                ))
+            }
+            EditorEffect::ShowOrphanedComment { comment_id } => {
+                let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
+                let orphaned = current
+                    .documents
+                    .iter()
+                    .flat_map(|document| &document.comments)
+                    .any(|thread| {
+                        thread.id == id
+                            && matches!(
+                                thread.anchor,
+                                CanonicalCommentAnchor::Text { orphaned: true, .. }
+                            )
+                    });
+                if !orphaned {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "comment is not orphaned",
+                    ));
+                }
+                Ok(EditorEffectCompletion::GlobalDictionaryUpdated)
             }
         }
     }
 
     async fn current_snapshot(&self) -> Result<ProjectSnapshot, ProjectRuntimeError> {
         let current = self.ports.snapshot().await?;
-        if self.snapshot.as_ref() != &current {
+        if self.snapshot.project.revision != current.project.revision
+            || document_revision_frontier(&self.snapshot) != document_revision_frontier(&current)
+        {
             return Err(ProjectRuntimeError::StaleSnapshot {
                 expected: self.snapshot.project.revision,
                 actual: current.project.revision,
             });
         }
         Ok(current)
+    }
+
+    async fn load_document(
+        &self,
+        snapshot: &ProjectSnapshot,
+        document: DocumentId,
+    ) -> Result<(CanonicalDocumentLoad, ProjectSnapshot), ProjectRuntimeError> {
+        if snapshot
+            .documents
+            .iter()
+            .any(|candidate| candidate.document_id == document)
+        {
+            return Ok((canonical_load(snapshot, document)?, snapshot.clone()));
+        }
+        self.ports.load_document(document).await?;
+        let refreshed = self.ports.snapshot().await?;
+        let load = canonical_load(&refreshed, document)?;
+        Ok((load, refreshed))
     }
 
     async fn execute_commands(
@@ -476,33 +559,37 @@ impl NativeProjectEffectExecutor {
         )))
     }
 
-    fn open_documents(
+    async fn open_documents(
         &self,
+        snapshot: &ProjectSnapshot,
         resolvers: &StableIdResolvers,
         pane: EditorPane,
         document_ids: impl IntoIterator<Item = String>,
-    ) -> Result<Vec<ResolvedDocumentMount>, ProjectRuntimeError> {
+    ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
         let documents = document_ids
             .into_iter()
             .map(|id| resolvers.document(&id))
             .collect::<Result<Vec<_>, _>>()?;
-        self.open_documents_by_id(pane, documents)
+        self.open_documents_by_id(snapshot, pane, documents).await
     }
 
-    fn open_documents_by_id(
+    async fn open_documents_by_id(
         &self,
+        snapshot: &ProjectSnapshot,
         pane: EditorPane,
         documents: impl IntoIterator<Item = DocumentId>,
-    ) -> Result<Vec<ResolvedDocumentMount>, ProjectRuntimeError> {
-        documents
-            .into_iter()
-            .map(|document| {
-                Ok(ResolvedDocumentMount {
-                    pane,
-                    load: canonical_load(&self.snapshot, document)?,
-                })
-            })
-            .collect()
+    ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
+        let mut snapshot = snapshot.clone();
+        let mut mounts = Vec::new();
+        for document in documents {
+            let (load, refreshed) = self.load_document(&snapshot, document).await?;
+            snapshot = refreshed;
+            mounts.push(ResolvedDocumentMount { pane, load });
+        }
+        Ok(ProjectEffectCompletion::OpenDocuments {
+            snapshot: Box::new(snapshot),
+            documents: mounts,
+        })
     }
 }
 
@@ -513,12 +600,17 @@ pub(crate) enum ProjectEffectCompletion {
     TreePaste {
         snapshot: Box<ProjectSnapshot>,
         kind: TreeClipboardKind,
+        created_roots: Vec<String>,
     },
-    OpenDocuments(Vec<ResolvedDocumentMount>),
+    OpenDocuments {
+        snapshot: Box<ProjectSnapshot>,
+        documents: Vec<ResolvedDocumentMount>,
+    },
     ApplyAppearance(ThemeSnapshot),
     SavedThrough(u64),
     FocusRecoveredEditor,
     NavigateSearch {
+        snapshot: Box<ProjectSnapshot>,
         document: ResolvedDocumentMount,
         range: FindMatch,
     },
@@ -531,10 +623,17 @@ pub(crate) struct ResolvedDocumentMount {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+struct DuplicateWorkflowResult {
+    snapshot: ProjectSnapshot,
+    created_roots: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EditorEffectCompletion {
     Intent(EditorRuntimeIntent),
     ProjectMutation(ProjectEffectCompletion),
     GlobalDictionaryUpdated,
+    SavedThrough(u64),
 }
 
 /// Typed intent requiring the native mounted-editor registry or native UI.
@@ -548,6 +647,7 @@ pub(crate) enum EditorRuntimeIntent {
         pane: EditorPane,
         view: ViewId,
         load: CanonicalDocumentLoad,
+        snapshot: Box<ProjectSnapshot>,
     },
     Unmount {
         pane: EditorPane,
@@ -562,6 +662,11 @@ pub(crate) enum EditorRuntimeIntent {
         view: ViewId,
         decorations: Vec<AdapterSpellDecoration>,
     },
+    NavigateCommentAnchor {
+        view: ViewId,
+        comment: Option<CommentId>,
+        range: EditorSelection,
+    },
     ShowSpellingMenu(SpellingMenu),
     RestoreFocus {
         view: ViewId,
@@ -574,6 +679,8 @@ pub(crate) enum StableIdKind {
     DeletedNode,
     Document,
     MetadataField,
+    Style,
+    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -582,8 +689,7 @@ pub(crate) enum UnsupportedCategory {
     Replacement,
     Export,
     ExternalOpen,
-    CommentNavigation,
-    MetadataApplicability,
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,6 +790,10 @@ impl From<PortError> for ProjectRuntimeError {
 trait RuntimeProjectPorts: Send + Sync {
     fn authorize(&self) -> Result<(), PortError>;
     fn snapshot(&self) -> RuntimeFuture<Result<ProjectSnapshot, PortError>>;
+    fn load_document(
+        &self,
+        document: DocumentId,
+    ) -> RuntimeFuture<Result<parchmint_application::DocumentSnapshot, PortError>>;
     fn execute(&self, command: ProjectCommand) -> RuntimeFuture<Result<(), PortError>>;
     fn save(&self, kind: ProjectSaveKind) -> RuntimeFuture<Result<u64, PortError>>;
     fn set_appearance(
@@ -717,13 +827,24 @@ trait RuntimeProjectPorts: Send + Sync {
             })
         })
     }
-    fn duplicate_subtree(
+    fn delete_subtrees(
         &self,
-        _request: DuplicateSubtreeWorkflow,
+        _request: DeleteSubtreesWorkflow,
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         Box::pin(async {
             Err(PortError::Failed {
-                service: "ProjectWorkflowPort::duplicate_subtree",
+                service: "ProjectWorkflowPort::delete_subtrees",
+                message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
+    fn duplicate_subtrees(
+        &self,
+        _request: DuplicateSubtreesWorkflow,
+    ) -> RuntimeFuture<Result<DuplicateWorkflowResult, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::duplicate_subtrees",
                 message: "workflow port is unavailable".to_owned(),
             })
         })
@@ -786,6 +907,29 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 })?
                 .map_err(|error| PortError::Failed {
                     service: "ProjectSnapshotQuery::snapshot",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn load_document(
+        &self,
+        document: DocumentId,
+    ) -> RuntimeFuture<Result<parchmint_application::DocumentSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .snapshot(|query| query.load_document(document))
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectSnapshotQuery::load_document",
                     message: error.to_string(),
                 })
         })
@@ -990,9 +1134,9 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
         })
     }
 
-    fn duplicate_subtree(
+    fn delete_subtrees(
         &self,
-        request: DuplicateSubtreeWorkflow,
+        request: DeleteSubtreesWorkflow,
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
@@ -1001,14 +1145,41 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 generation: error.session().generation(),
             })?;
             access
-                .workflows(|workflows| workflows.duplicate_subtree(request))
+                .workflows(|workflows| workflows.delete_subtrees(request))
                 .map_err(|error| PortError::Stale {
                     session_id: error.session().session_id(),
                     generation: error.session().generation(),
                 })?
-                .map(|result| result.workflow.snapshot)
+                .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
-                    service: "ProjectWorkflowPort::duplicate_subtree",
+                    service: "ProjectWorkflowPort::delete_subtrees",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn duplicate_subtrees(
+        &self,
+        request: DuplicateSubtreesWorkflow,
+    ) -> RuntimeFuture<Result<DuplicateWorkflowResult, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .workflows(|workflows| workflows.duplicate_subtrees(request))
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .map(|result| DuplicateWorkflowResult {
+                    snapshot: result.workflow.snapshot,
+                    created_roots: result.created_roots,
+                })
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::duplicate_subtrees",
                     message: error.to_string(),
                 })
         })
@@ -1076,6 +1247,7 @@ struct StableIdResolvers {
     documents: BTreeMap<String, DocumentId>,
     node_documents: BTreeMap<NodeId, DocumentId>,
     metadata_fields: BTreeMap<String, MetadataFieldId>,
+    styles: BTreeMap<String, StyleId>,
 }
 
 impl StableIdResolvers {
@@ -1097,7 +1269,7 @@ impl StableIdResolvers {
                 .map(|id| (stable_id_string(id.as_bytes()), *id))
                 .collect(),
             documents: snapshot
-                .documents
+                .document_summaries
                 .iter()
                 .map(|document| {
                     (
@@ -1105,6 +1277,12 @@ impl StableIdResolvers {
                         document.document_id,
                     )
                 })
+                .chain(snapshot.documents.iter().map(|document| {
+                    (
+                        stable_id_string(document.document_id.as_bytes()),
+                        document.document_id,
+                    )
+                }))
                 .collect(),
             node_documents,
             metadata_fields: snapshot
@@ -1112,6 +1290,12 @@ impl StableIdResolvers {
                 .metadata
                 .iter()
                 .map(|field| (stable_id_string(field.id.as_bytes()), field.id))
+                .collect(),
+            styles: snapshot
+                .project
+                .styles
+                .iter()
+                .map(|style| (stable_id_string(style.id.as_bytes()), style.id))
                 .collect(),
         }
     }
@@ -1164,6 +1348,13 @@ impl StableIdResolvers {
             .get(ui_id)
             .copied()
             .ok_or_else(|| unknown_id(StableIdKind::MetadataField, ui_id))
+    }
+
+    fn style(&self, ui_id: &str) -> Result<StyleId, ProjectRuntimeError> {
+        self.styles
+            .get(ui_id)
+            .copied()
+            .ok_or_else(|| unknown_id(StableIdKind::Style, ui_id))
     }
 }
 
@@ -1383,7 +1574,7 @@ fn validate_restore_location(
     Ok(())
 }
 
-fn canonical_load(
+pub(crate) fn canonical_load(
     snapshot: &ProjectSnapshot,
     document: DocumentId,
 ) -> Result<CanonicalDocumentLoad, ProjectRuntimeError> {
@@ -1398,8 +1589,26 @@ fn canonical_load(
             )
         })?;
     let mut load = CanonicalDocumentLoad::new(document, source.body.clone());
+    load.revision = source.revision;
+    load.comments = source.comments.clone();
     load.styles = StyleCatalogProjection::new(snapshot.project.styles.clone());
     Ok(load)
+}
+
+fn document_revision_frontier(
+    snapshot: &ProjectSnapshot,
+) -> BTreeMap<DocumentId, parchmint_editor_api::EditorRevision> {
+    snapshot
+        .document_summaries
+        .iter()
+        .map(|summary| (summary.document_id, summary.revision))
+        .chain(
+            snapshot
+                .documents
+                .iter()
+                .map(|document| (document.document_id, document.revision)),
+        )
+        .collect()
 }
 
 fn selection(start: u64, end: u64) -> EditorSelection {
@@ -1479,13 +1688,19 @@ fn unsupported_project_effect(effect: &ProjectEffect) -> Option<UnsupportedEffec
             UnsupportedCategory::Replacement,
             "revision-scoped GlobalReplacement completion feed",
         ),
-        ProjectEffect::ExportEntireManuscript { .. } => (
+        ProjectEffect::ExportEntireManuscript { .. }
+        | ProjectEffect::ChooseExportDestination { .. }
+        | ProjectEffect::CancelExport => (
             UnsupportedCategory::Export,
             "progress-bearing Exporter completion feed",
         ),
         ProjectEffect::OpenExportResult(_) | ProjectEffect::RevealExportResult(_) => (
             UnsupportedCategory::ExternalOpen,
             "validated export artifact path resolver",
+        ),
+        ProjectEffect::ReinitializeHistory => (
+            UnsupportedCategory::History,
+            "session-scoped History maintenance completion",
         ),
         _ => return None,
     };
@@ -1552,7 +1767,9 @@ mod tests {
     use parchmint_domain::{
         DocumentId, MetadataFieldDefinition, MetadataTextKind, NodeId, Project, ProjectId,
     };
-    use parchmint_editor_api::EditorRevision;
+    use parchmint_editor_api::{
+        BlockId, CanonicalComment, CommentId, EditorRevision, EditorSelection,
+    };
     use parchmint_preferences::ResolvedAppearance;
 
     use super::*;
@@ -1560,6 +1777,8 @@ mod tests {
     struct FakePorts {
         current: Mutex<bool>,
         snapshot: Mutex<ProjectSnapshot>,
+        lazy_documents: Mutex<BTreeMap<DocumentId, DocumentSnapshot>>,
+        duplicate_requests: Mutex<Vec<DuplicateSubtreesWorkflow>>,
     }
 
     impl FakePorts {
@@ -1567,6 +1786,8 @@ mod tests {
             Self {
                 current: Mutex::new(true),
                 snapshot: Mutex::new(snapshot),
+                lazy_documents: Mutex::new(BTreeMap::new()),
+                duplicate_requests: Mutex::new(Vec::new()),
             }
         }
 
@@ -1576,6 +1797,13 @@ mod tests {
 
         fn replace_snapshot(&self, snapshot: ProjectSnapshot) {
             *self.snapshot.lock().expect("snapshot mutex poisoned") = snapshot;
+        }
+
+        fn add_lazy_document(&self, document: DocumentSnapshot) {
+            self.lazy_documents
+                .lock()
+                .expect("lazy documents mutex poisoned")
+                .insert(document.document_id, document);
         }
     }
 
@@ -1597,6 +1825,36 @@ mod tests {
                     .lock()
                     .expect("snapshot mutex poisoned")
                     .clone()
+            });
+            Box::pin(async move { result })
+        }
+
+        fn load_document(
+            &self,
+            document: DocumentId,
+        ) -> RuntimeFuture<Result<DocumentSnapshot, PortError>> {
+            let result = self.authorize().and_then(|_| {
+                let mut snapshot = self.snapshot.lock().expect("snapshot mutex poisoned");
+                if let Some(loaded) = snapshot
+                    .documents
+                    .iter()
+                    .find(|candidate| candidate.document_id == document)
+                    .cloned()
+                {
+                    return Ok(loaded);
+                }
+                let loaded = self
+                    .lazy_documents
+                    .lock()
+                    .expect("lazy documents mutex poisoned")
+                    .get(&document)
+                    .cloned()
+                    .ok_or_else(|| PortError::Failed {
+                        service: "fake document loader",
+                        message: "document body is not loaded".into(),
+                    })?;
+                snapshot.documents.push(loaded.clone());
+                Ok(loaded)
             });
             Box::pin(async move { result })
         }
@@ -1676,6 +1934,7 @@ mod tests {
                 })?;
                 snapshot.project = applied.project;
                 snapshot.documents.push(DocumentSnapshot {
+                    comments: Vec::new(),
                     document_id: request.document,
                     body: "<p></p>".to_owned(),
                     revision: EditorRevision::from(0),
@@ -1710,6 +1969,58 @@ mod tests {
             });
             Box::pin(async move { result })
         }
+
+        fn delete_subtrees(
+            &self,
+            request: DeleteSubtreesWorkflow,
+        ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+            let result = self.authorize().and_then(|_| {
+                let mut snapshot = self.snapshot.lock().expect("snapshot mutex poisoned");
+                let checkpoint = parchmint_domain::CheckpointId::from_bytes([0x77; 16]);
+                let mut project = snapshot.project.clone();
+                for node in request.nodes {
+                    project = apply_project_command(
+                        &project,
+                        project.revision,
+                        ProjectCommand::delete_node_from_checkpoint(
+                            node,
+                            request.deleted_at_unix_millis,
+                            checkpoint,
+                        ),
+                    )
+                    .map_err(|error| PortError::Failed {
+                        service: "fake delete workflow",
+                        message: error.to_string(),
+                    })?
+                    .project;
+                }
+                snapshot.project = project;
+                Ok(snapshot.clone())
+            });
+            Box::pin(async move { result })
+        }
+
+        fn duplicate_subtrees(
+            &self,
+            request: DuplicateSubtreesWorkflow,
+        ) -> RuntimeFuture<Result<DuplicateWorkflowResult, PortError>> {
+            let result = self.authorize().map(|_| {
+                let created_roots = request.sources.clone();
+                self.duplicate_requests
+                    .lock()
+                    .expect("duplicate request mutex poisoned")
+                    .push(request);
+                DuplicateWorkflowResult {
+                    snapshot: self
+                        .snapshot
+                        .lock()
+                        .expect("snapshot mutex poisoned")
+                        .clone(),
+                    created_roots,
+                }
+            });
+            Box::pin(async move { result })
+        }
     }
 
     fn executor(snapshot: ProjectSnapshot) -> (NativeProjectEffectExecutor, Arc<FakePorts>) {
@@ -1739,7 +2050,7 @@ mod tests {
                 id: field,
                 label: "Status".to_owned(),
                 description: None,
-                applicability: MetadataApplicability::Documents,
+                applicability: parchmint_domain::MetadataApplicability::Documents,
                 text_kind: MetadataTextKind::SingleLine,
                 default_value: None,
                 visible_on_cards: true,
@@ -1747,7 +2058,9 @@ mod tests {
             .expect("fixture metadata inserts");
         let snapshot = ProjectSnapshot {
             project,
+            document_summaries: Vec::new(),
             documents: vec![DocumentSnapshot {
+                comments: Vec::new(),
                 document_id: document,
                 body: "hello".to_owned(),
                 revision: EditorRevision::from(1),
@@ -1756,6 +2069,185 @@ mod tests {
             styles_css: String::new(),
         };
         (snapshot, node, document, field)
+    }
+
+    #[test]
+    fn canonical_load_hydrates_revision_comments_and_styles_for_initial_mounts() {
+        let (mut snapshot, _, document, _) = fixture();
+        snapshot.documents[0].revision = EditorRevision::from(7);
+        snapshot.documents[0].comments.push(CanonicalComment::new(
+            CommentId::from_bytes([8; 16]),
+            EditorSelection::new(0.into(), 5.into()),
+            "Hydrated",
+            BlockId::from_bytes(*document.as_bytes()),
+        ));
+
+        let load = canonical_load(&snapshot, document).unwrap();
+
+        assert_eq!(load.revision, EditorRevision::from(7));
+        assert_eq!(load.comments, snapshot.documents[0].comments);
+        assert_eq!(
+            load.styles,
+            StyleCatalogProjection::new(snapshot.project.styles.clone())
+        );
+    }
+
+    #[test]
+    fn mount_document_loads_a_summary_only_document_on_demand() {
+        let (mut snapshot, _, document, _) = fixture();
+        let lazy = snapshot.documents.pop().expect("fixture body");
+        snapshot
+            .document_summaries
+            .push(parchmint_ui_api::DocumentSummary {
+                document_id: document,
+                revision: lazy.revision,
+                visibility: lazy.visibility,
+                content_hash: None,
+                word_count: parchmint_ui_api::DocumentWordCount::Known(1),
+            });
+        let (executor, ports) = executor(snapshot);
+        ports.add_lazy_document(lazy);
+
+        let completion = block_on(executor.execute_editor_effect(EditorEffect::MountDocument {
+            pane: EditorPane::Primary,
+            view: ViewId::from_bytes([17; 16]),
+            document_id: stable_id_string(document.as_bytes()),
+        }))
+        .expect("summary-only document should load through the session port");
+        let EditorEffectCompletion::Intent(EditorRuntimeIntent::Mount { load, .. }) = completion
+        else {
+            panic!("expected mount completion")
+        };
+        assert_eq!(load.document_id, document);
+        assert_eq!(load.body, "hello");
+    }
+
+    #[test]
+    fn project_open_document_effect_hydrates_and_returns_a_refreshed_snapshot() {
+        let (mut snapshot, _, _, _) = fixture();
+        let node = NodeId::from_bytes([18; 16]);
+        let document = DocumentId::from_bytes([19; 16]);
+        snapshot
+            .project
+            .nodes
+            .try_insert_document(node, document, NodeId::manuscript_root(), 1, "Chapter Two")
+            .unwrap();
+        snapshot
+            .document_summaries
+            .push(parchmint_ui_api::DocumentSummary {
+                document_id: document,
+                revision: EditorRevision::from(3),
+                visibility: DocumentVisibility::Closed,
+                content_hash: None,
+                word_count: parchmint_ui_api::DocumentWordCount::Known(2),
+            });
+        let (executor, ports) = executor(snapshot);
+        ports.add_lazy_document(DocumentSnapshot {
+            document_id: document,
+            body: "second chapter".into(),
+            comments: Vec::new(),
+            revision: EditorRevision::from(3),
+            visibility: DocumentVisibility::Closed,
+        });
+
+        let completion = block_on(executor.execute_project_effect(
+            ProjectEffect::OpenDocumentInPrimary(stable_id_string(document.as_bytes())),
+        ))
+        .unwrap();
+        let ProjectEffectCompletion::OpenDocuments {
+            snapshot,
+            documents,
+        } = completion
+        else {
+            panic!("expected hydrated document completion")
+        };
+        assert!(
+            snapshot
+                .documents
+                .iter()
+                .any(|loaded| loaded.document_id == document)
+        );
+        assert_eq!(documents[0].load.body, "second chapter");
+    }
+
+    #[test]
+    fn summary_hydration_does_not_make_search_navigation_snapshot_stale() {
+        let (mut snapshot, _, _, _) = fixture();
+        let node = NodeId::from_bytes([20; 16]);
+        let document = DocumentId::from_bytes([21; 16]);
+        snapshot
+            .project
+            .nodes
+            .try_insert_document(
+                node,
+                document,
+                NodeId::manuscript_root(),
+                1,
+                "Search Target",
+            )
+            .unwrap();
+        snapshot
+            .document_summaries
+            .push(parchmint_ui_api::DocumentSummary {
+                document_id: document,
+                revision: EditorRevision::from(1),
+                visibility: DocumentVisibility::Closed,
+                content_hash: None,
+                word_count: parchmint_ui_api::DocumentWordCount::Pending,
+            });
+        let (executor, ports) = executor(snapshot.clone());
+        let mut hydrated = snapshot;
+        hydrated.document_summaries.last_mut().unwrap().word_count =
+            parchmint_ui_api::DocumentWordCount::Known(1);
+        hydrated.document_summaries.last_mut().unwrap().content_hash = Some([8; 32]);
+        ports.replace_snapshot(hydrated);
+        ports.add_lazy_document(DocumentSnapshot {
+            document_id: document,
+            body: "world".into(),
+            comments: Vec::new(),
+            revision: EditorRevision::from(1),
+            visibility: DocumentVisibility::Closed,
+        });
+        let match_id = format!(
+            "{}:{}:Body:0:5:1",
+            stable_id_string(document.as_bytes()),
+            stable_id_string(&[22; 16])
+        );
+
+        let completion = block_on(executor.execute_project_effect(
+            ProjectEffect::NavigateSearchResult {
+                match_id,
+                revalidate_revision: true,
+            },
+        ))
+        .unwrap();
+        assert!(matches!(
+            completion,
+            ProjectEffectCompletion::NavigateSearch { document: mount, .. }
+                if mount.load.body == "world"
+        ));
+    }
+
+    #[test]
+    fn refreshed_executor_uses_the_post_persist_snapshot_without_resetting_sequence() {
+        let (snapshot, _, document, _) = fixture();
+        let (executor, _) = executor(snapshot.clone());
+        executor.operation_sequence.store(9, Ordering::SeqCst);
+        let mut refreshed_snapshot = snapshot;
+        refreshed_snapshot.documents[0].revision = EditorRevision::from(2);
+        refreshed_snapshot.documents[0]
+            .comments
+            .push(CanonicalComment::new(
+                CommentId::from_bytes([9; 16]),
+                EditorSelection::new(0.into(), 5.into()),
+                "Persisted",
+                BlockId::from_bytes(*document.as_bytes()),
+            ));
+
+        let refreshed = executor.refreshed(Arc::new(refreshed_snapshot.clone()));
+
+        assert_eq!(refreshed.snapshot, Arc::new(refreshed_snapshot));
+        assert_eq!(refreshed.operation_sequence.load(Ordering::SeqCst), 9);
     }
 
     #[test]
@@ -1951,6 +2443,51 @@ mod tests {
             ports.snapshot.lock().unwrap().project.nodes.parent(node),
             Some(NodeId::research_root())
         );
+    }
+
+    #[test]
+    fn copy_paste_forwards_a_mixed_multi_root_forest_to_one_workflow() {
+        let (mut snapshot, document_node, _, _) = fixture();
+        let group = NodeId::from_bytes([8; 16]);
+        snapshot
+            .project
+            .nodes
+            .try_insert_group(group, NodeId::manuscript_root(), 1, "Notes")
+            .unwrap();
+        let (executor, ports) = executor(snapshot);
+
+        let result = block_on(executor.execute_project_effect(
+            ProjectEffect::PasteCopiedSubtrees {
+                node_ids: vec![
+                    stable_id_string(document_node.as_bytes()),
+                    stable_id_string(group.as_bytes()),
+                ],
+                destination: DragDestination::IntoGroup(stable_id_string(
+                    NodeId::research_root().as_bytes(),
+                )),
+            },
+        ))
+        .expect("mixed copy paste reaches the workflow");
+
+        let ProjectEffectCompletion::TreePaste {
+            kind: TreeClipboardKind::Copy,
+            created_roots,
+            ..
+        } = result
+        else {
+            panic!("copy paste must return created roots");
+        };
+        assert_eq!(
+            created_roots,
+            [
+                stable_id_string(document_node.as_bytes()),
+                stable_id_string(group.as_bytes()),
+            ]
+        );
+        let requests = ports.duplicate_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].sources, [document_node, group]);
+        assert_eq!(requests[0].parent, NodeId::research_root());
     }
 
     #[test]

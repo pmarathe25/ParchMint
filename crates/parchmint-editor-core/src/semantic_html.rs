@@ -15,6 +15,7 @@ pub(super) fn parse(
                 attributes: BTreeMap::new(),
                 text: body.to_owned(),
                 marks: Vec::new(),
+                list_depth: 0,
             }],
             canonical_html: false,
         });
@@ -74,14 +75,27 @@ pub(super) fn parse(
                     finish_block(&mut current, &mut open_marks, &mut blocks);
                     let kind = block_kind(&name, lists.last().map(String::as_str));
                     ensure_block(&mut current, primary, blocks.len(), kind, attributes);
+                    if name == "li"
+                        && let Some(block) = current.as_mut()
+                    {
+                        block.list_depth = lists.len().saturating_sub(1);
+                    }
                 }
             }
             (true, "p" | "h1" | "h2" | "h3" | "blockquote" | "li") => {
                 finish_block(&mut current, &mut open_marks, &mut blocks);
             }
             (false, "ul" | "ol") => {
-                if !lists.is_empty() {
-                    return Err("nested canonical HTML lists are not available yet");
+                if !lists.is_empty()
+                    && !current.as_ref().is_some_and(|block| {
+                        matches!(
+                            block.kind,
+                            SemanticBlockKind::UnorderedListItem
+                                | SemanticBlockKind::OrderedListItem
+                        )
+                    })
+                {
+                    return Err("nested canonical list is outside a list item");
                 }
                 lists.push(name);
             }
@@ -164,44 +178,33 @@ pub(super) fn serialize(document: &SemanticDocumentSnapshot) -> String {
         return document.plain_text();
     }
     let mut output = String::new();
-    let mut open_list: Option<&str> = None;
-    for block in &document.blocks {
-        let next_list = match block.kind {
-            SemanticBlockKind::UnorderedListItem => Some("ul"),
-            SemanticBlockKind::OrderedListItem => Some("ol"),
-            _ => None,
-        };
-        if open_list != next_list
-            && let Some(open) = open_list.take()
-        {
-            output.push_str("</");
-            output.push_str(open);
-            output.push('>');
+    let mut index = 0usize;
+    while index < document.blocks.len() {
+        let block = &document.blocks[index];
+        if is_list_item(block.kind) {
+            if block.list_depth != 0 {
+                return String::new();
+            }
+            render_list(&document.blocks, &mut index, 0, &mut output);
+            continue;
         }
-        if let Some(next) = next_list
-            && open_list.is_none()
-        {
-            output.push('<');
-            output.push_str(next);
-            output.push('>');
-            open_list = Some(next);
-        }
-        let (container, tag) = match block.kind {
-            SemanticBlockKind::Paragraph => (None, "p"),
-            SemanticBlockKind::Heading1 => (None, "h1"),
-            SemanticBlockKind::Heading2 => (None, "h2"),
-            SemanticBlockKind::Heading3 => (None, "h3"),
-            SemanticBlockKind::BlockQuote => (None, "blockquote"),
-            SemanticBlockKind::UnorderedListItem => (Some("ul"), "li"),
-            SemanticBlockKind::OrderedListItem => (Some("ol"), "li"),
+        let tag = match block.kind {
+            SemanticBlockKind::Paragraph => "p",
+            SemanticBlockKind::Heading1 => "h1",
+            SemanticBlockKind::Heading2 => "h2",
+            SemanticBlockKind::Heading3 => "h3",
+            SemanticBlockKind::BlockQuote => "blockquote",
+            SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem => {
+                unreachable!()
+            }
             SemanticBlockKind::SceneBreak | SemanticBlockKind::PageBreak => {
                 output.push_str("<hr");
                 write_attributes(&block.attributes, &mut output);
                 output.push('>');
+                index += 1;
                 continue;
             }
         };
-        debug_assert_eq!(container, next_list);
         output.push('<');
         output.push_str(tag);
         write_attributes(&block.attributes, &mut output);
@@ -210,13 +213,66 @@ pub(super) fn serialize(document: &SemanticDocumentSnapshot) -> String {
         output.push_str("</");
         output.push_str(tag);
         output.push('>');
-    }
-    if let Some(open) = open_list {
-        output.push_str("</");
-        output.push_str(open);
-        output.push('>');
+        index += 1;
     }
     output
+}
+
+fn render_list(
+    blocks: &[SemanticBlockSnapshot],
+    index: &mut usize,
+    depth: usize,
+    output: &mut String,
+) {
+    let container = list_tag(blocks[*index].kind);
+    output.push('<');
+    output.push_str(container);
+    output.push('>');
+    while *index < blocks.len() {
+        let block = &blocks[*index];
+        if !is_list_item(block.kind)
+            || block.list_depth != depth
+            || list_tag(block.kind) != container
+        {
+            break;
+        }
+        output.push_str("<li");
+        write_attributes(&block.attributes, output);
+        output.push('>');
+        render_inline(block, output);
+        *index += 1;
+        while *index < blocks.len()
+            && is_list_item(blocks[*index].kind)
+            && blocks[*index].list_depth == depth + 1
+        {
+            render_list(blocks, index, depth + 1, output);
+        }
+        output.push_str("</li>");
+        if *index < blocks.len()
+            && is_list_item(blocks[*index].kind)
+            && blocks[*index].list_depth > depth
+        {
+            break;
+        }
+    }
+    output.push_str("</");
+    output.push_str(container);
+    output.push('>');
+}
+
+fn is_list_item(kind: SemanticBlockKind) -> bool {
+    matches!(
+        kind,
+        SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem
+    )
+}
+
+fn list_tag(kind: SemanticBlockKind) -> &'static str {
+    match kind {
+        SemanticBlockKind::UnorderedListItem => "ul",
+        SemanticBlockKind::OrderedListItem => "ol",
+        _ => unreachable!(),
+    }
 }
 
 /// Serializes one scalar range as plain text and deterministic restricted HTML.
@@ -283,6 +339,7 @@ pub(super) fn serialize_selection(
                     attributes: block.attributes.clone(),
                     text,
                     marks,
+                    list_depth: block.list_depth,
                 });
             }
         }
@@ -310,6 +367,7 @@ fn empty_selection_block(id: BlockId) -> SemanticBlockSnapshot {
         attributes: BTreeMap::new(),
         text: String::new(),
         marks: Vec::new(),
+        list_depth: 0,
     }
 }
 
@@ -428,6 +486,7 @@ fn ensure_block(
             attributes,
             text: String::new(),
             marks: Vec::new(),
+            list_depth: 0,
         });
     }
 }

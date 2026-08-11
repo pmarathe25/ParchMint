@@ -19,7 +19,9 @@ pub use parchmint_domain::{
     DocumentId, DomainError, Project, ProjectCommand, ProjectId, ProjectOperationId,
     ProjectRevision, Resource, ResourceSet,
 };
-pub use parchmint_editor_api::{CanonicalProjection, EditorRevision};
+pub use parchmint_editor_api::{
+    CanonicalComment, CanonicalCommentAnchor, CanonicalProjection, EditorRevision,
+};
 
 const PROJECT_UNDO_LIMIT: usize = 100;
 const PROJECT_UNDO_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -97,8 +99,21 @@ pub enum DocumentVisibility {
 pub struct DocumentSnapshot {
     pub document_id: DocumentId,
     pub body: String,
+    pub comments: Vec<CanonicalComment>,
     pub revision: EditorRevision,
     pub visibility: DocumentVisibility,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LazyDocumentSummary {
+    pub document_id: DocumentId,
+    pub revision: EditorRevision,
+    pub visibility: DocumentVisibility,
+}
+
+/// Session-scoped authority for materializing one canonical document body.
+pub trait DocumentSnapshotLoader: Send + Sync {
+    fn load(&self, document: DocumentId) -> Result<DocumentSnapshot, ApplicationError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +250,7 @@ pub trait DocumentStateOwner: Send + Sync {
         document: DocumentId,
         revision: EditorRevision,
         body: String,
+        comments: Vec<CanonicalComment>,
     ) -> Result<(), ApplicationError>;
     fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError>;
     fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError>;
@@ -332,6 +348,10 @@ pub enum ApplicationError {
     CompositeApplyFailed {
         document: DocumentId,
     },
+    DocumentLoad {
+        document: DocumentId,
+        reason: String,
+    },
     ProjectUndoEmpty,
     ProjectRedoEmpty,
     DocumentUndoEmpty {
@@ -369,6 +389,9 @@ impl fmt::Display for ApplicationError {
             }
             Self::CompositeApplyFailed { document } => {
                 write!(formatter, "composite apply failed at {document:?}")
+            }
+            Self::DocumentLoad { document, reason } => {
+                write!(formatter, "could not load document {document:?}: {reason}")
             }
             Self::ProjectUndoEmpty => formatter.write_str("project undo is empty"),
             Self::ProjectRedoEmpty => formatter.write_str("project redo is empty"),
@@ -419,6 +442,7 @@ pub trait GlobalReplacement: Send + Sync {
 #[derive(Debug, Clone)]
 struct DocumentRecord {
     body: String,
+    comments: Vec<CanonicalComment>,
     revision: EditorRevision,
     visibility: DocumentVisibility,
     undo: Vec<String>,
@@ -426,9 +450,11 @@ struct DocumentRecord {
     project_boundaries: Vec<ProjectOperationId>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct NativeDocumentState {
     documents: BTreeMap<DocumentId, DocumentRecord>,
+    unloaded: BTreeMap<DocumentId, LazyDocumentSummary>,
+    loader: Option<Arc<dyn DocumentSnapshotLoader>>,
     #[cfg(test)]
     fail_composite_at: Option<DocumentId>,
 }
@@ -437,9 +463,17 @@ struct NativeDocumentState {
 ///
 /// Closed documents become hidden open sessions before a document command.
 /// Composite project edits retain their visibility and do not touch document undo.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct NativeDocumentStateOwner {
     state: Mutex<NativeDocumentState>,
+}
+
+impl fmt::Debug for NativeDocumentStateOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeDocumentStateOwner")
+            .finish_non_exhaustive()
+    }
 }
 
 impl NativeDocumentStateOwner {
@@ -451,6 +485,7 @@ impl NativeDocumentStateOwner {
                     document.document_id,
                     DocumentRecord {
                         body: document.body,
+                        comments: document.comments,
                         revision: document.revision,
                         visibility: document.visibility,
                         undo: Vec::new(),
@@ -463,13 +498,115 @@ impl NativeDocumentStateOwner {
         Self {
             state: Mutex::new(NativeDocumentState {
                 documents,
+                unloaded: BTreeMap::new(),
+                loader: None,
                 #[cfg(test)]
                 fail_composite_at: None,
             }),
         }
     }
 
+    pub fn new_lazy(
+        summaries: impl IntoIterator<Item = LazyDocumentSummary>,
+        loader: Arc<dyn DocumentSnapshotLoader>,
+    ) -> Result<Self, ApplicationError> {
+        let mut unloaded = BTreeMap::new();
+        for summary in summaries {
+            if unloaded.insert(summary.document_id, summary).is_some() {
+                return Err(ApplicationError::DuplicateDocument {
+                    document: summary.document_id,
+                });
+            }
+        }
+        Ok(Self {
+            state: Mutex::new(NativeDocumentState {
+                documents: BTreeMap::new(),
+                unloaded,
+                loader: Some(loader),
+                #[cfg(test)]
+                fail_composite_at: None,
+            }),
+        })
+    }
+
+    fn ensure_loaded(&self, document: DocumentId) -> Result<(), ApplicationError> {
+        let (summary, loader) = {
+            let state = lock(&self.state)?;
+            if state.documents.contains_key(&document) {
+                return Ok(());
+            }
+            let summary = state
+                .unloaded
+                .get(&document)
+                .copied()
+                .ok_or(ApplicationError::MissingDocument { document })?;
+            let loader = state
+                .loader
+                .clone()
+                .ok_or(ApplicationError::MissingDocument { document })?;
+            (summary, loader)
+        };
+        let mut snapshot = loader.load(document)?;
+        if snapshot.document_id != document || snapshot.revision != summary.revision {
+            return Err(ApplicationError::DocumentLoad {
+                document,
+                reason: "canonical body does not match its persisted summary revision".into(),
+            });
+        }
+        snapshot.visibility = summary.visibility;
+        let mut state = lock(&self.state)?;
+        if state.documents.contains_key(&document) {
+            return Ok(());
+        }
+        state
+            .unloaded
+            .remove(&document)
+            .ok_or(ApplicationError::MissingDocument { document })?;
+        state.documents.insert(
+            document,
+            DocumentRecord {
+                body: snapshot.body,
+                comments: snapshot.comments,
+                revision: snapshot.revision,
+                visibility: snapshot.visibility,
+                undo: Vec::new(),
+                redo: Vec::new(),
+                project_boundaries: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn loaded_snapshots(&self) -> Result<Vec<DocumentSnapshot>, ApplicationError> {
+        let state = lock(&self.state)?;
+        Ok(state
+            .documents
+            .iter()
+            .map(|(document, record)| DocumentSnapshot {
+                document_id: *document,
+                body: record.body.clone(),
+                comments: record.comments.clone(),
+                revision: record.revision,
+                visibility: record.visibility,
+            })
+            .collect())
+    }
+
+    pub fn summaries(&self) -> Result<Vec<LazyDocumentSummary>, ApplicationError> {
+        let state = lock(&self.state)?;
+        let loaded = state
+            .documents
+            .iter()
+            .map(|(document, record)| LazyDocumentSummary {
+                document_id: *document,
+                revision: record.revision,
+                visibility: record.visibility,
+            });
+        Ok(loaded.chain(state.unloaded.values().copied()).collect())
+    }
+
     pub fn snapshot(&self, document: DocumentId) -> Result<DocumentSnapshot, ApplicationError> {
+        self.ensure_loaded(document)?;
         let state = lock(&self.state)?;
         let record = state
             .documents
@@ -478,23 +615,22 @@ impl NativeDocumentStateOwner {
         Ok(DocumentSnapshot {
             document_id: document,
             body: record.body.clone(),
+            comments: record.comments.clone(),
             revision: record.revision,
             visibility: record.visibility,
         })
     }
 
     pub fn snapshots(&self) -> Result<Vec<DocumentSnapshot>, ApplicationError> {
-        let state = lock(&self.state)?;
-        Ok(state
-            .documents
-            .iter()
-            .map(|(document, record)| DocumentSnapshot {
-                document_id: *document,
-                body: record.body.clone(),
-                revision: record.revision,
-                visibility: record.visibility,
-            })
-            .collect())
+        let documents = self
+            .summaries()?
+            .into_iter()
+            .map(|summary| summary.document_id)
+            .collect::<Vec<_>>();
+        for document in documents {
+            self.ensure_loaded(document)?;
+        }
+        self.loaded_snapshots()
     }
 
     pub fn document_undo_len(&self, document: DocumentId) -> Result<usize, ApplicationError> {
@@ -528,6 +664,7 @@ impl NativeDocumentStateOwner {
 
 impl DocumentStateOwner for NativeDocumentStateOwner {
     fn execute(&self, command: DocumentCommand) -> Result<DocumentCommandResult, ApplicationError> {
+        self.ensure_loaded(command.document_id)?;
         let mut state = lock(&self.state)?;
         let record = state.documents.get_mut(&command.document_id).ok_or(
             ApplicationError::MissingDocument {
@@ -557,6 +694,7 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
     }
 
     fn undo(&self, document: DocumentId) -> Result<DocumentCommandResult, ApplicationError> {
+        self.ensure_loaded(document)?;
         let mut state = lock(&self.state)?;
         let record = state
             .documents
@@ -577,6 +715,7 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
     }
 
     fn redo(&self, document: DocumentId) -> Result<DocumentCommandResult, ApplicationError> {
+        self.ensure_loaded(document)?;
         let mut state = lock(&self.state)?;
         let record = state
             .documents
@@ -600,6 +739,9 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         &self,
         edits: &[ReplacementEdit],
     ) -> Result<DocumentPatchSet, ApplicationError> {
+        for edit in edits {
+            self.ensure_loaded(edit.document_id)?;
+        }
         let state = lock(&self.state)?;
         let mut patches = Vec::with_capacity(edits.len());
         for edit in edits {
@@ -635,6 +777,9 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         patch: &DocumentPatchSet,
         direction: PatchDirection,
     ) -> Result<BTreeMap<DocumentId, EditorRevision>, ApplicationError> {
+        for change in &patch.patches {
+            self.ensure_loaded(change.document_id)?;
+        }
         let mut state = lock(&self.state)?;
         let mut draft = state.documents.clone();
         for change in &patch.patches {
@@ -661,6 +806,11 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
                 });
             }
             record.body.clone_from(replacement);
+            for comment in &mut record.comments {
+                if let CanonicalCommentAnchor::Text { orphaned, .. } = &mut comment.anchor {
+                    *orphaned = true;
+                }
+            }
             record.revision = record.revision.next();
             record.project_boundaries.push(operation);
         }
@@ -686,6 +836,16 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
                 }
             }
         }
+        for (document, summary) in &state.unloaded {
+            match summary.visibility {
+                DocumentVisibility::Open | DocumentVisibility::Hidden => {
+                    revisions.open.insert(*document, summary.revision);
+                }
+                DocumentVisibility::Closed => {
+                    revisions.closed.insert(*document, summary.revision);
+                }
+            }
+        }
         Ok(revisions)
     }
 
@@ -703,13 +863,17 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         document: DocumentId,
         revision: EditorRevision,
         body: String,
+        comments: Vec<CanonicalComment>,
     ) -> Result<(), ApplicationError> {
+        self.ensure_loaded(document)?;
         let mut state = lock(&self.state)?;
         let record = state
             .documents
             .get_mut(&document)
             .ok_or(ApplicationError::MissingDocument { document })?;
-        if revision < record.revision || (revision == record.revision && body != record.body) {
+        if revision < record.revision
+            || (revision == record.revision && (body != record.body || comments != record.comments))
+        {
             return Err(ApplicationError::StaleDocument {
                 document,
                 observed: revision,
@@ -718,12 +882,15 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         }
         record.revision = revision;
         record.body = body;
+        record.comments = comments;
         Ok(())
     }
 
     fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError> {
         let mut state = lock(&self.state)?;
-        if state.documents.contains_key(&document.document_id) {
+        if state.documents.contains_key(&document.document_id)
+            || state.unloaded.contains_key(&document.document_id)
+        {
             return Err(ApplicationError::DuplicateDocument {
                 document: document.document_id,
             });
@@ -732,6 +899,7 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
             document.document_id,
             DocumentRecord {
                 body: document.body,
+                comments: document.comments,
                 revision: document.revision,
                 visibility: document.visibility,
                 undo: Vec::new(),
@@ -750,6 +918,7 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
                     document.document_id,
                     DocumentRecord {
                         body: document.body,
+                        comments: document.comments,
                         revision: document.revision,
                         visibility: document.visibility,
                         undo: Vec::new(),
@@ -764,7 +933,10 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
                 });
             }
         }
-        lock(&self.state)?.documents = replacement;
+        let mut state = lock(&self.state)?;
+        state.documents = replacement;
+        state.unloaded.clear();
+        state.loader = None;
         Ok(())
     }
 }
@@ -899,6 +1071,7 @@ impl NativeProjectCommandDispatcher {
             projection.document_id(),
             projection.revision(),
             projection.body().to_owned(),
+            projection.comments().to_vec(),
         )?;
         let mut state = lock(&self.state)?;
         let mutation = state.mark_document_dirty(projection.document_id());
@@ -1050,6 +1223,7 @@ impl NativeProjectCommandDispatcher {
             self.documents.insert_document(DocumentSnapshot {
                 document_id: *document_id,
                 body: "<p></p>".to_owned(),
+                comments: Vec::new(),
                 revision: EditorRevision::default(),
                 visibility: DocumentVisibility::Open,
             })?;

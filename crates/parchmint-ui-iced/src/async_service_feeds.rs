@@ -23,23 +23,33 @@ use std::{
 };
 
 use parchmint_application::DocumentSnapshot;
-use parchmint_domain::{DocumentId, MetadataFieldId, NodeId, NodeKind, Project, ProjectSection};
+use parchmint_domain::{
+    DocumentId, MetadataFieldId, NodeId, NodeKind, Project, ProjectExportSetting, ProjectSection,
+};
+use parchmint_editor_api::CanonicalDocumentLoad;
+use parchmint_editor_core::EditorCoreSession;
 use parchmint_export_api::{
-    CancelOutcome, ExportDefaults, ExportError, ExportHandle, ExportNode, ExportNumbering,
-    ExportPlan, ExportRequest, ExportRunOptions, ExportSettings, ExportSink, ExportSource,
-    ExportStatus, ExportStyleCatalog, ExportValidationReport, InheritedSetting,
+    CancelOutcome, ExportCompletion, ExportDefaults, ExportError, ExportHandle, ExportNode,
+    ExportNumbering, ExportPlan, ExportProgress as OperationProgress, ExportProgressSink,
+    ExportRequest, ExportRunOptions, ExportSettings, ExportSink, ExportSource, ExportStatus,
+    ExportStyleCatalog, ExportValidationReport, InheritedSetting,
     ProjectSnapshot as ExportProjectSnapshot, SourceRevision,
 };
 use parchmint_history_api::{
-    CheckpointCategory, CheckpointId, CheckpointSummary, HistoryCursor, HistoryPage,
-    HistoryPageQuery, RestorePlan, SnapshotPreview,
+    CheckpointCategory, CheckpointId, CheckpointResource, CheckpointSummary, HistoryCursor,
+    HistoryPage, HistoryPageQuery, RestorePlan, SnapshotPreview,
 };
+use parchmint_project_format::CanonicalRelativePath;
 use parchmint_search_api::{SearchBatch, SearchBatchSink, SearchField, SearchHit, SearchQuery};
 use parchmint_ui_api::{
-    ProjectRecoveryAcceptance, ProjectRecoveryState, ProjectSnapshot, ProjectUiPorts,
+    ProjectRecoveryAcceptance, ProjectRecoveryState, ProjectSaveKind, ProjectSnapshot,
+    ProjectUiPorts,
 };
 
-use crate::{GlobalSearchResult, ProjectTaskPayload};
+use crate::{
+    GlobalSearchResult, HistoryCheckpointCategory, HistoryCheckpointRow, HistoryDocumentPreview,
+    HistoryPreviewData, ProjectTaskPayload,
+};
 
 /// A boxed operation that may call blocking service traits.
 ///
@@ -217,6 +227,7 @@ pub struct AsyncServiceFeeds {
     ports: Arc<dyn ServiceFeedPorts>,
     search: SearchFeedController,
     next_recovery: Arc<AtomicU64>,
+    active_export: Arc<Mutex<Option<ExportHandle>>>,
 }
 
 impl fmt::Debug for AsyncServiceFeeds {
@@ -238,6 +249,7 @@ impl AsyncServiceFeeds {
             search: SearchFeedController::new(ports.clone()),
             ports,
             next_recovery: Arc::new(AtomicU64::new(0)),
+            active_export: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -265,14 +277,55 @@ impl AsyncServiceFeeds {
     pub fn history_preview(
         &self,
         checkpoint_id: impl Into<String>,
+        document_id: Option<String>,
     ) -> BlockingServiceJob<HistoryPreviewResult> {
         let ports = self.ports.clone();
         let checkpoint_id = checkpoint_id.into();
         BlockingServiceJob::new("preview History", move || {
             let checkpoint = parse_stable_id(&checkpoint_id, "History checkpoint")?;
-            ports
-                .history_preview(CheckpointId::from_bytes(checkpoint))
-                .map(HistoryPreviewResult::from_preview)
+            let checkpoint = CheckpointId::from_bytes(checkpoint);
+            let preview = ports.history_preview(checkpoint)?;
+            let document = document_id
+                .map(|document| {
+                    let document =
+                        DocumentId::from_bytes(parse_stable_id(&document, "History document")?);
+                    load_checkpoint_document(ports.as_ref(), checkpoint, &preview, document)
+                })
+                .transpose()?
+                .flatten();
+            Ok(HistoryPreviewResult::from_preview(preview, document))
+        })
+    }
+
+    pub fn deleted_preview(
+        &self,
+        node_id: impl Into<String>,
+        checkpoint_id: impl Into<String>,
+        document_id: impl Into<String>,
+    ) -> BlockingServiceJob<DeletedPreviewResult> {
+        let ports = self.ports.clone();
+        let node_id = node_id.into();
+        let checkpoint_id = checkpoint_id.into();
+        let document_id = document_id.into();
+        BlockingServiceJob::new("preview deleted document", move || {
+            let checkpoint =
+                CheckpointId::from_bytes(parse_stable_id(&checkpoint_id, "restoring checkpoint")?);
+            let document =
+                DocumentId::from_bytes(parse_stable_id(&document_id, "deleted document")?);
+            let preview = ports.history_preview(checkpoint)?;
+            let document =
+                load_checkpoint_document(ports.as_ref(), checkpoint, &preview, document)?
+                    .ok_or_else(|| ServiceFeedError::InvalidServiceData {
+                        service: ServiceKind::History,
+                        reason: format!(
+                            "restoring checkpoint has no canonical document {document_id}"
+                        ),
+                    })?;
+            Ok(DeletedPreviewResult {
+                node_id,
+                checkpoint_id,
+                document,
+            })
         })
     }
 
@@ -313,6 +366,16 @@ impl AsyncServiceFeeds {
         })
     }
 
+    pub fn discard_recovery(
+        &self,
+        acceptance: RecoveryAcceptanceTicket,
+    ) -> BlockingServiceJob<RecoveryDiscardedResult> {
+        let ports = self.ports.clone();
+        BlockingServiceJob::new("discard recovery", move || {
+            ports.discard_recovery(acceptance.sequence)
+        })
+    }
+
     pub fn plan_export(
         &self,
         request: ExportRequest,
@@ -329,8 +392,8 @@ impl AsyncServiceFeeds {
 
     /// Starts a synchronous exporter on a blocking worker.
     ///
-    /// The progress receiver reports only `0/1` and `1/1`. Intermediate
-    /// progress is unavailable in the current exporter contract.
+    /// Progress is forwarded from the exporter, while its returned
+    /// [`ExportCompletion`] remains the authoritative success result.
     pub fn start_export(
         &self,
         plan: ExportPlan,
@@ -338,22 +401,33 @@ impl AsyncServiceFeeds {
         source_revision: u64,
     ) -> ExportStart {
         let ports = self.ports.clone();
+        let active_export = self.active_export.clone();
         let output_name = plan.target().name().as_str().to_owned();
         let (progress_sender, progress) = mpsc::channel();
+        let handle = ExportHandle::new();
+        if let Ok(mut active) = active_export.lock()
+            && let Some(replaced) = active.replace(handle.clone())
+        {
+            let _ = replaced.cancel();
+        }
+        let progress_sink = Arc::new(ChannelExportProgress {
+            sender: progress_sender,
+        });
         let job = BlockingServiceJob::new("start export", move || {
-            let _ = progress_sender.send(ExportProgress {
-                completed: 0,
-                total: 1,
-                terminal: false,
-            });
-            let handle = ports.export_start(plan, sink)?;
+            let result = ports.export_start(plan, sink, handle.clone(), progress_sink);
+            if let Ok(mut active) = active_export.lock()
+                && active
+                    .as_ref()
+                    .is_some_and(|current| current.same_operation(&handle))
+            {
+                *active = None;
+            }
+            result?;
             match handle.status() {
-                ExportStatus::Completed => {
-                    let _ = progress_sender.send(ExportProgress {
-                        completed: 1,
-                        total: 1,
-                        terminal: true,
-                    });
+                // `ExportCompletion` is returned only after the temporary
+                // output has been safely finished. Treat it as authoritative
+                // when an adapter leaves its status handle unsettled.
+                ExportStatus::Completed | ExportStatus::Pending | ExportStatus::Running => {
                     Ok(SuccessfulExportOutput {
                         output_name,
                         source_revision,
@@ -367,11 +441,6 @@ impl AsyncServiceFeeds {
                     service: ServiceKind::Export,
                     message: "export handle reported failure".to_owned(),
                 }),
-                ExportStatus::Pending | ExportStatus::Running => {
-                    Err(ServiceFeedError::Unsupported(
-                        UnsupportedBoundary::ExportProgressFeedUnavailable,
-                    ))
-                }
             }
         });
         ExportStart { progress, job }
@@ -380,12 +449,19 @@ impl AsyncServiceFeeds {
     /// Reports the current cancellation boundary honestly. `Exporter::export`
     /// returns its handle only after synchronous rendering, so no controller
     /// can cancel the in-flight operation through the existing trait.
-    pub const fn cancel_export(
-        &self,
-    ) -> Result<BlockingServiceJob<CancelOutcome>, ServiceFeedError> {
-        Err(ServiceFeedError::Unsupported(
-            UnsupportedBoundary::ExportHandleUnavailableWhileRendering,
-        ))
+    pub fn cancel_export(&self) -> Result<BlockingServiceJob<CancelOutcome>, ServiceFeedError> {
+        let handle = self
+            .active_export
+            .lock()
+            .map_err(|_| ServiceFeedError::InvalidState {
+                operation: "cancel export",
+                reason: "export operation state is unavailable",
+            })?
+            .clone()
+            .ok_or(ServiceFeedError::OutputUnavailable)?;
+        Ok(BlockingServiceJob::new("cancel export", move || {
+            Ok(handle.cancel())
+        }))
     }
 
     /// Invokes an output adapter only for a success-gated intent and after
@@ -408,25 +484,7 @@ pub enum RecentlyDeletedRestoreDisposition {
     CommandExecutorOwned,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HistoryCheckpointCategory {
-    Autosave,
-    ExplicitSave,
-    StructuralChange,
-    NamedSnapshot,
-    Restoration,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryCheckpointResult {
-    pub checkpoint_id: String,
-    pub sequence: u64,
-    pub category: HistoryCheckpointCategory,
-    pub affected_document_ids: Vec<String>,
-    pub name: Option<String>,
-}
-
-impl HistoryCheckpointResult {
+impl HistoryCheckpointRow {
     fn from_summary(summary: CheckpointSummary) -> Self {
         Self {
             checkpoint_id: encode_hex(summary.id.as_bytes()),
@@ -450,7 +508,7 @@ impl HistoryCheckpointResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryListResult {
-    pub checkpoints: Vec<HistoryCheckpointResult>,
+    pub checkpoints: Vec<HistoryCheckpointRow>,
     pub next_cursor: Option<HistoryCursor>,
 }
 
@@ -460,7 +518,7 @@ impl HistoryListResult {
             checkpoints: page
                 .checkpoints
                 .into_iter()
-                .map(HistoryCheckpointResult::from_summary)
+                .map(HistoryCheckpointRow::from_summary)
                 .collect(),
             next_cursor: page.next_cursor,
         }
@@ -468,11 +526,7 @@ impl HistoryListResult {
 
     pub fn reducer_payload(&self) -> ProjectTaskPayload {
         ProjectTaskPayload::HistoryLoaded {
-            checkpoints: self
-                .checkpoints
-                .iter()
-                .map(|checkpoint| checkpoint.checkpoint_id.clone())
-                .collect(),
+            checkpoints: self.checkpoints.clone(),
         }
     }
 }
@@ -485,14 +539,15 @@ pub struct HistoryResourceResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryPreviewResult {
-    pub checkpoint: HistoryCheckpointResult,
+    pub checkpoint: HistoryCheckpointRow,
     pub resources: Vec<HistoryResourceResult>,
+    pub document: Option<HistoryDocumentPreview>,
 }
 
 impl HistoryPreviewResult {
-    fn from_preview(preview: SnapshotPreview) -> Self {
+    fn from_preview(preview: SnapshotPreview, document: Option<HistoryDocumentPreview>) -> Self {
         Self {
-            checkpoint: HistoryCheckpointResult::from_summary(preview.checkpoint),
+            checkpoint: HistoryCheckpointRow::from_summary(preview.checkpoint),
             resources: preview
                 .resources
                 .into_iter()
@@ -501,18 +556,84 @@ impl HistoryPreviewResult {
                     content_hash: *hash.as_bytes(),
                 })
                 .collect(),
+            document,
         }
     }
 
-    pub const fn reducer_payload(&self) -> ProjectTaskPayload {
-        ProjectTaskPayload::HistoryPreviewReady
+    pub fn reducer_payload(&self) -> ProjectTaskPayload {
+        ProjectTaskPayload::HistoryPreviewReady {
+            preview: HistoryPreviewData {
+                checkpoint: self.checkpoint.clone(),
+                resource_paths: self
+                    .resources
+                    .iter()
+                    .map(|resource| resource.canonical_path.clone())
+                    .collect(),
+                document: self.document.clone(),
+            },
+        }
     }
+}
 
-    pub const fn rich_preview(&self) -> Result<(), ServiceFeedError> {
-        Err(ServiceFeedError::Conversion(
-            ConversionGap::HistoryRichPreviewUnavailable,
-        ))
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedPreviewResult {
+    pub node_id: String,
+    pub checkpoint_id: String,
+    pub document: HistoryDocumentPreview,
+}
+
+impl DeletedPreviewResult {
+    pub fn reducer_payload(&self) -> ProjectTaskPayload {
+        ProjectTaskPayload::DeletedPreviewReady {
+            node_id: self.node_id.clone(),
+            checkpoint_id: self.checkpoint_id.clone(),
+            document_id: self.document.document_id.clone(),
+            semantic: self.document.semantic.clone(),
+        }
     }
+}
+
+fn load_checkpoint_document(
+    ports: &dyn ServiceFeedPorts,
+    checkpoint: CheckpointId,
+    preview: &SnapshotPreview,
+    document: DocumentId,
+) -> Result<Option<HistoryDocumentPreview>, ServiceFeedError> {
+    let document_id = encode_hex(document.as_bytes());
+    let suffix = format!("/{document_id}.html");
+    let mut matches = preview
+        .resources
+        .keys()
+        .filter(|path| path.as_str().ends_with(&suffix));
+    let Some(path) = matches.next().cloned() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(ServiceFeedError::InvalidServiceData {
+            service: ServiceKind::History,
+            reason: format!("checkpoint has duplicate paths for document {document_id}"),
+        });
+    }
+    let resource = ports.history_resource(checkpoint, &path)?;
+    let body = String::from_utf8(resource.bytes).map_err(|error| {
+        ServiceFeedError::InvalidServiceData {
+            service: ServiceKind::History,
+            reason: format!("checkpoint document {document_id} is not UTF-8: {error}"),
+        }
+    })?;
+    let semantic = EditorCoreSession::open(CanonicalDocumentLoad::new(document, body))
+        .map_err(|error| ServiceFeedError::InvalidServiceData {
+            service: ServiceKind::History,
+            reason: format!("checkpoint document {document_id} is not canonical: {error}"),
+        })?
+        .canonical_projection()
+        .semantic()
+        .clone();
+    Ok(Some(HistoryDocumentPreview {
+        document_id,
+        canonical_path: path.as_str().to_owned(),
+        semantic,
+    }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -542,15 +663,24 @@ impl RecoveryAcceptanceTicket {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoveryReconcileResult {
     pub accepted_records: usize,
+    pub affected_documents: Vec<RecoveryDocumentSummary>,
     pub isolation: Option<String>,
     pub acceptance: Option<RecoveryAcceptanceTicket>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryDocumentSummary {
+    pub document_id: String,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryAcceptedResult {
     pub accepted_records: usize,
     pub isolation: Option<String>,
     pub project_revision: u64,
+    pub recovered_document: Option<DocumentId>,
+    pub snapshot: ProjectSnapshot,
 }
 
 impl RecoveryAcceptedResult {
@@ -559,6 +689,13 @@ impl RecoveryAcceptedResult {
             revision: self.project_revision,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveryDiscardedResult {
+    pub isolation: Option<String>,
+    pub project_revision: u64,
+    pub snapshot: ProjectSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -781,10 +918,27 @@ fn search_result_from_hit(hit: SearchHit) -> Result<GlobalSearchResult, ServiceF
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExportProgress {
-    pub completed: u64,
-    pub total: u64,
-    pub terminal: bool,
+pub enum ExportProgress {
+    Planning,
+    Rendering { completed: u64, total: u64 },
+    Committing,
+}
+
+struct ChannelExportProgress {
+    sender: Sender<ExportProgress>,
+}
+
+impl ExportProgressSink for ChannelExportProgress {
+    fn report(&self, progress: OperationProgress) {
+        let progress = match progress {
+            OperationProgress::Planning => ExportProgress::Planning,
+            OperationProgress::Rendering { completed, total } => {
+                ExportProgress::Rendering { completed, total }
+            }
+            OperationProgress::Committing => ExportProgress::Committing,
+        };
+        let _ = self.sender.send(progress);
+    }
 }
 
 #[derive(Debug)]
@@ -806,12 +960,6 @@ impl SuccessfulExportOutput {
 
     pub const fn source_revision(&self) -> u64 {
         self.source_revision
-    }
-
-    pub fn reducer_payload(&self) -> ProjectTaskPayload {
-        ProjectTaskPayload::ExportSucceeded {
-            output_name: self.output_name.clone(),
-        }
     }
 }
 
@@ -891,7 +1039,7 @@ fn export_snapshot_with_css(
     Ok(ExportProjectSnapshot::new(
         ExportStyleCatalog::new(css),
         ExportDefaults {
-            emit_titles: true,
+            emit_titles: project.export_settings.emit_titles != ProjectExportSetting::Disabled,
             start_new_page: project.export_settings.starts_new_page,
         },
         manuscript,
@@ -918,11 +1066,12 @@ fn export_children(
                 node_id: encode_hex(id.as_bytes()),
             })
         })?;
-        if node.export_settings.excluded {
-            continue;
-        }
         let settings = ExportSettings {
-            emit_titles: InheritedSetting::Inherit,
+            emit_titles: match node.export_settings.emit_titles {
+                ProjectExportSetting::Inherit => InheritedSetting::Inherit,
+                ProjectExportSetting::Enabled => InheritedSetting::Enabled,
+                ProjectExportSetting::Disabled => InheritedSetting::Disabled,
+            },
             start_new_page: if node.export_settings.starts_new_page {
                 InheritedSetting::Enabled
             } else {
@@ -991,12 +1140,18 @@ trait ServiceFeedPorts: Send + Sync {
         &self,
         checkpoint: CheckpointId,
     ) -> Result<SnapshotPreview, ServiceFeedError>;
+    fn history_resource(
+        &self,
+        checkpoint: CheckpointId,
+        path: &CanonicalRelativePath,
+    ) -> Result<CheckpointResource, ServiceFeedError>;
     fn history_restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan, ServiceFeedError>;
     fn reconcile_recovery(
         &self,
         sequence: u64,
     ) -> Result<RecoveryReconcileResult, ServiceFeedError>;
     fn accept_recovery(&self, sequence: u64) -> Result<RecoveryAcceptedResult, ServiceFeedError>;
+    fn discard_recovery(&self, sequence: u64) -> Result<RecoveryDiscardedResult, ServiceFeedError>;
     fn export_plan(
         &self,
         request: ExportRequest,
@@ -1010,12 +1165,20 @@ trait ServiceFeedPorts: Send + Sync {
         &self,
         plan: ExportPlan,
         sink: Box<dyn ExportSink>,
-    ) -> Result<ExportHandle, ServiceFeedError>;
+        handle: ExportHandle,
+        progress: Arc<dyn ExportProgressSink>,
+    ) -> Result<ExportCompletion, ServiceFeedError>;
 }
 
 struct ProjectUiPortAdapter {
     ports: ProjectUiPorts,
-    recovery_acceptances: Mutex<BTreeMap<u64, ProjectRecoveryAcceptance>>,
+    recovery_acceptances: Mutex<BTreeMap<u64, PendingRecoveryChoice>>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingRecoveryChoice {
+    acceptance: ProjectRecoveryAcceptance,
+    affected_documents: Vec<RecoveryDocumentSummary>,
 }
 
 impl ProjectUiPortAdapter {
@@ -1070,6 +1233,17 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
             .map_err(|error| service_error(ServiceKind::History, error))
     }
 
+    fn history_resource(
+        &self,
+        checkpoint: CheckpointId,
+        path: &CanonicalRelativePath,
+    ) -> Result<CheckpointResource, ServiceFeedError> {
+        self.access()?
+            .history(|history| history.read_resource(checkpoint, path))
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::History, error))
+    }
+
     fn history_restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan, ServiceFeedError> {
         self.access()?
             .history(|history| history.restore(checkpoint))
@@ -1090,7 +1264,7 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
     }
 
     fn accept_recovery(&self, sequence: u64) -> Result<RecoveryAcceptedResult, ServiceFeedError> {
-        let acceptance = self
+        let pending = self
             .recovery_acceptances
             .lock()
             .map_err(|_| ServiceFeedError::InvalidState {
@@ -1101,11 +1275,19 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
             .ok_or(ServiceFeedError::NoRecoveryToAccept)?;
         let state = self
             .access()?
-            .persistence(|persistence| persistence.accept_recovery(acceptance))
+            .persistence(|persistence| persistence.accept_recovery(pending.acceptance))
             .map_err(stale_session)?
             .map_err(|error| service_error(ServiceKind::Recovery, error))?;
-        // Recovery acceptance changes authoritative project/editor state. Query
-        // again instead of claiming the captured task revision advanced by one.
+        let (handle, _) = self
+            .access()?
+            .persistence(|persistence| persistence.request_save(ProjectSaveKind::Restoration))
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::Recovery, error))?;
+        let saved = self
+            .access()?
+            .persistence(|persistence| persistence.await_save(handle))
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::Recovery, error))?;
         let snapshot = self
             .access()?
             .snapshot(|query| query.snapshot())
@@ -1114,7 +1296,42 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
         Ok(RecoveryAcceptedResult {
             accepted_records: state.accepted_records,
             isolation: state.isolation.map(|isolation| format!("{isolation:?}")),
+            project_revision: saved.written.project_revision.value(),
+            recovered_document: pending
+                .affected_documents
+                .first()
+                .and_then(|summary| {
+                    parse_stable_id(&summary.document_id, "recovered document").ok()
+                })
+                .map(DocumentId::from_bytes),
+            snapshot,
+        })
+    }
+
+    fn discard_recovery(&self, sequence: u64) -> Result<RecoveryDiscardedResult, ServiceFeedError> {
+        let pending = self
+            .recovery_acceptances
+            .lock()
+            .map_err(|_| ServiceFeedError::InvalidState {
+                operation: "discard recovery",
+                reason: "recovery acceptance state is unavailable",
+            })?
+            .remove(&sequence)
+            .ok_or(ServiceFeedError::NoRecoveryToAccept)?;
+        let state = self
+            .access()?
+            .persistence(|persistence| persistence.discard_recovery(pending.acceptance))
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::Recovery, error))?;
+        let snapshot = self
+            .access()?
+            .snapshot(|query| query.snapshot())
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::ProjectQuery, error))?;
+        Ok(RecoveryDiscardedResult {
+            isolation: state.isolation.map(|isolation| format!("{isolation:?}")),
             project_revision: snapshot.project.revision.value(),
+            snapshot,
         })
     }
 
@@ -1142,9 +1359,11 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
         &self,
         plan: ExportPlan,
         sink: Box<dyn ExportSink>,
-    ) -> Result<ExportHandle, ServiceFeedError> {
+        handle: ExportHandle,
+        progress: Arc<dyn ExportProgressSink>,
+    ) -> Result<ExportCompletion, ServiceFeedError> {
         self.access()?
-            .exporter(|exporter| exporter.export(plan, sink))
+            .exporter(|exporter| exporter.export(plan, sink, handle, progress))
             .map_err(stale_session)?
             .map_err(|error| service_error(ServiceKind::Export, error))
     }
@@ -1153,8 +1372,16 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
 fn recovery_reconcile_result(
     sequence: u64,
     state: ProjectRecoveryState,
-    acceptances: &Mutex<BTreeMap<u64, ProjectRecoveryAcceptance>>,
+    acceptances: &Mutex<BTreeMap<u64, PendingRecoveryChoice>>,
 ) -> Result<RecoveryReconcileResult, ServiceFeedError> {
+    let affected_documents = state
+        .affected_documents
+        .iter()
+        .map(|(document, revision)| RecoveryDocumentSummary {
+            document_id: encode_hex(document.as_bytes()),
+            revision: revision.value(),
+        })
+        .collect::<Vec<_>>();
     let isolation = state.isolation.map(|isolation| format!("{isolation:?}"));
     let acceptance = if let Some(acceptance) = state.acceptance {
         acceptances
@@ -1163,13 +1390,20 @@ fn recovery_reconcile_result(
                 operation: "reconcile recovery",
                 reason: "recovery acceptance state is unavailable",
             })?
-            .insert(sequence, acceptance);
+            .insert(
+                sequence,
+                PendingRecoveryChoice {
+                    acceptance,
+                    affected_documents: affected_documents.clone(),
+                },
+            );
         Some(RecoveryAcceptanceTicket { sequence })
     } else {
         None
     };
     Ok(RecoveryReconcileResult {
         accepted_records: state.accepted_records,
+        affected_documents,
         isolation,
         acceptance,
     })
@@ -1221,6 +1455,8 @@ fn parse_stable_id(value: &str, kind: &'static str) -> Result<[u8; 16], ServiceF
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    use parchmint_application::{DocumentVisibility, EditorRevision};
+    use parchmint_domain::{ProjectId, ProjectSection};
     use parchmint_export_api::{ExportCompletion, ExportTargetCapability};
     use parchmint_history_api::{CheckpointSummary, HistoryPage, SnapshotName};
     use parchmint_search_api::{BlockId, RevisionId, SearchSnippet, TextRange};
@@ -1234,6 +1470,7 @@ mod tests {
         search_batches: Mutex<Vec<SearchBatch>>,
         history_page: Mutex<Option<HistoryPage>>,
         history_preview: Mutex<Option<SnapshotPreview>>,
+        history_resource: Mutex<Option<CheckpointResource>>,
         recovery_revision: AtomicU64,
         export_mode: Mutex<FakeExportMode>,
     }
@@ -1243,6 +1480,7 @@ mod tests {
         #[default]
         Success,
         Failure,
+        PendingAfterCompletion,
     }
 
     impl FakePorts {
@@ -1305,6 +1543,22 @@ mod tests {
                 })
         }
 
+        fn history_resource(
+            &self,
+            _: CheckpointId,
+            _: &CanonicalRelativePath,
+        ) -> Result<CheckpointResource, ServiceFeedError> {
+            self.check()?;
+            self.history_resource
+                .lock()
+                .expect("history resource")
+                .clone()
+                .ok_or_else(|| ServiceFeedError::Service {
+                    service: ServiceKind::History,
+                    message: "missing fake resource".to_owned(),
+                })
+        }
+
         fn history_restore(&self, _: CheckpointId) -> Result<RestorePlan, ServiceFeedError> {
             Err(ServiceFeedError::Unsupported(
                 UnsupportedBoundary::HistoryRestorePlanExecutorUnavailable,
@@ -1318,6 +1572,10 @@ mod tests {
             self.check()?;
             Ok(RecoveryReconcileResult {
                 accepted_records: 2,
+                affected_documents: vec![RecoveryDocumentSummary {
+                    document_id: encode_hex(&[6; 16]),
+                    revision: 11,
+                }],
                 isolation: None,
                 acceptance: Some(RecoveryAcceptanceTicket { sequence }),
             })
@@ -1329,6 +1587,17 @@ mod tests {
                 accepted_records: 2,
                 isolation: None,
                 project_revision: self.recovery_revision.load(Ordering::Relaxed),
+                recovered_document: Some(DocumentId::from_bytes([6; 16])),
+                snapshot: recovery_snapshot(),
+            })
+        }
+
+        fn discard_recovery(&self, _: u64) -> Result<RecoveryDiscardedResult, ServiceFeedError> {
+            self.check()?;
+            Ok(RecoveryDiscardedResult {
+                isolation: None,
+                project_revision: self.recovery_revision.load(Ordering::Relaxed),
+                snapshot: recovery_snapshot(),
             })
         }
 
@@ -1354,25 +1623,45 @@ mod tests {
             &self,
             plan: ExportPlan,
             mut sink: Box<dyn ExportSink>,
-        ) -> Result<ExportHandle, ServiceFeedError> {
+            handle: ExportHandle,
+            progress: Arc<dyn ExportProgressSink>,
+        ) -> Result<ExportCompletion, ServiceFeedError> {
             self.check()?;
-            if matches!(
-                *self.export_mode.lock().expect("export mode"),
-                FakeExportMode::Failure
-            ) {
-                return Err(ServiceFeedError::Service {
-                    service: ServiceKind::Export,
-                    message: "fake write failed".to_owned(),
-                });
+            match *self.export_mode.lock().expect("export mode") {
+                FakeExportMode::Failure => {
+                    return Err(ServiceFeedError::Service {
+                        service: ServiceKind::Export,
+                        message: "fake write failed".to_owned(),
+                    });
+                }
+                FakeExportMode::PendingAfterCompletion => {
+                    return Ok(ExportCompletion {
+                        target: plan.target().clone(),
+                    });
+                }
+                FakeExportMode::Success => {}
             }
-            let handle = ExportHandle::new();
+            progress.report(OperationProgress::Rendering {
+                completed: 0,
+                total: 0,
+            });
             let output = handle
                 .begin_temporary(sink.as_mut(), plan.target())
                 .map_err(|error| service_error(ServiceKind::Export, error))?;
-            let ExportCompletion { .. } = output
+            let completion = output
                 .finish()
                 .map_err(|error| service_error(ServiceKind::Export, error))?;
-            Ok(handle)
+            progress.report(OperationProgress::Committing);
+            Ok(completion)
+        }
+    }
+
+    fn recovery_snapshot() -> ProjectSnapshot {
+        ProjectSnapshot {
+            project: Project::new(ProjectId::from_bytes([7; 16])),
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
         }
     }
 
@@ -1445,6 +1734,52 @@ mod tests {
                 },
             )]),
         )
+    }
+
+    #[test]
+    fn export_snapshot_preserves_excluded_nodes_for_planning() {
+        let document = DocumentId::from_bytes([4; 16]);
+        let node = NodeId::from_bytes([5; 16]);
+        let mut project = Project::new(ProjectId::from_bytes([7; 16]));
+        project
+            .nodes
+            .try_insert_document(
+                node,
+                document,
+                ProjectSection::Manuscript.root_id(),
+                0,
+                "Excluded chapter",
+            )
+            .expect("insert document");
+        project
+            .nodes
+            .get_mut(node)
+            .expect("document node")
+            .export_settings
+            .excluded = true;
+        let documents = [DocumentSnapshot {
+            document_id: document,
+            revision: EditorRevision::from(3),
+            body: "preserved body".to_owned(),
+            comments: Vec::new(),
+            visibility: DocumentVisibility::Closed,
+        }];
+
+        let snapshot = export_snapshot_with_css(&project, &documents, String::new())
+            .expect("capture full project snapshot");
+
+        assert!(matches!(
+            snapshot.manuscript.as_slice(),
+            [ExportNode::Document { id, title, .. }]
+                if *id == document && title == "Excluded chapter"
+        ));
+        assert_eq!(
+            snapshot
+                .sources
+                .get(&document)
+                .map(|source| source.body.as_str()),
+            Some("preserved body")
+        );
     }
 
     #[test]
@@ -1546,18 +1881,64 @@ mod tests {
 
         let page = feeds.history_list(None, 20, None).run().expect("list");
         assert_eq!(page.checkpoints[0].sequence, 42);
+        assert_eq!(
+            page.checkpoints[0].category,
+            HistoryCheckpointCategory::NamedSnapshot
+        );
         assert_eq!(page.checkpoints[0].name.as_deref(), Some("Draft"));
         assert_eq!(
             page.next_cursor.as_ref().map(HistoryCursor::as_str),
             Some("next")
         );
         let preview = feeds
-            .history_preview(encode_hex(&[1; 16]))
+            .history_preview(encode_hex(&[1; 16]), None)
             .run()
             .expect("preview");
         assert_eq!(preview.checkpoint.checkpoint_id, encode_hex(&[1; 16]));
         assert_eq!(preview.resources[0].canonical_path, "project.toml");
         assert_eq!(preview.resources[0].content_hash, [8; 32]);
+    }
+
+    #[test]
+    fn history_document_preview_reads_exact_checkpoint_bytes() {
+        let fake = Arc::new(FakePorts::default());
+        let checkpoint = CheckpointId::from_bytes([3; 16]);
+        let document = DocumentId::from_bytes([4; 16]);
+        let path = CanonicalRelativePath::parse(format!(
+            "manuscript/{}.html",
+            encode_hex(document.as_bytes())
+        ))
+        .unwrap();
+        let body =
+            br#"<p data-block-id="04040404040404040404040404040404">checkpoint words</p>"#.to_vec();
+        let hash = parchmint_history_api::ContentHash::from_bytes([8; 32]);
+        fake.history_preview
+            .lock()
+            .unwrap()
+            .replace(SnapshotPreview {
+                checkpoint: summary(3, 9),
+                resources: BTreeMap::from([(path.clone(), hash)]),
+            });
+        fake.history_resource
+            .lock()
+            .unwrap()
+            .replace(CheckpointResource {
+                checkpoint,
+                path: path.clone(),
+                content_hash: hash,
+                bytes: body,
+            });
+
+        let preview = feeds(fake)
+            .history_preview(
+                encode_hex(checkpoint.as_bytes()),
+                Some(encode_hex(document.as_bytes())),
+            )
+            .run()
+            .expect("checkpoint document preview");
+        let document = preview.document.expect("document content");
+        assert_eq!(document.canonical_path, path.as_str());
+        assert_eq!(document.semantic.blocks().len(), 1);
     }
 
     #[test]
@@ -1567,14 +1948,38 @@ mod tests {
         let feeds = feeds(fake);
         let reconciled = feeds.reconcile_recovery().run().expect("reconcile");
         assert_eq!(reconciled.accepted_records, 2);
+        assert_eq!(reconciled.affected_documents[0].revision, 11);
         let accepted = feeds
             .accept_recovery(reconciled.acceptance.expect("acceptance"))
             .run()
             .expect("accept");
         assert_eq!(accepted.project_revision, 18);
         assert_eq!(
+            accepted.recovered_document,
+            Some(DocumentId::from_bytes([6; 16]))
+        );
+        assert_eq!(
             accepted.reducer_payload(),
             ProjectTaskPayload::RecoveryAccepted { revision: 18 }
+        );
+    }
+
+    #[test]
+    fn recovery_discard_returns_the_authoritative_current_snapshot() {
+        let fake = Arc::new(FakePorts::default());
+        fake.recovery_revision.store(12, Ordering::Relaxed);
+        let feeds = feeds(fake);
+        let reconciled = feeds.reconcile_recovery().run().expect("reconcile");
+
+        let discarded = feeds
+            .discard_recovery(reconciled.acceptance.expect("acceptance"))
+            .run()
+            .expect("discard");
+
+        assert_eq!(discarded.project_revision, 12);
+        assert_eq!(
+            discarded.snapshot.project.id,
+            ProjectId::from_bytes([7; 16])
         );
     }
 
@@ -1608,16 +2013,11 @@ mod tests {
         assert_eq!(
             start.progress.into_iter().collect::<Vec<_>>(),
             vec![
-                ExportProgress {
+                ExportProgress::Rendering {
                     completed: 0,
-                    total: 1,
-                    terminal: false,
+                    total: 0,
                 },
-                ExportProgress {
-                    completed: 1,
-                    total: 1,
-                    terminal: true,
-                },
+                ExportProgress::Committing,
             ]
         );
         assert_eq!(
@@ -1647,9 +2047,26 @@ mod tests {
         assert_eq!(platform.calls.load(Ordering::Relaxed), 1);
         assert!(matches!(
             feeds.cancel_export(),
-            Err(ServiceFeedError::Unsupported(
-                UnsupportedBoundary::ExportHandleUnavailableWhileRendering
-            ))
+            Err(ServiceFeedError::OutputUnavailable)
         ));
+    }
+
+    #[test]
+    fn export_completion_is_successful_when_an_adapter_leaves_its_handle_pending() {
+        let fake = Arc::new(FakePorts::default());
+        *fake.export_mode.lock().expect("export mode") = FakeExportMode::PendingAfterCompletion;
+        let feeds = feeds(fake);
+        let plan = feeds
+            .plan_export(export_request("unsettled.html", false), export_project())
+            .run()
+            .expect("plan");
+
+        let completed = feeds
+            .start_export(plan, Box::new(FakeSink), 7)
+            .job
+            .run()
+            .expect("completion is authoritative");
+
+        assert_eq!(completed.output_name(), "unsettled.html");
     }
 }

@@ -124,6 +124,9 @@ name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
+dependencies = [
+    "serde_core",
+]
 
 [[package]]
 name = "blanket"
@@ -319,7 +322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b7f4aaa047ba3c3630b080bb9860894732ff23e2aee290a418909aa6d5df38f"
 dependencies = [
     "objc2 0.5.2",
-    "objc2-app-kit",
+    "objc2-app-kit 0.2.2",
     "objc2-foundation 0.2.2",
 ]
 
@@ -474,6 +477,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
     "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85363c37faeca707aef026efa9f3b34d077bce547e48f770770625c6013679e"
+dependencies = [
+    "crossbeam-utils",
 ]
 
 [[package]]
@@ -1453,6 +1465,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyboard-types"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
+dependencies = [
+    "bitflags 2.13.1",
+    "serde",
+    "unicode-segmentation",
+]
+
+[[package]]
 name = "kurbo"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1687,6 +1710,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "muda"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dd04e60bc0b07438a6771710ee1698f98f6ebbc7f89b61264af1563b8aeb878"
+dependencies = [
+    "crossbeam-channel",
+    "dpi",
+    "keyboard-types",
+    "objc2 0.6.4",
+    "objc2-app-kit 0.3.2",
+    "objc2-core-foundation",
+    "objc2-foundation 0.3.2",
+    "once_cell",
+    "png",
+    "thiserror 2.0.20",
+    "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "naga"
 version = "27.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1824,6 +1866,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-app-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
+dependencies = [
+    "bitflags 2.13.1",
+    "objc2 0.6.4",
+    "objc2-core-foundation",
+    "objc2-foundation 0.3.2",
+]
+
+[[package]]
 name = "objc2-cloud-kit"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1956,7 +2010,7 @@ checksum = "a1a1ae721c5e35be65f01a03b6d2ac13a54cb4fa70d8a5da293d7b0020261398"
 dependencies = [
     "block2",
     "objc2 0.5.2",
-    "objc2-app-kit",
+    "objc2-app-kit 0.2.2",
     "objc2-foundation 0.2.2",
 ]
 
@@ -2159,6 +2213,7 @@ name = "parchmint-desktop"
 version = "0.1.0"
 dependencies = [
     "parchmint-application",
+    "parchmint-contracts",
     "parchmint-domain",
     "parchmint-editor-api",
     "parchmint-editor-core",
@@ -2275,7 +2330,9 @@ version = "0.1.0"
 name = "parchmint-platform-native"
 version = "0.1.0"
 dependencies = [
+    "muda",
     "parchmint-platform-api",
+    "raw-window-handle",
 ]
 
 [[package]]
@@ -2417,13 +2474,16 @@ dependencies = [
     "parchmint-design-system",
     "parchmint-domain",
     "parchmint-editor-api",
+    "parchmint-editor-core",
     "parchmint-editor-iced",
     "parchmint-export-api",
     "parchmint-history-api",
     "parchmint-platform-api",
     "parchmint-preferences",
+    "parchmint-project-format",
     "parchmint-search-api",
     "parchmint-ui-api",
+    "parchmint-workspace-state",
 ]
 
 [[package]]
@@ -3921,7 +3981,7 @@ dependencies = [
     "memmap2",
     "ndk",
     "objc2 0.5.2",
-    "objc2-app-kit",
+    "objc2-app-kit 0.2.2",
     "objc2-foundation 0.2.2",
     "objc2-ui-kit",
     "orbclient",

@@ -301,12 +301,28 @@ pub struct PasteMark {
     pub kind: PasteMarkKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteBlockKind {
+    Paragraph,
+    UnorderedListItem,
+    OrderedListItem,
+    BlockQuote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasteBlock {
+    pub range: EditorSelection,
+    pub kind: PasteBlockKind,
+    pub list_depth: usize,
+}
+
 /// Sanitized clipboard content. ParchMint can apply the text now and retain
 /// the mark descriptors for the formatting implementation stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SanitizedPaste {
     text: String,
     marks: Vec<PasteMark>,
+    blocks: Vec<PasteBlock>,
     unsafe_content_removed: bool,
     omitted_images: usize,
 }
@@ -318,6 +334,10 @@ impl SanitizedPaste {
 
     pub fn marks(&self) -> &[PasteMark] {
         &self.marks
+    }
+
+    pub fn blocks(&self) -> &[PasteBlock] {
+        &self.blocks
     }
 
     pub const fn unsafe_content_removed(&self) -> bool {
@@ -945,6 +965,7 @@ pub fn sanitize_paste(source: PasteSource<'_>) -> SanitizedPaste {
         PasteSource::PlainText(text) => SanitizedPaste {
             text: normalize_newlines(text),
             marks: Vec::new(),
+            blocks: Vec::new(),
             unsafe_content_removed: false,
             omitted_images: 0,
         },
@@ -956,6 +977,10 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
     let lower = html.to_ascii_lowercase();
     let mut text = String::new();
     let mut marks = Vec::new();
+    let mut blocks = Vec::new();
+    let mut open_block: Option<(PasteBlockKind, usize, usize)> = None;
+    let mut lists: Vec<String> = Vec::new();
+    let mut quote_depth = 0usize;
     let mut open_marks: Vec<(String, usize, PasteMarkKind)> = Vec::new();
     let mut unsafe_content_removed = false;
     let mut omitted_images = 0;
@@ -995,31 +1020,138 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
             }
             continue;
         }
+        if name != "a"
+            && matches!(
+                name,
+                "br" | "p"
+                    | "div"
+                    | "h1"
+                    | "h2"
+                    | "h3"
+                    | "blockquote"
+                    | "ul"
+                    | "ol"
+                    | "li"
+                    | "strong"
+                    | "b"
+                    | "em"
+                    | "i"
+                    | "u"
+                    | "s"
+                    | "strike"
+                    | "del"
+            )
+            && tag_has_attributes(raw_tag, name)
+        {
+            unsafe_content_removed = true;
+        }
         match (closing, name) {
             (false, "img") => omitted_images += 1,
             (_, "br") => push_line_break(&mut text),
-            (false, "p" | "div" | "h1" | "h2" | "h3" | "blockquote") => {
-                push_paragraph_break(&mut text)
+            (false, "blockquote") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                push_paragraph_break(&mut text);
+                quote_depth += 1;
+                open_block = Some((PasteBlockKind::BlockQuote, text.chars().count(), 0));
             }
-            (true, "p" | "div" | "h1" | "h2" | "h3" | "blockquote") => {
-                push_paragraph_break(&mut text)
+            (true, "blockquote") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                quote_depth = quote_depth.saturating_sub(1);
+                push_paragraph_break(&mut text);
+            }
+            (false, "ul" | "ol") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                lists.push(name.into());
+            }
+            (true, "ul" | "ol") => {
+                if lists.pop().as_deref() != Some(name) {
+                    unsafe_content_removed = true;
+                }
+            }
+            (false, "li") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                push_paragraph_break(&mut text);
+                let previous_depth = blocks.last().and_then(|block: &PasteBlock| {
+                    matches!(
+                        block.kind,
+                        PasteBlockKind::UnorderedListItem | PasteBlockKind::OrderedListItem
+                    )
+                    .then_some(block.list_depth)
+                });
+                let requested_depth = lists.len().saturating_sub(1);
+                let list_depth = previous_depth
+                    .map(|depth| requested_depth.min(depth.saturating_add(1)))
+                    .unwrap_or(0);
+                if list_depth != requested_depth {
+                    unsafe_content_removed = true;
+                }
+                let kind = if lists.last().map(String::as_str) == Some("ol") {
+                    PasteBlockKind::OrderedListItem
+                } else {
+                    PasteBlockKind::UnorderedListItem
+                };
+                open_block = Some((kind, text.chars().count(), list_depth));
+            }
+            (true, "li") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                push_paragraph_break(&mut text);
+            }
+            (false, "p" | "div" | "h1" | "h2" | "h3") => {
+                let keep_empty_quote = quote_depth > 0
+                    && open_block
+                        .as_ref()
+                        .is_some_and(|(_, start, _)| *start == text.chars().count());
+                if !keep_empty_quote {
+                    finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                    push_paragraph_break(&mut text);
+                    open_block = Some((
+                        if quote_depth > 0 {
+                            PasteBlockKind::BlockQuote
+                        } else {
+                            PasteBlockKind::Paragraph
+                        },
+                        text.chars().count(),
+                        0,
+                    ));
+                }
+            }
+            (true, "p" | "div" | "h1" | "h2" | "h3") => {
+                finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
+                push_paragraph_break(&mut text);
             }
             (false, "strong" | "b") => {
+                if tag_has_attributes(raw_tag, name) {
+                    unsafe_content_removed = true;
+                }
                 open_marks.push((name.into(), text.chars().count(), PasteMarkKind::Bold))
             }
             (false, "em" | "i") => {
+                if tag_has_attributes(raw_tag, name) {
+                    unsafe_content_removed = true;
+                }
                 open_marks.push((name.into(), text.chars().count(), PasteMarkKind::Italic))
             }
             (false, "u") => {
+                if tag_has_attributes(raw_tag, name) {
+                    unsafe_content_removed = true;
+                }
                 open_marks.push((name.into(), text.chars().count(), PasteMarkKind::Underline))
             }
-            (false, "s" | "strike" | "del") => open_marks.push((
-                name.into(),
-                text.chars().count(),
-                PasteMarkKind::Strikethrough,
-            )),
+            (false, "s" | "strike" | "del") => {
+                if tag_has_attributes(raw_tag, name) {
+                    unsafe_content_removed = true;
+                }
+                open_marks.push((
+                    name.into(),
+                    text.chars().count(),
+                    PasteMarkKind::Strikethrough,
+                ));
+            }
             (false, "a") => {
                 if let Some(link) = safe_href(raw_tag) {
+                    if raw_tag.matches('=').count() != 1 {
+                        unsafe_content_removed = true;
+                    }
                     open_marks.push((name.into(), text.chars().count(), PasteMarkKind::Link(link)));
                 } else {
                     unsafe_content_removed = true;
@@ -1028,14 +1160,12 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
             (true, "strong" | "b" | "em" | "i" | "u" | "s" | "strike" | "del" | "a") => {
                 close_mark(name, text.chars().count(), &mut open_marks, &mut marks)
             }
-            _ => {
-                if raw_tag.contains('=') {
-                    unsafe_content_removed = true;
-                }
-            }
+            _ => unsafe_content_removed = true,
         }
         cursor = end + 1;
     }
+
+    finish_paste_block(&mut open_block, text.chars().count(), &mut blocks);
 
     let trimmed = text.trim_matches('\n').to_owned();
     let removed_prefix = text
@@ -1061,13 +1191,52 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
             EditorSelection::new(DocumentPosition::from(start), DocumentPosition::from(end));
         true
     });
-
+    blocks.retain_mut(|block| {
+        let start = block
+            .range
+            .start()
+            .value()
+            .saturating_sub(removed_prefix as u64);
+        let end = block
+            .range
+            .end()
+            .value()
+            .saturating_sub(removed_prefix as u64);
+        if start > end || end > trimmed_len as u64 {
+            return false;
+        }
+        block.range = EditorSelection::new(start.into(), end.into());
+        true
+    });
     SanitizedPaste {
         text: trimmed,
         marks,
+        blocks,
         unsafe_content_removed,
         omitted_images,
     }
+}
+
+fn finish_paste_block(
+    open: &mut Option<(PasteBlockKind, usize, usize)>,
+    end: usize,
+    output: &mut Vec<PasteBlock>,
+) {
+    if let Some((kind, start, list_depth)) = open.take()
+        && start <= end
+    {
+        output.push(PasteBlock {
+            range: EditorSelection::new((start as u64).into(), (end as u64).into()),
+            kind,
+            list_depth,
+        });
+    }
+}
+
+fn tag_has_attributes(raw: &str, name: &str) -> bool {
+    raw.trim_start_matches('/')
+        .strip_prefix(name)
+        .is_some_and(|rest| !rest.trim_matches('/').trim().is_empty())
 }
 
 fn close_mark(
@@ -1335,6 +1504,38 @@ mod tests {
                 kind: PasteMarkKind::Bold,
             }]
         );
+        assert_eq!(
+            sanitized.blocks(),
+            &[
+                PasteBlock {
+                    range: selection(0, 9),
+                    kind: PasteBlockKind::Paragraph,
+                    list_depth: 0,
+                },
+                PasteBlock {
+                    range: selection(11, 15),
+                    kind: PasteBlockKind::Paragraph,
+                    list_depth: 0,
+                },
+            ]
+        );
+
+        let structured = sanitize_paste(PasteSource::RichHtml(
+            "<ul><li>top<ul><li><em>nested</em></li></ul></li></ul><blockquote>q<br>x</blockquote>",
+        ));
+        assert_eq!(
+            structured
+                .blocks()
+                .iter()
+                .map(|block| (block.kind, block.list_depth))
+                .collect::<Vec<_>>(),
+            vec![
+                (PasteBlockKind::UnorderedListItem, 0),
+                (PasteBlockKind::UnorderedListItem, 1),
+                (PasteBlockKind::BlockQuote, 0),
+            ]
+        );
+        assert_eq!(structured.marks().len(), 1);
 
         assert_eq!(
             sanitize_paste(PasteSource::PlainText("one\r\n\r\ntwo")).text(),
@@ -1402,11 +1603,12 @@ mod tests {
         let mounted = view(1);
         let comment_id = CommentId::from_bytes([8; 16]);
         let mut load = CanonicalDocumentLoad::new(document(32), "alpha");
-        load.comments.push(CanonicalComment {
-            id: comment_id,
-            range: selection(1, 3),
-            body: "note".into(),
-        });
+        load.comments.push(CanonicalComment::new(
+            comment_id,
+            selection(1, 3),
+            "note",
+            BlockId::from_bytes([32; 16]),
+        ));
         load.anchors.push(CanonicalAnchor {
             block: BlockId::from_bytes([9; 16]),
             position: DocumentPosition::from(4),

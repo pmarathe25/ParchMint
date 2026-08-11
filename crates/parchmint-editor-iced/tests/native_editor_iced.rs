@@ -6,7 +6,10 @@
 mod fixtures;
 
 use iced_test::futures::futures::executor::block_on;
-use parchmint_editor_api::{DocumentPosition, EditorAdapter, EditorRevision, EditorSelection};
+use parchmint_editor_api::{
+    DocumentPosition, EditorAdapter, EditorCommand, EditorCommandKind, EditorCommandOrigin,
+    EditorRevision, EditorSelection,
+};
 use parchmint_editor_iced::{EditorViewport, MountedViewPresentation};
 use parchmint_platform_api::UntrustedClipboardContent;
 use parchmint_recovery_api::DocumentRevision;
@@ -235,6 +238,103 @@ fn synthetic_input_contract_accepts_en_us_and_sanitizes_untrusted_clipboard_payl
             .expect("retained projection")
             .body(),
         "Title\n\tBodyKeep"
+    );
+}
+
+#[test]
+fn rich_and_plain_paste_are_distinct_revision_checked_transactions() {
+    let adapter = adapter_with_cache_limit(6);
+    let session = open(&adapter, "<p></p>");
+    mount(&adapter, session.clone(), view(1));
+    let rich = UntrustedClipboardContent::empty()
+        .with_plain_text("Keep")
+        .with_html("<strong>Keep</strong><img src=x>");
+    let paste = adapter
+        .paste_untrusted_at(
+            session.clone(),
+            view(1),
+            EditorSelection::default(),
+            EditorRevision::default(),
+            &rich,
+        )
+        .expect("rich paste");
+    assert_eq!(paste.omitted_images(), 1);
+    assert_eq!(
+        block_on(adapter.project(session.clone(), EditorRevision::from(1)))
+            .expect("rich projection")
+            .body(),
+        "<p><strong>Keep</strong></p>"
+    );
+    adapter
+        .execute(
+            session.clone(),
+            EditorCommandOrigin::new(view(1)),
+            EditorCommand::new(EditorRevision::from(1), EditorCommandKind::Undo),
+        )
+        .expect("undo rich paste");
+    assert_eq!(
+        block_on(adapter.project(session.clone(), EditorRevision::from(2)))
+            .expect("undo projection")
+            .body(),
+        "<p></p>"
+    );
+    adapter
+        .paste_untrusted_plain_at(
+            session.clone(),
+            view(1),
+            EditorSelection::default(),
+            EditorRevision::from(2),
+            &rich,
+        )
+        .expect("plain paste");
+    assert_eq!(
+        block_on(adapter.project(session, EditorRevision::from(3)))
+            .expect("plain projection")
+            .body(),
+        "<p>Keep</p>"
+    );
+}
+
+#[test]
+fn rich_paste_retains_multi_block_nested_structure_in_one_undoable_revision() {
+    let adapter = adapter_with_cache_limit(6);
+    let session = open(&adapter, "<p>before after</p>");
+    mount(&adapter, session.clone(), view(1));
+    let rich = UntrustedClipboardContent::empty().with_html(
+        "<p><strong>one</strong></p><ul><li>top<ul><li><em>nested</em></li></ul></li></ul><blockquote><a href=\"https://e.test\">q</a><br>x</blockquote><img src=x>",
+    );
+    let paste = adapter
+        .paste_untrusted_at(
+            session.clone(),
+            view(1),
+            EditorSelection::new(7.into(), 7.into()),
+            EditorRevision::default(),
+            &rich,
+        )
+        .expect("structured rich paste");
+    assert_eq!(paste.omitted_images(), 1);
+    assert_eq!(
+        adapter.revision(session.clone()).expect("revision"),
+        1.into()
+    );
+    assert_eq!(
+        block_on(adapter.project(session.clone(), 1.into()))
+            .expect("structured projection")
+            .body(),
+        "<p>before </p><p><strong>one</strong></p><ul><li>top<ul><li><em>nested</em></li></ul></li></ul><blockquote><a href=\"https://e.test\">q</a><br>x</blockquote><p>after</p>"
+    );
+    adapter
+        .execute(
+            session.clone(),
+            EditorCommandOrigin::new(view(1)),
+            EditorCommand::new(1.into(), EditorCommandKind::Undo),
+        )
+        .expect("undo structured paste");
+    assert_eq!(
+        block_on(adapter.project(session, 2.into()))
+            .expect("undo projection")
+            .body(),
+        "<p>before after</p>"
     );
 }
 

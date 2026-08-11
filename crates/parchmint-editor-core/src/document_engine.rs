@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, SemanticBlock, SemanticBlockKind,
-    SemanticDocument, SemanticInlineMark, SemanticMarkRange,
+    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, ListDepthChange, SemanticBlock,
+    SemanticBlockKind, SemanticDocument, SemanticInlineMark, SemanticMarkRange,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,12 +13,21 @@ pub(super) struct EngineMark {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EngineFragmentBlock {
+    pub(super) kind: SemanticBlockKind,
+    pub(super) text: String,
+    pub(super) marks: Vec<EngineMark>,
+    pub(super) list_depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SemanticBlockSnapshot {
     pub(super) id: BlockId,
     pub(super) kind: SemanticBlockKind,
     pub(super) attributes: BTreeMap<String, String>,
     pub(super) text: String,
     pub(super) marks: Vec<EngineMark>,
+    pub(super) list_depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +81,7 @@ impl SemanticDocumentSnapshot {
                     block.text.clone(),
                     marks,
                 )
+                .with_list_depth(block.list_depth)
             })
             .collect();
         SemanticDocument::new(blocks)
@@ -117,6 +127,12 @@ impl PositionMapping {
             removed: self.inserted,
             inserted: self.removed,
         }
+    }
+
+    pub(super) fn inserted_end(self) -> Result<usize, EngineError> {
+        self.at
+            .checked_add(self.inserted)
+            .ok_or(EngineError::InvalidEdit)
     }
 
     pub(super) fn map(self, position: usize) -> Result<usize, EngineError> {
@@ -177,6 +193,18 @@ pub(super) enum EngineError {
 pub(super) trait DocumentEngine {
     fn load(&mut self, document: SemanticDocumentSnapshot) -> Result<(), EngineError>;
     fn apply(&mut self, edit: EngineEdit) -> Result<EngineChange, EngineError>;
+    fn replace_with_marks(
+        &mut self,
+        edit: EngineEdit,
+        marks: Vec<EngineMark>,
+    ) -> Result<EngineChange, EngineError>;
+    fn replace_with_fragment(
+        &mut self,
+        start: usize,
+        end: usize,
+        blocks: Vec<EngineFragmentBlock>,
+        fresh_ids: Vec<BlockId>,
+    ) -> Result<EngineChange, EngineError>;
     fn toggle_inline_mark(
         &mut self,
         start: usize,
@@ -202,6 +230,18 @@ pub(super) trait DocumentEngine {
         atomic_id: BlockId,
         after_id: BlockId,
     ) -> Result<EngineChange, EngineError>;
+    fn split_block(
+        &mut self,
+        start: usize,
+        end: usize,
+        after_id: BlockId,
+    ) -> Result<EngineChange, EngineError>;
+    fn adjust_list_depth(
+        &mut self,
+        start: usize,
+        end: usize,
+        change: ListDepthChange,
+    ) -> Result<Option<EngineChange>, EngineError>;
     fn apply_paragraph_style(
         &mut self,
         start: usize,
@@ -265,6 +305,131 @@ impl DocumentEngine for PrivateTextEngine {
                 inserted: edit.inserted.chars().count(),
             },
             changed_blocks: vec![changed_block],
+        })
+    }
+
+    fn replace_with_marks(
+        &mut self,
+        edit: EngineEdit,
+        marks: Vec<EngineMark>,
+    ) -> Result<EngineChange, EngineError> {
+        let inserted_len = edit.inserted.chars().count();
+        if marks
+            .iter()
+            .any(|mark| mark.start >= mark.end || mark.end > inserted_len)
+        {
+            return Err(EngineError::InvalidEdit);
+        }
+        let at = edit.at;
+        let change = self.apply(edit)?;
+        let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
+        let (block_index, local_start) = locate_position(&document.blocks, at, true)?;
+        let block = &mut document.blocks[block_index];
+        for mark in marks {
+            add_mark(
+                &mut block.marks,
+                local_start + mark.start,
+                local_start + mark.end,
+                mark.mark,
+            );
+        }
+        Ok(change)
+    }
+
+    fn replace_with_fragment(
+        &mut self,
+        start: usize,
+        end: usize,
+        blocks: Vec<EngineFragmentBlock>,
+        fresh_ids: Vec<BlockId>,
+    ) -> Result<EngineChange, EngineError> {
+        if blocks.is_empty() || start > end {
+            return Err(EngineError::InvalidEdit);
+        }
+        let document = self.document.as_ref().ok_or(EngineError::InvalidSnapshot)?;
+        let before_len = document.plain_text().chars().count();
+        let (start_index, local_start) = locate_position(&document.blocks, start, true)?;
+        let (end_index, local_end) = locate_position(&document.blocks, end, true)?;
+        if start_index > end_index
+            || document.blocks[start_index..=end_index]
+                .iter()
+                .any(|block| is_atomic(block.kind))
+        {
+            return Err(EngineError::InvalidEdit);
+        }
+        let start_block = document.blocks[start_index].clone();
+        let end_block = document.blocks[end_index].clone();
+        let start_len = start_block.text.chars().count();
+        let end_len = end_block.text.chars().count();
+        if local_start > start_len || local_end > end_len {
+            return Err(EngineError::InvalidEdit);
+        }
+
+        let mut replacement = Vec::new();
+        let mut ids = fresh_ids.into_iter();
+        let prefix = if local_start > 0 {
+            let byte =
+                scalar_to_byte(&start_block.text, local_start).ok_or(EngineError::InvalidEdit)?;
+            let mut prefix = start_block.clone();
+            prefix.text = prefix.text[..byte].to_owned();
+            prefix.marks = clipped_marks(&prefix.marks, 0, local_start);
+            replacement.push(prefix);
+            true
+        } else {
+            false
+        };
+
+        for (index, fragment) in blocks.into_iter().enumerate() {
+            let id = if !prefix && index == 0 {
+                start_block.id
+            } else {
+                ids.next().ok_or(EngineError::InvalidEdit)?
+            };
+            replacement.push(SemanticBlockSnapshot {
+                id,
+                kind: fragment.kind,
+                attributes: BTreeMap::new(),
+                text: fragment.text,
+                marks: fragment.marks,
+                list_depth: fragment.list_depth,
+            });
+        }
+
+        if local_end < end_len {
+            let byte =
+                scalar_to_byte(&end_block.text, local_end).ok_or(EngineError::InvalidEdit)?;
+            let suffix_id = if end_index != start_index {
+                end_block.id
+            } else {
+                ids.next().ok_or(EngineError::InvalidEdit)?
+            };
+            let mut suffix = end_block;
+            suffix.id = suffix_id;
+            suffix.text = suffix.text[byte..].to_owned();
+            suffix.marks = clipped_marks(&suffix.marks, local_end, end_len);
+            replacement.push(suffix);
+        }
+
+        let changed_blocks = replacement.iter().map(|block| block.id).collect::<Vec<_>>();
+        let mut after = document.clone();
+        after.blocks.splice(start_index..=end_index, replacement);
+        let after_text = after.plain_text();
+        let after_len = after_text.chars().count();
+        let retained = before_len
+            .checked_sub(end - start)
+            .ok_or(EngineError::InvalidEdit)?;
+        let inserted = after_len
+            .checked_sub(retained)
+            .ok_or(EngineError::InvalidEdit)?;
+        self.document = Some(after);
+        self.text = after_text;
+        Ok(EngineChange {
+            mapping: PositionMapping {
+                at: start,
+                removed: end - start,
+                inserted,
+            },
+            changed_blocks,
         })
     }
 
@@ -393,6 +558,12 @@ impl DocumentEngine for PrivateTextEngine {
         for index in selected {
             let block = &mut document.blocks[index];
             block.kind = replacement;
+            if !matches!(
+                replacement,
+                SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem
+            ) {
+                block.list_depth = 0;
+            }
             changed.push(block.id);
         }
         self.text = document.plain_text();
@@ -432,6 +603,7 @@ impl DocumentEngine for PrivateTextEngine {
             )]),
             text: String::new(),
             marks: Vec::new(),
+            list_depth: 0,
         };
         let mut changed = vec![atomic_id];
         if is_atomic(block.kind) {
@@ -468,6 +640,155 @@ impl DocumentEngine for PrivateTextEngine {
             },
             changed_blocks: changed,
         })
+    }
+
+    fn split_block(
+        &mut self,
+        start: usize,
+        end: usize,
+        after_id: BlockId,
+    ) -> Result<EngineChange, EngineError> {
+        let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
+        let (index, local_start) = locate_position(&document.blocks, start, true)?;
+        let (end_index, local_end) = locate_position(&document.blocks, end, false)?;
+        if index != end_index || is_atomic(document.blocks[index].kind) {
+            return Err(EngineError::InvalidEdit);
+        }
+
+        let block = document.blocks[index].clone();
+        let len = block.text.chars().count();
+        if local_start > local_end || local_end > len {
+            return Err(EngineError::InvalidEdit);
+        }
+
+        if local_start == 0
+            && local_end == 0
+            && block.text.is_empty()
+            && matches!(
+                block.kind,
+                SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem
+            )
+        {
+            let current = &mut document.blocks[index];
+            current.kind = SemanticBlockKind::Paragraph;
+            current.list_depth = 0;
+            current
+                .attributes
+                .insert("data-style-id".into(), "body".into());
+            let changed = current.id;
+            self.text = document.plain_text();
+            return Ok(EngineChange {
+                mapping: PositionMapping::identity(),
+                changed_blocks: vec![changed],
+            });
+        }
+
+        let start_byte =
+            scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
+        let end_byte = scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
+        let mut before = block.clone();
+        before.text = block.text[..start_byte].to_owned();
+        before.marks = clipped_marks(&block.marks, 0, local_start);
+
+        let mut after = block;
+        after.id = after_id;
+        after.text = after.text[end_byte..].to_owned();
+        after.marks = clipped_marks(&after.marks, local_end, len);
+        if matches!(
+            after.kind,
+            SemanticBlockKind::Heading1 | SemanticBlockKind::Heading2 | SemanticBlockKind::Heading3
+        ) {
+            after.kind = SemanticBlockKind::Paragraph;
+            after.list_depth = 0;
+            after
+                .attributes
+                .insert("data-style-id".into(), "body".into());
+        }
+
+        let before_id = before.id;
+        document.blocks.splice(index..=index, [before, after]);
+        self.text = document.plain_text();
+        Ok(EngineChange {
+            mapping: PositionMapping {
+                at: start,
+                removed: end - start,
+                inserted: 1,
+            },
+            changed_blocks: vec![before_id, after_id],
+        })
+    }
+
+    fn adjust_list_depth(
+        &mut self,
+        start: usize,
+        end: usize,
+        change: ListDepthChange,
+    ) -> Result<Option<EngineChange>, EngineError> {
+        let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
+        let mut selected = Vec::new();
+        let mut offset = 0usize;
+        for (index, block) in document.blocks.iter().enumerate() {
+            let len = block_scalar_len(block);
+            let block_end = offset.saturating_add(len);
+            let intersects = if start == end {
+                start >= offset && start <= block_end
+            } else {
+                start < block_end && offset < end
+            };
+            if intersects {
+                if !matches!(
+                    block.kind,
+                    SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem
+                ) {
+                    return Ok(None);
+                }
+                selected.push(index);
+            }
+            offset = block_end.saturating_add(1);
+        }
+        if selected.is_empty() {
+            return Ok(None);
+        }
+
+        match change {
+            ListDepthChange::Indent => {
+                let first = selected[0];
+                if first == 0 {
+                    return Ok(None);
+                }
+                let current = &document.blocks[first];
+                let previous = &document.blocks[first - 1];
+                if previous.kind != current.kind || previous.list_depth != current.list_depth {
+                    return Ok(None);
+                }
+                for index in &selected {
+                    document.blocks[*index].list_depth = document.blocks[*index]
+                        .list_depth
+                        .checked_add(1)
+                        .ok_or(EngineError::InvalidEdit)?;
+                }
+            }
+            ListDepthChange::Outdent => {
+                if selected
+                    .iter()
+                    .any(|index| document.blocks[*index].list_depth == 0)
+                {
+                    return Ok(None);
+                }
+                for index in &selected {
+                    document.blocks[*index].list_depth -= 1;
+                }
+            }
+        }
+        let changed_blocks = selected
+            .into_iter()
+            .map(|index| document.blocks[index].id)
+            .collect();
+        self.text = document.plain_text();
+        Ok(Some(EngineChange {
+            mapping: PositionMapping::identity(),
+            changed_blocks,
+        }))
     }
 
     fn apply_paragraph_style(

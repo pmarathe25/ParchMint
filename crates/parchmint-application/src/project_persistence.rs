@@ -5,18 +5,25 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use parchmint_contracts::generated::RecoveryRecordV1;
+use parchmint_contracts::{
+    AnnotationAnchor, AnnotationMessage, AnnotationThread, generated::RecoveryRecordV1,
+};
 use parchmint_domain::{
     CheckpointId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectRevision, Resource,
     apply_project_command,
 };
-use parchmint_editor_api::{CanonicalProjection, EditorPersistenceError, EditorRevision};
+use parchmint_editor_api::{
+    BlockId, CanonicalComment, CanonicalCommentAnchor, CanonicalCommentMessage,
+    CanonicalProjection, CommentId, DocumentPosition, EditorPersistenceError, EditorRevision,
+    EditorSelection,
+};
 use parchmint_history_api::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, RestorePlan, SnapshotName,
 };
 use parchmint_project_format::{
-    CanonicalCodec, CanonicalPersistenceFrontier, CanonicalProjectEncoding,
-    CanonicalProjectPathMap, CanonicalRelativePath, ContentHash, FormatError, ProjectFormatCodec,
+    CanonicalAnnotations, CanonicalCodec, CanonicalPersistenceFrontier, CanonicalProjectEncoding,
+    CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource, ContentHash, FormatError,
+    ProjectFormatCodec,
 };
 use parchmint_project_repository::{AtomicWritePlan, StagedResource};
 use parchmint_recovery_api::{
@@ -109,10 +116,24 @@ pub struct MoveNodesWorkflow {
     pub moves: Vec<MoveNodeWorkflow>,
 }
 
+/// One authoritative deletion request over normalized live subtree roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteSubtreesWorkflow {
+    pub nodes: Vec<NodeId>,
+    pub deleted_at_unix_millis: u64,
+}
+
+/// A durable deletion whose tombstones point to the pre-delete checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletedSubtreesRevision {
+    pub restoring_checkpoint: CheckpointId,
+    pub revision: PersistenceSavedRevision,
+}
+
 /// An application-owned request to clone one complete live subtree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicateSubtreeWorkflow {
-    pub source: NodeId,
+pub struct DuplicateSubtreesWorkflow {
+    pub sources: Vec<NodeId>,
     pub parent: NodeId,
     pub index: usize,
 }
@@ -121,8 +142,8 @@ pub struct DuplicateSubtreeWorkflow {
 /// intentionally not copied; the duplicate receives only this new structural
 /// checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplicatedSubtreeRevision {
-    pub created_root: NodeId,
+pub struct DuplicatedSubtreesRevision {
+    pub created_roots: Vec<NodeId>,
     pub node_ids: BTreeMap<NodeId, NodeId>,
     pub document_ids: BTreeMap<DocumentId, DocumentId>,
     pub revision: PersistenceSavedRevision,
@@ -144,6 +165,7 @@ pub struct RecoveryAcceptance(u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistenceRecoveryState {
     pub accepted_records: usize,
+    pub affected_documents: BTreeMap<DocumentId, EditorRevision>,
     pub isolation: Option<RecoveryIsolation>,
     pub acceptance: Option<RecoveryAcceptance>,
 }
@@ -228,6 +250,7 @@ struct PendingSave {
     encoding: CanonicalProjectEncoding,
 }
 
+#[derive(Clone)]
 struct PendingRecovery {
     replay: RecoveryReplay,
 }
@@ -266,6 +289,29 @@ impl ProjectPersistenceCoordinator {
         }
     }
 
+    pub fn register_loaded_document_base(
+        &self,
+        document: DocumentId,
+        revision: EditorRevision,
+        hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<(), ProjectPersistenceError> {
+        let revision = parchmint_recovery_api::DocumentRevision::from(revision.value());
+        self.editor
+            .register_document_base(document, revision, hash)?;
+        let mut base = self
+            .recovery_base
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        base.revisions.documents.insert(document, revision);
+        base.hashes.insert(
+            parchmint_recovery_api::ResourceId::DocumentById {
+                document_id: stable_id_text(document.as_bytes()),
+            },
+            hash,
+        );
+        Ok(())
+    }
+
     pub fn persist_editor_projection(
         &self,
         projection: CanonicalProjection,
@@ -292,6 +338,25 @@ impl ProjectPersistenceCoordinator {
             projection.revision().value(),
             capture.generation
         );
+        let annotation_document_id = stable_id_text(projection.document_id().as_bytes());
+        let annotations = CanonicalAnnotations::from_typed(
+            annotation_document_id.clone(),
+            &projection
+                .comments()
+                .iter()
+                .map(contract_thread)
+                .collect::<Vec<_>>(),
+        )?;
+        let annotation_value =
+            serde_json::to_value(parchmint_contracts::generated::AnnotationSidecarV1 {
+                schema: "parchmint.annotation-sidecar/v1".into(),
+                document_id: annotation_document_id,
+                threads: annotations.threads().to_vec(),
+            })
+            .map_err(|error| ProjectPersistenceError::Format(error.to_string()))?;
+        let annotation_bytes = ProjectFormatCodec::default()
+            .encode(&CanonicalResource::Annotations(annotations))?
+            .bytes;
         let payload = VersionedRecoveryPayload::V1(RecoveryRecordV1 {
             schema: "parchmint.recovery-record/v1".into(),
             record_id,
@@ -300,11 +365,19 @@ impl ProjectPersistenceCoordinator {
                 "document_id": stable_id_text(projection.document_id().as_bytes()),
                 "revision": projection.revision().value(),
                 "body": projection.body(),
+                "annotations": annotation_value,
             })],
         });
-        let durable = self
-            .editor
-            .persist_projection(&projection, &revisions, payload)?;
+        let result_hash = recovery_document_content_hash(
+            projection.body().as_bytes(),
+            Some(annotation_bytes.as_slice()),
+        );
+        let durable = self.editor.persist_projection_with_document_hash(
+            &projection,
+            &revisions,
+            payload,
+            result_hash,
+        )?;
         let frontier = self.editor.acknowledge_recovery(durable)?;
         Ok(DurableProjectionAck {
             document: projection.document_id(),
@@ -348,6 +421,15 @@ impl ProjectPersistenceCoordinator {
             .iter()
             .map(|(document, snapshot)| (*document, snapshot.body.clone()))
             .collect();
+        let annotations = documents
+            .iter()
+            .map(|(document, snapshot)| {
+                (
+                    *document,
+                    snapshot.comments.iter().map(contract_thread).collect(),
+                )
+            })
+            .collect();
         let canonical = self
             .canonical
             .lock()
@@ -363,10 +445,12 @@ impl ProjectPersistenceCoordinator {
                 .iter()
                 .map(|(document, snapshot)| (*document, snapshot.revision.value()))
                 .collect(),
+            ..Default::default()
         };
-        let encoding = ProjectFormatCodec::default().encode_domain_project_with_frontier(
+        let encoding = ProjectFormatCodec::default().encode_domain_project_with_annotations(
             &project,
             &bodies,
+            &annotations,
             &canonical.resources,
             &canonical.paths,
             &persistence_frontier,
@@ -377,6 +461,8 @@ impl ProjectPersistenceCoordinator {
             .values()
             .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
             .or_else(|| documents.values().next())
+            .cloned()
+            .or_else(|| self.documents.snapshots().ok()?.into_iter().next())
             .ok_or_else(|| {
                 ProjectPersistenceError::Application(
                     "project has no document available for a revisioned save".into(),
@@ -385,7 +471,7 @@ impl ProjectPersistenceCoordinator {
         let projection = CanonicalProjection::new(
             projection.document_id,
             projection.revision,
-            projection.body.clone(),
+            projection.body,
             Vec::new(),
             Vec::new(),
             0,
@@ -498,6 +584,53 @@ impl ProjectPersistenceCoordinator {
         })
     }
 
+    /// Flushes the exact pre-delete state, associates every new tombstone with
+    /// that immutable checkpoint, then durably saves the post-delete project.
+    pub fn delete_subtrees(
+        &self,
+        request: DeleteSubtreesWorkflow,
+    ) -> Result<DeletedSubtreesRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let current = self.commands.project()?;
+        let nodes = normalized_subtree_roots(&current, &request.nodes)?;
+        if nodes.is_empty() || nodes.iter().any(|node| node.is_fixed_root()) {
+            return Err(ProjectPersistenceError::Application(
+                "delete workflow requires at least one non-root subtree".into(),
+            ));
+        }
+
+        // Validate the full command sequence before publishing any mutation.
+        let mut simulated = current;
+        for node in &nodes {
+            simulated = apply_project_command(
+                &simulated,
+                simulated.revision,
+                ProjectCommand::delete_node(*node),
+            )?
+            .project;
+        }
+
+        let (before_handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        let restoring_checkpoint = self.await_save(before_handle)?.checkpoint;
+        for node in nodes {
+            self.commands
+                .execute_now(ProjectCommand::delete_node_from_checkpoint(
+                    node,
+                    request.deleted_at_unix_millis,
+                    restoring_checkpoint,
+                ))?;
+        }
+        let (after_handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        let revision = self.await_save(after_handle)?;
+        Ok(DeletedSubtreesRevision {
+            restoring_checkpoint,
+            revision,
+        })
+    }
+
     /// Applies preflighted domain `MoveNode` commands and durably commits the
     /// resulting hierarchy before returning to the session.
     pub fn move_nodes(
@@ -533,10 +666,10 @@ impl ProjectPersistenceCoordinator {
     /// Clones one group or document subtree with fresh identities. The entire
     /// canonical image is written before the prepared project and documents
     /// become visible, so save failure cannot publish a partial duplicate.
-    pub fn duplicate_subtree(
+    pub fn duplicate_subtrees(
         &self,
-        request: DuplicateSubtreeWorkflow,
-    ) -> Result<DuplicatedSubtreeRevision, ProjectPersistenceError> {
+        request: DuplicateSubtreesWorkflow,
+    ) -> Result<DuplicatedSubtreesRevision, ProjectPersistenceError> {
         let _workflow = self
             .workflow
             .lock()
@@ -552,12 +685,12 @@ impl ProjectPersistenceCoordinator {
 
         let current_project = self.commands.project()?;
         let current_documents = self.documents.snapshots()?;
-        let prepared = prepare_duplicate(&current_project, &current_documents, &request)?;
+        let prepared = prepare_duplicates(&current_project, &current_documents, &request)?;
         let revision =
             self.persist_prepared_state(prepared.project.clone(), prepared.documents.clone())?;
 
-        Ok(DuplicatedSubtreeRevision {
-            created_root: prepared.created_root,
+        Ok(DuplicatedSubtreesRevision {
+            created_roots: prepared.created_roots,
             node_ids: prepared.node_ids,
             document_ids: prepared.document_ids,
             revision,
@@ -581,6 +714,7 @@ impl ProjectPersistenceCoordinator {
                 .iter()
                 .map(|document| (document.document_id, document.revision.value()))
                 .collect(),
+            ..Default::default()
         };
         let canonical = self
             .canonical
@@ -722,7 +856,7 @@ impl ProjectPersistenceCoordinator {
         let restored_resources = validated_restore_resources(&plan)?;
         let current_project = self.commands.project()?;
         let current_documents = self.documents.snapshots()?;
-        let (mut project, restored_paths, restored_frontier, restored_bodies) =
+        let (mut project, restored_paths, restored_frontier, restored_bodies, restored_comments) =
             decode_restored_project(current_project.id, &restored_resources)?;
 
         // Domain and document revisions remain monotonic even when authored
@@ -752,6 +886,7 @@ impl ProjectPersistenceCoordinator {
                 DocumentSnapshot {
                     document_id: *document,
                     body: body.clone(),
+                    comments: restored_comments.get(document).cloned().unwrap_or_default(),
                     revision: EditorRevision::from(historical.max(current).saturating_add(1)),
                     visibility: current_visibility
                         .get(document)
@@ -780,6 +915,7 @@ impl ProjectPersistenceCoordinator {
                 .iter()
                 .map(|document| (document.document_id, document.revision.value()))
                 .collect(),
+            ..Default::default()
         };
         let current_paths = self
             .canonical
@@ -920,6 +1056,11 @@ impl ProjectPersistenceCoordinator {
             .map_err(|_| ProjectPersistenceError::StateUnavailable)?
             .clone();
         let replay = self.editor.reconcile_recovery(base)?;
+        let affected_documents = recovery_affected_documents(&replay);
+        self.pending_recovery
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .clear();
         let acceptance = if replay.accepted.is_empty() {
             None
         } else {
@@ -942,6 +1083,7 @@ impl ProjectPersistenceCoordinator {
         };
         Ok(PersistenceRecoveryState {
             accepted_records: replay.accepted.len(),
+            affected_documents,
             isolation: replay.isolation,
             acceptance,
         })
@@ -977,12 +1119,25 @@ impl ProjectPersistenceCoordinator {
                     .get("body")
                     .and_then(serde_json::Value::as_str)
                     .ok_or(ProjectPersistenceError::UnknownRecoveryAcceptance)?;
+                let document_id = DocumentId::from_bytes(parse_stable_id(document)?);
+                let comments = match operation.get("annotations") {
+                    Some(value) => ProjectFormatCodec::default()
+                        .decode_annotations(
+                            &serde_json::to_vec(value)
+                                .map_err(|_| ProjectPersistenceError::UnknownRecoveryAcceptance)?,
+                        )?
+                        .typed_threads()?
+                        .into_iter()
+                        .map(editor_thread_contract)
+                        .collect(),
+                    None => self.documents.snapshot(document_id)?.comments,
+                };
                 self.commands
                     .accept_editor_projection(&CanonicalProjection::new(
-                        DocumentId::from_bytes(parse_stable_id(document)?),
+                        document_id,
                         EditorRevision::from(revision),
                         body,
-                        Vec::new(),
+                        comments,
                         Vec::new(),
                         0,
                     ))?;
@@ -990,34 +1145,124 @@ impl ProjectPersistenceCoordinator {
         }
         Ok(PersistenceRecoveryState {
             accepted_records: pending.replay.accepted.len(),
+            affected_documents: recovery_affected_documents(&pending.replay),
             isolation: pending.replay.isolation,
+            acceptance: None,
+        })
+    }
+
+    pub fn discard_recovery(
+        &self,
+        acceptance: RecoveryAcceptance,
+    ) -> Result<PersistenceRecoveryState, ProjectPersistenceError> {
+        let pending = self
+            .pending_recovery
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .get(&acceptance)
+            .cloned()
+            .ok_or(ProjectPersistenceError::UnknownRecoveryAcceptance)?;
+        let current_project = self.commands.project()?;
+        let current_documents = self.documents.snapshots()?;
+        let canonical_resources = self
+            .canonical
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .resources
+            .clone();
+        let (canonical_project, _, canonical_frontier, canonical_bodies, canonical_comments) =
+            decode_restored_project(current_project.id, &canonical_resources)?;
+        if canonical_project.revision != current_project.revision {
+            return Err(ProjectPersistenceError::OperationInProgress);
+        }
+        let visibility = current_documents
+            .into_iter()
+            .map(|document| (document.document_id, document.visibility))
+            .collect::<BTreeMap<_, _>>();
+        let canonical_documents = canonical_bodies
+            .into_iter()
+            .map(|(document, body)| DocumentSnapshot {
+                document_id: document,
+                body,
+                comments: canonical_comments
+                    .get(&document)
+                    .cloned()
+                    .unwrap_or_default(),
+                revision: EditorRevision::from(
+                    canonical_frontier
+                        .document_revisions
+                        .get(&document)
+                        .copied()
+                        .unwrap_or_default(),
+                ),
+                visibility: visibility
+                    .get(&document)
+                    .copied()
+                    .unwrap_or(crate::DocumentVisibility::Closed),
+            })
+            .collect::<Vec<_>>();
+        let base = self
+            .recovery_base
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .clone();
+        self.editor
+            .discard_reconciled_recovery(base.clone(), &pending.replay)?;
+        self.pending_recovery
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .remove(&acceptance);
+        self.commands
+            .publish_restored_state(canonical_project, canonical_documents)?;
+        let replay = self.editor.reconcile_recovery(base)?;
+        Ok(PersistenceRecoveryState {
+            accepted_records: replay.accepted.len(),
+            affected_documents: recovery_affected_documents(&replay),
+            isolation: replay.isolation,
             acceptance: None,
         })
     }
 }
 
+fn recovery_affected_documents(replay: &RecoveryReplay) -> BTreeMap<DocumentId, EditorRevision> {
+    let mut affected = BTreeMap::new();
+    for batch in &replay.accepted {
+        for (document, range) in &batch.documents {
+            affected
+                .entry(*document)
+                .and_modify(|revision: &mut EditorRevision| {
+                    *revision = (*revision).max(EditorRevision::from(range.last.value()));
+                })
+                .or_insert_with(|| EditorRevision::from(range.last.value()));
+        }
+    }
+    affected
+}
+
 pub(crate) struct PreparedDuplicate {
     pub(crate) project: Project,
     pub(crate) documents: Vec<DocumentSnapshot>,
-    pub(crate) created_root: NodeId,
+    pub(crate) created_roots: Vec<NodeId>,
     pub(crate) node_ids: BTreeMap<NodeId, NodeId>,
     pub(crate) document_ids: BTreeMap<DocumentId, DocumentId>,
 }
 
-pub(crate) fn prepare_duplicate(
+pub(crate) fn prepare_duplicates(
     project: &Project,
     documents: &[DocumentSnapshot],
-    request: &DuplicateSubtreeWorkflow,
+    request: &DuplicateSubtreesWorkflow,
 ) -> Result<PreparedDuplicate, ProjectPersistenceError> {
-    if request.source.is_fixed_root() {
+    let sources = normalized_copy_sources(project, &request.sources)?;
+    if sources.is_empty() {
+        return Err(ProjectPersistenceError::Application(
+            "copy workflow requires at least one subtree root".to_owned(),
+        ));
+    }
+    if sources.iter().any(|source| source.is_fixed_root()) {
         return Err(ProjectPersistenceError::Application(
             "fixed project roots cannot be copied".to_owned(),
         ));
     }
-    project
-        .nodes
-        .get(request.source)
-        .ok_or_else(|| ProjectPersistenceError::Application("copy source is stale".to_owned()))?;
     if !project
         .nodes
         .get(request.parent)
@@ -1029,7 +1274,14 @@ pub(crate) fn prepare_duplicate(
     }
 
     let mut preorder = Vec::new();
-    collect_subtree_ids(project, request.source, &mut preorder);
+    for source in &sources {
+        collect_subtree_ids(project, *source, &mut preorder);
+    }
+    let root_ordinals = sources
+        .iter()
+        .enumerate()
+        .map(|(ordinal, source)| (*source, ordinal))
+        .collect::<BTreeMap<_, _>>();
     let mut draft = project.clone();
     let mut node_ids = BTreeMap::new();
     let mut document_ids = BTreeMap::new();
@@ -1058,8 +1310,8 @@ pub(crate) fn prepare_duplicate(
             .get(source_id)
             .expect("preorder source exists");
         let fresh_node = node_ids[&source_id];
-        let (parent, index) = if source_id == request.source {
-            (request.parent, request.index)
+        let (parent, index) = if let Some(root_ordinal) = root_ordinals.get(&source_id) {
+            (request.parent, request.index.saturating_add(*root_ordinal))
         } else {
             let source_parent = project
                 .nodes
@@ -1140,6 +1392,7 @@ pub(crate) fn prepare_duplicate(
                 // document-title block remains synchronized without rewriting
                 // or normalizing the authored body.
                 body: source_snapshot.body.clone(),
+                comments: Vec::new(),
                 revision: Default::default(),
                 visibility: crate::DocumentVisibility::Closed,
             });
@@ -1151,10 +1404,53 @@ pub(crate) fn prepare_duplicate(
     Ok(PreparedDuplicate {
         project: draft,
         documents: all_documents,
-        created_root: node_ids[&request.source],
+        created_roots: sources.iter().map(|source| node_ids[source]).collect(),
         node_ids,
         document_ids,
     })
+}
+
+fn normalized_copy_sources(
+    project: &Project,
+    requested: &[NodeId],
+) -> Result<Vec<NodeId>, ProjectPersistenceError> {
+    normalized_subtree_roots(project, requested)
+}
+
+fn normalized_subtree_roots(
+    project: &Project,
+    requested: &[NodeId],
+) -> Result<Vec<NodeId>, ProjectPersistenceError> {
+    let requested = requested
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    for source in &requested {
+        if !project.nodes.contains(*source) {
+            return Err(ProjectPersistenceError::Application(
+                "subtree source is stale".to_owned(),
+            ));
+        }
+    }
+
+    let mut visible_order = Vec::new();
+    for root in [NodeId::manuscript_root(), NodeId::research_root()] {
+        collect_subtree_ids(project, root, &mut visible_order);
+    }
+    Ok(visible_order
+        .into_iter()
+        .filter(|source| requested.contains(source))
+        .filter(|source| {
+            let mut parent = project.nodes.parent(*source);
+            while let Some(ancestor) = parent {
+                if requested.contains(&ancestor) {
+                    return false;
+                }
+                parent = project.nodes.parent(ancestor);
+            }
+            true
+        })
+        .collect())
 }
 
 fn collect_subtree_ids(project: &Project, node: NodeId, output: &mut Vec<NodeId>) {
@@ -1253,18 +1549,18 @@ fn validated_restore_resources(
     Ok(resources)
 }
 
+type RestoredProjectDecode = (
+    crate::Project,
+    CanonicalProjectPathMap,
+    CanonicalPersistenceFrontier,
+    BTreeMap<DocumentId, String>,
+    BTreeMap<DocumentId, Vec<CanonicalComment>>,
+);
+
 fn decode_restored_project(
     project_id: crate::ProjectId,
     resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
-) -> Result<
-    (
-        crate::Project,
-        CanonicalProjectPathMap,
-        CanonicalPersistenceFrontier,
-        BTreeMap<DocumentId, String>,
-    ),
-    ProjectPersistenceError,
-> {
+) -> Result<RestoredProjectDecode, ProjectPersistenceError> {
     let codec = ProjectFormatCodec::default();
     let control = resources
         .get(&CanonicalRelativePath::parse(".parchmint/format-version")?)
@@ -1274,17 +1570,18 @@ fn decode_restored_project(
         .get(&CanonicalRelativePath::parse("project.toml")?)
         .ok_or_else(|| ProjectPersistenceError::History("project manifest is missing".into()))?;
     let manifest = codec.decode_manifest(manifest)?;
+    let styles = resources
+        .get(&CanonicalRelativePath::parse("styles.css")?)
+        .map(|bytes| codec.decode_styles(bytes))
+        .transpose()?;
     let (mut project, paths) = codec
-        .decode_domain_project(&manifest, project_id)?
+        .decode_domain_project_with_styles(&manifest, styles.as_ref(), project_id)?
         .ok_or_else(|| {
             ProjectPersistenceError::History(
                 "checkpoint predates the canonical project structure extension".into(),
             )
         })?;
     let frontier = codec.decode_persistence_frontier(&manifest)?;
-    if let Some(styles) = resources.get(&CanonicalRelativePath::parse("styles.css")?) {
-        codec.decode_styles(styles)?;
-    }
     if let Some(dictionary) = resources.get(&CanonicalRelativePath::parse("dictionary.txt")?) {
         let dictionary = codec.decode_dictionary(dictionary)?;
         project.dictionary = Default::default();
@@ -1295,10 +1592,22 @@ fn decode_restored_project(
                 .map_err(|error| ProjectPersistenceError::Format(error.to_string()))?;
         }
     }
-    for (path, bytes) in resources {
-        if path.as_str().starts_with("annotations/") && path.as_str().ends_with(".json") {
-            codec.decode_annotations(bytes)?;
-        }
+    let mut comments = BTreeMap::new();
+    for document in paths.documents.keys() {
+        let path = CanonicalRelativePath::parse(format!(
+            "annotations/{}.json",
+            stable_id_text(document.as_bytes())
+        ))?;
+        let threads = match resources.get(&path) {
+            Some(bytes) => codec
+                .decode_annotations(bytes)?
+                .typed_threads()?
+                .into_iter()
+                .map(editor_thread_contract)
+                .collect(),
+            None => Vec::new(),
+        };
+        comments.insert(*document, threads);
     }
     let bodies = paths
         .documents
@@ -1314,10 +1623,34 @@ fn decode_restored_project(
             Ok((*document, body))
         })
         .collect::<Result<BTreeMap<_, _>, ProjectPersistenceError>>()?;
-    Ok((project, paths, frontier, bodies))
+    Ok((project, paths, frontier, bodies, comments))
 }
 
 fn recovery_base_from_encoding(encoding: &CanonicalProjectEncoding) -> RecoveryBaseSnapshot {
+    let mut hashes = encoding
+        .resources
+        .values()
+        .map(|resource| (resource.resource.clone(), resource.hash))
+        .collect::<BTreeMap<_, _>>();
+    for document in encoding.resources.values() {
+        let parchmint_project_format::ResourceId::DocumentById { document_id } = &document.resource
+        else {
+            continue;
+        };
+        let annotations = encoding.resources.values().find_map(|resource| {
+            matches!(
+                &resource.resource,
+                parchmint_project_format::ResourceId::Annotations {
+                    document_id: candidate
+                } if candidate == document_id
+            )
+            .then_some(resource.bytes.as_slice())
+        });
+        hashes.insert(
+            document.resource.clone(),
+            recovery_document_content_hash(&document.bytes, annotations),
+        );
+    }
     RecoveryBaseSnapshot {
         revisions: parchmint_recovery_api::RecoveryRevisionVector::new(
             ProjectRevision::from(encoding.persistence_frontier.recovery_project_revision),
@@ -1333,12 +1666,24 @@ fn recovery_base_from_encoding(encoding: &CanonicalProjectEncoding) -> RecoveryB
                 })
                 .collect(),
         ),
-        hashes: encoding
-            .resources
-            .values()
-            .map(|resource| (resource.resource.clone(), resource.hash))
-            .collect(),
+        hashes,
     }
+}
+
+fn recovery_document_content_hash(body: &[u8], annotations: Option<&[u8]>) -> ContentHash {
+    let mut digest = Sha256::new();
+    digest.update(b"parchmint recovery document v1\0");
+    digest.update((body.len() as u64).to_be_bytes());
+    digest.update(body);
+    match annotations {
+        Some(annotations) => {
+            digest.update([1]);
+            digest.update((annotations.len() as u64).to_be_bytes());
+            digest.update(annotations);
+        }
+        None => digest.update([0]),
+    }
+    ContentHash::from_bytes(digest.finalize().into())
 }
 
 fn save_revisions(
@@ -1544,4 +1889,87 @@ fn parse_stable_id(value: &str) -> Result<[u8; 16], ProjectPersistenceError> {
             .map_err(|_| ProjectPersistenceError::UnknownRecoveryAcceptance)?;
     }
     Ok(bytes)
+}
+
+fn contract_thread(thread: &CanonicalComment) -> AnnotationThread {
+    AnnotationThread {
+        id: *thread.id.as_bytes(),
+        messages: thread
+            .messages
+            .iter()
+            .map(|message| AnnotationMessage {
+                id: *message.id.as_bytes(),
+                body: message.body.clone(),
+                unknown_fields: message.unknown_fields.clone(),
+            })
+            .collect(),
+        resolved: thread.resolved,
+        anchor: match &thread.anchor {
+            CanonicalCommentAnchor::Document { unknown_fields } => AnnotationAnchor::Document {
+                unknown_fields: unknown_fields.clone(),
+            },
+            CanonicalCommentAnchor::Text {
+                block,
+                range,
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields,
+            } => AnnotationAnchor::Text {
+                block: *block.as_bytes(),
+                start: range.start().value(),
+                end: range.end().value(),
+                quote: quote.clone(),
+                context_before: context_before.clone(),
+                context_after: context_after.clone(),
+                orphaned: *orphaned,
+                unknown_fields: unknown_fields.clone(),
+            },
+        },
+        unknown_fields: thread.unknown_fields.clone(),
+    }
+}
+
+fn editor_thread_contract(thread: AnnotationThread) -> CanonicalComment {
+    CanonicalComment {
+        id: CommentId::from_bytes(thread.id),
+        messages: thread
+            .messages
+            .into_iter()
+            .map(|message| CanonicalCommentMessage {
+                id: CommentId::from_bytes(message.id),
+                body: message.body,
+                unknown_fields: message.unknown_fields,
+            })
+            .collect(),
+        resolved: thread.resolved,
+        anchor: match thread.anchor {
+            AnnotationAnchor::Document { unknown_fields } => {
+                CanonicalCommentAnchor::Document { unknown_fields }
+            }
+            AnnotationAnchor::Text {
+                block,
+                start,
+                end,
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields,
+            } => CanonicalCommentAnchor::Text {
+                block: BlockId::from_bytes(block),
+                range: EditorSelection::new(
+                    DocumentPosition::from(start),
+                    DocumentPosition::from(end),
+                ),
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields,
+            },
+        },
+        unknown_fields: thread.unknown_fields,
+    }
 }

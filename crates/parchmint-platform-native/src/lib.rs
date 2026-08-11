@@ -6,12 +6,14 @@
 //! work starts and again immediately before its completion is delivered.
 
 mod async_task;
+mod native_menu;
 mod registry;
 mod runtime;
 #[doc(hidden)]
 pub mod testing;
 
 use std::{
+    collections::HashMap,
     error::Error,
     fmt,
     sync::{
@@ -26,11 +28,11 @@ use std::{
 use async_task::dispatch;
 use parchmint_platform_api::{
     ApplicationPathService, ApplicationPaths, AsyncResult, ClipboardContent, ClipboardFormats,
-    ClipboardService, DialogService, ExternalOpenService, MenuBinding, MenuService, PathDialog,
-    PlatformError, SemanticMenu, SystemAppearance, SystemAppearanceEvent,
-    SystemAppearanceEventService, SystemAppearanceEventStream, SystemAppearanceService,
-    UntrustedClipboardContent, UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
-    WindowResult,
+    ClipboardService, DialogService, ExternalOpenService, MenuActivation, MenuActivationService,
+    MenuActivationStream, MenuBinding, MenuService, PathDialog, PlatformError, SemanticMenu,
+    SemanticMenuEntry, SystemAppearance, SystemAppearanceEvent, SystemAppearanceEventService,
+    SystemAppearanceEventStream, SystemAppearanceService, UntrustedClipboardContent,
+    UntrustedPathSelection, ValidatedExternalIntent, WindowCapability, WindowResult,
 };
 use registry::CapabilityRegistry;
 use runtime::{NativeBackend, SystemBackend};
@@ -61,6 +63,7 @@ impl Error for PlatformStartupError {}
 pub struct NativePlatform {
     pub dialogs: Arc<dyn DialogService>,
     pub menus: Arc<dyn MenuService>,
+    pub menu_activations: Arc<dyn MenuActivationService>,
     pub clipboard: Arc<dyn ClipboardService>,
     pub external_open: Arc<dyn ExternalOpenService>,
     pub appearance: Arc<dyn SystemAppearanceService>,
@@ -86,16 +89,19 @@ impl NativePlatform {
     fn with_backend(backend: Arc<dyn NativeBackend>) -> (Self, Arc<NativeServices>) {
         let registry = CapabilityRegistry::new();
         let services = Arc::new(NativeServices::new(Arc::clone(&backend), registry.clone()));
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        native_menu::register_activation_target(&services);
         services.start_appearance_watcher();
         let platform = Self {
             dialogs: services.clone(),
             menus: services.clone(),
+            menu_activations: services.clone(),
             clipboard: services.clone(),
             external_open: services.clone(),
             appearance: services.clone(),
             appearance_events: services.clone(),
             application_paths: services.clone(),
-            iced_registry: iced_adapter::IcedWindowRegistry::new(registry),
+            iced_registry: iced_adapter::IcedWindowRegistry::new(Arc::clone(&services)),
         };
         (platform, services)
     }
@@ -111,6 +117,8 @@ struct NativeServices {
     backend: Arc<dyn NativeBackend>,
     registry: CapabilityRegistry,
     next_menu_binding: AtomicU64,
+    installed_menus: Arc<Mutex<HashMap<WindowCapability, InstalledMenu>>>,
+    menu_activation_listeners: Mutex<Vec<mpsc::Sender<MenuActivation>>>,
     next_appearance_generation: AtomicU64,
     appearance_listeners: Mutex<Vec<mpsc::Sender<SystemAppearanceEvent>>>,
     observed_appearance: Mutex<Option<SystemAppearance>>,
@@ -124,6 +132,8 @@ impl NativeServices {
             backend,
             registry,
             next_menu_binding: AtomicU64::new(1),
+            installed_menus: Arc::new(Mutex::new(HashMap::new())),
+            menu_activation_listeners: Mutex::new(Vec::new()),
             next_appearance_generation: AtomicU64::new(1),
             appearance_listeners: Mutex::new(Vec::new()),
             observed_appearance: Mutex::new(None),
@@ -208,6 +218,46 @@ impl NativeServices {
         if let Ok(mut listeners) = self.appearance_listeners.lock() {
             listeners.retain(|listener| listener.send(event).is_ok());
         }
+    }
+
+    fn publish_menu_activation(
+        &self,
+        window: WindowCapability,
+        binding: u64,
+        command_id: impl Into<String>,
+    ) -> Result<(), PlatformError> {
+        self.registry.authorize(window)?;
+        let command_id = command_id.into();
+        let enabled = self
+            .installed_menus
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "activate menu command",
+                reason: "installed menu registry is unavailable".into(),
+            })?
+            .get(&window)
+            .is_some_and(|installed| {
+                installed.binding == binding
+                    && menu_command_enabled(installed.menu.entries(), &command_id)
+            });
+        if !enabled {
+            return Err(PlatformError::Failed {
+                operation: "activate menu command",
+                reason: "menu binding is stale or the command is disabled".into(),
+            });
+        }
+        let activation = MenuActivation {
+            binding: WindowResult::new(window, binding),
+            command_id,
+        };
+        self.menu_activation_listeners
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "activate menu command",
+                reason: "menu activation listener registry is unavailable".into(),
+            })?
+            .retain(|listener| listener.send(activation.clone()).is_ok());
+        Ok(())
     }
 
     fn spawn_window<T, Work>(
@@ -295,10 +345,63 @@ impl MenuService for NativeServices {
         let binding = self
             .next_menu_binding
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.spawn_window(window, move |backend| {
+        let installed_menu = menu.clone();
+        let install = self.spawn_window(window, move |backend| {
             backend.install_menu(window, menu)?;
             Ok(binding)
+        });
+        let registry = self.registry.clone();
+        let installed_menus = Arc::clone(&self.installed_menus);
+        Box::pin(async move {
+            let result = install.await?;
+            registry.authorize(result.window())?;
+            let mut installed_menus =
+                installed_menus.lock().map_err(|_| PlatformError::Failed {
+                    operation: "install menu",
+                    reason: "installed menu registry is unavailable".into(),
+                })?;
+            if installed_menus
+                .get(&result.window())
+                .is_none_or(|current| current.binding < *result.value())
+            {
+                installed_menus.insert(
+                    result.window(),
+                    InstalledMenu {
+                        binding: result.into_value(),
+                        menu: installed_menu,
+                    },
+                );
+            }
+            Ok(WindowResult::new(window, binding))
         })
+    }
+}
+
+#[derive(Clone)]
+struct InstalledMenu {
+    binding: u64,
+    menu: SemanticMenu,
+}
+
+fn menu_command_enabled(entries: &[SemanticMenuEntry], command_id: &str) -> bool {
+    entries.iter().any(|entry| match entry {
+        SemanticMenuEntry::Command(command) => command.id() == command_id && command.enabled(),
+        SemanticMenuEntry::Separator => false,
+        SemanticMenuEntry::Submenu { entries, .. } => menu_command_enabled(entries, command_id),
+    })
+}
+
+impl MenuActivationService for NativeServices {
+    fn subscribe(&self) -> Result<MenuActivationStream, PlatformError> {
+        let (sender, stream) = MenuActivationStream::channel();
+        self.menu_activation_listeners
+            .lock()
+            .map_err(|_| PlatformError::Failed {
+                operation: "subscribe to menu activations",
+                reason: "menu activation listener registry is unavailable".into(),
+            })?
+            .push(sender);
+        Ok(stream)
     }
 }
 
@@ -377,26 +480,89 @@ impl SystemAppearanceEventService for NativeServices {
 /// and domain code from registering windows accidentally.
 #[doc(hidden)]
 pub mod iced_adapter {
-    use parchmint_platform_api::WindowCapability;
+    use std::sync::Arc;
 
-    use crate::registry::CapabilityRegistry;
+    use parchmint_platform_api::WindowCapability;
+    use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+
+    use crate::{NativeServices, native_menu};
+
+    /// Result of asking the platform adapter to attach an installed menu.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum IcedMenuAttachment {
+        /// The operating system owns and displays the attached menu.
+        Native,
+        /// The Iced surface must display the semantic menu inside the window.
+        InWindow,
+    }
 
     #[derive(Clone)]
     pub struct IcedWindowRegistry {
-        registry: CapabilityRegistry,
+        services: Arc<NativeServices>,
     }
 
     impl IcedWindowRegistry {
-        pub(crate) fn new(registry: CapabilityRegistry) -> Self {
-            Self { registry }
+        pub(crate) fn new(services: Arc<NativeServices>) -> Self {
+            Self { services }
         }
 
         pub fn register_window(&self, capability: WindowCapability) -> WindowCapability {
-            self.registry.register(capability)
+            self.services.registry.register(capability)
         }
 
         pub fn close_window(&self, capability: WindowCapability) {
-            self.registry.unregister(capability);
+            self.services.registry.unregister(capability);
+            self.services
+                .installed_menus
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .remove(&capability);
+            self.services.backend.remove_menu(capability);
+        }
+
+        /// Attaches the exact installed binding while Iced guarantees that the
+        /// supplied raw handles belong to a live event-loop window.
+        pub fn attach_menu(
+            &self,
+            capability: WindowCapability,
+            binding: u64,
+            raw_window: RawWindowHandle,
+            raw_display: RawDisplayHandle,
+        ) -> Result<IcedMenuAttachment, parchmint_platform_api::PlatformError> {
+            self.services.registry.authorize(capability)?;
+            let semantic = self
+                .services
+                .installed_menus
+                .lock()
+                .map_err(|_| parchmint_platform_api::PlatformError::Failed {
+                    operation: "attach native menu",
+                    reason: "installed menu registry is unavailable".to_owned(),
+                })?
+                .get(&capability)
+                .filter(|installed| installed.binding == binding)
+                .map(|installed| installed.menu.clone())
+                .ok_or_else(|| parchmint_platform_api::PlatformError::Failed {
+                    operation: "attach native menu",
+                    reason: "menu binding is stale or unavailable".to_owned(),
+                })?;
+            native_menu::attach(capability, binding, &semantic, raw_window, raw_display).map(
+                |kind| match kind {
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    native_menu::AttachmentKind::Native => IcedMenuAttachment::Native,
+                    #[cfg(target_os = "linux")]
+                    native_menu::AttachmentKind::InWindow => IcedMenuAttachment::InWindow,
+                },
+            )
+        }
+
+        /// Removes native menu state for a live Iced window before it closes.
+        pub fn detach_menu(
+            &self,
+            capability: WindowCapability,
+            raw_window: RawWindowHandle,
+            raw_display: RawDisplayHandle,
+        ) -> Result<(), parchmint_platform_api::PlatformError> {
+            native_menu::detach(capability, raw_window, raw_display)
         }
     }
 }

@@ -151,13 +151,97 @@ impl StyleCatalog {
         self.order.iter().filter_map(|id| self.definitions.get(id))
     }
 
-    pub fn upsert(&mut self, definition: StyleDefinition) -> Result<(), DomainError> {
-        if definition.display_name.trim().is_empty() {
+    /// Builds an explicitly ordered catalog, as stored by the canonical
+    /// project manifest. Explicit catalogs must contain every reserved style
+    /// exactly once and must use the fixed ID assigned to that role.
+    pub fn from_definitions(
+        definitions: impl IntoIterator<Item = StyleDefinition>,
+    ) -> Result<Self, DomainError> {
+        let definitions = definitions.into_iter().collect::<Vec<_>>();
+        let mut catalog = Self {
+            definitions: BTreeMap::new(),
+            order: Vec::new(),
+        };
+        for definition in definitions {
+            validate_style_definition(&definition)?;
+            if catalog
+                .definitions
+                .insert(definition.id, definition.clone())
+                .is_some()
+            {
+                return Err(DomainError::DuplicateId { field: "style ID" });
+            }
+            if catalog.definitions.values().any(|candidate| {
+                candidate.id != definition.id
+                    && candidate.role == definition.role
+                    && definition.role.is_reserved()
+            }) {
+                return Err(DomainError::DuplicateId {
+                    field: "reserved style role",
+                });
+            }
+            catalog.order.push(definition.id);
+        }
+        catalog.validate()?;
+        Ok(catalog)
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.order.len() != self.definitions.len()
+            || self.order.iter().copied().collect::<BTreeSet<_>>().len() != self.order.len()
+            || self
+                .order
+                .iter()
+                .any(|id| !self.definitions.contains_key(id))
+        {
             return Err(DomainError::InvalidInput {
-                field: "style display name",
-                reason: "must not be empty",
+                field: "style order",
+                reason: "must contain every style exactly once",
             });
         }
+        for (id, role) in [
+            (Self::body_id(), StyleRole::Body),
+            (Self::document_title_id(), StyleRole::DocumentTitle),
+            (Self::heading_1_id(), StyleRole::Heading1),
+            (Self::heading_2_id(), StyleRole::Heading2),
+            (Self::heading_3_id(), StyleRole::Heading3),
+            (Self::block_quote_id(), StyleRole::BlockQuote),
+            (Self::verse_id(), StyleRole::Verse),
+        ] {
+            if self.definitions.get(&id).map(|style| style.role) != Some(role) {
+                return Err(DomainError::InvalidInput {
+                    field: "reserved style",
+                    reason: "reserved role and ID do not match",
+                });
+            }
+        }
+        for definition in self.definitions.values() {
+            validate_style_definition(definition)?;
+            if let Some(parent) = definition.inherits {
+                if parent == definition.id || !self.definitions.contains_key(&parent) {
+                    return Err(DomainError::InvalidInput {
+                        field: "style inheritance",
+                        reason: "parent style must exist and differ from the child",
+                    });
+                }
+                let mut cursor = Some(parent);
+                let mut seen = BTreeSet::new();
+                while let Some(id) = cursor {
+                    if !seen.insert(id) || id == definition.id {
+                        return Err(DomainError::InvalidInput {
+                            field: "style inheritance",
+                            reason: "inheritance cycles are not allowed",
+                        });
+                    }
+                    cursor = self.definitions.get(&id).and_then(|style| style.inherits);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn upsert(&mut self, definition: StyleDefinition) -> Result<(), DomainError> {
+        validate_style_definition(&definition)?;
         if let Some(existing) = self.definitions.get(&definition.id)
             && existing.role.is_reserved()
             && existing.role != definition.role
@@ -199,7 +283,7 @@ impl StyleCatalog {
             self.order.push(definition.id);
         }
         self.definitions.insert(definition.id, definition);
-        Ok(())
+        self.validate()
     }
 
     pub fn remove(&mut self, id: StyleId) -> Result<StyleDefinition, DomainError> {
@@ -226,6 +310,79 @@ impl StyleCatalog {
         self.order.retain(|candidate| *candidate != id);
         Ok(self.definitions.remove(&id).expect("style was checked"))
     }
+}
+
+fn validate_style_definition(definition: &StyleDefinition) -> Result<(), DomainError> {
+    if definition.id.as_bytes().iter().all(|byte| *byte == 0) {
+        return Err(DomainError::InvalidInput {
+            field: "style ID",
+            reason: "must not be the nil ID",
+        });
+    }
+    if definition.display_name.trim().is_empty()
+        || definition.display_name.chars().any(char::is_control)
+    {
+        return Err(DomainError::InvalidInput {
+            field: "style display name",
+            reason: "must be non-empty text without control characters",
+        });
+    }
+    if let Some(family) = &definition.properties.font_family
+        && (family.trim().is_empty() || family.chars().any(char::is_control))
+    {
+        return Err(DomainError::InvalidInput {
+            field: "style font family",
+            reason: "must be non-empty text without control characters",
+        });
+    }
+    if definition
+        .properties
+        .font_size_points
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(DomainError::InvalidInput {
+            field: "style font size",
+            reason: "must be a positive finite point value",
+        });
+    }
+    if definition
+        .properties
+        .weight
+        .is_some_and(|value| !(1..=1000).contains(&value))
+    {
+        return Err(DomainError::InvalidInput {
+            field: "style font weight",
+            reason: "must be between 1 and 1000",
+        });
+    }
+    if definition
+        .properties
+        .line_spacing
+        .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err(DomainError::InvalidInput {
+            field: "style line spacing",
+            reason: "must be a positive finite multiplier",
+        });
+    }
+    for value in [
+        definition.properties.first_line_indent_points,
+        definition.properties.left_indent_points,
+        definition.properties.right_indent_points,
+        definition.properties.space_before_points,
+        definition.properties.space_after_points,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !value.is_finite() {
+            return Err(DomainError::InvalidInput {
+                field: "style point value",
+                reason: "must be finite",
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +443,12 @@ impl MetadataCatalog {
     }
 
     pub fn upsert(&mut self, definition: MetadataFieldDefinition) -> Result<(), DomainError> {
+        if definition.id.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err(DomainError::InvalidInput {
+                field: "metadata field ID",
+                reason: "must not be the nil ID",
+            });
+        }
         if definition.label.trim().is_empty() {
             return Err(DomainError::InvalidInput {
                 field: "metadata field label",
@@ -366,7 +529,7 @@ impl ProjectDictionary {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectDictionary;
+    use super::*;
 
     #[test]
     fn project_dictionary_add_and_remove_are_deterministic() {
@@ -381,5 +544,57 @@ mod tests {
         assert!(!dictionary.remove("apple"));
         assert!(!dictionary.contains("apple"));
         assert_eq!(dictionary.iter().collect::<Vec<_>>(), ["zebra"]);
+    }
+
+    #[test]
+    fn metadata_catalog_preserves_stable_identity_through_edit_reorder_and_delete() {
+        let first = MetadataFieldId::from_bytes([1; 16]);
+        let second = MetadataFieldId::from_bytes([2; 16]);
+        let mut catalog = MetadataCatalog::default();
+        for (id, label) in [(first, "Status"), (second, "Location")] {
+            catalog
+                .upsert(MetadataFieldDefinition {
+                    id,
+                    label: label.into(),
+                    description: None,
+                    applicability: MetadataApplicability::GroupsAndDocuments,
+                    text_kind: MetadataTextKind::SingleLine,
+                    default_value: None,
+                    visible_on_cards: false,
+                })
+                .unwrap();
+        }
+        let mut renamed = catalog.get(first).unwrap().clone();
+        renamed.label = "Draft status".into();
+        catalog.upsert(renamed).unwrap();
+        catalog.move_to(second, 0).unwrap();
+        assert_eq!(
+            catalog.iter().map(|field| field.id).collect::<Vec<_>>(),
+            [second, first]
+        );
+        assert_eq!(catalog.remove(first).unwrap().id, first);
+        assert_eq!(
+            catalog.iter().map(|field| field.id).collect::<Vec<_>>(),
+            [second]
+        );
+    }
+
+    #[test]
+    fn style_catalog_protects_reserved_styles_and_rejects_invalid_properties() {
+        let mut catalog = StyleCatalog::default();
+        assert!(catalog.remove(StyleCatalog::body_id()).is_err());
+
+        let mut body = catalog.get(StyleCatalog::body_id()).unwrap().clone();
+        body.properties.font_size_points = Some(f32::NAN);
+        assert!(catalog.upsert(body).is_err());
+
+        let custom_id = StyleId::from_bytes([8; 16]);
+        catalog
+            .upsert(StyleDefinition::custom(custom_id, "Custom"))
+            .unwrap();
+        let mut child = StyleDefinition::custom(StyleId::from_bytes([9; 16]), "Child");
+        child.inherits = Some(custom_id);
+        catalog.upsert(child).unwrap();
+        assert!(catalog.remove(custom_id).is_err());
     }
 }

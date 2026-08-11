@@ -52,6 +52,7 @@ fn projection(revision: u64) -> Projection {
                 attributes: BTreeMap::new(),
                 text: String::new(),
                 marks: Vec::new(),
+                list_depth: 0,
             }],
             canonical_html: false,
         },
@@ -153,11 +154,15 @@ fn ids_transactions_and_revisions_are_core_owned_and_monotonic() {
 fn comments_and_anchors_map_or_orphan_with_document_edits() {
     let comment_id = comment(7);
     let mut canonical = load("alpha");
-    canonical.comments.push(CanonicalComment {
-        id: comment_id,
-        range: selection(2, 5),
-        body: "note".into(),
-    });
+    canonical.comments.push(CanonicalComment::new(
+        comment_id,
+        selection(2, 5),
+        "note",
+        block(9),
+    ));
+    if let CanonicalCommentAnchor::Text { quote, .. } = &mut canonical.comments[0].anchor {
+        *quote = "pha".into();
+    }
     canonical.anchors.push(CanonicalAnchor {
         block: block(3),
         position: position(3),
@@ -217,16 +222,8 @@ fn comments_and_anchors_map_or_orphan_with_document_edits() {
 fn projections_are_deterministic_and_sort_stable_comments_and_anchors() {
     let mut left_load = load("alpha");
     left_load.comments = vec![
-        CanonicalComment {
-            id: comment(2),
-            range: selection(0, 1),
-            body: "second".into(),
-        },
-        CanonicalComment {
-            id: comment(1),
-            range: selection(1, 2),
-            body: "first".into(),
-        },
+        CanonicalComment::new(comment(2), selection(0, 1), "second", block(9)),
+        CanonicalComment::new(comment(1), selection(1, 2), "first", block(9)),
     ];
     left_load.anchors = vec![
         CanonicalAnchor {
@@ -567,11 +564,7 @@ fn collapsed_and_cross_block_selections_toggle_block_quotes_safely() {
 }
 
 #[test]
-fn block_format_rejects_atomic_ranges_and_nested_lists_without_mutation() {
-    assert!(matches!(
-        EditorCoreSession::open(load("<ul><li>outer<ul><li>nested</li></ul></li></ul>")),
-        Err(EditorError::InvalidCommand { .. })
-    ));
+fn block_format_rejects_atomic_ranges_without_mutation() {
     let mounted = view(1);
     let mut session =
         EditorCoreSession::open(load("<p>one</p><hr data-kind=\"scene-break\"><p>two</p>"))
@@ -603,6 +596,253 @@ fn block_format_rejects_atomic_ranges_and_nested_lists_without_mutation() {
     );
     assert!(matches!(text_edit, Err(EditorError::InvalidCommand { .. })));
     assert_eq!(session.canonical_projection(), before);
+}
+
+#[test]
+fn nested_lists_round_trip_and_depth_changes_are_revision_checked_and_undoable() {
+    assert!(matches!(
+        EditorCoreSession::open(load("<ul><ul><li>orphan</li></ul></ul>")),
+        Err(EditorError::InvalidCommand { .. })
+    ));
+    let canonical = "<ul><li>one<ul><li><strong>two</strong></li></ul></li><li>three</li></ul>";
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load(canonical)).expect("open nested list");
+    session.attach_view(mounted).expect("attach view");
+    assert_eq!(session.canonical_projection().body(), canonical);
+    assert_eq!(
+        session
+            .canonical_projection()
+            .semantic()
+            .blocks()
+            .iter()
+            .map(SemanticBlock::list_depth)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 0]
+    );
+
+    let mut flat = EditorCoreSession::open(load("<ul><li>one</li><li><em>two</em></li></ul>"))
+        .expect("open flat list");
+    flat.attach_view(mounted).expect("attach flat view");
+    let indent = EditorCommandKind::AdjustListDepth {
+        range: selection(4, 4),
+        change: ListDepthChange::Indent,
+    };
+    flat.execute(origin(mounted), command(0, indent.clone()))
+        .expect("indent second list item");
+    assert_eq!(
+        flat.canonical_projection().body(),
+        "<ul><li>one<ul><li><em>two</em></li></ul></li></ul>"
+    );
+    assert!(matches!(
+        flat.execute(origin(mounted), command(0, indent)),
+        Err(EditorError::StaleCommand { .. })
+    ));
+    flat.execute(origin(mounted), command(1, EditorCommandKind::Undo))
+        .expect("undo indent");
+    assert_eq!(
+        flat.canonical_projection().body(),
+        "<ul><li>one</li><li><em>two</em></li></ul>"
+    );
+}
+
+#[test]
+fn enter_soft_break_and_list_reset_preserve_semantics() {
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load("<h1 data-style-id=\"heading-1\">hello</h1>"))
+        .expect("open heading");
+    session.attach_view(mounted).expect("attach view");
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SplitBlock {
+                    selection: selection(2, 2),
+                },
+            ),
+        )
+        .expect("split heading");
+    assert_eq!(
+        session.canonical_projection().body(),
+        "<h1 data-style-id=\"heading-1\">he</h1><p data-style-id=\"body\">llo</p>"
+    );
+    assert_eq!(session.selection(mounted).expect("view"), selection(3, 3));
+    session
+        .execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::InsertSoftBreak {
+                    selection: selection(4, 4),
+                },
+            ),
+        )
+        .expect("insert soft break");
+    assert!(session.canonical_projection().body().contains("l<br>lo"));
+
+    let mut empty =
+        EditorCoreSession::open(load("<ul><li></li></ul>")).expect("open empty list item");
+    empty.attach_view(mounted).expect("attach empty list view");
+    empty
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SplitBlock {
+                    selection: selection(0, 0),
+                },
+            ),
+        )
+        .expect("reset empty list item");
+    assert_eq!(
+        empty.canonical_projection().body(),
+        "<p data-style-id=\"body\"></p>"
+    );
+}
+
+#[test]
+fn semantic_fragment_insertion_preserves_blocks_marks_soft_breaks_and_undo() {
+    let mounted = view(1);
+    let mut session =
+        EditorCoreSession::open(load("<p>before after</p>")).expect("open fragment destination");
+    session.attach_view(mounted).expect("attach view");
+    let fragment = SemanticFragment::new(vec![
+        SemanticFragmentBlock::new(
+            SemanticBlockKind::Paragraph,
+            "one",
+            vec![SemanticMarkRange::new(
+                selection(0, 3),
+                SemanticInlineMark::Bold,
+            )],
+        ),
+        SemanticFragmentBlock::new(SemanticBlockKind::UnorderedListItem, "top", Vec::new()),
+        SemanticFragmentBlock::new(SemanticBlockKind::UnorderedListItem, "nested", Vec::new())
+            .with_list_depth(1),
+        SemanticFragmentBlock::new(
+            SemanticBlockKind::BlockQuote,
+            "q\nx",
+            vec![SemanticMarkRange::new(
+                selection(0, 1),
+                SemanticInlineMark::Link("https://e.test".into()),
+            )],
+        ),
+    ]);
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                    range: selection(7, 7),
+                    fragment,
+                },
+            ),
+        )
+        .expect("insert semantic fragment");
+    assert_eq!(
+        session.canonical_projection().body(),
+        "<p>before </p><p><strong>one</strong></p><ul><li>top<ul><li>nested</li></ul></li></ul><blockquote><a href=\"https://e.test\">q</a><br>x</blockquote><p>after</p>"
+    );
+    assert_eq!(session.revision(), revision(1));
+    assert_eq!(
+        session.selection(mounted).expect("fragment caret"),
+        selection(27, 27)
+    );
+    session
+        .execute(origin(mounted), command(1, EditorCommandKind::Undo))
+        .expect("undo semantic fragment");
+    assert_eq!(session.canonical_projection().body(), "<p>before after</p>");
+}
+
+#[test]
+fn semantic_fragment_replaces_cross_block_selection_and_rejects_invalid_input_atomically() {
+    let mounted = view(1);
+    let mut session =
+        EditorCoreSession::open(load("<p>aa</p><p>bb</p>")).expect("open replacement destination");
+    session.attach_view(mounted).expect("attach view");
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                    range: selection(1, 4),
+                    fragment: SemanticFragment::new(vec![
+                        SemanticFragmentBlock::new(SemanticBlockKind::Paragraph, "x", Vec::new()),
+                        SemanticFragmentBlock::new(SemanticBlockKind::Paragraph, "y", Vec::new()),
+                    ]),
+                },
+            ),
+        )
+        .expect("replace cross-block selection");
+    assert_eq!(
+        session.canonical_projection().body(),
+        "<p>a</p><p>x</p><p>y</p><p>b</p>"
+    );
+    assert_eq!(
+        session.selection(mounted).expect("replacement caret"),
+        selection(6, 6)
+    );
+    let before = session.canonical_projection();
+    assert!(matches!(
+        session.execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                    range: selection(0, 0),
+                    fragment: SemanticFragment::new(vec![SemanticFragmentBlock::new(
+                        SemanticBlockKind::Paragraph,
+                        "stale",
+                        Vec::new(),
+                    )]),
+                },
+            ),
+        ),
+        Err(EditorError::StaleCommand { .. })
+    ));
+    let invalid = SemanticFragment::new(vec![
+        SemanticFragmentBlock::new(SemanticBlockKind::OrderedListItem, "orphan", Vec::new())
+            .with_list_depth(1),
+    ]);
+    assert!(matches!(
+        session.execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                    range: selection(0, 0),
+                    fragment: invalid,
+                },
+            ),
+        ),
+        Err(EditorError::InvalidCommand { .. })
+    ));
+    assert_eq!(session.revision(), revision(1));
+    assert_eq!(session.canonical_projection(), before);
+
+    let oversized = SemanticFragment::new(
+        (0..=MAX_SEMANTIC_FRAGMENT_BLOCKS)
+            .map(|_| {
+                SemanticFragmentBlock::new(SemanticBlockKind::Paragraph, String::new(), Vec::new())
+            })
+            .collect(),
+    );
+    assert!(
+        session
+            .execute(
+                origin(mounted),
+                command(
+                    1,
+                    EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                        range: selection(0, 0),
+                        fragment: oversized,
+                    },
+                ),
+            )
+            .is_err()
+    );
+    assert_eq!(session.revision(), revision(1));
 }
 
 #[test]
@@ -824,6 +1064,51 @@ fn paragraph_style_and_bold_are_revision_checked_undoable_transactions() {
 }
 
 #[test]
+fn active_style_tracks_the_containing_caret_block_without_a_document_revision() {
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load(
+        "<p data-style-id=\"body\">a</p><h1 data-style-id=\"heading-1\">b</h1><blockquote>c</blockquote>",
+    ))
+    .expect("open styled blocks");
+    session.attach_view(mounted).expect("attach view");
+    assert_eq!(
+        session.active_style(mounted).expect("body style"),
+        StyleCatalog::body_id()
+    );
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SetSelection {
+                    selection: selection(2, 2),
+                },
+            ),
+        )
+        .expect("move to heading");
+    assert_eq!(
+        session.active_style(mounted).expect("heading style"),
+        StyleCatalog::heading_1_id()
+    );
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SetSelection {
+                    selection: selection(4, 4),
+                },
+            ),
+        )
+        .expect("move to quote");
+    assert_eq!(
+        session.active_style(mounted).expect("quote style"),
+        StyleCatalog::block_quote_id()
+    );
+    assert_eq!(session.revision(), revision(0));
+}
+
+#[test]
 fn supported_inline_marks_parse_and_serialize_without_entering_rendered_text() {
     let body = "<p><em>italic</em> <u>under</u> <s>strike</s> <a href=\"https://example.com/a?x=1&amp;y=2\">link</a></p>";
     let session = EditorCoreSession::open(load(body)).expect("open supported inline marks");
@@ -863,6 +1148,12 @@ fn every_value_free_inline_mark_toggle_is_revision_safe_and_undoable() {
         (InlineMarkKind::Italic, "<p><em>text</em></p>"),
         (InlineMarkKind::Underline, "<p><u>text</u></p>"),
         (InlineMarkKind::Strikethrough, "<p><s>text</s></p>"),
+        (
+            InlineMarkKind::SmallCaps,
+            "<p><span data-semantic=\"small-caps\">text</span></p>",
+        ),
+        (InlineMarkKind::Superscript, "<p><sup>text</sup></p>"),
+        (InlineMarkKind::Subscript, "<p><sub>text</sub></p>"),
     ] {
         let mounted = view(1);
         let mut session = EditorCoreSession::open(load("<p>text</p>")).expect("open HTML");
@@ -1105,4 +1396,335 @@ fn exhausted_core_sequences_reject_an_edit_before_the_engine_changes() {
     assert!(matches!(result, Err(EditorError::InvalidCommand { .. })));
     assert_eq!(session.revision(), revision(0));
     assert_eq!(session.canonical_projection(), before);
+}
+
+#[test]
+fn comment_mutations_are_revision_checked_undoable_and_reattachable() {
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load("alpha beta")).unwrap();
+    session.attach_view(mounted).unwrap();
+    let thread = comment(41);
+    let root = comment(42);
+    let reply = comment(43);
+    let created = CanonicalComment {
+        id: thread,
+        messages: vec![CanonicalCommentMessage {
+            id: root,
+            body: "Root note".into(),
+            unknown_fields: BTreeMap::new(),
+        }],
+        resolved: false,
+        anchor: CanonicalCommentAnchor::Text {
+            block: block(9),
+            range: selection(0, 5),
+            quote: "alpha".into(),
+            context_before: String::new(),
+            context_after: " beta".into(),
+            orphaned: false,
+            unknown_fields: BTreeMap::new(),
+        },
+        unknown_fields: BTreeMap::new(),
+    };
+
+    session
+        .execute(
+            origin(mounted),
+            command(0, EditorCommandKind::CreateComment { comment: created }),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::ReplyToComment {
+                    thread,
+                    message: CanonicalCommentMessage {
+                        id: reply,
+                        body: "Reply".into(),
+                        unknown_fields: BTreeMap::new(),
+                    },
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                2,
+                EditorCommandKind::SetCommentResolved {
+                    thread,
+                    resolved: true,
+                },
+            ),
+        )
+        .unwrap();
+    assert!(session.canonical_projection().comments()[0].resolved);
+    session
+        .execute(
+            origin(mounted),
+            command(
+                3,
+                EditorCommandKind::SetCommentResolved {
+                    thread,
+                    resolved: false,
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                4,
+                EditorCommandKind::ReattachComment {
+                    thread,
+                    range: selection(6, 10),
+                },
+            ),
+        )
+        .unwrap();
+    assert_eq!(session.comment_anchor(thread).unwrap().quote(), "beta");
+
+    let stale = session.execute(
+        origin(mounted),
+        command(4, EditorCommandKind::DeleteCommentThread { thread }),
+    );
+    assert!(matches!(stale, Err(EditorError::StaleCommand { .. })));
+    session
+        .execute(
+            origin(mounted),
+            command(
+                5,
+                EditorCommandKind::DeleteCommentMessage {
+                    thread,
+                    message: reply,
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                6,
+                EditorCommandKind::DeleteCommentMessage {
+                    thread,
+                    message: root,
+                },
+            ),
+        )
+        .unwrap();
+    assert!(session.canonical_projection().comments().is_empty());
+    session
+        .execute(origin(mounted), command(7, EditorCommandKind::Undo))
+        .unwrap();
+    assert_eq!(
+        session.canonical_projection().comments()[0].messages.len(),
+        1
+    );
+}
+
+#[test]
+fn comment_message_edits_are_revision_checked_validated_and_undoable() {
+    let mounted = view(1);
+    let thread = comment(10);
+    let message = comment(11);
+    let mut session = EditorCoreSession::open(load("alpha")).unwrap();
+    session.attach_view(mounted).unwrap();
+    let mut created = CanonicalComment::new(thread, selection(0, 5), "Original", block(9));
+    created.messages[0].id = message;
+    session
+        .execute(
+            origin(mounted),
+            command(0, EditorCommandKind::CreateComment { comment: created }),
+        )
+        .unwrap();
+
+    session
+        .execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::EditCommentMessage {
+                    thread,
+                    message,
+                    body: "Edited".into(),
+                },
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        session.canonical_projection().comments()[0].messages[0].body,
+        "Edited"
+    );
+
+    assert!(matches!(
+        session.execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::EditCommentMessage {
+                    thread,
+                    message,
+                    body: "Stale".into(),
+                },
+            ),
+        ),
+        Err(EditorError::StaleCommand { .. })
+    ));
+    assert!(
+        session
+            .execute(
+                origin(mounted),
+                command(
+                    2,
+                    EditorCommandKind::EditCommentMessage {
+                        thread,
+                        message,
+                        body: "  ".into(),
+                    },
+                ),
+            )
+            .is_err()
+    );
+    assert_eq!(session.revision(), revision(2));
+
+    session
+        .execute(origin(mounted), command(2, EditorCommandKind::Undo))
+        .unwrap();
+    assert_eq!(
+        session.canonical_projection().comments()[0].messages[0].body,
+        "Original"
+    );
+}
+
+#[test]
+fn orphan_conversion_is_revision_checked_and_undoable() {
+    let mounted = view(1);
+    let thread = comment(12);
+    let mut canonical = CanonicalComment::new(thread, selection(0, 5), "Note", block(9));
+    if let CanonicalCommentAnchor::Text { orphaned, .. } = &mut canonical.anchor {
+        *orphaned = true;
+    }
+    let mut canonical_load = load("alpha");
+    canonical_load.comments = vec![canonical];
+    let mut session = EditorCoreSession::open(canonical_load).unwrap();
+    session.attach_view(mounted).unwrap();
+
+    session
+        .execute(
+            origin(mounted),
+            command(0, EditorCommandKind::ConvertCommentToDocument { thread }),
+        )
+        .unwrap();
+    assert!(matches!(
+        session.canonical_projection().comments()[0].anchor,
+        CanonicalCommentAnchor::Document { .. }
+    ));
+    assert!(matches!(
+        session.execute(
+            origin(mounted),
+            command(0, EditorCommandKind::ConvertCommentToDocument { thread },),
+        ),
+        Err(EditorError::StaleCommand { .. })
+    ));
+    session
+        .execute(origin(mounted), command(1, EditorCommandKind::Undo))
+        .unwrap();
+    assert!(matches!(
+        session.canonical_projection().comments()[0].anchor,
+        CanonicalCommentAnchor::Text { orphaned: true, .. }
+    ));
+}
+
+#[test]
+fn empty_comment_bodies_and_empty_reattachments_are_rejected_without_revision_change() {
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load("alpha")).unwrap();
+    session.attach_view(mounted).unwrap();
+    let invalid = CanonicalComment::new(comment(9), selection(0, 0), "  ", block(9));
+    assert!(
+        session
+            .execute(
+                origin(mounted),
+                command(0, EditorCommandKind::CreateComment { comment: invalid })
+            )
+            .is_err()
+    );
+    assert_eq!(session.revision(), revision(0));
+}
+
+#[test]
+fn collapsed_and_document_comment_anchors_are_supported_but_empty_reattach_is_not() {
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load("alpha")).unwrap();
+    session.attach_view(mounted).unwrap();
+    let position_thread = comment(51);
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::CreateComment {
+                    comment: CanonicalComment::new(
+                        position_thread,
+                        selection(2, 2),
+                        "Position note",
+                        block(9),
+                    ),
+                },
+            ),
+        )
+        .unwrap();
+    assert!(
+        session
+            .comment_anchor(position_thread)
+            .unwrap()
+            .range()
+            .is_collapsed()
+    );
+
+    let document_thread = comment(52);
+    session
+        .execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::CreateComment {
+                    comment: CanonicalComment {
+                        id: document_thread,
+                        messages: vec![CanonicalCommentMessage {
+                            id: comment(53),
+                            body: "Document note".into(),
+                            unknown_fields: BTreeMap::new(),
+                        }],
+                        resolved: false,
+                        anchor: CanonicalCommentAnchor::Document {
+                            unknown_fields: BTreeMap::new(),
+                        },
+                        unknown_fields: BTreeMap::new(),
+                    },
+                },
+            ),
+        )
+        .unwrap();
+    assert!(session.comment_anchor(document_thread).is_none());
+    let before = session.revision();
+    assert!(
+        session
+            .execute(
+                origin(mounted),
+                EditorCommand::new(
+                    before,
+                    EditorCommandKind::ReattachComment {
+                        thread: document_thread,
+                        range: selection(1, 1),
+                    },
+                ),
+            )
+            .is_err()
+    );
+    assert_eq!(session.revision(), before);
 }

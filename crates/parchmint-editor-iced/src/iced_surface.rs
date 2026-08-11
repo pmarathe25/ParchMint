@@ -3,14 +3,15 @@ use iced::mouse;
 use iced::widget::canvas::{self, Action, Canvas, Frame, Path, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use parchmint_editor_api::{
-    AtomicBlockKind, BlockFormatKind, BlockId, DocumentPosition, EditorAdapter, EditorCommand,
-    EditorCommandKind, EditorCommandOrigin, EditorError, EditorRevision, EditorSelection,
-    InlineMarkKind, SharedEditorSession, SpellcheckDecoration, StyleId, ViewId,
+    AtomicBlockKind, BlockFormatKind, BlockId, CommentDecoration, DocumentPosition, EditorAdapter,
+    EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorError, EditorRevision,
+    EditorSelection, InlineMarkKind, ListDepthChange, SharedEditorSession, SpellcheckDecoration,
+    StyleId, ViewId,
 };
 use std::sync::{Arc, Mutex};
 
 use crate::adapter::EditorIcedAdapter;
-use crate::layout::{BlockLayoutGeometry, EditorRectangle, EditorViewport};
+use crate::layout::{BlockLayoutGeometry, EditorFontFamily, EditorRectangle, EditorViewport};
 
 /// An sRGB surface color owned by the ParchMint editor boundary.
 ///
@@ -73,6 +74,7 @@ pub struct EditorSurfaceTheme {
     caret: EditorSurfaceColor,
     link: EditorSurfaceColor,
     spellcheck: EditorSurfaceColor,
+    comment: EditorSurfaceColor,
 }
 
 impl EditorSurfaceTheme {
@@ -89,6 +91,7 @@ impl EditorSurfaceTheme {
             caret,
             link: caret,
             spellcheck: EditorSurfaceColor::rgb(190, 62, 54),
+            comment: EditorSurfaceColor::rgba(191, 137, 31, 96),
         }
     }
 
@@ -137,6 +140,10 @@ impl EditorSurfaceTheme {
     pub const fn spellcheck(self) -> EditorSurfaceColor {
         self.spellcheck
     }
+
+    pub const fn comment(self) -> EditorSurfaceColor {
+        self.comment
+    }
 }
 
 impl Default for EditorSurfaceTheme {
@@ -150,8 +157,17 @@ impl Default for EditorSurfaceTheme {
 pub enum MountedEditorKeyCommand {
     Backspace,
     Delete,
-    MoveLeft,
-    MoveRight,
+    MoveLeft { extend: bool },
+    MoveRight { extend: bool },
+    MoveUp { extend: bool },
+    MoveDown { extend: bool },
+    MoveLineStart { extend: bool },
+    MoveLineEnd { extend: bool },
+    SelectAll,
+    SplitBlock,
+    InsertSoftBreak,
+    IndentList,
+    OutdentList,
 }
 
 /// Clipboard operation requested by a focused mounted editor. Platform I/O is
@@ -161,12 +177,19 @@ pub enum MountedEditorClipboardIntent {
     Copy,
     Cut,
     Paste,
+    PasteWithoutFormatting,
 }
 
 /// A ParchMint-owned interaction emitted by a mounted editor surface.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MountedEditorMessage {
     Focus(DocumentPosition),
+    SetSelection(EditorSelection),
+    Scroll {
+        delta_y: f32,
+        viewport: EditorViewport,
+    },
+    ViewportChanged(EditorViewport),
     InsertText(String),
     KeyCommand(MountedEditorKeyCommand),
     Clipboard(MountedEditorClipboardIntent),
@@ -175,8 +198,11 @@ pub enum MountedEditorMessage {
     ToggleBlockFormat(BlockFormatKind),
     InsertAtomicBlock(AtomicBlockKind),
     ApplyParagraphStyle(StyleId),
-    /// A secondary-button hit on one currently underlined spelling range.
-    OpenSpellingMenu(EditorSelection),
+    /// A secondary-button hit with independent comment and spelling targets.
+    OpenSpellingMenu {
+        comment_range: EditorSelection,
+        spelling_range: Option<EditorSelection>,
+    },
 }
 
 /// The session-local identity and semantic appearance of one mounted surface.
@@ -225,6 +251,7 @@ impl MountedEditorConfig {
 pub struct MountedEditorUpdate {
     revision: EditorRevision,
     document_changed: bool,
+    active_style: StyleId,
 }
 
 impl MountedEditorUpdate {
@@ -234,6 +261,10 @@ impl MountedEditorUpdate {
 
     pub const fn document_changed(self) -> bool {
         self.document_changed
+    }
+
+    pub const fn active_style(self) -> StyleId {
+        self.active_style
     }
 }
 
@@ -250,11 +281,23 @@ struct SurfaceContent {
     viewport: EditorViewport,
     theme: EditorSurfaceTheme,
     spellcheck: Vec<SpellcheckDecoration>,
+    comments: Vec<CommentDecoration>,
 }
 
-#[derive(Default)]
 struct SurfaceState {
     focused: bool,
+    modifiers: keyboard::Modifiers,
+    drag_anchor: Option<DocumentPosition>,
+}
+
+impl Default for SurfaceState {
+    fn default() -> Self {
+        Self {
+            focused: false,
+            modifiers: keyboard::Modifiers::NONE,
+            drag_anchor: None,
+        }
+    }
 }
 
 impl canvas::Program<MountedEditorMessage> for EditorSurface {
@@ -270,17 +313,68 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         self.sync_focus(state);
         let content = self.content();
         match event {
+            iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
+                state.modifiers = *modifiers;
+                None
+            }
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let position = cursor.position_in(bounds)?;
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
                 self.set_focus(true);
-                Some(Action::publish(MountedEditorMessage::Focus(document)).and_capture())
+                let extend = state.modifiers.contains(keyboard::Modifiers::SHIFT);
+                let anchor = if extend {
+                    content.selection.anchor()
+                } else {
+                    document
+                };
+                state.drag_anchor = Some(anchor);
+                let message = if extend {
+                    MountedEditorMessage::SetSelection(EditorSelection::new(anchor, document))
+                } else {
+                    MountedEditorMessage::Focus(document)
+                };
+                Some(Action::publish(message).and_capture())
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag_anchor.is_some() => {
+                let position = cursor.position_in(bounds)?;
+                let document = content.geometry.hit_test(position.x, position.y)?;
+                Some(
+                    Action::publish(MountedEditorMessage::SetSelection(EditorSelection::new(
+                        state.drag_anchor.expect("drag anchor guard"),
+                        document,
+                    )))
+                    .and_capture(),
+                )
+            }
+            iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                if state.drag_anchor.take().is_some() =>
+            {
+                Some(Action::capture())
+            }
+            iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let delta_y = match delta {
+                    mouse::ScrollDelta::Lines { y, .. } => -*y * 60.0,
+                    mouse::ScrollDelta::Pixels { y, .. } => -*y,
+                };
+                Some(
+                    Action::publish(MountedEditorMessage::Scroll {
+                        delta_y,
+                        viewport: viewport_from_bounds(bounds)?,
+                    })
+                    .and_capture(),
+                )
             }
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 let position = cursor.position_in(bounds)?;
-                let range = spelling_range_at(&content, position.x, position.y)?;
-                Some(Action::publish(MountedEditorMessage::OpenSpellingMenu(range)).and_capture())
+                let comment_range = comment_range_at(&content, position.x, position.y)?;
+                Some(
+                    Action::publish(MountedEditorMessage::OpenSpellingMenu {
+                        comment_range,
+                        spelling_range: spelling_range_at(&content, position.x, position.y),
+                    })
+                    .and_capture(),
+                )
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
                 if state.focused && clipboard_shortcut(key.as_ref(), *modifiers).is_some() =>
@@ -293,29 +387,18 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     .and_capture(),
                 )
             }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                if state.focused && mounted_key_command(key.as_ref(), *modifiers).is_some() =>
+            {
+                let command = mounted_key_command(key.as_ref(), *modifiers)
+                    .expect("guard resolved a mounted key command");
+                Some(Action::publish(MountedEditorMessage::KeyCommand(command)).and_capture())
+            }
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 text: Some(text), ..
             }) if state.focused && is_supported_en_us(text) => Some(
                 Action::publish(MountedEditorMessage::InsertText(text.to_string())).and_capture(),
             ),
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) if state.focused => {
-                let command = match key.as_ref() {
-                    keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-                        MountedEditorKeyCommand::Backspace
-                    }
-                    keyboard::Key::Named(keyboard::key::Named::Delete) => {
-                        MountedEditorKeyCommand::Delete
-                    }
-                    keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
-                        MountedEditorKeyCommand::MoveLeft
-                    }
-                    keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
-                        MountedEditorKeyCommand::MoveRight
-                    }
-                    _ => return None,
-                };
-                Some(Action::publish(MountedEditorMessage::KeyCommand(command)).and_capture())
-            }
             _ => None,
         }
     }
@@ -361,22 +444,77 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 }
                 continue;
             }
+            if scalar.block_start
+                && scalar.block_kind == parchmint_editor_api::SemanticBlockKind::BlockQuote
+            {
+                fill_rectangle(
+                    &mut frame,
+                    EditorRectangle {
+                        x: scalar.bounds.x - 12.0,
+                        y: scalar.bounds.y,
+                        width: 2.0,
+                        height: scalar.bounds.height,
+                    },
+                    content.theme.text().iced(),
+                );
+            }
+            if let Some(marker) = scalar.list_marker {
+                frame.fill_text(Text {
+                    content: if marker == 0 {
+                        "•".to_owned()
+                    } else {
+                        format!("{marker}.")
+                    },
+                    position: Point::new(scalar.bounds.x - 20.0, scalar.bounds.y),
+                    color: content.theme.text().iced(),
+                    size: iced::Pixels::from(16.0),
+                    ..Text::default()
+                });
+            }
+            let raised = scalar.superscript;
+            let lowered = scalar.subscript;
+            let small_caps = scalar.small_caps && scalar.character.is_lowercase();
             frame.fill_text(Text {
-                content: scalar.character.to_string(),
-                position: Point::new(scalar.bounds.x, scalar.bounds.y),
+                content: if scalar.small_caps {
+                    scalar.character.to_uppercase().collect()
+                } else {
+                    scalar.character.to_string()
+                },
+                position: Point::new(
+                    scalar.bounds.x,
+                    scalar.bounds.y
+                        + if raised {
+                            -scalar.bounds.height * 0.25
+                        } else if lowered {
+                            scalar.bounds.height * 0.25
+                        } else {
+                            0.0
+                        },
+                ),
                 color: if scalar.link {
                     content.theme.link().iced()
                 } else {
                     content.theme.text().iced()
                 },
-                size: iced::Pixels::from(16.0),
+                size: iced::Pixels::from(if raised || lowered || small_caps {
+                    scalar.font_size * 0.75
+                } else {
+                    scalar.font_size
+                }),
                 font: iced::Font {
-                    weight: if scalar.bold {
+                    family: match scalar.font_family {
+                        EditorFontFamily::SansSerif => iced::font::Family::SansSerif,
+                        EditorFontFamily::Serif => iced::font::Family::Serif,
+                        EditorFontFamily::Monospace => iced::font::Family::Monospace,
+                    },
+                    weight: if scalar.bold || scalar.font_weight >= 700 {
                         iced::font::Weight::Bold
+                    } else if scalar.font_weight >= 500 {
+                        iced::font::Weight::Medium
                     } else {
                         iced::font::Weight::Normal
                     },
-                    style: if scalar.italic {
+                    style: if scalar.italic || scalar.block_italic {
                         iced::font::Style::Italic
                     } else {
                         iced::font::Style::Normal
@@ -427,6 +565,21 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     },
                     content.theme.spellcheck().iced(),
                 );
+            }
+        }
+
+        for decoration in &content.comments {
+            for rectangle in content.geometry.selection_rectangles(decoration.range()) {
+                let rectangle = if decoration.active() {
+                    rectangle
+                } else {
+                    EditorRectangle {
+                        y: rectangle.y + rectangle.height - 2.0,
+                        height: 2.0,
+                        ..rectangle
+                    }
+                };
+                fill_rectangle(&mut frame, rectangle, content.theme.comment().iced());
             }
         }
 
@@ -488,6 +641,24 @@ fn spelling_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorS
         })
 }
 
+fn comment_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSelection> {
+    let document = content.geometry.hit_test(x, y)?;
+    Some(
+        if !content.selection.is_collapsed()
+            && content.selection.start() <= document
+            && document <= content.selection.end()
+        {
+            content.selection
+        } else {
+            EditorSelection::new(document, document)
+        },
+    )
+}
+
+fn viewport_from_bounds(bounds: Rectangle) -> Option<EditorViewport> {
+    EditorViewport::new(bounds.width, bounds.height).ok()
+}
+
 /// A retained handle for refreshing the state observed by an existing Canvas.
 #[derive(Clone)]
 struct SurfaceHandle {
@@ -521,6 +692,7 @@ impl SurfaceHandle {
         let geometry = adapter.geometry(session.clone(), view, block)?;
         let selection = adapter.selection(session.clone(), view)?;
         let spellcheck = adapter.spellcheck_decorations(session.clone(), view)?;
+        let comments = adapter.comment_decorations(session.clone(), view)?;
         let mut content =
             self.content
                 .lock()
@@ -530,6 +702,7 @@ impl SurfaceHandle {
         content.geometry = geometry;
         content.selection = selection;
         content.spellcheck = spellcheck;
+        content.comments = comments;
         content.focused = presentation.focused;
         content.viewport = presentation.viewport;
         Ok(())
@@ -557,11 +730,11 @@ impl SurfaceHandle {
 
 fn editor_surface(
     content: Arc<Mutex<SurfaceContent>>,
-    size: Size,
+    _size: Size,
 ) -> Element<'static, MountedEditorMessage> {
     Canvas::new(EditorSurface { content })
-        .width(Length::Fixed(size.width))
-        .height(Length::Fixed(size.height))
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
 }
 
@@ -576,6 +749,7 @@ fn mounted_surface(
     let geometry = adapter.geometry(session.clone(), view, block)?;
     let selection = adapter.selection(session.clone(), view)?;
     let spellcheck = adapter.spellcheck_decorations(session.clone(), view)?;
+    let comments = adapter.comment_decorations(session.clone(), view)?;
     let content = Arc::new(Mutex::new(SurfaceContent {
         geometry,
         selection,
@@ -583,6 +757,7 @@ fn mounted_surface(
         viewport: presentation.viewport,
         theme,
         spellcheck,
+        comments,
     }));
     let handle = SurfaceHandle {
         content: Arc::clone(&content),
@@ -620,6 +795,42 @@ fn apply_surface_message(
                 view,
                 crate::MountedViewPresentation {
                     focused: true,
+                    ..snapshot.presentation
+                },
+            )
+        }
+        MountedEditorMessage::SetSelection(selection) => {
+            set_selection(adapter, session.clone(), view, selection)?;
+            let snapshot = adapter.view_snapshot(session.clone(), view)?;
+            adapter.set_view_presentation(
+                session,
+                view,
+                crate::MountedViewPresentation {
+                    focused: true,
+                    ..snapshot.presentation
+                },
+            )
+        }
+        MountedEditorMessage::Scroll { delta_y, viewport } => {
+            let snapshot = adapter.view_snapshot(session.clone(), view)?;
+            let requested = (snapshot.presentation.pixel_scroll_y + delta_y).max(0.0);
+            adapter.set_view_presentation(
+                session,
+                view,
+                crate::MountedViewPresentation {
+                    pixel_scroll_y: requested,
+                    viewport,
+                    ..snapshot.presentation
+                },
+            )
+        }
+        MountedEditorMessage::ViewportChanged(viewport) => {
+            let snapshot = adapter.view_snapshot(session.clone(), view)?;
+            adapter.set_view_presentation(
+                session,
+                view,
+                crate::MountedViewPresentation {
+                    viewport,
                     ..snapshot.presentation
                 },
             )
@@ -692,7 +903,7 @@ fn apply_surface_message(
         // The native shell owns the popover and validates its exact revision
         // before it executes an action. The canvas has already performed the
         // range hit test before publishing this message.
-        MountedEditorMessage::OpenSpellingMenu(_) => Ok(()),
+        MountedEditorMessage::OpenSpellingMenu { .. } => Ok(()),
     }
 }
 
@@ -719,12 +930,41 @@ fn apply_key_command(
             .flatten()
             .map(|next| EditorSelection::new(head, next))
             .or((!selection.is_collapsed()).then_some(selection)),
-        MountedEditorKeyCommand::MoveLeft => geometry
-            .previous_caret(head)
-            .map(|previous| EditorSelection::new(previous, previous)),
-        MountedEditorKeyCommand::MoveRight => geometry
-            .next_caret(head)
-            .map(|next| EditorSelection::new(next, next)),
+        MountedEditorKeyCommand::MoveLeft { extend } => {
+            if !extend && !selection.is_collapsed() {
+                Some(EditorSelection::new(selection.start(), selection.start()))
+            } else {
+                geometry
+                    .previous_caret(head)
+                    .map(|previous| moved_selection(selection, previous, extend))
+            }
+        }
+        MountedEditorKeyCommand::MoveRight { extend } => {
+            if !extend && !selection.is_collapsed() {
+                Some(EditorSelection::new(selection.end(), selection.end()))
+            } else {
+                geometry
+                    .next_caret(head)
+                    .map(|next| moved_selection(selection, next, extend))
+            }
+        }
+        MountedEditorKeyCommand::MoveUp { extend } => geometry
+            .caret_above(head)
+            .map(|target| moved_selection(selection, target, extend)),
+        MountedEditorKeyCommand::MoveDown { extend } => geometry
+            .caret_below(head)
+            .map(|target| moved_selection(selection, target, extend)),
+        MountedEditorKeyCommand::MoveLineStart { extend } => geometry
+            .line_start(head)
+            .map(|target| moved_selection(selection, target, extend)),
+        MountedEditorKeyCommand::MoveLineEnd { extend } => geometry
+            .line_end(head)
+            .map(|target| moved_selection(selection, target, extend)),
+        MountedEditorKeyCommand::SelectAll => Some(geometry.document_range()),
+        MountedEditorKeyCommand::SplitBlock
+        | MountedEditorKeyCommand::InsertSoftBreak
+        | MountedEditorKeyCommand::IndentList
+        | MountedEditorKeyCommand::OutdentList => Some(selection),
     };
     let Some(range) = selection_or_adjacent else {
         return Ok(());
@@ -734,14 +974,118 @@ fn apply_key_command(
         MountedEditorKeyCommand::Backspace | MountedEditorKeyCommand::Delete => {
             EditorCommandKind::DeleteRange { range }
         }
-        MountedEditorKeyCommand::MoveLeft | MountedEditorKeyCommand::MoveRight => {
+        MountedEditorKeyCommand::MoveLeft { .. }
+        | MountedEditorKeyCommand::MoveRight { .. }
+        | MountedEditorKeyCommand::MoveUp { .. }
+        | MountedEditorKeyCommand::MoveDown { .. }
+        | MountedEditorKeyCommand::MoveLineStart { .. }
+        | MountedEditorKeyCommand::MoveLineEnd { .. }
+        | MountedEditorKeyCommand::SelectAll => {
             EditorCommandKind::SetSelection { selection: range }
+        }
+        MountedEditorKeyCommand::SplitBlock => EditorCommandKind::SplitBlock { selection: range },
+        MountedEditorKeyCommand::InsertSoftBreak => {
+            EditorCommandKind::InsertSoftBreak { selection: range }
+        }
+        MountedEditorKeyCommand::IndentList | MountedEditorKeyCommand::OutdentList => {
+            let is_list = matches!(
+                geometry.block_kind_at(range.head()),
+                Some(
+                    parchmint_editor_api::SemanticBlockKind::UnorderedListItem
+                        | parchmint_editor_api::SemanticBlockKind::OrderedListItem
+                )
+            );
+            if is_list {
+                EditorCommandKind::AdjustListDepth {
+                    range,
+                    change: if command == MountedEditorKeyCommand::IndentList {
+                        ListDepthChange::Indent
+                    } else {
+                        ListDepthChange::Outdent
+                    },
+                }
+            } else if command == MountedEditorKeyCommand::IndentList {
+                EditorCommandKind::ReplaceRange {
+                    range,
+                    text: "\t".to_owned(),
+                }
+            } else {
+                return Ok(());
+            }
         }
     };
     adapter.execute(
-        session,
+        session.clone(),
         EditorCommandOrigin::new(view),
         EditorCommand::new(revision, kind),
+    )?;
+    if !matches!(
+        command,
+        MountedEditorKeyCommand::Backspace
+            | MountedEditorKeyCommand::Delete
+            | MountedEditorKeyCommand::SplitBlock
+            | MountedEditorKeyCommand::InsertSoftBreak
+            | MountedEditorKeyCommand::IndentList
+            | MountedEditorKeyCommand::OutdentList
+    ) {
+        ensure_caret_visible(adapter, session, surface, view, range.head())?;
+    }
+    Ok(())
+}
+
+fn set_selection(
+    adapter: &EditorIcedAdapter,
+    session: SharedEditorSession,
+    view: ViewId,
+    selection: EditorSelection,
+) -> Result<(), EditorError> {
+    let revision = adapter.revision(session.clone())?;
+    adapter.execute(
+        session,
+        EditorCommandOrigin::new(view),
+        EditorCommand::new(revision, EditorCommandKind::SetSelection { selection }),
+    )
+}
+
+fn moved_selection(
+    selection: EditorSelection,
+    target: DocumentPosition,
+    extend: bool,
+) -> EditorSelection {
+    if extend {
+        EditorSelection::new(selection.anchor(), target)
+    } else {
+        EditorSelection::new(target, target)
+    }
+}
+
+fn ensure_caret_visible(
+    adapter: &EditorIcedAdapter,
+    session: SharedEditorSession,
+    surface: &SurfaceHandle,
+    view: ViewId,
+    head: DocumentPosition,
+) -> Result<(), EditorError> {
+    let snapshot = adapter.view_snapshot(session.clone(), view)?;
+    let Some(caret) = surface.content().geometry.caret(head) else {
+        return Ok(());
+    };
+    let top = caret.y;
+    let bottom = caret.y + caret.height;
+    let delta = if top < 0.0 {
+        top
+    } else if bottom > snapshot.presentation.viewport.height {
+        bottom - snapshot.presentation.viewport.height
+    } else {
+        return Ok(());
+    };
+    adapter.set_view_presentation(
+        session,
+        view,
+        crate::MountedViewPresentation {
+            pixel_scroll_y: (snapshot.presentation.pixel_scroll_y + delta).max(0.0),
+            ..snapshot.presentation
+        },
     )
 }
 
@@ -752,22 +1096,84 @@ fn is_supported_en_us(text: &str) -> bool {
             .all(|character| character.is_ascii_graphic() || matches!(character, ' ' | '\n' | '\t'))
 }
 
+fn mounted_key_command(
+    key: keyboard::Key<&str>,
+    modifiers: keyboard::Modifiers,
+) -> Option<MountedEditorKeyCommand> {
+    let extend = modifiers.contains(keyboard::Modifiers::SHIFT);
+    match key {
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("a") =>
+        {
+            Some(MountedEditorKeyCommand::SelectAll)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Enter)
+            if modifiers.contains(keyboard::Modifiers::SHIFT) =>
+        {
+            Some(MountedEditorKeyCommand::InsertSoftBreak)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Enter) => {
+            Some(MountedEditorKeyCommand::SplitBlock)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Tab)
+            if modifiers.contains(keyboard::Modifiers::SHIFT) =>
+        {
+            Some(MountedEditorKeyCommand::OutdentList)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Tab) => {
+            Some(MountedEditorKeyCommand::IndentList)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+            Some(MountedEditorKeyCommand::Backspace)
+        }
+        keyboard::Key::Named(keyboard::key::Named::Delete) => Some(MountedEditorKeyCommand::Delete),
+        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+            Some(MountedEditorKeyCommand::MoveLeft { extend })
+        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+            Some(MountedEditorKeyCommand::MoveRight { extend })
+        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+            Some(MountedEditorKeyCommand::MoveUp { extend })
+        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+            Some(MountedEditorKeyCommand::MoveDown { extend })
+        }
+        keyboard::Key::Named(keyboard::key::Named::Home) => {
+            Some(MountedEditorKeyCommand::MoveLineStart { extend })
+        }
+        keyboard::Key::Named(keyboard::key::Named::End) => {
+            Some(MountedEditorKeyCommand::MoveLineEnd { extend })
+        }
+        _ => None,
+    }
+}
+
 fn clipboard_shortcut(
     key: keyboard::Key<&str>,
     modifiers: keyboard::Modifiers,
 ) -> Option<MountedEditorClipboardIntent> {
-    if modifiers != keyboard::Modifiers::COMMAND {
-        return None;
-    }
     match key {
-        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("c") => {
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("c") =>
+        {
             Some(MountedEditorClipboardIntent::Copy)
         }
-        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("x") => {
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("x") =>
+        {
             Some(MountedEditorClipboardIntent::Cut)
         }
-        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("v") => {
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("v") =>
+        {
             Some(MountedEditorClipboardIntent::Paste)
+        }
+        keyboard::Key::Character(value)
+            if modifiers == (keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT)
+                && value.eq_ignore_ascii_case("v") =>
+        {
+            Some(MountedEditorClipboardIntent::PasteWithoutFormatting)
         }
         _ => None,
     }
@@ -831,6 +1237,9 @@ impl MountedEditorHost {
             message,
         )?;
         let revision = self.adapter.revision(self.config.session())?;
+        let active_style = self
+            .adapter
+            .active_style(self.config.session(), self.config.view())?;
         self.surface.refresh_from_adapter(
             &self.adapter,
             self.config.session(),
@@ -840,7 +1249,35 @@ impl MountedEditorHost {
         Ok(MountedEditorUpdate {
             revision,
             document_changed: revision != before,
+            active_style,
         })
+    }
+
+    pub fn active_style(&self) -> Result<StyleId, EditorError> {
+        self.adapter
+            .active_style(self.config.session(), self.config.view())
+    }
+
+    /// Returns the pane allocation currently retained by the mounted surface.
+    pub fn viewport(&self) -> EditorViewport {
+        self.surface
+            .content
+            .lock()
+            .expect("mounted editor surface mutex poisoned")
+            .viewport
+    }
+
+    /// Reflows this pane to the logical size assigned by the outer Iced layout.
+    /// Native hosts should call this when the pane allocation changes.
+    pub fn resize(&self, viewport: EditorViewport) -> Result<(), EditorError> {
+        apply_surface_message(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            Some(&self.surface),
+            MountedEditorMessage::ViewportChanged(viewport),
+        )?;
+        self.refresh()
     }
 
     /// Refreshes retained Canvas state after the outer UI has advanced a frame.
@@ -895,14 +1332,14 @@ mod tests {
 
     use iced::{Settings, Size, Theme};
     use iced_test::{Simulator, simulator::Snapshot};
-    use parchmint_editor_api::{CanonicalDocumentLoad, DocumentId};
+    use parchmint_editor_api::{CanonicalComment, CanonicalDocumentLoad, CommentId, DocumentId};
 
     use super::*;
     use crate::layout::{EditorViewport, VisibleEditorBlock};
     use crate::{EditorIcedConfig, EditorResourceLimits};
 
     #[test]
-    fn primary_modifier_maps_only_copy_cut_and_paste_shortcuts() {
+    fn primary_modifier_maps_copy_cut_paste_and_plain_paste_shortcuts() {
         for (key, expected) in [
             ("c", MountedEditorClipboardIntent::Copy),
             ("X", MountedEditorClipboardIntent::Cut),
@@ -919,6 +1356,13 @@ mod tests {
         );
         assert_eq!(
             clipboard_shortcut(
+                keyboard::Key::Character("v"),
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
+            ),
+            Some(MountedEditorClipboardIntent::PasteWithoutFormatting)
+        );
+        assert_eq!(
+            clipboard_shortcut(
                 keyboard::Key::Character("c"),
                 keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
             ),
@@ -927,6 +1371,266 @@ mod tests {
         assert_eq!(
             clipboard_shortcut(keyboard::Key::Character("b"), keyboard::Modifiers::COMMAND,),
             None
+        );
+    }
+
+    #[test]
+    fn structural_keys_map_before_scalar_text_input() {
+        assert_eq!(
+            mounted_key_command(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                keyboard::Modifiers::NONE,
+            ),
+            Some(MountedEditorKeyCommand::SplitBlock)
+        );
+        assert_eq!(
+            mounted_key_command(
+                keyboard::Key::Named(keyboard::key::Named::Enter),
+                keyboard::Modifiers::SHIFT,
+            ),
+            Some(MountedEditorKeyCommand::InsertSoftBreak)
+        );
+        assert_eq!(
+            mounted_key_command(
+                keyboard::Key::Named(keyboard::key::Named::Tab),
+                keyboard::Modifiers::SHIFT,
+            ),
+            Some(MountedEditorKeyCommand::OutdentList)
+        );
+        assert_eq!(
+            mounted_key_command(
+                keyboard::Key::Named(keyboard::key::Named::ArrowDown),
+                keyboard::Modifiers::SHIFT,
+            ),
+            Some(MountedEditorKeyCommand::MoveDown { extend: true })
+        );
+        assert_eq!(
+            mounted_key_command(
+                keyboard::Key::Named(keyboard::key::Named::Home),
+                keyboard::Modifiers::NONE,
+            ),
+            Some(MountedEditorKeyCommand::MoveLineStart { extend: false })
+        );
+        assert_eq!(
+            mounted_key_command(keyboard::Key::Character("a"), keyboard::Modifiers::COMMAND,),
+            Some(MountedEditorKeyCommand::SelectAll)
+        );
+    }
+
+    #[test]
+    fn mounted_navigation_extends_selection_and_scroll_is_clamped_to_content() {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let document = DocumentId::from_bytes([51; 16]);
+        let block = BlockId::from_bytes([51; 16]);
+        let session = adapter
+            .open_session(CanonicalDocumentLoad::new(document, "abc\ndef"))
+            .expect("session");
+        let view = ViewId::from_bytes([52; 16]);
+        let host = adapter
+            .create_view_host(parchmint_platform_api::WindowCapability::new(52, 1), view)
+            .expect("host");
+        adapter
+            .attach_view(session.clone(), view, host)
+            .expect("mount");
+        let viewport = EditorViewport::new(200.0, 20.0).expect("viewport");
+        adapter
+            .set_view_presentation(
+                session.clone(),
+                view,
+                crate::MountedViewPresentation::new(viewport),
+            )
+            .expect("presentation");
+        adapter
+            .cache_visible_blocks(
+                session.clone(),
+                view,
+                [VisibleEditorBlock::new(
+                    block,
+                    "abc\ndef",
+                    DocumentPosition::default(),
+                )],
+            )
+            .expect("layout");
+        let mounted = MountedEditorHost::mount(
+            &adapter,
+            MountedEditorConfig::new(session.clone(), view, block, EditorSurfaceTheme::light()),
+        )
+        .expect("mounted host");
+
+        mounted
+            .update(MountedEditorMessage::Focus(1.into()))
+            .expect("focus");
+        mounted
+            .update(MountedEditorMessage::KeyCommand(
+                MountedEditorKeyCommand::MoveDown { extend: false },
+            ))
+            .expect("move down");
+        assert_eq!(
+            adapter.selection(session.clone(), view).expect("selection"),
+            EditorSelection::new(5.into(), 5.into())
+        );
+        mounted
+            .update(MountedEditorMessage::KeyCommand(
+                MountedEditorKeyCommand::MoveLineStart { extend: true },
+            ))
+            .expect("extend to line start");
+        assert_eq!(
+            adapter.selection(session.clone(), view).expect("selection"),
+            EditorSelection::new(5.into(), 4.into())
+        );
+        mounted
+            .update(MountedEditorMessage::KeyCommand(
+                MountedEditorKeyCommand::SelectAll,
+            ))
+            .expect("select all");
+        assert_eq!(
+            adapter.selection(session.clone(), view).expect("selection"),
+            EditorSelection::new(0.into(), 7.into())
+        );
+        mounted
+            .update(MountedEditorMessage::Scroll {
+                delta_y: 10_000.0,
+                viewport,
+            })
+            .expect("bounded scroll");
+        let snapshot = adapter.view_snapshot(session, view).expect("snapshot");
+        assert!(snapshot.presentation.pixel_scroll_y > 0.0);
+        assert!(snapshot.presentation.pixel_scroll_y < 10_000.0);
+    }
+
+    #[test]
+    fn mounted_tab_inserts_literal_text_outside_lists() {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let document = DocumentId::from_bytes([61; 16]);
+        let block = BlockId::from_bytes([61; 16]);
+        let session = adapter
+            .open_session(CanonicalDocumentLoad::new(document, "abc"))
+            .expect("session");
+        let view = ViewId::from_bytes([62; 16]);
+        let host = adapter
+            .create_view_host(parchmint_platform_api::WindowCapability::new(62, 1), view)
+            .expect("host");
+        adapter
+            .attach_view(session.clone(), view, host)
+            .expect("mount");
+        let viewport = EditorViewport::new(200.0, 80.0).expect("viewport");
+        adapter
+            .set_view_presentation(
+                session.clone(),
+                view,
+                crate::MountedViewPresentation::new(viewport),
+            )
+            .expect("presentation");
+        adapter
+            .cache_visible_blocks(
+                session.clone(),
+                view,
+                [VisibleEditorBlock::new(
+                    block,
+                    "abc",
+                    DocumentPosition::default(),
+                )],
+            )
+            .expect("layout");
+        let mounted = MountedEditorHost::mount(
+            &adapter,
+            MountedEditorConfig::new(session.clone(), view, block, EditorSurfaceTheme::light()),
+        )
+        .expect("mounted host");
+
+        mounted
+            .update(MountedEditorMessage::Focus(1.into()))
+            .expect("focus");
+        mounted
+            .update(MountedEditorMessage::KeyCommand(
+                MountedEditorKeyCommand::IndentList,
+            ))
+            .expect("literal tab");
+
+        assert_eq!(
+            adapter
+                .primary_visible_block(session)
+                .expect("document")
+                .text(),
+            "a\tbc"
+        );
+    }
+
+    #[test]
+    fn canvas_drag_and_shift_click_preserve_the_directional_selection_anchor() {
+        let viewport = EditorViewport::new(200.0, 80.0).expect("viewport");
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(
+                BlockId::from_bytes([53; 16]),
+                "abcd",
+                DocumentPosition::default(),
+            ),
+            viewport,
+            0.0,
+            crate::EditorLayoutMetrics::default(),
+            None,
+        )
+        .expect("geometry");
+        let content = Arc::new(Mutex::new(SurfaceContent {
+            geometry,
+            selection: EditorSelection::new(0.into(), 0.into()),
+            focused: false,
+            viewport,
+            theme: EditorSurfaceTheme::light(),
+            spellcheck: Vec::new(),
+            comments: Vec::new(),
+        }));
+        let surface = EditorSurface {
+            content: Arc::clone(&content),
+        };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0));
+        let mut state = SurfaceState::default();
+
+        let press = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(16.0, 16.0)),
+        );
+        let (message, _, _) = press.expect("press action").into_inner();
+        assert_eq!(message, Some(MountedEditorMessage::Focus(0.into())));
+
+        let drag = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(40.0, 16.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(40.0, 16.0)),
+        );
+        let (message, _, _) = drag.expect("drag action").into_inner();
+        assert_eq!(
+            message,
+            Some(MountedEditorMessage::SetSelection(EditorSelection::new(
+                0.into(),
+                3.into(),
+            )))
+        );
+
+        content.lock().expect("content").selection = EditorSelection::new(1.into(), 1.into());
+        state.drag_anchor = None;
+        state.modifiers = keyboard::Modifiers::SHIFT;
+        let shift_press = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(40.0, 16.0)),
+        );
+        let (message, _, _) = shift_press.expect("shift press action").into_inner();
+        assert_eq!(
+            message,
+            Some(MountedEditorMessage::SetSelection(EditorSelection::new(
+                1.into(),
+                3.into(),
+            )))
         );
     }
 
@@ -1281,6 +1985,51 @@ mod tests {
         assert_eq!(content.geometry.selection_rectangles(range).len(), 3);
         assert_eq!(spelling_range_at(&content, 18.0, 18.0), Some(range));
         assert_eq!(spelling_range_at(&content, 200.0, 80.0), None);
+        assert!(
+            comment_range_at(&content, 18.0, 18.0)
+                .unwrap()
+                .is_collapsed()
+        );
+        let mut selected = content;
+        selected.selection = range;
+        assert_eq!(comment_range_at(&selected, 18.0, 18.0), Some(range));
+    }
+
+    #[test]
+    fn live_comment_anchors_render_and_selected_threads_become_active() {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let document = DocumentId::from_bytes([44; 16]);
+        let block = BlockId::from_bytes([44; 16]);
+        let comment = CommentId::from_bytes([45; 16]);
+        let range = EditorSelection::new(0_u64.into(), 3_u64.into());
+        let mut load = CanonicalDocumentLoad::new(document, "note");
+        load.comments = vec![CanonicalComment::new(comment, range, "Comment", block)];
+        let session = adapter.open_session(load).expect("session");
+        let view = ViewId::from_bytes([46; 16]);
+        let host = adapter
+            .create_view_host(parchmint_platform_api::WindowCapability::new(4, 1), view)
+            .expect("host");
+        adapter
+            .attach_view(session.clone(), view, host)
+            .expect("mount");
+        adapter
+            .cache_visible_blocks(
+                session.clone(),
+                view,
+                [VisibleEditorBlock::new(
+                    block,
+                    "note",
+                    DocumentPosition::default(),
+                )],
+            )
+            .expect("layout");
+        assert!(!adapter.comment_decorations(session.clone(), view).unwrap()[0].active());
+        adapter
+            .set_active_comment_decoration(session.clone(), view, Some(comment))
+            .unwrap();
+        let surface =
+            mounted_surface(&adapter, session, view, block, EditorSurfaceTheme::light()).unwrap();
+        assert!(surface.content().comments[0].active());
     }
 
     #[test]
@@ -1351,6 +2100,7 @@ mod tests {
                 viewport: EditorViewport::new(240.0, 100.0).expect("viewport"),
                 theme: EditorSurfaceTheme::light(),
                 spellcheck: Vec::new(),
+                comments: Vec::new(),
             })),
         };
         assert!(surface.draws_focused_caret(&SurfaceState::default(), &surface.content()));

@@ -521,6 +521,7 @@ impl EditorSaveRecoveryHarness {
             body: initial_body.to_owned(),
             revision: EditorRevision::default(),
             visibility: DocumentVisibility::Open,
+            comments: Vec::new(),
         }]));
         let application =
             NativeProjectCommandDispatcher::new(Project::new(PROJECT), application_documents);

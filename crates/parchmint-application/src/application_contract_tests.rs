@@ -10,7 +10,8 @@ use std::{
 
 use parchmint_contracts::generated::RecoveryRecordV1;
 use parchmint_editor_api::{
-    CanonicalProjection, DocumentId, DurableProjectionBatch, EditorPersistenceError, EditorRevision,
+    BlockId, CanonicalComment, CanonicalProjection, CommentId, DocumentId, DurableProjectionBatch,
+    EditorPersistenceError, EditorRevision, EditorSelection,
 };
 use parchmint_project_repository::AtomicWritePlan;
 use parchmint_recovery_api::{
@@ -41,6 +42,55 @@ fn wait<T>(future: impl Future<Output = T>) -> T {
 
 fn stable_id(value: u8) -> [u8; 16] {
     [value; 16]
+}
+
+struct CountingDocumentLoader {
+    reads: Arc<AtomicU64>,
+}
+
+impl DocumentSnapshotLoader for CountingDocumentLoader {
+    fn load(&self, document: DocumentId) -> Result<DocumentSnapshot, ApplicationError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(DocumentSnapshot {
+            document_id: document,
+            body: format!("body-{:02x}", document.as_bytes()[0]),
+            comments: Vec::new(),
+            revision: EditorRevision::from(7),
+            visibility: DocumentVisibility::Closed,
+        })
+    }
+}
+
+#[test]
+fn lazy_document_owner_reads_only_the_selected_body_on_demand() {
+    let reads = Arc::new(AtomicU64::new(0));
+    let summaries = (1..=64).map(|value| LazyDocumentSummary {
+        document_id: DocumentId::from_bytes([value; 16]),
+        revision: EditorRevision::from(7),
+        visibility: if value == 1 {
+            DocumentVisibility::Open
+        } else {
+            DocumentVisibility::Closed
+        },
+    });
+    let owner = NativeDocumentStateOwner::new_lazy(
+        summaries,
+        Arc::new(CountingDocumentLoader {
+            reads: reads.clone(),
+        }),
+    )
+    .expect("unique summaries should initialize");
+
+    assert!(owner.loaded_snapshots().unwrap().is_empty());
+    assert_eq!(owner.summaries().unwrap().len(), 64);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+
+    let selected = DocumentId::from_bytes([32; 16]);
+    assert_eq!(owner.snapshot(selected).unwrap().body, "body-20");
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.loaded_snapshots().unwrap().len(), 1);
+    owner.snapshot(selected).unwrap();
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
 fn project_id() -> ProjectId {
@@ -80,12 +130,14 @@ fn sample_documents() -> Arc<NativeDocumentStateOwner> {
         DocumentSnapshot {
             document_id: open_document(),
             body: "alpha needle".into(),
+            comments: Vec::new(),
             revision: EditorRevision::from(0),
             visibility: DocumentVisibility::Open,
         },
         DocumentSnapshot {
             document_id: closed_document(),
             body: "closed needle".into(),
+            comments: Vec::new(),
             revision: EditorRevision::from(0),
             visibility: DocumentVisibility::Closed,
         },
@@ -453,11 +505,22 @@ impl RecoveryJournal for ProductionJournal {
 
     fn discard_through(
         &self,
-        _durable: parchmint_recovery_api::DurableRevisionVector,
+        durable: parchmint_recovery_api::DurableRevisionVector,
     ) -> Result<DiscardReport, RecoveryError> {
+        let mut records = self.records.lock().unwrap();
+        let before = records.len();
+        records.retain(|record| match record {
+            RecoveryRecord::Complete(batch) => {
+                batch.project_revision > durable.revisions.project_revision
+                    || batch.documents.iter().any(|(document, range)| {
+                        durable.revisions.documents.get(document) < Some(&range.last)
+                    })
+            }
+            _ => true,
+        });
         Ok(DiscardReport {
-            removed_records: 0,
-            retained_records: self.records.lock().unwrap().len(),
+            removed_records: before - records.len(),
+            retained_records: records.len(),
         })
     }
 }
@@ -667,6 +730,7 @@ fn persisted_project(
     let documents = vec![DocumentSnapshot {
         document_id: document,
         body: body.to_owned(),
+        comments: Vec::new(),
         revision: EditorRevision::from(1),
         visibility: DocumentVisibility::Open,
     }];
@@ -679,6 +743,7 @@ fn persisted_project(
             &parchmint_project_format::CanonicalPersistenceFrontier {
                 recovery_project_revision: 1,
                 document_revisions: BTreeMap::from([(document, 1)]),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -711,6 +776,237 @@ fn recovery_base_for(
             .map(|resource| (resource.resource.clone(), resource.hash))
             .collect(),
     }
+}
+
+#[test]
+fn durable_delete_points_reopened_tombstone_at_exact_pre_delete_checkpoint() {
+    use parchmint_project_format::ProjectFormatCodec;
+
+    let (project, documents, encoding) = persisted_project("Current", "<p>deleted body</p>");
+    let deleted_node = project
+        .nodes
+        .iter()
+        .find_map(|(id, node)| {
+            matches!(node.kind, parchmint_domain::NodeKind::Document(_)).then_some(*id)
+        })
+        .expect("fixture document node");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+
+    let deleted = coordinator
+        .delete_subtrees(DeleteSubtreesWorkflow {
+            nodes: vec![deleted_node],
+            deleted_at_unix_millis: 42,
+        })
+        .expect("delete workflow should save both sides of deletion");
+    assert_eq!(
+        deleted.restoring_checkpoint,
+        parchmint_domain::CheckpointId::from_bytes([1; 16])
+    );
+    let tombstone = commands.project().unwrap().deleted[&deleted_node].clone();
+    assert_eq!(
+        tombstone.restoring_checkpoint,
+        Some(deleted.restoring_checkpoint)
+    );
+
+    let requests = save.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0]
+            .checkpoint
+            .resources
+            .keys()
+            .any(|path| path.as_str().ends_with(".html"))
+    );
+    assert!(
+        !requests[1]
+            .checkpoint
+            .resources
+            .keys()
+            .any(|path| path.as_str().ends_with(".html"))
+    );
+    let manifest_bytes = requests[1]
+        .writes
+        .writes
+        .iter()
+        .find(|write| write.path == "project.toml")
+        .expect("post-delete manifest write")
+        .bytes
+        .clone();
+    let codec = ProjectFormatCodec::default();
+    let manifest = codec.decode_manifest(&manifest_bytes).unwrap();
+    let (reopened, _) = codec
+        .decode_domain_project(&manifest, project_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        reopened.deleted[&deleted_node].restoring_checkpoint,
+        Some(deleted.restoring_checkpoint)
+    );
+}
+
+fn project_with_recoverable_comment() -> (
+    Arc<ProductionJournal>,
+    Arc<NativeDocumentStateOwner>,
+    ProjectPersistenceCoordinator,
+    DocumentId,
+    CanonicalComment,
+) {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let document = documents[0].document_id;
+    let comment = CanonicalComment::new(
+        CommentId::from_bytes([91; 16]),
+        EditorSelection::new(0.into(), 9.into()),
+        "Recovered note",
+        BlockId::from_bytes(*document.as_bytes()),
+    );
+    let journal = Arc::new(ProductionJournal::default());
+    {
+        let owner = Arc::new(NativeDocumentStateOwner::new(documents.clone()));
+        let commands = Arc::new(NativeProjectCommandDispatcher::new(
+            project.clone(),
+            owner.clone(),
+        ));
+        let editor = Arc::new(EditorPersistenceCoordinator::new(
+            journal.clone(),
+            Arc::new(CompletedSave::default()),
+            recovery_base_for(&encoding),
+        ));
+        let writer = ProjectPersistenceCoordinator::new(
+            commands,
+            owner,
+            editor,
+            recovery_base_for(&encoding),
+            encoding
+                .resources
+                .iter()
+                .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+                .collect(),
+            encoding.paths.clone(),
+        );
+        writer
+            .persist_editor_projection(CanonicalProjection::new(
+                document,
+                EditorRevision::from(2),
+                "<p>recovered</p>",
+                vec![comment.clone()],
+                Vec::new(),
+                0,
+            ))
+            .expect("prepare durable recovery record");
+    }
+
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        journal.clone(),
+        Arc::new(CompletedSave::default()),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    (journal, owner, coordinator, document, comment)
+}
+
+#[test]
+fn recovery_acceptance_restores_body_and_comments_before_a_durable_save_retires_the_journal() {
+    let (journal, owner, coordinator, document, comment) = project_with_recoverable_comment();
+
+    let recovery = coordinator.reconcile_recovery().expect("reconcile");
+    assert_eq!(
+        recovery.affected_documents.get(&document),
+        Some(&EditorRevision::from(2))
+    );
+    let accepted = coordinator
+        .accept_recovery(recovery.acceptance.expect("acceptance"))
+        .expect("accept");
+    assert_eq!(accepted.accepted_records, 1);
+    let restored = owner.snapshot(document).expect("restored snapshot");
+    assert_eq!(restored.body, "<p>recovered</p>");
+    assert_eq!(restored.comments, vec![comment]);
+
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Restoration)
+        .expect("start recovery save");
+    coordinator
+        .await_save(handle)
+        .expect("durable recovery save");
+    assert!(
+        journal
+            .inspect()
+            .expect("journal inventory")
+            .records
+            .is_empty()
+    );
+}
+
+#[test]
+fn recovery_discard_keeps_current_state_and_resets_the_frontier_for_future_edits() {
+    let (journal, owner, coordinator, document, _) = project_with_recoverable_comment();
+
+    let recovery = coordinator.reconcile_recovery().expect("reconcile");
+    coordinator
+        .accept_recovery(recovery.acceptance.expect("first acceptance"))
+        .expect("apply recovery before a failed save");
+    assert_eq!(
+        owner.snapshot(document).expect("recovered snapshot").body,
+        "<p>recovered</p>"
+    );
+    let recovery = coordinator.reconcile_recovery().expect("retry reconcile");
+    let discarded = coordinator
+        .discard_recovery(recovery.acceptance.expect("acceptance"))
+        .expect("discard");
+    assert_eq!(discarded.accepted_records, 0);
+    assert_eq!(
+        owner.snapshot(document).expect("current snapshot").body,
+        "<p>current</p>"
+    );
+    assert!(
+        journal
+            .inspect()
+            .expect("journal inventory")
+            .records
+            .is_empty()
+    );
+
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            EditorRevision::from(2),
+            "<p>new edit</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("new edit starts from canonical frontier");
 }
 
 fn restore_plan(
@@ -827,7 +1123,7 @@ fn history_restore_save_failure_keeps_current_in_memory_project_open() {
 }
 
 #[test]
-fn prepared_group_duplicate_preserves_authored_subtree_with_fresh_ids_and_bodies() {
+fn prepared_mixed_forest_normalizes_descendants_and_preserves_order_and_authored_state() {
     use parchmint_domain::{
         MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind, NodeId,
         ProjectExportSettings,
@@ -837,6 +1133,8 @@ fn prepared_group_duplicate_preserves_authored_subtree_with_fresh_ids_and_bodies
     let group = NodeId::from_bytes(stable_id(52));
     let node = NodeId::from_bytes(stable_id(53));
     let document = DocumentId::from_bytes(stable_id(54));
+    let sibling = NodeId::from_bytes(stable_id(55));
+    let sibling_document = DocumentId::from_bytes(stable_id(56));
     let mut project = Project::new(project_id());
     for command in [
         ProjectCommand::upsert_metadata_field(MetadataFieldDefinition {
@@ -855,40 +1153,90 @@ fn prepared_group_duplicate_preserves_authored_subtree_with_fresh_ids_and_bodies
             group,
             ProjectExportSettings {
                 excluded: true,
+                emit_titles: Default::default(),
                 starts_new_page: true,
             },
         ),
         ProjectCommand::create_document(node, document, group, 0, "Chapter One"),
         ProjectCommand::set_metadata_value(node, field, Some("Revised".into())),
+        ProjectCommand::create_document(
+            sibling,
+            sibling_document,
+            NodeId::manuscript_root(),
+            1,
+            "Interlude",
+        ),
     ] {
         project = parchmint_domain::apply_project_command(&project, project.revision, command)
             .unwrap()
             .project;
     }
     let body = "<p data-style-id=\"document-title\">Chapter One</p><p>Body</p>";
-    let prepared = project_persistence::prepare_duplicate(
+    let prepared = project_persistence::prepare_duplicates(
         &project,
-        &[DocumentSnapshot {
-            document_id: document,
-            body: body.into(),
-            revision: EditorRevision::from(7),
-            visibility: DocumentVisibility::Open,
-        }],
-        &DuplicateSubtreeWorkflow {
-            source: group,
-            parent: NodeId::research_root(),
-            index: 0,
+        &[
+            DocumentSnapshot {
+                document_id: document,
+                body: body.into(),
+                comments: vec![CanonicalComment::new(
+                    CommentId::from_bytes(stable_id(57)),
+                    EditorSelection::new(0.into(), 11.into()),
+                    "Source-only comment",
+                    BlockId::from_bytes(*document.as_bytes()),
+                )],
+                revision: EditorRevision::from(7),
+                visibility: DocumentVisibility::Open,
+            },
+            DocumentSnapshot {
+                document_id: sibling_document,
+                body: "<p>Interlude body</p>".into(),
+                comments: Vec::new(),
+                revision: EditorRevision::from(3),
+                visibility: DocumentVisibility::Closed,
+            },
+        ],
+        &DuplicateSubtreesWorkflow {
+            // Deliberately unordered and redundant: the application restores
+            // canonical visible order and omits the selected descendant.
+            sources: vec![sibling, node, group],
+            parent: NodeId::manuscript_root(),
+            index: 1,
         },
     )
     .expect("group subtree can be prepared");
 
-    let copied_group = prepared.project.nodes.get(prepared.created_root).unwrap();
-    assert_ne!(prepared.created_root, group);
+    let copied_group = prepared
+        .project
+        .nodes
+        .get(prepared.created_roots[0])
+        .unwrap();
+    assert_ne!(prepared.created_roots[0], group);
     assert_eq!(copied_group.title, "Part One");
     assert_eq!(copied_group.synopsis, "Opening movement");
     assert_eq!(copied_group.metadata[&field], "Draft");
     assert!(copied_group.export_settings.excluded);
     assert!(copied_group.export_settings.starts_new_page);
+    assert_eq!(prepared.created_roots.len(), 2);
+    assert_eq!(prepared.node_ids.len(), 3);
+    assert_eq!(prepared.document_ids.len(), 2);
+    assert_eq!(
+        prepared.project.nodes.children(NodeId::manuscript_root()),
+        &[
+            group,
+            prepared.created_roots[0],
+            prepared.created_roots[1],
+            sibling,
+        ]
+    );
+    assert_eq!(
+        prepared
+            .project
+            .nodes
+            .get(prepared.created_roots[1])
+            .unwrap()
+            .title,
+        "Interlude"
+    );
     let copied_node = prepared.node_ids[&node];
     let copied_document = prepared.document_ids[&document];
     assert_ne!(copied_node, node);
@@ -905,6 +1253,15 @@ fn prepared_group_duplicate_preserves_authored_subtree_with_fresh_ids_and_bodies
             .unwrap()
             .body,
         body
+    );
+    assert!(
+        prepared
+            .documents
+            .iter()
+            .find(|snapshot| snapshot.document_id == copied_document)
+            .unwrap()
+            .comments
+            .is_empty()
     );
 }
 
@@ -938,8 +1295,8 @@ fn duplicate_save_failure_publishes_no_partial_project_or_document_state() {
 
     assert!(
         coordinator
-            .duplicate_subtree(DuplicateSubtreeWorkflow {
-                source,
+            .duplicate_subtrees(DuplicateSubtreesWorkflow {
+                sources: vec![source],
                 parent: group_id(),
                 index: 1,
             })
@@ -1004,8 +1361,8 @@ fn duplicate_does_not_create_an_annotation_sidecar_for_the_fresh_document() {
     );
 
     let result = coordinator
-        .duplicate_subtree(DuplicateSubtreeWorkflow {
-            source,
+        .duplicate_subtrees(DuplicateSubtreesWorkflow {
+            sources: vec![source],
             parent: group_id(),
             index: 1,
         })

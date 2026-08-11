@@ -22,6 +22,7 @@ pub enum ProjectCommand {
     DeleteNode {
         id: NodeId,
         deleted_at_unix_millis: u64,
+        restoring_checkpoint: Option<crate::CheckpointId>,
     },
     RestoreDeleted {
         id: NodeId,
@@ -116,6 +117,7 @@ impl ProjectCommand {
         Self::DeleteNode {
             id,
             deleted_at_unix_millis: 0,
+            restoring_checkpoint: None,
         }
     }
 
@@ -123,6 +125,19 @@ impl ProjectCommand {
         Self::DeleteNode {
             id,
             deleted_at_unix_millis,
+            restoring_checkpoint: None,
+        }
+    }
+
+    pub const fn delete_node_from_checkpoint(
+        id: NodeId,
+        deleted_at_unix_millis: u64,
+        restoring_checkpoint: crate::CheckpointId,
+    ) -> Self {
+        Self::DeleteNode {
+            id,
+            deleted_at_unix_millis,
+            restoring_checkpoint: Some(restoring_checkpoint),
         }
     }
 
@@ -255,7 +270,8 @@ fn apply_to_draft(project: &mut Project, command: ProjectCommand) -> Result<(), 
         ProjectCommand::DeleteNode {
             id,
             deleted_at_unix_millis,
-        } => delete_node(project, id, deleted_at_unix_millis)?,
+            restoring_checkpoint,
+        } => delete_node(project, id, deleted_at_unix_millis, restoring_checkpoint)?,
         ProjectCommand::RestoreDeleted { id } => restore_deleted(project, id)?,
         ProjectCommand::MoveNode { id, parent, index } => {
             project.nodes.move_node(id, parent, index)?;
@@ -388,6 +404,7 @@ fn delete_node(
     project: &mut Project,
     id: NodeId,
     deleted_at_unix_millis: u64,
+    restoring_checkpoint: Option<crate::CheckpointId>,
 ) -> Result<(), DomainError> {
     if id.is_fixed_root() {
         return Err(DomainError::InvalidTree {
@@ -422,7 +439,7 @@ fn delete_node(
             former_parent,
             former_index,
             deleted_at_unix_millis,
-            restoring_checkpoint: None,
+            restoring_checkpoint,
             subtree,
         },
     );
@@ -559,6 +576,7 @@ fn derive_available_document_id(project: &Project, node_id: NodeId) -> DocumentI
 fn changed_resources(before: &Project, after: &Project) -> ResourceSet {
     let mut changed = ResourceSet::default();
     if before.styles != after.styles {
+        changed.insert(Resource::Manifest);
         changed.insert(Resource::Styles);
     }
     if before.dictionary != after.dictionary {

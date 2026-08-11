@@ -517,6 +517,29 @@ pub enum CancelOutcome {
     TooLate,
 }
 
+/// Authoritative progress for one export operation.
+///
+/// Planning and commit are intentionally phase-only. Rendering is determinate
+/// because an immutable plan has a fixed number of semantic items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportProgress {
+    Planning,
+    Rendering { completed: u64, total: u64 },
+    Committing,
+}
+
+/// Receives progress from the synchronous exporter worker.
+pub trait ExportProgressSink: Send + Sync {
+    fn report(&self, progress: ExportProgress);
+}
+
+#[derive(Debug, Default)]
+pub struct IgnoreExportProgress;
+
+impl ExportProgressSink for IgnoreExportProgress {
+    fn report(&self, _: ExportProgress) {}
+}
+
 #[derive(Debug)]
 struct ExportControl {
     status: Mutex<ExportStatus>,
@@ -550,6 +573,10 @@ impl ExportHandle {
             .map_or(ExportStatus::Failed, |status| *status)
     }
 
+    pub fn same_operation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.control, &other.control)
+    }
+
     pub fn cancel(&self) -> CancelOutcome {
         let Ok(mut status) = self.control.status.lock() else {
             return CancelOutcome::Cancelled;
@@ -562,6 +589,16 @@ impl ExportHandle {
             ExportStatus::Completed | ExportStatus::Cancelled | ExportStatus::Failed => {
                 CancelOutcome::TooLate
             }
+        }
+    }
+
+    /// Marks a registered operation failed when planning or validation fails
+    /// before a temporary output is started.
+    pub fn fail(&self) {
+        if let Ok(mut status) = self.control.status.lock()
+            && matches!(*status, ExportStatus::Pending | ExportStatus::Running)
+        {
+            *status = ExportStatus::Failed;
         }
     }
 
@@ -695,7 +732,9 @@ pub trait Exporter: Send + Sync {
         &self,
         plan: ExportPlan,
         sink: Box<dyn ExportSink>,
-    ) -> Result<ExportHandle, ExportError>;
+        handle: ExportHandle,
+        progress: Arc<dyn ExportProgressSink>,
+    ) -> Result<ExportCompletion, ExportError>;
     fn cancel(&self, handle: &ExportHandle) {
         let _ = handle.cancel();
     }

@@ -4,13 +4,17 @@ use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 
 use parchmint_editor_api::{
-    AsyncResult, BlockId, CanonicalDocumentLoad, CanonicalProjection, DocumentPosition,
-    EditorAdapter, EditorCapabilities, EditorClipboardContent, EditorCommand, EditorCommandKind,
-    EditorCommandOrigin, EditorError, EditorEvent, EditorRevision, EditorSelection,
-    EditorViewState, EventStream, ProjectDocumentOperation, SearchDecoration, SelectionGeometry,
-    SharedEditorSession, SpellcheckDecoration, StyleCatalogProjection, ViewHostCapability, ViewId,
+    AsyncResult, BlockId, CanonicalCommentAnchor, CanonicalDocumentLoad, CanonicalProjection,
+    CommentDecoration, CommentId, DocumentPosition, EditorAdapter, EditorCapabilities,
+    EditorClipboardContent, EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorError,
+    EditorEvent, EditorRevision, EditorSelection, EditorViewState, EventStream,
+    ProjectDocumentOperation, SearchDecoration, SelectionGeometry, SemanticFragment,
+    SemanticFragmentBlock, SemanticInlineMark, SemanticMarkRange, SharedEditorSession,
+    SpellcheckDecoration, StyleCatalogProjection, ViewHostCapability, ViewId,
 };
-use parchmint_editor_core::feasibility::{PasteSource, SanitizedPaste, sanitize_paste};
+use parchmint_editor_core::feasibility::{
+    PasteBlockKind, PasteMarkKind, PasteSource, SanitizedPaste, sanitize_paste,
+};
 use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession};
 use parchmint_platform_api::{UntrustedClipboardContent, WindowCapability};
 
@@ -152,6 +156,7 @@ struct MountedView {
     layouts: BTreeMap<BlockId, CachedLayout>,
     search: Vec<SearchDecoration>,
     spellcheck: Vec<SpellcheckDecoration>,
+    active_comment: Option<CommentId>,
 }
 
 struct SessionRuntime {
@@ -290,7 +295,7 @@ impl EditorIcedAdapter {
         &self,
         session: SharedEditorSession,
         view: ViewId,
-        presentation: MountedViewPresentation,
+        mut presentation: MountedViewPresentation,
     ) -> Result<(), EditorError> {
         presentation.validate()?;
         self.with_session(session, |state| {
@@ -309,6 +314,16 @@ impl EditorIcedAdapter {
                 .ok_or(EditorError::UnknownView { view })?;
             mounted.presentation = presentation;
             relayout_all(mounted, self.config.layout_metrics)?;
+            let maximum_scroll = mounted
+                .layouts
+                .values()
+                .map(|cached| cached.geometry.max_scroll_y(presentation.viewport))
+                .fold(0.0_f32, f32::max);
+            if !mounted.layouts.is_empty() && presentation.pixel_scroll_y > maximum_scroll {
+                presentation.pixel_scroll_y = maximum_scroll;
+                mounted.presentation = presentation;
+                relayout_all(mounted, self.config.layout_metrics)?;
+            }
             Ok(())
         })
     }
@@ -367,8 +382,12 @@ impl EditorIcedAdapter {
                 if unchanged {
                     continue;
                 }
-                let geometry =
-                    layout_block(&input, mounted.presentation, self.config.layout_metrics)?;
+                let geometry = layout_block(
+                    &input,
+                    mounted.presentation,
+                    self.config.layout_metrics,
+                    mounted.layouts.get(&block).map(|cached| &cached.geometry),
+                )?;
                 mounted
                     .layouts
                     .insert(block, CachedLayout { input, geometry });
@@ -396,16 +415,19 @@ impl EditorIcedAdapter {
                         continue;
                     };
                     if *block == primary {
-                        cached.input = VisibleEditorBlock::from_semantic(
+                        cached.input = VisibleEditorBlock::from_semantic_with_styles(
                             primary,
                             projection.semantic(),
                             cached.input.document_start(),
+                            state.core.style_catalog(),
                         );
                     }
+                    let previous = cached.geometry.clone();
                     cached.geometry = layout_block(
                         &cached.input,
                         mounted.presentation,
                         self.config.layout_metrics,
+                        Some(&previous),
                     )?;
                     relayouts.push(BlockRelayout {
                         view: *view,
@@ -459,6 +481,57 @@ impl EditorIcedAdapter {
         })
     }
 
+    pub fn comment_decorations(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Vec<CommentDecoration>, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            let active = state
+                .views
+                .get(&view)
+                .ok_or(EditorError::UnknownView { view })?
+                .active_comment;
+            Ok(state
+                .core
+                .canonical_projection()
+                .comments()
+                .iter()
+                .filter_map(|thread| match &thread.anchor {
+                    CanonicalCommentAnchor::Text {
+                        range,
+                        orphaned: false,
+                        ..
+                    } => Some(CommentDecoration::new(
+                        thread.id,
+                        *range,
+                        active == Some(thread.id),
+                    )),
+                    CanonicalCommentAnchor::Document { .. }
+                    | CanonicalCommentAnchor::Text { orphaned: true, .. } => None,
+                })
+                .collect())
+        })
+    }
+
+    pub fn set_active_comment_decoration(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        comment: Option<CommentId>,
+    ) -> Result<(), EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            state
+                .views
+                .get_mut(&view)
+                .ok_or(EditorError::UnknownView { view })?
+                .active_comment = comment;
+            Ok(())
+        })
+    }
+
     pub fn input_en_us(
         &self,
         session: SharedEditorSession,
@@ -488,7 +561,9 @@ impl EditorIcedAdapter {
     ) -> Result<SanitizedPaste, EditorError> {
         let paste = self.sanitize_clipboard(source)?;
         if !paste.text().is_empty() {
-            self.replace_selection(session, view, paste.text())?;
+            let selection = self.selection(session.clone(), view)?;
+            let revision = self.revision(session.clone())?;
+            self.replace_sanitized_selection_at(session, view, selection, revision, &paste)?;
         }
         Ok(paste)
     }
@@ -505,6 +580,33 @@ impl EditorIcedAdapter {
     ) -> Result<SanitizedPaste, EditorError> {
         let paste = self.sanitize_clipboard(source)?;
         if !paste.text().is_empty() {
+            self.replace_sanitized_selection_at(
+                session,
+                view,
+                selection,
+                expected_revision,
+                &paste,
+            )?;
+        }
+        Ok(paste)
+    }
+
+    /// Applies only the sanitized text representation of an untrusted
+    /// clipboard read, even when the platform also supplied HTML.
+    pub fn paste_untrusted_plain_at(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        selection: EditorSelection,
+        expected_revision: EditorRevision,
+        source: &UntrustedClipboardContent,
+    ) -> Result<SanitizedPaste, EditorError> {
+        let paste = if let Some(plain) = source.plain_text() {
+            sanitize_paste(PasteSource::PlainText(plain))
+        } else {
+            self.sanitize_clipboard(source)?
+        };
+        if !paste.text().is_empty() {
             self.replace_selection_at(session, view, selection, expected_revision, paste.text())?;
         }
         Ok(paste)
@@ -514,6 +616,17 @@ impl EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             Ok(state.core.revision())
+        })
+    }
+
+    pub fn active_style(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<parchmint_editor_api::StyleId, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            state.core.active_style(view)
         })
     }
 
@@ -529,10 +642,11 @@ impl EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             let projection = state.core.canonical_projection();
-            Ok(VisibleEditorBlock::from_semantic(
+            Ok(VisibleEditorBlock::from_semantic_with_styles(
                 state.core.primary_block(),
                 projection.semantic(),
                 DocumentPosition::default(),
+                state.core.style_catalog(),
             ))
         })
     }
@@ -590,6 +704,114 @@ impl EditorIcedAdapter {
                         DocumentPosition::from(caret),
                         DocumentPosition::from(caret),
                     ),
+                },
+            ),
+        )
+    }
+
+    fn replace_sanitized_selection_at(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        selection: EditorSelection,
+        revision: EditorRevision,
+        paste: &SanitizedPaste,
+    ) -> Result<(), EditorError> {
+        if !paste.blocks().is_empty() {
+            let characters = paste.text().chars().collect::<Vec<_>>();
+            let blocks = paste
+                .blocks()
+                .iter()
+                .map(|block| {
+                    let start = usize::try_from(block.range.start().value())
+                        .map_err(|_| invalid("sanitized block start is too large"))?;
+                    let end = usize::try_from(block.range.end().value())
+                        .map_err(|_| invalid("sanitized block end is too large"))?;
+                    if start > end || end > characters.len() {
+                        return Err(invalid("sanitized block range is invalid"));
+                    }
+                    let text = characters[start..end].iter().collect::<String>();
+                    let marks = paste
+                        .marks()
+                        .iter()
+                        .filter_map(|mark| {
+                            let mark_start = usize::try_from(mark.range.start().value()).ok()?;
+                            let mark_end = usize::try_from(mark.range.end().value()).ok()?;
+                            let clipped_start = mark_start.max(start);
+                            let clipped_end = mark_end.min(end);
+                            (clipped_start < clipped_end).then(|| {
+                                SemanticMarkRange::new(
+                                    EditorSelection::new(
+                                        ((clipped_start - start) as u64).into(),
+                                        ((clipped_end - start) as u64).into(),
+                                    ),
+                                    paste_mark(&mark.kind),
+                                )
+                            })
+                        })
+                        .collect();
+                    let kind = match block.kind {
+                        PasteBlockKind::Paragraph => {
+                            parchmint_editor_api::SemanticBlockKind::Paragraph
+                        }
+                        PasteBlockKind::UnorderedListItem => {
+                            parchmint_editor_api::SemanticBlockKind::UnorderedListItem
+                        }
+                        PasteBlockKind::OrderedListItem => {
+                            parchmint_editor_api::SemanticBlockKind::OrderedListItem
+                        }
+                        PasteBlockKind::BlockQuote => {
+                            parchmint_editor_api::SemanticBlockKind::BlockQuote
+                        }
+                    };
+                    Ok(SemanticFragmentBlock::new(kind, text, marks)
+                        .with_list_depth(block.list_depth))
+                })
+                .collect::<Result<Vec<_>, EditorError>>()?;
+            return self.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(
+                    revision,
+                    EditorCommandKind::ReplaceRangeWithSemanticFragment {
+                        range: selection,
+                        fragment: SemanticFragment::new(blocks),
+                    },
+                ),
+            );
+        }
+        let marks = paste
+            .marks()
+            .iter()
+            .map(|mark| SemanticMarkRange::new(mark.range, paste_mark(&mark.kind)))
+            .collect();
+        self.execute(
+            session.clone(),
+            EditorCommandOrigin::new(view),
+            EditorCommand::new(
+                revision,
+                EditorCommandKind::ReplaceRangeWithSemanticText {
+                    range: selection,
+                    text: paste.text().to_owned(),
+                    marks,
+                },
+            ),
+        )?;
+        let inserted = u64::try_from(paste.text().chars().count())
+            .map_err(|_| invalid("inserted text is too large"))?;
+        let caret = selection
+            .start()
+            .value()
+            .checked_add(inserted)
+            .ok_or_else(|| invalid("inserted text position overflowed"))?;
+        let revision = self.revision(session.clone())?;
+        self.execute(
+            session,
+            EditorCommandOrigin::new(view),
+            EditorCommand::new(
+                revision,
+                EditorCommandKind::SetSelection {
+                    selection: EditorSelection::new(caret.into(), caret.into()),
                 },
             ),
         )
@@ -702,6 +924,7 @@ impl EditorAdapter for EditorIcedAdapter {
                     layouts: BTreeMap::new(),
                     search: Vec::new(),
                     spellcheck: Vec::new(),
+                    active_comment: None,
                 },
             );
             state.publish(EditorEvent::ViewAttached { view });
@@ -809,6 +1032,27 @@ impl EditorAdapter for EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             state.core.set_style_catalog(styles);
+            let primary = state.core.primary_block();
+            let projection = state.core.canonical_projection();
+            for mounted in state.views.values_mut() {
+                for (block, cached) in &mut mounted.layouts {
+                    if *block == primary {
+                        cached.input = VisibleEditorBlock::from_semantic_with_styles(
+                            primary,
+                            projection.semantic(),
+                            cached.input.document_start(),
+                            state.core.style_catalog(),
+                        );
+                    }
+                    let previous = cached.geometry.clone();
+                    cached.geometry = layout_block(
+                        &cached.input,
+                        mounted.presentation,
+                        self.config.layout_metrics,
+                        Some(&previous),
+                    )?;
+                }
+            }
             Ok(())
         })
     }
@@ -926,12 +1170,14 @@ fn layout_block(
     input: &VisibleEditorBlock,
     presentation: MountedViewPresentation,
     metrics: EditorLayoutMetrics,
+    previous: Option<&BlockLayoutGeometry>,
 ) -> Result<BlockLayoutGeometry, EditorError> {
     BlockLayoutGeometry::build(
         input,
         presentation.viewport,
         presentation.pixel_scroll_y,
         metrics,
+        previous,
     )
     .map_err(invalid)
 }
@@ -941,9 +1187,25 @@ fn relayout_all(
     metrics: EditorLayoutMetrics,
 ) -> Result<(), EditorError> {
     for cached in mounted.layouts.values_mut() {
-        cached.geometry = layout_block(&cached.input, mounted.presentation, metrics)?;
+        let previous = cached.geometry.clone();
+        cached.geometry = layout_block(
+            &cached.input,
+            mounted.presentation,
+            metrics,
+            Some(&previous),
+        )?;
     }
     Ok(())
+}
+
+fn paste_mark(kind: &PasteMarkKind) -> SemanticInlineMark {
+    match kind {
+        PasteMarkKind::Bold => SemanticInlineMark::Bold,
+        PasteMarkKind::Italic => SemanticInlineMark::Italic,
+        PasteMarkKind::Underline => SemanticInlineMark::Underline,
+        PasteMarkKind::Strikethrough => SemanticInlineMark::Strikethrough,
+        PasteMarkKind::Link(target) => SemanticInlineMark::Link(target.clone()),
+    }
 }
 
 const fn startup(reason: &'static str) -> EditorStartupError {

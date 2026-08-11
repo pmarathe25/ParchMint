@@ -14,7 +14,7 @@ pub use iced_surface::{
     MountedEditorHost, MountedEditorKeyCommand, MountedEditorMessage, MountedEditorUpdate,
 };
 pub use layout::{
-    BlockLayoutGeometry, EditorLayoutMetrics, EditorRectangle, EditorScalarGeometry,
-    EditorViewport, VisibleEditorBlock,
+    BlockLayoutGeometry, EditorFontFamily, EditorLayoutMetrics, EditorRectangle,
+    EditorScalarGeometry, EditorViewport, VisibleEditorBlock,
 };
 pub use mounted_binding::{MountedEditorBinding, MountedEditorBindingConfig, MountedEditorSession};

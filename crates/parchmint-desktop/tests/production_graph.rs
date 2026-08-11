@@ -1,31 +1,92 @@
 //! Developer-owned checks for the Stage 38 production composition boundary.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_application::{DocumentVisibility, ProjectCommandDispatcher};
 use parchmint_desktop::{
     DesktopBootstrap, FinalSaveResolution, LaunchRequest, NewProjectRequest, OpenProjectResult,
-    ProductionControls, ProductionFaultKind, ProductionFaultPoint, ProductionObservation,
-    ProductionProjectSession, ProjectFilesystemError, RequestedProjectPath,
+    ProductionControls, ProductionFaultKind, ProductionFaultPoint, ProductionHistoryStatus,
+    ProductionObservation, ProductionProjectSession, ProjectFilesystemError, RequestedProjectPath,
 };
-use parchmint_domain::{NodeId, NodeKind, ProjectCommand, ProjectSection};
+use parchmint_domain::{
+    MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind, NodeId,
+    NodeKind, ProjectCommand, ProjectExportSettings, ProjectSection,
+};
+use parchmint_editor_api::{
+    AnnotationValue, BlockId, CanonicalComment, CanonicalCommentAnchor, CanonicalCommentMessage,
+    CommentId, DocumentPosition, EditorSelection,
+};
 use parchmint_export_api::{
-    ExportDefaults, ExportRequest, ExportRunOptions, ExportStyleCatalog, ProjectSnapshot,
+    ExportDefaults, ExportRequest, ExportRunOptions, ExportStyleCatalog, IgnoreExportProgress,
+    ProjectSnapshot,
 };
 use parchmint_platform_api::UntrustedPathSelection;
+use parchmint_search_api::{
+    SearchBatch, SearchBatchSink, SearchField, SearchHit, SearchIndex, SearchQuery,
+    SearchRebuildStatus,
+};
 use parchmint_spellcheck_api::{
     DictionaryRevision, DocumentId, EditorRevision, LanguageId, SpellcheckGeneration,
     SpellcheckPriority, SpellcheckRequest,
 };
 use parchmint_test_support::ScopedProject;
 use parchmint_ui_api::{
-    CanonicalProjection, CreateDocumentWorkflow, ExportArtifactAction, ExportArtifactToken,
-    ProjectSaveKind,
+    CanonicalProjection, CreateDocumentWorkflow, DocumentWordCount, ExportArtifactAction,
+    ExportArtifactToken, ExportOutcome, ProjectSaveKind,
 };
+
+#[test]
+fn legacy_summary_hydration_runs_in_background_without_opening_unselected_documents() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project").unwrap();
+    fs::write(
+        project.root.as_path().join("manuscript/chapter-2.html"),
+        b"<p>second legacy chapter</p>",
+    )
+    .unwrap();
+    let bootstrap = DesktopBootstrap::production().unwrap();
+    let session = bootstrap
+        .project_filesystem
+        .open(&RequestedProjectPath::new(project.root.as_path()))
+        .unwrap();
+    let production = session
+        .as_any()
+        .downcast_ref::<ProductionProjectSession>()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if !matches!(
+            production.search().rebuild_status(),
+            SearchRebuildStatus::Running { .. }
+        ) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summary hydration stalled"
+        );
+        std::thread::yield_now();
+    }
+
+    let snapshot = production.ui_snapshot().unwrap();
+    assert_eq!(snapshot.document_summaries.len(), 2);
+    assert_eq!(
+        snapshot.documents.len(),
+        1,
+        "background hydration must not open editor sessions"
+    );
+    assert!(
+        snapshot
+            .document_summaries
+            .iter()
+            .all(|summary| matches!(summary.word_count, DocumentWordCount::Known(_)))
+    );
+}
 
 #[test]
 fn production_constructor_retains_every_application_wide_service() {
@@ -256,7 +317,28 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         document,
         EditorRevision::from(2),
         "<p>second edit</p>",
-        vec![],
+        vec![CanonicalComment {
+            id: CommentId::from_bytes([21; 16]),
+            messages: vec![CanonicalCommentMessage {
+                id: CommentId::from_bytes([22; 16]),
+                body: "Durable note".into(),
+                unknown_fields: BTreeMap::from([(
+                    "future_author".into(),
+                    AnnotationValue::String("preserved".into()),
+                )]),
+            }],
+            resolved: false,
+            anchor: CanonicalCommentAnchor::Text {
+                block: BlockId::from_bytes(*document.as_bytes()),
+                range: EditorSelection::new(DocumentPosition::from(0), DocumentPosition::from(6)),
+                quote: "second".into(),
+                context_before: String::new(),
+                context_after: " edit".into(),
+                orphaned: false,
+                unknown_fields: BTreeMap::new(),
+            },
+            unknown_fields: BTreeMap::new(),
+        }],
         vec![],
         2,
     );
@@ -264,6 +346,31 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         .persistence(|persistence| persistence.persist_editor_projection(second))
         .unwrap()
         .expect("the editor must remain writable after a recovery failure");
+    let current = access
+        .snapshot(|query| query.snapshot())
+        .unwrap()
+        .expect("the persisted comment should be queryable before editing");
+    let mut edited_comments = current
+        .documents
+        .iter()
+        .find(|snapshot| snapshot.document_id == document)
+        .unwrap()
+        .comments
+        .clone();
+    edited_comments[0].messages[0].body = "Edited durable note".into();
+    access
+        .persistence(|persistence| {
+            persistence.persist_editor_projection(CanonicalProjection::new(
+                document,
+                EditorRevision::from(3),
+                "<p>second edit</p>",
+                edited_comments,
+                vec![],
+                2,
+            ))
+        })
+        .unwrap()
+        .expect("a message edit should participate in normal durable projection");
     assert!(
         !access
             .recovery(|recovery| recovery.inspect())
@@ -282,7 +389,7 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         .unwrap()
         .expect("explicit save should durably complete");
     assert_eq!(saved.requested, requested);
-    assert_eq!(saved.written.documents[&document], EditorRevision::from(2));
+    assert_eq!(saved.written.documents[&document], EditorRevision::from(3));
 
     let close = runtime
         .begin_final_save(project.root.as_path())
@@ -317,7 +424,16 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         .iter()
         .find(|snapshot| snapshot.document_id == document)
         .expect("saved document identity should survive reopen");
-    assert_eq!(reopened_document.revision, EditorRevision::from(2));
+    assert_eq!(reopened_document.revision, EditorRevision::from(3));
+    assert_eq!(reopened_document.comments.len(), 1);
+    assert_eq!(
+        reopened_document.comments[0].messages[0].body,
+        "Edited durable note"
+    );
+    assert_eq!(
+        reopened_document.comments[0].messages[0].unknown_fields["future_author"],
+        AnnotationValue::String("preserved".into())
+    );
     assert_eq!(reopened_document.body, "<p>second edit</p>");
 }
 
@@ -361,6 +477,18 @@ fn production_workflows_create_a_complete_document_and_export_to_an_authorized_p
             .body,
         "<p></p>"
     );
+    let mut excluded =
+        access
+            .commands_service()
+            .unwrap()
+            .execute(ProjectCommand::set_node_export_settings(
+                NodeId::from_bytes([90; 16]),
+                ProjectExportSettings {
+                    excluded: true,
+                    ..ProjectExportSettings::default()
+                },
+            ));
+    poll_ready(excluded.as_mut()).expect("legacy per-node exclusion should remain a valid edit");
     let named = access
         .workflows(|workflows| workflows.create_named_snapshot("Before export".into()))
         .unwrap()
@@ -381,17 +509,52 @@ fn production_workflows_create_a_complete_document_and_export_to_an_authorized_p
     let output = project.root.as_path().join("exported-project.html");
     let artifact = access
         .export_target(|export| {
+            let stale = export.begin_export(Arc::new(IgnoreExportProgress))?;
+            let operation = export.begin_export(Arc::new(IgnoreExportProgress))?;
+            assert!(
+                export
+                    .export_to_path(
+                        stale,
+                        UntrustedPathSelection::new(&output),
+                        ExportRunOptions::default(),
+                    )
+                    .is_err(),
+                "replaced operation tokens must be rejected"
+            );
             export.export_to_path(
+                operation,
                 UntrustedPathSelection::new(&output),
                 ExportRunOptions::default(),
             )
         })
         .unwrap()
         .expect("production export");
+    let ExportOutcome::Completed(artifact) = artifact else {
+        panic!("production export was unexpectedly cancelled")
+    };
     let html = fs::read_to_string(&output).expect("completed export is visible");
     assert!(html.contains("Created Chapter"));
     assert!(html.contains("<p></p>"));
     assert_eq!(artifact.display_name, "exported-project.html");
+    let second_directory = project.root.as_path().join("alternate-export");
+    fs::create_dir(&second_directory).expect("second export directory");
+    let second_output = second_directory.join("exported-project.html");
+    let second = access
+        .export_target(|export| {
+            let operation = export.begin_export(Arc::new(IgnoreExportProgress))?;
+            export.export_to_path(
+                operation,
+                UntrustedPathSelection::new(&second_output),
+                ExportRunOptions::default(),
+            )
+        })
+        .unwrap()
+        .expect("second production export");
+    let ExportOutcome::Completed(second) = second else {
+        panic!("second production export was unexpectedly cancelled")
+    };
+    assert_eq!(second.display_name, artifact.display_name);
+    assert_ne!(second.token, artifact.token);
     assert!(
         access
             .export_target(|export| export.act_on_artifact(
@@ -401,6 +564,262 @@ fn production_workflows_create_a_complete_document_and_export_to_an_authorized_p
             .unwrap()
             .is_err(),
         "forged artifact tokens must not expose arbitrary file actions"
+    );
+}
+
+#[test]
+fn lazy_multi_document_export_materializes_every_manuscript_body() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project").unwrap();
+    fs::write(
+        project.root.as_path().join("manuscript/chapter-2.html"),
+        b"<p>second lazy export body</p>",
+    )
+    .unwrap();
+    let bootstrap = DesktopBootstrap::production().unwrap();
+    let runtime = block_on(bootstrap.start(LaunchRequest::launcher())).unwrap();
+    let OpenProjectResult::Opened { session, .. } = runtime
+        .open_project(project.root.as_path())
+        .expect("lazy project opens")
+    else {
+        panic!("project should open")
+    };
+    let project_ui = runtime.project_ui(session).unwrap().unwrap();
+    assert_eq!(project_ui.snapshot.document_summaries.len(), 2);
+    assert_eq!(
+        project_ui.snapshot.documents.len(),
+        1,
+        "project open must retain only the initial body"
+    );
+    let access = project_ui.ports.access().unwrap();
+    let output = project.root.as_path().join("lazy-export.html");
+    let outcome = access
+        .export_target(|export| {
+            let operation = export.begin_export(Arc::new(IgnoreExportProgress))?;
+            export.export_to_path(
+                operation,
+                UntrustedPathSelection::new(&output),
+                ExportRunOptions::default(),
+            )
+        })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(outcome, ExportOutcome::Completed(_)));
+    let html = fs::read_to_string(output).unwrap();
+    assert!(html.contains("hello"));
+    assert!(html.contains("second lazy export body"));
+}
+
+#[test]
+fn live_search_reconciles_body_title_synopsis_metadata_create_delete_save_and_reopen() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project")
+        .expect("canonical project fixture should exist");
+    let bootstrap = DesktopBootstrap::production().expect("production graph should assemble");
+    let requested = RequestedProjectPath::new(project.root.as_path());
+    let session = bootstrap
+        .project_filesystem
+        .open(&requested)
+        .expect("production project should open");
+    let production = session
+        .as_any()
+        .downcast_ref::<ProductionProjectSession>()
+        .expect("typed production project");
+    let snapshot = production.ui_snapshot().expect("initial project snapshot");
+    let document = snapshot.documents[0].document_id;
+    let node = snapshot
+        .project
+        .nodes
+        .iter()
+        .find_map(|(id, node)| (node.kind == NodeKind::Document(document)).then_some(*id))
+        .expect("initial document node");
+    let search = production.search();
+    let commands = production.commands();
+
+    let initial = search_hits(search.as_ref(), "hello", SearchField::Body);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(
+        initial[0].indexed_revision.value(),
+        snapshot.documents[0].revision.value(),
+        "body hits must identify the canonical document revision"
+    );
+
+    production
+        .project_persistence()
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            EditorRevision::from(1),
+            "<p>fresh body phrase</p>",
+            Vec::new(),
+            Vec::new(),
+            3,
+        ))
+        .expect("body edit should persist to recovery");
+    assert!(search_hits(search.as_ref(), "hello", SearchField::Body).is_empty());
+    let body_hit = search_hits(search.as_ref(), "fresh body phrase", SearchField::Body);
+    assert_eq!(body_hit.len(), 1);
+    let edited_revision = production
+        .ui_snapshot()
+        .expect("edited project snapshot")
+        .documents[0]
+        .revision
+        .value();
+    assert_eq!(body_hit[0].indexed_revision.value(), edited_revision);
+
+    for command in [
+        ProjectCommand::rename_node(node, "Revised Search Title"),
+        ProjectCommand::set_synopsis(node, "Distinct synopsis phrase"),
+    ] {
+        let mut command = commands.execute(command);
+        poll_ready(command.as_mut()).expect("searchable project edit should succeed");
+    }
+    let title_hit = search_hits(
+        search.as_ref(),
+        "Revised Search Title",
+        SearchField::DisplayTitle,
+    );
+    let synopsis_hit = search_hits(
+        search.as_ref(),
+        "Distinct synopsis phrase",
+        SearchField::Synopsis,
+    );
+    assert_eq!(title_hit.len(), 1);
+    assert_eq!(synopsis_hit.len(), 1);
+    assert_eq!(title_hit[0].indexed_revision.value(), edited_revision);
+    assert_eq!(synopsis_hit[0].indexed_revision.value(), edited_revision);
+
+    let metadata = MetadataFieldId::from_bytes([73; 16]);
+    for command in [
+        ProjectCommand::upsert_metadata_field(MetadataFieldDefinition {
+            id: metadata,
+            label: "Status".into(),
+            description: None,
+            applicability: MetadataApplicability::Documents,
+            text_kind: MetadataTextKind::SingleLine,
+            default_value: None,
+            visible_on_cards: true,
+        }),
+        ProjectCommand::set_metadata_value(node, metadata, Some("Metadata search phrase".into())),
+    ] {
+        let mut command = commands.execute(command);
+        poll_ready(command.as_mut()).expect("metadata edit should succeed");
+    }
+    let metadata_hit = search_hits(
+        search.as_ref(),
+        "Metadata search phrase",
+        SearchField::Metadata(metadata),
+    );
+    assert_eq!(metadata_hit.len(), 1);
+    assert_eq!(metadata_hit[0].indexed_revision.value(), edited_revision);
+
+    let created_node = NodeId::from_bytes([74; 16]);
+    let created_document = DocumentId::from_bytes([75; 16]);
+    let mut create = commands.execute(ProjectCommand::create_document(
+        created_node,
+        created_document,
+        NodeId::manuscript_root(),
+        snapshot
+            .project
+            .nodes
+            .children(NodeId::manuscript_root())
+            .len(),
+        "Transient searchable chapter",
+    ));
+    poll_ready(create.as_mut()).expect("document creation should succeed");
+    assert_eq!(
+        search_hits(
+            search.as_ref(),
+            "Transient searchable chapter",
+            SearchField::DisplayTitle,
+        )
+        .len(),
+        1
+    );
+    let mut delete = commands.execute(ProjectCommand::delete_node(created_node));
+    poll_ready(delete.as_mut()).expect("document deletion should succeed");
+    assert!(
+        search_hits(
+            search.as_ref(),
+            "Transient searchable chapter",
+            SearchField::DisplayTitle,
+        )
+        .is_empty(),
+        "deleted documents must not leave stale indexed text"
+    );
+
+    bootstrap
+        .project_filesystem
+        .begin_final_save(session.as_ref())
+        .expect("final save should persist the searchable state");
+    drop(session);
+
+    let reopened = bootstrap
+        .project_filesystem
+        .open(&requested)
+        .expect("saved project should reopen");
+    let reopened = reopened
+        .as_any()
+        .downcast_ref::<ProductionProjectSession>()
+        .expect("typed reopened project");
+    let reopened_body = search_hits(
+        reopened.search().as_ref(),
+        "fresh body phrase",
+        SearchField::Body,
+    );
+    assert_eq!(reopened_body.len(), 1);
+    assert_eq!(
+        reopened_body[0].indexed_revision.value(),
+        reopened
+            .ui_snapshot()
+            .expect("reopened project snapshot")
+            .documents[0]
+            .revision
+            .value()
+    );
+    assert!(
+        search_hits(
+            reopened.search().as_ref(),
+            "Transient searchable chapter",
+            SearchField::DisplayTitle,
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn corrupt_embedded_history_does_not_prevent_open_and_reports_typed_recovery_availability() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project")
+        .expect("canonical project fixture should exist");
+    let git = project.root.as_path().join(".git");
+    fs::create_dir(&git).expect("corrupt embedded History directory");
+    fs::write(git.join("HEAD"), b"not a valid embedded Git repository\n")
+        .expect("corrupt embedded History marker");
+
+    let bootstrap = DesktopBootstrap::production().expect("production graph should assemble");
+    let session = bootstrap
+        .project_filesystem
+        .open(&RequestedProjectPath::new(project.root.as_path()))
+        .expect("canonical project data must open despite corrupt History");
+    let production = session
+        .as_any()
+        .downcast_ref::<ProductionProjectSession>()
+        .expect("typed production project");
+    let ProductionHistoryStatus::Unavailable {
+        problem,
+        reinitialize,
+    } = production.history_status()
+    else {
+        panic!("corrupt History should be reported as unavailable")
+    };
+    assert!(problem.contains("corrupt"));
+    assert!(matches!(
+        reinitialize,
+        parchmint_history_api::HistoryReinitializeAvailability::Blocked { .. }
+    ));
+    assert_eq!(production.ui_snapshot().unwrap().documents.len(), 1);
+    assert!(
+        production
+            .history()
+            .list(parchmint_history_api::HistoryPageQuery::newest_first(25))
+            .is_err()
     );
 }
 
@@ -587,6 +1006,47 @@ fn assert_fault_and_operation(
             succeeded: false,
         } if *observed_point == point && *observed_operation == operation
     )));
+}
+
+#[derive(Clone, Default)]
+struct SearchHits(Arc<Mutex<Vec<SearchHit>>>);
+
+impl SearchBatchSink for SearchHits {
+    fn push(&self, batch: SearchBatch) {
+        self.0
+            .lock()
+            .expect("search hit collector lock")
+            .extend(batch.hits);
+    }
+}
+
+fn search_hits(index: &dyn SearchIndex, text: &str, field: SearchField) -> Vec<SearchHit> {
+    let sink = SearchHits::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let result = index.query(
+            SearchQuery {
+                text: text.into(),
+                fields: BTreeSet::from([field]),
+                case_sensitive: false,
+                whole_word: false,
+                generation: 1,
+            },
+            Box::new(sink.clone()),
+        );
+        match result {
+            Ok(()) => break,
+            Err(parchmint_search_api::SearchError::Rebuilding { .. }) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "production search rebuild did not settle"
+                );
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("production search query: {error}"),
+        }
+    }
+    sink.0.lock().expect("search hit collector lock").clone()
 }
 
 fn poll_ready<T>(mut future: std::pin::Pin<&mut dyn std::future::Future<Output = T>>) -> T {

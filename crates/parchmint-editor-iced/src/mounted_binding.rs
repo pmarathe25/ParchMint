@@ -145,6 +145,10 @@ impl MountedEditorBinding {
         &self.host
     }
 
+    pub fn active_style(&self) -> Result<parchmint_editor_api::StyleId, EditorError> {
+        self.host.active_style()
+    }
+
     /// Builds the Iced implementation boundary for the outer production UI.
     pub fn element(&self) -> Element<'static, MountedEditorMessage> {
         self.host.element()
@@ -172,6 +176,28 @@ impl MountedEditorBinding {
     /// Restores editor focus after a native task without changing selection.
     pub fn restore_focus(&self) -> Result<(), EditorError> {
         self.host.restore_focus()
+    }
+
+    /// Reflows the retained editor when the native pane allocation changes.
+    pub fn resize(&self, viewport: EditorViewport) -> Result<(), EditorError> {
+        self.host.resize(viewport)
+    }
+
+    /// Restores a persisted pixel offset through the same bounded scroll path
+    /// used by pointer input.
+    pub fn restore_scroll(
+        &self,
+        viewport: EditorViewport,
+        pixel_scroll_y: f32,
+    ) -> Result<(), EditorError> {
+        if !pixel_scroll_y.is_finite() || pixel_scroll_y <= 0.0 {
+            return Ok(());
+        }
+        self.update(MountedEditorMessage::Scroll {
+            delta_y: pixel_scroll_y,
+            viewport,
+        })?;
+        Ok(())
     }
 
     /// Rebinds semantic colors without remounting the editor session or view.

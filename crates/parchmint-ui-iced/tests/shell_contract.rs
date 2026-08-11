@@ -75,6 +75,23 @@ fn geometry_clamps_sidebars_and_scales_without_clipping() {
 }
 
 #[test]
+fn pane_visibility_and_restored_widths_remain_explicit_workspace_state() {
+    let mut layout = ShellLayout::for_window(1440, 900);
+    layout.restore_panes(336, 412, false, true);
+
+    assert_eq!(layout.explorer_width(), 336);
+    assert_eq!(layout.inspector_width(), 412);
+    assert!(!layout.explorer_is_visible());
+    assert!(layout.inspector_is_visible());
+    assert_eq!(layout.explorer().width(), 0);
+    assert_eq!(layout.inspector().width(), 412);
+
+    layout.resize_window(1280, 720);
+    layout.set_explorer_visible(true);
+    assert!(layout.has_no_clipped_controls());
+}
+
+#[test]
 fn navigation_focus_dialog_and_menu_states_are_consistent() {
     let window = WindowCapability::new(3, 1);
     let mut shell = Shell::new(window);

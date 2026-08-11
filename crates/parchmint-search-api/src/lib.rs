@@ -4,7 +4,7 @@
 //! are revisioned candidates, not authority to navigate or replace text: the
 //! caller must revalidate them against the current projection.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 pub use parchmint_domain::{BlockId, DocumentId, MetadataFieldId, ProjectId};
 
@@ -15,6 +15,20 @@ pub struct RevisionId(u64);
 impl RevisionId {
     pub const fn value(self) -> u64 {
         self.0
+    }
+}
+
+/// Body-independent identity of one complete canonical save frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SearchFrontierId([u8; 32]);
+
+impl SearchFrontierId {
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 }
 
@@ -241,7 +255,34 @@ pub trait SearchBatchSink: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchIndexState {
     Opened,
-    Rebuilt { previous: SearchIndexProblem },
+    Rebuilt {
+        previous: SearchIndexProblem,
+    },
+    Rebuilding {
+        previous: SearchIndexProblem,
+        generation: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchRebuildStatus {
+    Idle,
+    Running {
+        generation: u64,
+        previous: SearchIndexProblem,
+        processed_documents: usize,
+    },
+    Complete {
+        generation: u64,
+        indexed_documents: usize,
+    },
+    Cancelled {
+        generation: u64,
+    },
+    Failed {
+        generation: u64,
+        reason: String,
+    },
 }
 
 /// A disposable-index condition that requires rebuilding from canonical data.
@@ -286,6 +327,11 @@ pub trait SearchProjectionVisitor {
 /// Implementations stream projections to `visitor`; they must not need to load
 /// every project document at once and must never mutate authored data.
 pub trait SearchProjectionSource: Send + Sync {
+    /// Identifies the canonical save represented by this source, when known.
+    fn frontier_identity(&self) -> Option<SearchFrontierId> {
+        None
+    }
+
     fn visit_projections(
         &self,
         visitor: &mut dyn SearchProjectionVisitor,
@@ -306,6 +352,9 @@ pub enum SearchError {
     Source {
         reason: String,
     },
+    Rebuilding {
+        generation: u64,
+    },
 }
 
 impl fmt::Display for SearchError {
@@ -319,6 +368,12 @@ impl fmt::Display for SearchError {
             }
             Self::Source { reason } => {
                 write!(formatter, "search projection source failed: {reason}")
+            }
+            Self::Rebuilding { generation } => {
+                write!(
+                    formatter,
+                    "search index generation {generation} is rebuilding"
+                )
             }
         }
     }
@@ -341,6 +396,16 @@ pub trait SearchIndex: Send + Sync {
         project: ProjectId,
         source: &dyn SearchProjectionSource,
     ) -> Result<SearchIndexState, SearchError>;
+    fn open_or_rebuild_background(
+        &self,
+        project: ProjectId,
+        source: Arc<dyn SearchProjectionSource>,
+    ) -> Result<SearchIndexState, SearchError> {
+        self.open_or_rebuild(project, source.as_ref())
+    }
+    fn rebuild_status(&self) -> SearchRebuildStatus {
+        SearchRebuildStatus::Idle
+    }
     fn replace_document(
         &self,
         projection: SearchDocumentProjection,

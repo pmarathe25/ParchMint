@@ -14,7 +14,11 @@ use parchmint_platform_api::{
     SemanticMenuEntry, SystemAppearance, UntrustedClipboardContent, ValidatedExternalIntent,
     WindowCapability,
 };
+#[cfg(target_os = "linux")]
+use parchmint_platform_native::iced_adapter::IcedMenuAttachment;
 use parchmint_platform_native::testing::NativeFixture;
+#[cfg(target_os = "linux")]
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle, XlibDisplayHandle, XlibWindowHandle};
 
 const WINDOW_ID: u64 = 27;
 const LIVE_GENERATION: u64 = 41;
@@ -35,10 +39,10 @@ fn menu() -> SemanticMenu {
         SemanticMenuEntry::Separator,
         SemanticMenuEntry::Submenu {
             label: "Edit".to_owned(),
-            entries: vec![SemanticMenuEntry::Command(MenuCommand::new(
-                "edit.paste",
-                "Paste",
-            ))],
+            entries: vec![
+                SemanticMenuEntry::Command(MenuCommand::new("edit.paste", "Paste")),
+                SemanticMenuEntry::Command(MenuCommand::disabled("edit.cut", "Cut")),
+            ],
         },
     ])
 }
@@ -89,13 +93,15 @@ fn native_desktop_uses_target_menu_and_dialog_conventions() {
     let native = fixture();
     let window = native.register_window(live_window());
 
-    block_on(native.menus().install(window, menu())).expect("menu install");
+    let semantic_menu = menu();
+    block_on(native.menus().install(window, semantic_menu.clone())).expect("menu install");
     let snapshot = native.menu_snapshot(window).expect("live menu snapshot");
 
     assert_eq!(
         snapshot.commands(),
-        &["file.open", "file.save", "edit.paste"]
+        &["file.open", "file.save", "edit.paste", "edit.cut"]
     );
+    assert_eq!(snapshot.menu(), &semantic_menu);
     assert!(snapshot.contains_separator());
     #[cfg(target_os = "macos")]
     assert_eq!(snapshot.accelerator("file.open"), Some("Cmd+O"));
@@ -115,6 +121,81 @@ fn native_desktop_uses_target_menu_and_dialog_conventions() {
     assert_eq!(
         selection.as_path(),
         std::path::Path::new("/outside/project.parchment")
+    );
+}
+
+#[test]
+fn menu_activations_retain_the_exact_binding_and_reject_stale_or_disabled_commands() {
+    let native = fixture();
+    let window = native.register_window(live_window());
+    let binding = block_on(native.menus().install(window, menu()))
+        .expect("menu install")
+        .into_value();
+    let stream = native
+        .menu_activations()
+        .subscribe()
+        .expect("activation subscription");
+
+    native
+        .activate_menu(window, binding, "file.open")
+        .expect("enabled activation");
+    let activation = stream.try_next().expect("activation read").expect("event");
+    assert_eq!(activation.binding.window(), window);
+    assert_eq!(activation.binding.into_value(), binding);
+    assert_eq!(activation.command_id, "file.open");
+
+    assert!(
+        native
+            .activate_menu(window, binding + 1, "file.open")
+            .is_err()
+    );
+    assert!(native.activate_menu(window, binding, "edit.cut").is_err());
+    native.close_window(window);
+    assert!(matches!(
+        native.activate_menu(window, binding, "file.open"),
+        Err(PlatformError::StaleCapability { .. })
+    ));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn iced_menu_attachment_uses_the_linux_fallback_and_rejects_stale_lifecycle_requests() {
+    let native = fixture();
+    let window = native.register_window(live_window());
+    let first = block_on(native.menus().install(window, menu()))
+        .expect("first menu install")
+        .into_value();
+    let registry = native.registry();
+    let raw_window = RawWindowHandle::Xlib(XlibWindowHandle::new(17));
+    let raw_display = RawDisplayHandle::Xlib(XlibDisplayHandle::new(None, 0));
+
+    assert_eq!(
+        registry
+            .attach_menu(window, first, raw_window, raw_display)
+            .expect("matching live Xlib handles"),
+        IcedMenuAttachment::InWindow
+    );
+
+    let second = block_on(native.menus().install(window, menu()))
+        .expect("replacement menu install")
+        .into_value();
+    assert!(
+        registry
+            .attach_menu(window, first, raw_window, raw_display)
+            .is_err()
+    );
+    assert_eq!(
+        registry
+            .attach_menu(window, second, raw_window, raw_display)
+            .expect("current replacement binding"),
+        IcedMenuAttachment::InWindow
+    );
+
+    native.close_window(window);
+    assert!(
+        registry
+            .attach_menu(window, second, raw_window, raw_display)
+            .is_err()
     );
 }
 

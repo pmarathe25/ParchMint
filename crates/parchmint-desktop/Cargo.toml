@@ -16,7 +16,9 @@ workspace = true
 
 [dependencies]
 parchmint-application = { path = "../parchmint-application" }
+parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
+parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-editor-iced = { path = "../parchmint-editor-iced" }
 parchmint-export-api = { path = "../parchmint-export-api" }
 parchmint-export-html = { path = "../parchmint-export-html" }
@@ -41,6 +43,5 @@ parchmint-workspace-state = { path = "../parchmint-workspace-state" }
 sha2.workspace = true
 
 [dev-dependencies]
-parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-editor-core = { path = "../parchmint-editor-core" }
 parchmint-test-support = { path = "../../tests/parchmint-test-support" }

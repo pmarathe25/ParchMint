@@ -166,6 +166,19 @@ pub struct SnapshotPreview {
     pub resources: BTreeMap<CanonicalRelativePath, ContentHash>,
 }
 
+/// Immutable bytes for one exact canonical resource in one checkpoint.
+///
+/// Implementations verify `content_hash` against `bytes` before returning so
+/// read-only History consumers never render corrupt or current-project data in
+/// place of checkpoint content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointResource {
+    pub checkpoint: CheckpointId,
+    pub path: CanonicalRelativePath,
+    pub content_hash: ContentHash,
+    pub bytes: Vec<u8>,
+}
+
 /// All canonical files to write when restoring one checkpoint.
 ///
 /// The plan is intentionally whole-project: it never represents a
@@ -256,6 +269,24 @@ pub struct HistoryState {
     pub checkpoint_count: usize,
 }
 
+/// Whether an explicit user action can replace unavailable History.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryReinitializeAvailability {
+    /// No History exists, or an app-managed damaged store can be preserved.
+    Ready { preserves_existing: bool },
+    /// The current History is healthy and must not be replaced.
+    NotNeeded,
+    /// The implementation cannot prove that replacement is safe.
+    Blocked { reason: String },
+}
+
+/// The new empty History store and any preserved damaged-store location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryReinitializeReport {
+    pub state: HistoryState,
+    pub preserved_history: Option<String>,
+}
+
 /// The result of a non-mutating History integrity pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryIntegrityReport {
@@ -291,6 +322,10 @@ pub enum HistoryError {
     UnknownCheckpoint {
         checkpoint: CheckpointId,
     },
+    UnknownResource {
+        checkpoint: CheckpointId,
+        path: CanonicalRelativePath,
+    },
     InvalidCursor,
     InvalidInput {
         field: &'static str,
@@ -312,6 +347,11 @@ impl fmt::Display for HistoryError {
             Self::UnknownCheckpoint { checkpoint } => {
                 write!(formatter, "unknown History checkpoint {checkpoint:?}")
             }
+            Self::UnknownResource { checkpoint, path } => write!(
+                formatter,
+                "History checkpoint {checkpoint:?} has no resource {}",
+                path.as_str()
+            ),
             Self::InvalidCursor => formatter.write_str("invalid History page cursor"),
             Self::InvalidInput { field, reason } => {
                 write!(formatter, "invalid History {field}: {reason}")
@@ -333,9 +373,37 @@ impl Error for HistoryError {}
 /// it cannot move, rewrite, or delete existing History.
 pub trait HistoryStore: Send + Sync {
     fn initialize(&self, project: ProjectRootCapability) -> Result<HistoryState, HistoryError>;
+    /// Reports whether an explicit recovery action is safe without changing files.
+    fn reinitialize_availability(&self) -> Result<HistoryReinitializeAvailability, HistoryError> {
+        Ok(HistoryReinitializeAvailability::Blocked {
+            reason: "this History provider does not support reinitialization".into(),
+        })
+    }
+    /// Replaces unavailable History with an empty store.
+    ///
+    /// The next normal save checkpoints the current canonical project state.
+    fn reinitialize(
+        &self,
+        _project: ProjectRootCapability,
+    ) -> Result<HistoryReinitializeReport, HistoryError> {
+        Err(HistoryError::InvalidInput {
+            field: "History reinitialization",
+            reason: "is not supported by this History provider",
+        })
+    }
     fn checkpoint(&self, input: CheckpointInput) -> Result<CheckpointId, HistoryError>;
     fn list(&self, query: HistoryPageQuery) -> Result<HistoryPage, HistoryError>;
     fn preview(&self, checkpoint: CheckpointId) -> Result<SnapshotPreview, HistoryError>;
+    fn read_resource(
+        &self,
+        checkpoint: CheckpointId,
+        path: &CanonicalRelativePath,
+    ) -> Result<CheckpointResource, HistoryError> {
+        Err(HistoryError::UnknownResource {
+            checkpoint,
+            path: path.clone(),
+        })
+    }
     fn restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan, HistoryError>;
     fn verify(&self) -> Result<HistoryIntegrityReport, HistoryError>;
     fn maintain(&self, budget: MaintenanceBudget) -> Result<MaintenanceReport, HistoryError>;

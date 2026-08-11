@@ -1,6 +1,50 @@
 //! Versioned JSON contracts used at ParchMint's durable data boundaries.
 
-use std::{error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt};
+
+/// A lossless JSON value retained for fields introduced by compatible readers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationValue {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Self>),
+    Object(BTreeMap<String, Self>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationMessage {
+    pub id: [u8; 16],
+    pub body: String,
+    pub unknown_fields: BTreeMap<String, AnnotationValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnnotationAnchor {
+    Document {
+        unknown_fields: BTreeMap<String, AnnotationValue>,
+    },
+    Text {
+        block: [u8; 16],
+        start: u64,
+        end: u64,
+        quote: String,
+        context_before: String,
+        context_after: String,
+        orphaned: bool,
+        unknown_fields: BTreeMap<String, AnnotationValue>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationThread {
+    pub id: [u8; 16],
+    pub messages: Vec<AnnotationMessage>,
+    pub resolved: bool,
+    pub anchor: AnnotationAnchor,
+    pub unknown_fields: BTreeMap<String, AnnotationValue>,
+}
 
 pub mod generated;
 

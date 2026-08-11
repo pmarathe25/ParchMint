@@ -10,10 +10,15 @@ use std::{
     fmt,
 };
 
-use parchmint_contracts::generated::AnnotationSidecarV1;
+use parchmint_contracts::{
+    AnnotationAnchor, AnnotationMessage, AnnotationThread, AnnotationValue,
+    generated::AnnotationSidecarV1,
+};
 use parchmint_domain::{
-    DocumentId as DomainDocumentId, NodeId, NodeKind, Project, ProjectExportSettings, ProjectId,
-    ProjectSection,
+    CheckpointId, DeletedNodeSnapshot, DeletionTombstone, DocumentId as DomainDocumentId, NodeId,
+    NodeKind, Project, ProjectExportSetting, ProjectExportSettings, ProjectId, ProjectNode,
+    ProjectSection, StyleCatalog, StyleDefinition, StyleId, StyleProperties, StyleRole,
+    TextAlignment,
 };
 use sha2::{Digest, Sha256};
 
@@ -253,6 +258,34 @@ impl CanonicalAnnotations {
     pub fn threads(&self) -> &[serde_json::Value] {
         &self.0.threads
     }
+
+    pub fn typed_threads(&self) -> Result<Vec<AnnotationThread>, FormatError> {
+        self.0.threads.iter().map(decode_thread).collect()
+    }
+
+    pub fn from_typed(
+        document_id: impl Into<String>,
+        threads: &[AnnotationThread],
+    ) -> Result<Self, FormatError> {
+        let sidecar = AnnotationSidecarV1 {
+            schema: ANNOTATION_SCHEMA_V1.to_owned(),
+            document_id: document_id.into(),
+            threads: threads
+                .iter()
+                .map(encode_thread)
+                .collect::<Result<_, _>>()?,
+        };
+        if sidecar.document_id.is_empty() || sidecar.document_id.chars().any(char::is_control) {
+            return Err(FormatError::InvalidAnnotations(
+                "document ID is empty or unsafe".into(),
+            ));
+        }
+        Ok(Self(canonicalize_annotations(sidecar)?))
+    }
+
+    pub fn empty(document_id: impl Into<String>) -> Result<Self, FormatError> {
+        Self::from_typed(document_id, &[])
+    }
 }
 
 /// Every canonical value that can be encoded by [`CanonicalCodec`].
@@ -302,6 +335,17 @@ pub struct CanonicalProjectPathMap {
 pub struct CanonicalPersistenceFrontier {
     pub recovery_project_revision: u64,
     pub document_revisions: BTreeMap<DomainDocumentId, u64>,
+    /// Identity of one complete canonical save frontier. Legacy manifests omit it.
+    pub save_identity: Option<ContentHash>,
+    /// Body-independent summaries used for lazy project hydration.
+    pub document_summaries: BTreeMap<DomainDocumentId, CanonicalDocumentSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalDocumentSummary {
+    pub revision: u64,
+    pub content_hash: ContentHash,
+    pub word_count: usize,
 }
 
 /// A deterministic complete project encoding and paths removed by this save.
@@ -429,10 +473,58 @@ impl ProjectFormatCodec {
         previous_paths: &CanonicalProjectPathMap,
         frontier: &CanonicalPersistenceFrontier,
     ) -> Result<CanonicalProjectEncoding, FormatError> {
+        self.encode_domain_project_with_annotations(
+            project,
+            documents,
+            &BTreeMap::new(),
+            existing,
+            previous_paths,
+            frontier,
+        )
+    }
+
+    pub fn encode_domain_project_with_annotations(
+        &self,
+        project: &Project,
+        documents: &BTreeMap<DomainDocumentId, String>,
+        annotations: &BTreeMap<DomainDocumentId, Vec<AnnotationThread>>,
+        existing: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+        previous_paths: &CanonicalProjectPathMap,
+        frontier: &CanonicalPersistenceFrontier,
+    ) -> Result<CanonicalProjectEncoding, FormatError> {
         project
             .validate()
             .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
-        let (manifest, paths) = domain_manifest(project, frontier)?;
+        let mut frontier = frontier.clone();
+        frontier.document_summaries = documents
+            .iter()
+            .map(|(document, body)| {
+                let content_hash = ContentHash::from_bytes(Sha256::digest(body.as_bytes()).into());
+                (
+                    *document,
+                    CanonicalDocumentSummary {
+                        revision: frontier
+                            .document_revisions
+                            .get(document)
+                            .copied()
+                            .unwrap_or_default(),
+                        content_hash,
+                        word_count: body.split_whitespace().count(),
+                    },
+                )
+            })
+            .collect();
+        let mut identity = Sha256::new();
+        identity.update(frontier.recovery_project_revision.to_be_bytes());
+        identity.update(project.revision.value().to_be_bytes());
+        for (document, summary) in &frontier.document_summaries {
+            identity.update(document.as_bytes());
+            identity.update(summary.revision.to_be_bytes());
+            identity.update(summary.content_hash.as_bytes());
+            identity.update((summary.word_count as u64).to_be_bytes());
+        }
+        frontier.save_identity = Some(ContentHash::from_bytes(identity.finalize().into()));
+        let (manifest, paths) = domain_manifest(project, &frontier)?;
         let mut resources = BTreeMap::new();
         let control = self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?;
         resources.insert(control.path.clone(), control);
@@ -467,11 +559,14 @@ impl ProjectFormatCodec {
                 },
             );
         }
-        if !resources.keys().any(|path| path.as_str() == "styles.css") {
-            let styles = self.decode_styles(b"")?;
-            let styles = self.encode(&CanonicalResource::Styles(styles))?;
-            resources.insert(styles.path.clone(), styles);
-        }
+        let existing_styles = existing
+            .get(&CanonicalRelativePath::parse("styles.css")?)
+            .map(|bytes| self.decode_styles(bytes))
+            .transpose()?
+            .unwrap_or(CanonicalStyles { rules: Vec::new() });
+        let styles = merge_managed_styles(&project.styles, &existing_styles)?;
+        let styles = self.encode(&CanonicalResource::Styles(styles))?;
+        resources.insert(styles.path.clone(), styles);
         for (document, path) in &paths.documents {
             let body = documents.get(document).ok_or_else(|| {
                 FormatError::InvalidDocument(format!(
@@ -486,18 +581,38 @@ impl ProjectFormatCodec {
                 document_id: stable_id_text(document.as_bytes()),
             };
             resources.insert(path.clone(), encoded);
+            if let Some(threads) = annotations.get(document) {
+                let document_id = stable_id_text(document.as_bytes());
+                let sidecar = CanonicalAnnotations::from_typed(document_id, threads)?;
+                let encoded = self.encode(&CanonicalResource::Annotations(sidecar))?;
+                resources.insert(encoded.path.clone(), encoded);
+            }
         }
         let current_paths: BTreeSet<_> = paths.documents.values().cloned().collect();
-        let deletions = previous_paths
+        let mut deletions: Vec<_> = previous_paths
             .documents
             .values()
             .filter(|path| !current_paths.contains(*path))
             .cloned()
             .collect();
+        for path in existing
+            .keys()
+            .filter(|path| is_annotation_path(path.as_str()))
+        {
+            let retained = paths.documents.keys().any(|document| {
+                path.as_str() == format!("annotations/{}.json", stable_id_text(document.as_bytes()))
+            });
+            if !retained {
+                resources.remove(path);
+                deletions.push(path.clone());
+            }
+        }
+        deletions.sort();
+        deletions.dedup();
         Ok(CanonicalProjectEncoding {
             resources,
             paths,
-            persistence_frontier: frontier.clone(),
+            persistence_frontier: frontier,
             deletions,
         })
     }
@@ -510,6 +625,25 @@ impl ProjectFormatCodec {
         project_id: ProjectId,
     ) -> Result<Option<(Project, CanonicalProjectPathMap)>, FormatError> {
         decode_domain_manifest(manifest.value(), project_id)
+    }
+
+    /// Decodes the manifest-owned style identities together with the
+    /// stylesheet-owned style properties. Callers loading a complete project
+    /// or History checkpoint should use this combined boundary.
+    pub fn decode_domain_project_with_styles(
+        &self,
+        manifest: &CanonicalManifest,
+        styles: Option<&CanonicalStyles>,
+        project_id: ProjectId,
+    ) -> Result<Option<(Project, CanonicalProjectPathMap)>, FormatError> {
+        let Some((mut project, paths)) = decode_domain_manifest(manifest.value(), project_id)?
+        else {
+            return Ok(None);
+        };
+        if let Some(styles) = styles {
+            hydrate_style_properties(&mut project.styles, styles)?;
+        }
+        Ok(Some((project, paths)))
     }
 
     pub fn decode_persistence_frontier(
@@ -546,6 +680,10 @@ fn domain_manifest(
         toml::Value::Boolean(project.export_settings.excluded),
     );
     project_table.insert(
+        "export-emit-titles".into(),
+        toml::Value::String(encode_export_setting(project.export_settings.emit_titles).into()),
+    );
+    project_table.insert(
         "export-starts-new-page".into(),
         toml::Value::Boolean(project.export_settings.starts_new_page),
     );
@@ -559,6 +697,16 @@ fn domain_manifest(
         encode_node_children(project, section.root_id(), section, &mut nodes, &mut paths)?;
     }
     structure.insert("nodes".into(), toml::Value::Array(nodes));
+    structure.insert(
+        "deletions".into(),
+        toml::Value::Array(
+            project
+                .deleted
+                .values()
+                .map(encode_deletion_tombstone)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    );
     let metadata_fields = project
         .metadata
         .iter()
@@ -611,6 +759,17 @@ fn domain_manifest(
         "metadata-fields".into(),
         toml::Value::Array(metadata_fields),
     );
+    root.insert(
+        "style-definitions".into(),
+        toml::Value::Array(
+            project
+                .styles
+                .iter()
+                .enumerate()
+                .map(|(order, style)| encode_style_definition(style, order))
+                .collect(),
+        ),
+    );
     root.insert("parchmint-structure".into(), toml::Value::Table(structure));
     let mut persistence = toml::map::Map::new();
     persistence.insert(
@@ -627,6 +786,40 @@ fn domain_manifest(
                     (
                         stable_id_text(document.as_bytes()),
                         toml::Value::Integer(*revision as i64),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    if let Some(identity) = frontier.save_identity {
+        persistence.insert(
+            "save-identity".into(),
+            toml::Value::String(hex_text(identity.as_bytes())),
+        );
+    }
+    persistence.insert(
+        "document-summaries".into(),
+        toml::Value::Table(
+            frontier
+                .document_summaries
+                .iter()
+                .map(|(document, summary)| {
+                    let mut value = toml::map::Map::new();
+                    value.insert(
+                        "revision".into(),
+                        toml::Value::Integer(summary.revision as i64),
+                    );
+                    value.insert(
+                        "content-hash".into(),
+                        toml::Value::String(hex_text(summary.content_hash.as_bytes())),
+                    );
+                    value.insert(
+                        "word-count".into(),
+                        toml::Value::Integer(summary.word_count as i64),
+                    );
+                    (
+                        stable_id_text(document.as_bytes()),
+                        toml::Value::Table(value),
                     )
                 })
                 .collect(),
@@ -669,10 +862,95 @@ fn decode_persistence_frontier(
             revision,
         );
     }
+    let save_identity = table
+        .get("save-identity")
+        .and_then(toml::Value::as_str)
+        .map(parse_content_hash)
+        .transpose()?;
+    let mut document_summaries = BTreeMap::new();
+    for (document, value) in table
+        .get("document-summaries")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        let summary = value
+            .as_table()
+            .ok_or_else(|| FormatError::InvalidManifest("invalid document summary".into()))?;
+        let revision = summary
+            .get("revision")
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| FormatError::InvalidManifest("invalid summary revision".into()))?;
+        let content_hash = summary
+            .get("content-hash")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| FormatError::InvalidManifest("missing summary content hash".into()))
+            .and_then(parse_content_hash)?;
+        let word_count = summary
+            .get("word-count")
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| FormatError::InvalidManifest("invalid summary word count".into()))?;
+        let document = DomainDocumentId::from_bytes(parse_stable_id(document)?);
+        if revision
+            != document_revisions
+                .get(&document)
+                .copied()
+                .unwrap_or_default()
+        {
+            return Err(FormatError::InvalidManifest(
+                "document summary revision does not match frontier".into(),
+            ));
+        }
+        document_summaries.insert(
+            document,
+            CanonicalDocumentSummary {
+                revision,
+                content_hash,
+                word_count,
+            },
+        );
+    }
     Ok(CanonicalPersistenceFrontier {
         recovery_project_revision,
         document_revisions,
+        save_identity,
+        document_summaries,
     })
+}
+
+fn hex_text(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut text, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    text
+}
+
+fn parse_content_hash(value: &str) -> Result<ContentHash, FormatError> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(FormatError::InvalidManifest(
+            "content hash is not 64 hexadecimal digits".into(),
+        ));
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        bytes[index] = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
+    }
+    Ok(ContentHash::from_bytes(bytes))
+}
+
+fn hex_digit(byte: u8) -> Result<u8, FormatError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(FormatError::InvalidManifest(
+            "invalid hexadecimal digit".into(),
+        )),
+    }
 }
 
 fn encode_node_children(
@@ -704,6 +982,10 @@ fn encode_node_children(
         value.insert(
             "export-excluded".into(),
             toml::Value::Boolean(node.export_settings.excluded),
+        );
+        value.insert(
+            "export-emit-titles".into(),
+            toml::Value::String(encode_export_setting(node.export_settings.emit_titles).into()),
         );
         value.insert(
             "export-starts-new-page".into(),
@@ -755,6 +1037,145 @@ fn encode_node_children(
     Ok(())
 }
 
+fn encode_deletion_tombstone(tombstone: &DeletionTombstone) -> Result<toml::Value, FormatError> {
+    let mut value = toml::map::Map::new();
+    value.insert(
+        "node-id".into(),
+        toml::Value::String(stable_id_text(tombstone.node_id.as_bytes())),
+    );
+    value.insert("title".into(), toml::Value::String(tombstone.title.clone()));
+    encode_node_kind(&mut value, tombstone.kind);
+    value.insert(
+        "section".into(),
+        toml::Value::String(
+            match tombstone.section {
+                ProjectSection::Manuscript => "manuscript",
+                ProjectSection::Research => "research",
+            }
+            .into(),
+        ),
+    );
+    value.insert(
+        "former-parent".into(),
+        toml::Value::String(stable_id_text(tombstone.former_parent.as_bytes())),
+    );
+    value.insert(
+        "former-index".into(),
+        toml::Value::Integer(i64::try_from(tombstone.former_index).map_err(|_| {
+            FormatError::InvalidManifest("deleted item order exceeds the format limit".into())
+        })?),
+    );
+    value.insert(
+        "deleted-at-unix-millis".into(),
+        toml::Value::Integer(
+            i64::try_from(tombstone.deleted_at_unix_millis).map_err(|_| {
+                FormatError::InvalidManifest("deletion time exceeds the format limit".into())
+            })?,
+        ),
+    );
+    if let Some(checkpoint) = tombstone.restoring_checkpoint {
+        value.insert(
+            "restoring-checkpoint".into(),
+            toml::Value::String(stable_id_text(checkpoint.as_bytes())),
+        );
+    }
+    value.insert(
+        "subtree".into(),
+        toml::Value::Array(tombstone.subtree.iter().map(encode_deleted_node).collect()),
+    );
+    Ok(toml::Value::Table(value))
+}
+
+fn encode_deleted_node(snapshot: &DeletedNodeSnapshot) -> toml::Value {
+    let mut value = encode_project_node(&snapshot.node);
+    if let Some(parent) = snapshot.parent {
+        value.insert(
+            "parent".into(),
+            toml::Value::String(stable_id_text(parent.as_bytes())),
+        );
+    }
+    value.insert(
+        "children".into(),
+        toml::Value::Array(
+            snapshot
+                .children
+                .iter()
+                .map(|child| toml::Value::String(stable_id_text(child.as_bytes())))
+                .collect(),
+        ),
+    );
+    toml::Value::Table(value)
+}
+
+fn encode_project_node(node: &ProjectNode) -> toml::Table {
+    let mut value = toml::map::Map::new();
+    value.insert(
+        "id".into(),
+        toml::Value::String(stable_id_text(node.id.as_bytes())),
+    );
+    value.insert("title".into(), toml::Value::String(node.title.clone()));
+    value.insert(
+        "synopsis".into(),
+        toml::Value::String(node.synopsis.clone()),
+    );
+    value.insert(
+        "export-excluded".into(),
+        toml::Value::Boolean(node.export_settings.excluded),
+    );
+    value.insert(
+        "export-emit-titles".into(),
+        toml::Value::String(encode_export_setting(node.export_settings.emit_titles).into()),
+    );
+    value.insert(
+        "export-starts-new-page".into(),
+        toml::Value::Boolean(node.export_settings.starts_new_page),
+    );
+    value.insert(
+        "metadata".into(),
+        toml::Value::Table(
+            node.metadata
+                .iter()
+                .map(|(field, text)| {
+                    (
+                        stable_id_text(field.as_bytes()),
+                        toml::Value::String(text.clone()),
+                    )
+                })
+                .collect(),
+        ),
+    );
+    encode_node_kind(&mut value, node.kind);
+    value
+}
+
+fn encode_node_kind(value: &mut toml::Table, kind: NodeKind) {
+    match kind {
+        NodeKind::Root(section) => {
+            value.insert("kind".into(), toml::Value::String("root".into()));
+            value.insert(
+                "root-section".into(),
+                toml::Value::String(
+                    match section {
+                        ProjectSection::Manuscript => "manuscript",
+                        ProjectSection::Research => "research",
+                    }
+                    .into(),
+                ),
+            );
+        }
+        NodeKind::Group => {
+            value.insert("kind".into(), toml::Value::String("group".into()));
+        }
+        NodeKind::Document(document) => {
+            value.insert("kind".into(), toml::Value::String("document".into()));
+            value.insert(
+                "document-id".into(),
+                toml::Value::String(stable_id_text(document.as_bytes())),
+            );
+        }
+    }
+}
+
 fn decode_domain_manifest(
     value: &toml::Value,
     project_id: ProjectId,
@@ -789,6 +1210,11 @@ fn decode_domain_manifest(
             .and_then(|table| table.get("export-excluded"))
             .and_then(toml::Value::as_bool)
             .unwrap_or(false),
+        emit_titles: decode_export_setting(project_value.and_then(|table| {
+            table
+                .get("export-emit-titles")
+                .and_then(toml::Value::as_str)
+        }))?,
         starts_new_page: project_value
             .and_then(|table| table.get("export-starts-new-page"))
             .and_then(toml::Value::as_bool)
@@ -800,6 +1226,37 @@ fn decode_domain_manifest(
         .and_then(|revision| u64::try_from(revision).ok())
         .map(Into::into)
         .unwrap_or_default();
+    if let Some(style_values) = value.get("style-definitions") {
+        let style_values = style_values.as_array().ok_or_else(|| {
+            FormatError::InvalidManifest("style-definitions must be an array".into())
+        })?;
+        let mut ordered = BTreeMap::new();
+        for value in style_values {
+            let table = required_table(value, "style definition")?;
+            let order = table
+                .get("order")
+                .and_then(toml::Value::as_integer)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    FormatError::InvalidManifest("style definition order is invalid".into())
+                })?;
+            if ordered
+                .insert(order, decode_style_definition(table)?)
+                .is_some()
+            {
+                return Err(FormatError::InvalidManifest(
+                    "duplicate style definition order".into(),
+                ));
+            }
+        }
+        if ordered.keys().copied().ne(0..ordered.len()) {
+            return Err(FormatError::InvalidManifest(
+                "style definition order must be contiguous".into(),
+            ));
+        }
+        project.styles = StyleCatalog::from_definitions(ordered.into_values())
+            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+    }
     for field in structure
         .get("metadata-fields")
         .and_then(toml::Value::as_array)
@@ -891,6 +1348,11 @@ fn decode_domain_manifest(
                 .get("export-excluded")
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(false),
+            emit_titles: decode_export_setting(
+                table
+                    .get("export-emit-titles")
+                    .and_then(toml::Value::as_str),
+            )?,
             starts_new_page: table
                 .get("export-starts-new-page")
                 .and_then(toml::Value::as_bool)
@@ -906,10 +1368,179 @@ fn decode_domain_manifest(
             }
         }
     }
+    for deletion in structure
+        .get("deletions")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let tombstone = decode_deletion_tombstone(required_table(deletion, "deletion")?)?;
+        if project
+            .deleted
+            .insert(tombstone.node_id, tombstone)
+            .is_some()
+        {
+            return Err(FormatError::InvalidManifest(
+                "duplicate deletion tombstone ID".into(),
+            ));
+        }
+    }
     project
         .validate()
         .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
     Ok(Some((project, paths)))
+}
+
+fn decode_deletion_tombstone(table: &toml::Table) -> Result<DeletionTombstone, FormatError> {
+    let node_id = NodeId::from_bytes(parse_stable_id(required_str(table, "node-id")?)?);
+    let kind = decode_node_kind(table)?;
+    let section = decode_section(required_str(table, "section")?)?;
+    let former_parent = NodeId::from_bytes(parse_stable_id(required_str(table, "former-parent")?)?);
+    let former_index = table
+        .get("former-index")
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| FormatError::InvalidManifest("former deletion order is invalid".into()))?;
+    let deleted_at_unix_millis = table
+        .get("deleted-at-unix-millis")
+        .and_then(toml::Value::as_integer)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| FormatError::InvalidManifest("deletion time is invalid".into()))?;
+    let restoring_checkpoint = table
+        .get("restoring-checkpoint")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    FormatError::InvalidManifest("restoring checkpoint is invalid".into())
+                })
+                .and_then(parse_stable_id)
+                .map(CheckpointId::from_bytes)
+        })
+        .transpose()?;
+    let subtree = table
+        .get("subtree")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| FormatError::InvalidManifest("deleted subtree is missing".into()))?
+        .iter()
+        .map(|value| decode_deleted_node(required_table(value, "deleted node")?))
+        .collect::<Result<Vec<_>, _>>()?;
+    let root = subtree.first().ok_or_else(|| {
+        FormatError::InvalidManifest("deleted subtree must contain its root".into())
+    })?;
+    if root.node.id != node_id || root.node.kind != kind {
+        return Err(FormatError::InvalidManifest(
+            "deletion tombstone does not match its subtree root".into(),
+        ));
+    }
+    Ok(DeletionTombstone {
+        node_id,
+        title: required_str(table, "title")?.to_owned(),
+        kind,
+        section,
+        former_parent,
+        former_index,
+        deleted_at_unix_millis,
+        restoring_checkpoint,
+        subtree,
+    })
+}
+
+fn decode_deleted_node(table: &toml::Table) -> Result<DeletedNodeSnapshot, FormatError> {
+    let id = NodeId::from_bytes(parse_stable_id(required_str(table, "id")?)?);
+    let parent = table
+        .get("parent")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    FormatError::InvalidManifest("deleted node parent is invalid".into())
+                })
+                .and_then(parse_stable_id)
+                .map(NodeId::from_bytes)
+        })
+        .transpose()?;
+    let children = table
+        .get("children")
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| FormatError::InvalidManifest("deleted node children are missing".into()))?
+        .iter()
+        .map(|child| {
+            child
+                .as_str()
+                .ok_or_else(|| FormatError::InvalidManifest("deleted child ID is invalid".into()))
+                .and_then(parse_stable_id)
+                .map(NodeId::from_bytes)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let title = required_str(table, "title")?;
+    let mut node = match decode_node_kind(table)? {
+        NodeKind::Group => ProjectNode::group(id, title),
+        NodeKind::Document(document) => ProjectNode::document(id, document, title),
+        NodeKind::Root(_) => {
+            return Err(FormatError::InvalidManifest(
+                "fixed roots cannot appear in a deleted subtree".into(),
+            ));
+        }
+    };
+    node.synopsis = table
+        .get("synopsis")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    node.export_settings = ProjectExportSettings {
+        excluded: table
+            .get("export-excluded")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+        emit_titles: decode_export_setting(
+            table
+                .get("export-emit-titles")
+                .and_then(toml::Value::as_str),
+        )?,
+        starts_new_page: table
+            .get("export-starts-new-page")
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false),
+    };
+    if let Some(metadata) = table.get("metadata").and_then(toml::Value::as_table) {
+        for (field, value) in metadata {
+            let field = parchmint_domain::MetadataFieldId::from_bytes(parse_stable_id(field)?);
+            let text = value.as_str().ok_or_else(|| {
+                FormatError::InvalidManifest("deleted node metadata is not text".into())
+            })?;
+            node.metadata.insert(field, text.to_owned());
+        }
+    }
+    Ok(DeletedNodeSnapshot {
+        node,
+        parent,
+        children,
+    })
+}
+
+fn decode_node_kind(table: &toml::Table) -> Result<NodeKind, FormatError> {
+    match required_str(table, "kind")? {
+        "root" => Ok(NodeKind::Root(decode_section(required_str(
+            table,
+            "root-section",
+        )?)?)),
+        "group" => Ok(NodeKind::Group),
+        "document" => Ok(NodeKind::Document(DomainDocumentId::from_bytes(
+            parse_stable_id(required_str(table, "document-id")?)?,
+        ))),
+        _ => Err(FormatError::InvalidManifest("node kind is invalid".into())),
+    }
+}
+
+fn decode_section(value: &str) -> Result<ProjectSection, FormatError> {
+    match value {
+        "manuscript" => Ok(ProjectSection::Manuscript),
+        "research" => Ok(ProjectSection::Research),
+        _ => Err(FormatError::InvalidManifest(
+            "project section is invalid".into(),
+        )),
+    }
 }
 
 fn required_table<'a>(
@@ -926,6 +1557,94 @@ fn required_str<'a>(table: &'a toml::Table, field: &'static str) -> Result<&'a s
         .get(field)
         .and_then(toml::Value::as_str)
         .ok_or_else(|| FormatError::InvalidManifest(format!("{field} is missing or invalid")))
+}
+
+fn encode_style_definition(style: &StyleDefinition, order: usize) -> toml::Value {
+    let mut value = toml::map::Map::new();
+    value.insert(
+        "id".into(),
+        toml::Value::String(stable_id_text(style.id.as_bytes())),
+    );
+    value.insert(
+        "display-name".into(),
+        toml::Value::String(style.display_name.clone()),
+    );
+    value.insert(
+        "role".into(),
+        toml::Value::String(style_role_text(style.role).into()),
+    );
+    if let Some(parent) = style.inherits {
+        value.insert(
+            "inherits".into(),
+            toml::Value::String(stable_id_text(parent.as_bytes())),
+        );
+    }
+    value.insert("order".into(), toml::Value::Integer(order as i64));
+    toml::Value::Table(value)
+}
+
+fn decode_style_definition(table: &toml::Table) -> Result<StyleDefinition, FormatError> {
+    let role = match required_str(table, "role")? {
+        "body" => StyleRole::Body,
+        "document-title" => StyleRole::DocumentTitle,
+        "heading-1" => StyleRole::Heading1,
+        "heading-2" => StyleRole::Heading2,
+        "heading-3" => StyleRole::Heading3,
+        "block-quote" => StyleRole::BlockQuote,
+        "verse" => StyleRole::Verse,
+        "custom" => StyleRole::Custom,
+        _ => return Err(FormatError::InvalidManifest("invalid style role".into())),
+    };
+    Ok(StyleDefinition {
+        id: StyleId::from_bytes(parse_stable_id(required_str(table, "id")?)?),
+        display_name: required_str(table, "display-name")?.to_owned(),
+        role,
+        inherits: table
+            .get("inherits")
+            .map(|value| {
+                value
+                    .as_str()
+                    .ok_or_else(|| {
+                        FormatError::InvalidManifest("style inherits must be an ID".into())
+                    })
+                    .and_then(parse_stable_id)
+                    .map(StyleId::from_bytes)
+            })
+            .transpose()?,
+        properties: StyleProperties::default(),
+    })
+}
+
+fn style_role_text(role: StyleRole) -> &'static str {
+    match role {
+        StyleRole::Body => "body",
+        StyleRole::DocumentTitle => "document-title",
+        StyleRole::Heading1 => "heading-1",
+        StyleRole::Heading2 => "heading-2",
+        StyleRole::Heading3 => "heading-3",
+        StyleRole::BlockQuote => "block-quote",
+        StyleRole::Verse => "verse",
+        StyleRole::Custom => "custom",
+    }
+}
+
+fn encode_export_setting(setting: ProjectExportSetting) -> &'static str {
+    match setting {
+        ProjectExportSetting::Inherit => "inherit",
+        ProjectExportSetting::Enabled => "enabled",
+        ProjectExportSetting::Disabled => "disabled",
+    }
+}
+
+fn decode_export_setting(value: Option<&str>) -> Result<ProjectExportSetting, FormatError> {
+    match value.unwrap_or("inherit") {
+        "inherit" => Ok(ProjectExportSetting::Inherit),
+        "enabled" => Ok(ProjectExportSetting::Enabled),
+        "disabled" => Ok(ProjectExportSetting::Disabled),
+        _ => Err(FormatError::InvalidManifest(
+            "export title setting must be inherit, enabled, or disabled".into(),
+        )),
+    }
 }
 
 fn stable_id_text(bytes: &[u8; 16]) -> String {
@@ -1031,7 +1750,25 @@ impl CanonicalCodec for ProjectFormatCodec {
                 "document ID is empty or unsafe".into(),
             ));
         }
-        Ok(CanonicalAnnotations(canonicalize_annotations(sidecar)?))
+        let annotations = CanonicalAnnotations(canonicalize_annotations(sidecar)?);
+        let threads = annotations.typed_threads()?;
+        let mut thread_ids = BTreeSet::new();
+        let mut message_ids = BTreeSet::new();
+        for thread in threads {
+            if !thread_ids.insert(thread.id) {
+                return Err(FormatError::InvalidAnnotations(
+                    "duplicate thread ID".into(),
+                ));
+            }
+            for message in thread.messages {
+                if !message_ids.insert(message.id) {
+                    return Err(FormatError::InvalidAnnotations(
+                        "duplicate message ID".into(),
+                    ));
+                }
+            }
+        }
+        Ok(annotations)
     }
 
     fn encode(&self, value: &CanonicalResource) -> Result<CanonicalBytes, FormatError> {
@@ -1194,6 +1931,242 @@ fn canonicalize_annotations(
     })
 }
 
+fn decode_thread(value: &serde_json::Value) -> Result<AnnotationThread, FormatError> {
+    let mut object = annotation_object(value, "thread")?.clone();
+    let id = annotation_id(take_string(&mut object, "id")?)?;
+    let resolved = take_bool(&mut object, "resolved")?;
+    let messages = take_array(&mut object, "messages")?
+        .iter()
+        .map(decode_message)
+        .collect::<Result<Vec<_>, _>>()?;
+    if messages.is_empty() {
+        return annotation_error("thread messages cannot be empty");
+    }
+    let anchor = decode_comment_anchor(&take_value(&mut object, "anchor")?)?;
+    Ok(AnnotationThread {
+        id,
+        messages,
+        resolved,
+        anchor,
+        unknown_fields: decode_unknown(object)?,
+    })
+}
+
+fn decode_message(value: &serde_json::Value) -> Result<AnnotationMessage, FormatError> {
+    let mut object = annotation_object(value, "message")?.clone();
+    let id = annotation_id(take_string(&mut object, "id")?)?;
+    let body = take_string(&mut object, "body")?;
+    if body.trim().is_empty() {
+        return annotation_error("comment body must contain text");
+    }
+    Ok(AnnotationMessage {
+        id,
+        body,
+        unknown_fields: decode_unknown(object)?,
+    })
+}
+
+fn decode_comment_anchor(value: &serde_json::Value) -> Result<AnnotationAnchor, FormatError> {
+    let mut object = annotation_object(value, "anchor")?.clone();
+    match take_string(&mut object, "kind")?.as_str() {
+        "document" => Ok(AnnotationAnchor::Document {
+            unknown_fields: decode_unknown(object)?,
+        }),
+        "range" | "position" => {
+            let block = annotation_id(take_string(&mut object, "block_id")?)?;
+            let start = take_u64(&mut object, "start")?;
+            let end = take_u64(&mut object, "end")?;
+            if end < start {
+                return annotation_error("anchor end precedes start");
+            }
+            let quote = take_string(&mut object, "quote")?;
+            let context_before = take_string(&mut object, "context_before")?;
+            let context_after = take_string(&mut object, "context_after")?;
+            let orphaned = take_bool(&mut object, "orphaned")?;
+            Ok(AnnotationAnchor::Text {
+                block,
+                start,
+                end,
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields: decode_unknown(object)?,
+            })
+        }
+        _ => annotation_error("anchor kind is unknown"),
+    }
+}
+
+fn encode_thread(thread: &AnnotationThread) -> Result<serde_json::Value, FormatError> {
+    let mut object = encode_unknown(&thread.unknown_fields)?;
+    object.insert("id".into(), stable_id_text(&thread.id).into());
+    object.insert("resolved".into(), thread.resolved.into());
+    object.insert(
+        "messages".into(),
+        serde_json::Value::Array(
+            thread
+                .messages
+                .iter()
+                .map(encode_message)
+                .collect::<Result<_, _>>()?,
+        ),
+    );
+    object.insert("anchor".into(), encode_comment_anchor(&thread.anchor)?);
+    Ok(serde_json::Value::Object(object))
+}
+
+fn encode_message(message: &AnnotationMessage) -> Result<serde_json::Value, FormatError> {
+    let mut object = encode_unknown(&message.unknown_fields)?;
+    object.insert("id".into(), stable_id_text(&message.id).into());
+    object.insert("body".into(), message.body.clone().into());
+    Ok(serde_json::Value::Object(object))
+}
+
+fn encode_comment_anchor(anchor: &AnnotationAnchor) -> Result<serde_json::Value, FormatError> {
+    let (mut object, kind) = match anchor {
+        AnnotationAnchor::Document { unknown_fields } => {
+            (encode_unknown(unknown_fields)?, "document")
+        }
+        AnnotationAnchor::Text {
+            block,
+            start,
+            end,
+            quote,
+            context_before,
+            context_after,
+            orphaned,
+            unknown_fields,
+        } => {
+            let mut object = encode_unknown(unknown_fields)?;
+            object.insert("block_id".into(), stable_id_text(block).into());
+            object.insert("start".into(), (*start).into());
+            object.insert("end".into(), (*end).into());
+            object.insert("quote".into(), quote.clone().into());
+            object.insert("context_before".into(), context_before.clone().into());
+            object.insert("context_after".into(), context_after.clone().into());
+            object.insert("orphaned".into(), (*orphaned).into());
+            (object, if start == end { "position" } else { "range" })
+        }
+    };
+    object.insert("kind".into(), kind.into());
+    Ok(serde_json::Value::Object(object))
+}
+
+fn annotation_object<'a>(
+    value: &'a serde_json::Value,
+    name: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, FormatError> {
+    value
+        .as_object()
+        .ok_or_else(|| FormatError::InvalidAnnotations(format!("{name} must be an object")))
+}
+
+fn take_value(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<serde_json::Value, FormatError> {
+    object
+        .remove(field)
+        .ok_or_else(|| FormatError::InvalidAnnotations(format!("{field} is required")))
+}
+
+fn take_string(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, FormatError> {
+    take_value(object, field)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| FormatError::InvalidAnnotations(format!("{field} must be a string")))
+}
+
+fn take_bool(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<bool, FormatError> {
+    take_value(object, field)?
+        .as_bool()
+        .ok_or_else(|| FormatError::InvalidAnnotations(format!("{field} must be a boolean")))
+}
+
+fn take_u64(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<u64, FormatError> {
+    take_value(object, field)?.as_u64().ok_or_else(|| {
+        FormatError::InvalidAnnotations(format!("{field} must be a non-negative integer"))
+    })
+}
+
+fn take_array(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<serde_json::Value>, FormatError> {
+    take_value(object, field)?
+        .as_array()
+        .cloned()
+        .ok_or_else(|| FormatError::InvalidAnnotations(format!("{field} must be an array")))
+}
+
+fn annotation_id(value: String) -> Result<[u8; 16], FormatError> {
+    parse_stable_id(&value).map_err(|_| {
+        FormatError::InvalidAnnotations("annotation ID must be 32 hexadecimal digits".into())
+    })
+}
+
+fn annotation_error<T>(reason: &str) -> Result<T, FormatError> {
+    Err(FormatError::InvalidAnnotations(reason.into()))
+}
+
+fn decode_unknown(
+    object: serde_json::Map<String, serde_json::Value>,
+) -> Result<BTreeMap<String, AnnotationValue>, FormatError> {
+    object
+        .into_iter()
+        .map(|(key, value)| Ok((key, annotation_value(value)?)))
+        .collect()
+}
+
+fn encode_unknown(
+    object: &BTreeMap<String, AnnotationValue>,
+) -> Result<serde_json::Map<String, serde_json::Value>, FormatError> {
+    object
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), json_value(value)?)))
+        .collect()
+}
+
+fn annotation_value(value: serde_json::Value) -> Result<AnnotationValue, FormatError> {
+    Ok(match value {
+        serde_json::Value::Null => AnnotationValue::Null,
+        serde_json::Value::Bool(value) => AnnotationValue::Bool(value),
+        serde_json::Value::Number(value) => AnnotationValue::Number(value.to_string()),
+        serde_json::Value::String(value) => AnnotationValue::String(value),
+        serde_json::Value::Array(values) => AnnotationValue::Array(
+            values
+                .into_iter()
+                .map(annotation_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        serde_json::Value::Object(values) => AnnotationValue::Object(decode_unknown(values)?),
+    })
+}
+
+fn json_value(value: &AnnotationValue) -> Result<serde_json::Value, FormatError> {
+    Ok(match value {
+        AnnotationValue::Null => serde_json::Value::Null,
+        AnnotationValue::Bool(value) => (*value).into(),
+        AnnotationValue::Number(value) => serde_json::from_str(value)
+            .map_err(|_| FormatError::InvalidAnnotations("unknown number is invalid".into()))?,
+        AnnotationValue::String(value) => value.clone().into(),
+        AnnotationValue::Array(values) => {
+            serde_json::Value::Array(values.iter().map(json_value).collect::<Result<_, _>>()?)
+        }
+        AnnotationValue::Object(values) => serde_json::Value::Object(encode_unknown(values)?),
+    })
+}
+
 fn validate_annotation_value(value: serde_json::Value) -> Result<serde_json::Value, FormatError> {
     fn check(value: &serde_json::Value) -> bool {
         match value {
@@ -1238,6 +2211,230 @@ fn sort_json(value: serde_json::Value) -> serde_json::Value {
 struct CssRule {
     selector: String,
     declarations: BTreeMap<String, String>,
+}
+
+fn managed_style_selector(id: StyleId) -> String {
+    format!("[data-style-id=\"{}\"]", stable_id_text(id.as_bytes()))
+}
+
+fn managed_style_id(selector: &str) -> Option<Result<StyleId, FormatError>> {
+    let value = selector
+        .strip_prefix("[data-style-id=\"")?
+        .strip_suffix("\"]")?;
+    Some(
+        parse_stable_id(value)
+            .map(StyleId::from_bytes)
+            .map_err(|_| {
+                FormatError::InvalidStyles("managed style selector has an invalid ID".into())
+            }),
+    )
+}
+
+fn merge_managed_styles(
+    catalog: &StyleCatalog,
+    existing: &CanonicalStyles,
+) -> Result<CanonicalStyles, FormatError> {
+    catalog
+        .validate()
+        .map_err(|error| FormatError::InvalidStyles(error.to_string()))?;
+    let mut rules = existing
+        .rules
+        .iter()
+        .filter(|rule| managed_style_id(&rule.selector).is_none())
+        .cloned()
+        .collect::<Vec<_>>();
+    for style in catalog.iter() {
+        let declarations = encode_style_properties(&style.properties);
+        if !declarations.is_empty() {
+            rules.push(CssRule {
+                selector: managed_style_selector(style.id),
+                declarations,
+            });
+        }
+    }
+    rules.sort_by(|left, right| left.selector.cmp(&right.selector));
+    Ok(CanonicalStyles { rules })
+}
+
+fn hydrate_style_properties(
+    catalog: &mut StyleCatalog,
+    styles: &CanonicalStyles,
+) -> Result<(), FormatError> {
+    let mut definitions = catalog.iter().cloned().collect::<Vec<_>>();
+    let by_id = definitions
+        .iter()
+        .enumerate()
+        .map(|(index, style)| (style.id, index))
+        .collect::<BTreeMap<_, _>>();
+    for rule in &styles.rules {
+        let Some(id) = managed_style_id(&rule.selector) else {
+            continue;
+        };
+        let id = id?;
+        let index = by_id.get(&id).copied().ok_or_else(|| {
+            FormatError::InvalidStyles("managed rule refers to an unknown style ID".into())
+        })?;
+        definitions[index].properties = decode_style_properties(&rule.declarations)?;
+    }
+    *catalog = StyleCatalog::from_definitions(definitions)
+        .map_err(|error| FormatError::InvalidStyles(error.to_string()))?;
+    Ok(())
+}
+
+fn encode_style_properties(properties: &StyleProperties) -> BTreeMap<String, String> {
+    let mut declarations = BTreeMap::new();
+    if let Some(value) = &properties.font_family {
+        declarations.insert("font-family".into(), value.clone());
+    }
+    if let Some(value) = properties.font_size_points {
+        declarations.insert("font-size".into(), point_value(value));
+    }
+    if let Some(value) = properties.weight {
+        declarations.insert("font-weight".into(), value.to_string());
+    }
+    if let Some(value) = properties.italic {
+        declarations.insert(
+            "font-style".into(),
+            if value { "italic" } else { "normal" }.into(),
+        );
+    }
+    if let Some(value) = properties.alignment {
+        declarations.insert(
+            "text-align".into(),
+            match value {
+                TextAlignment::Start => "start",
+                TextAlignment::Center => "center",
+                TextAlignment::End => "end",
+                TextAlignment::Justify => "justify",
+            }
+            .into(),
+        );
+    }
+    for (property, value) in [
+        ("text-indent", properties.first_line_indent_points),
+        ("margin-left", properties.left_indent_points),
+        ("margin-right", properties.right_indent_points),
+        ("margin-top", properties.space_before_points),
+        ("margin-bottom", properties.space_after_points),
+    ] {
+        if let Some(value) = value {
+            declarations.insert(property.into(), point_value(value));
+        }
+    }
+    if let Some(value) = properties.line_spacing {
+        declarations.insert("line-height".into(), finite_number(value));
+    }
+    if let Some(value) = properties.keep_with_next {
+        declarations.insert("keep-with-next".into(), value.to_string());
+    }
+    if let Some(value) = properties.page_break_before {
+        declarations.insert(
+            "page-break-before".into(),
+            if value { "always" } else { "auto" }.into(),
+        );
+    }
+    declarations
+}
+
+fn decode_style_properties(
+    declarations: &BTreeMap<String, String>,
+) -> Result<StyleProperties, FormatError> {
+    let mut properties = StyleProperties::default();
+    for (property, value) in declarations {
+        match property.as_str() {
+            "font-family" => properties.font_family = Some(value.clone()),
+            "font-size" => properties.font_size_points = Some(parse_points(value)?),
+            "font-weight" => {
+                properties.weight = Some(value.parse().map_err(|_| {
+                    FormatError::InvalidStyles("font-weight must be an integer".into())
+                })?)
+            }
+            "font-style" => {
+                properties.italic = Some(match value.as_str() {
+                    "italic" => true,
+                    "normal" => false,
+                    _ => {
+                        return Err(FormatError::InvalidStyles(
+                            "font-style must be italic or normal".into(),
+                        ));
+                    }
+                })
+            }
+            "text-align" => {
+                properties.alignment = Some(match value.as_str() {
+                    "start" => TextAlignment::Start,
+                    "center" => TextAlignment::Center,
+                    "end" => TextAlignment::End,
+                    "justify" => TextAlignment::Justify,
+                    _ => {
+                        return Err(FormatError::InvalidStyles(
+                            "text-align has an unsupported value".into(),
+                        ));
+                    }
+                })
+            }
+            "text-indent" => properties.first_line_indent_points = Some(parse_points(value)?),
+            "margin-left" => properties.left_indent_points = Some(parse_points(value)?),
+            "margin-right" => properties.right_indent_points = Some(parse_points(value)?),
+            "line-height" => properties.line_spacing = Some(parse_finite_number(value)?),
+            "margin-top" => properties.space_before_points = Some(parse_points(value)?),
+            "margin-bottom" => properties.space_after_points = Some(parse_points(value)?),
+            "keep-with-next" => {
+                properties.keep_with_next = Some(parse_css_bool(value, "keep-with-next")?)
+            }
+            "page-break-before" => {
+                properties.page_break_before = Some(match value.as_str() {
+                    "always" => true,
+                    "auto" => false,
+                    _ => {
+                        return Err(FormatError::InvalidStyles(
+                            "page-break-before must be always or auto".into(),
+                        ));
+                    }
+                })
+            }
+            _ => unreachable!("the CSS parser rejects unsupported properties"),
+        }
+    }
+    Ok(properties)
+}
+
+fn point_value(value: f32) -> String {
+    format!("{}pt", finite_number(value))
+}
+
+fn finite_number(value: f32) -> String {
+    let value = value.to_string();
+    value.strip_suffix(".0").unwrap_or(&value).to_owned()
+}
+
+fn parse_points(value: &str) -> Result<f32, FormatError> {
+    let number = value.strip_suffix("pt").ok_or_else(|| {
+        FormatError::InvalidStyles("managed point values must use pt units".into())
+    })?;
+    parse_finite_number(number)
+}
+
+fn parse_finite_number(value: &str) -> Result<f32, FormatError> {
+    let number: f32 = value
+        .parse()
+        .map_err(|_| FormatError::InvalidStyles("managed numeric value is invalid".into()))?;
+    if !number.is_finite() {
+        return Err(FormatError::InvalidStyles(
+            "managed numeric value must be finite".into(),
+        ));
+    }
+    Ok(number)
+}
+
+fn parse_css_bool(value: &str, property: &str) -> Result<bool, FormatError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(FormatError::InvalidStyles(format!(
+            "{property} must be true or false"
+        ))),
+    }
 }
 
 fn parse_css(text: &str) -> Result<Vec<CssRule>, FormatError> {
@@ -1289,6 +2486,10 @@ fn parse_css(text: &str) -> Result<Vec<CssRule>, FormatError> {
 
 fn canonical_selector(selector: &str) -> Result<String, FormatError> {
     let selector = collapse_whitespace(selector);
+    if let Some(id) = managed_style_id(&selector) {
+        id?;
+        return Ok(selector);
+    }
     if selector.is_empty()
         || selector.chars().any(|character| {
             character.is_control() || matches!(character, '<' | '>' | '"' | '\'' | '\\')
@@ -1839,6 +3040,43 @@ mod tests {
     }
 
     #[test]
+    fn typed_annotation_sidecars_preserve_unknown_fields_and_reject_malformed_ranges() {
+        let bytes = br#"{
+          "schema":"parchmint.annotation-sidecar/v1",
+          "document_id":"01010101010101010101010101010101",
+          "threads":[{
+            "id":"02020202020202020202020202020202",
+            "resolved":false,
+            "future":{"author":"kept"},
+            "messages":[{"id":"03030303030303030303030303030303","body":"note","display":"kept"}],
+            "anchor":{"kind":"range","block_id":"04040404040404040404040404040404","start":1,"end":3,"quote":"bc","context_before":"a","context_after":"d","orphaned":false,"confidence":1}
+          }]
+        }"#;
+        let decoded = codec().decode_annotations(bytes).unwrap();
+        let threads = decoded.typed_threads().unwrap();
+        assert!(threads[0].unknown_fields.contains_key("future"));
+        assert!(
+            threads[0].messages[0]
+                .unknown_fields
+                .contains_key("display")
+        );
+        let encoded = codec()
+            .encode(&CanonicalResource::Annotations(
+                CanonicalAnnotations::from_typed(decoded.document_id(), &threads).unwrap(),
+            ))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&encoded.bytes).unwrap();
+        assert_eq!(value["threads"][0]["future"]["author"], "kept");
+        assert_eq!(value["threads"][0]["anchor"]["confidence"], 1);
+
+        let malformed = bytes.to_vec();
+        let malformed = String::from_utf8(malformed)
+            .unwrap()
+            .replace("\"start\":1,\"end\":3", "\"start\":4,\"end\":3");
+        assert!(codec().decode_annotations(malformed.as_bytes()).is_err());
+    }
+
+    #[test]
     fn semantic_css_has_one_stable_safe_representation() {
         let styles = codec()
             .decode_styles(
@@ -1859,6 +3097,127 @@ mod tests {
                 .decode_styles(b"@import url(https://example.invalid); ")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn style_definitions_and_managed_properties_round_trip_without_rewriting_unmanaged_css() {
+        use parchmint_domain::{StyleDefinition, StyleProperties, TextAlignment};
+
+        let mut project = Project::new(ProjectId::from_bytes([1; 16]));
+        let mut body = project.styles.get(StyleCatalog::body_id()).unwrap().clone();
+        body.display_name = "Narrative".into();
+        body.properties = StyleProperties {
+            font_family: Some("Source Serif 4".into()),
+            font_size_points: Some(12.5),
+            weight: Some(450),
+            italic: Some(false),
+            alignment: Some(TextAlignment::Justify),
+            first_line_indent_points: Some(18.0),
+            left_indent_points: Some(0.0),
+            right_indent_points: Some(0.0),
+            line_spacing: Some(1.4),
+            space_before_points: Some(2.0),
+            space_after_points: Some(6.0),
+            keep_with_next: Some(false),
+            page_break_before: Some(false),
+        };
+        project.styles.upsert(body.clone()).unwrap();
+        let custom_id = StyleId::from_bytes([8; 16]);
+        let mut custom = StyleDefinition::custom(custom_id, "Letter");
+        custom.properties.italic = Some(true);
+        project.styles.upsert(custom.clone()).unwrap();
+
+        let styles_path = CanonicalRelativePath::parse("styles.css").unwrap();
+        let existing = BTreeMap::from([(
+            styles_path.clone(),
+            b".legacy {\n  font-weight: bold;\n}\n".to_vec(),
+        )]);
+        let encoding = codec()
+            .encode_domain_project(
+                &project,
+                &BTreeMap::new(),
+                &existing,
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        let css = std::str::from_utf8(&encoding.resources[&styles_path].bytes).unwrap();
+        assert!(css.contains(".legacy {"));
+        assert!(css.contains(&managed_style_selector(StyleCatalog::body_id())));
+        assert!(css.contains("font-size: 12.5pt;"));
+
+        let manifest_path = CanonicalRelativePath::parse("project.toml").unwrap();
+        let manifest = codec()
+            .decode_manifest(&encoding.resources[&manifest_path].bytes)
+            .unwrap();
+        let styles = codec().decode_styles(css.as_bytes()).unwrap();
+        let (decoded, _) = codec()
+            .decode_domain_project_with_styles(&manifest, Some(&styles), project.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.styles.get(StyleCatalog::body_id()), Some(&body));
+        assert_eq!(decoded.styles.get(custom_id), Some(&custom));
+        assert_eq!(decoded.styles.iter().last().unwrap().id, custom_id);
+    }
+
+    #[test]
+    fn combined_style_hydration_rejects_unknown_ids_and_invalid_units() {
+        let project = Project::new(ProjectId::from_bytes([1; 16]));
+        let encoding = codec()
+            .encode_domain_project(
+                &project,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        let manifest = codec()
+            .decode_manifest(
+                &encoding.resources[&CanonicalRelativePath::parse("project.toml").unwrap()].bytes,
+            )
+            .unwrap();
+        for css in [
+            format!(
+                "{} {{ font-size: 12px; }}",
+                managed_style_selector(StyleCatalog::body_id())
+            ),
+            format!(
+                "{} {{ font-size: 12pt; }}",
+                managed_style_selector(StyleId::from_bytes([9; 16]))
+            ),
+        ] {
+            let styles = codec().decode_styles(css.as_bytes()).unwrap();
+            assert!(
+                codec()
+                    .decode_domain_project_with_styles(&manifest, Some(&styles), project.id)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_manifest_uses_reserved_defaults_and_preserves_unmanaged_styles() {
+        let manifest = codec()
+            .decode_manifest(
+                b"[project]\ntitle = 'Legacy'\n[parchmint-structure]\nversion = 1\nmetadata-fields = []\nnodes = []\n",
+            )
+            .unwrap();
+        let (project, _) = codec()
+            .decode_domain_project_with_styles(&manifest, None, ProjectId::from_bytes([1; 16]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(project.styles.iter().count(), 7);
+
+        let styles_path = CanonicalRelativePath::parse("styles.css").unwrap();
+        let legacy_css = b".body {\n  line-height: 1.5;\n}\n".to_vec();
+        let encoding = codec()
+            .encode_domain_project(
+                &project,
+                &BTreeMap::new(),
+                &BTreeMap::from([(styles_path.clone(), legacy_css.clone())]),
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        assert_eq!(encoding.resources[&styles_path].bytes, legacy_css);
     }
 
     #[test]
@@ -1939,7 +3298,7 @@ mod tests {
         );
         resources.insert(
             annotation_path.clone(),
-            br#"{"threads":[{"message":"line one\nline two"}],"document_id":"document-1","schema":"parchmint.annotation-sidecar/v1"}"#.to_vec(),
+            br#"{"threads":[{"id":"01010101010101010101010101010101","resolved":false,"messages":[{"id":"02020202020202020202020202020202","body":"line one\nline two"}],"anchor":{"kind":"document"}}],"document_id":"document-1","schema":"parchmint.annotation-sidecar/v1"}"#.to_vec(),
         );
 
         let migrated = codec()
@@ -1993,7 +3352,7 @@ mod tests {
     fn domain_project_round_trip_preserves_structure_metadata_and_stable_document_paths() {
         use parchmint_domain::{
             MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind,
-            ProjectCommand, apply_project_command,
+            ProjectCommand, ProjectExportSetting, ProjectExportSettings, apply_project_command,
         };
 
         let project_id = ProjectId::from_bytes([1; 16]);
@@ -2005,6 +3364,19 @@ mod tests {
         for command in [
             ProjectCommand::create_group(group, NodeId::manuscript_root(), 0, "Drafts"),
             ProjectCommand::create_document(node, document, group, 0, "Chapter One"),
+            ProjectCommand::set_project_export_settings(ProjectExportSettings {
+                excluded: false,
+                emit_titles: ProjectExportSetting::Disabled,
+                starts_new_page: true,
+            }),
+            ProjectCommand::set_node_export_settings(
+                node,
+                ProjectExportSettings {
+                    excluded: false,
+                    emit_titles: ProjectExportSetting::Enabled,
+                    starts_new_page: true,
+                },
+            ),
             ProjectCommand::UpsertMetadataField {
                 definition: MetadataFieldDefinition {
                     id: metadata,
@@ -2038,6 +3410,7 @@ mod tests {
         let frontier = CanonicalPersistenceFrontier {
             recovery_project_revision: 7,
             document_revisions: BTreeMap::from([(document, 11)]),
+            ..Default::default()
         };
         let encoding = codec()
             .encode_domain_project_with_frontier(
@@ -2073,17 +3446,58 @@ mod tests {
             .unwrap();
         assert_eq!(
             codec().decode_persistence_frontier(&manifest).unwrap(),
-            frontier
+            encoding.persistence_frontier
         );
         let decoded_node = decoded.nodes.get(node).unwrap();
         assert_eq!(decoded.display_title, "Round Trip");
         assert_eq!(decoded.revision, project.revision);
         assert_eq!(decoded_node.title, "Research Note");
+        assert_eq!(
+            decoded.export_settings.emit_titles,
+            ProjectExportSetting::Disabled
+        );
+        assert!(decoded.export_settings.starts_new_page);
+        assert_eq!(
+            decoded_node.export_settings.emit_titles,
+            ProjectExportSetting::Enabled
+        );
+        assert!(decoded_node.export_settings.starts_new_page);
         assert_eq!(decoded.nodes.parent(node), Some(NodeId::research_root()));
         assert_eq!(
             decoded_node.metadata.get(&metadata).map(String::as_str),
             Some("Revised")
         );
         assert_eq!(decoded_paths.documents[&document], document_path);
+
+        let restoring_checkpoint = CheckpointId::from_bytes([9; 16]);
+        let deleted = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::delete_node_from_checkpoint(node, 1_725_000, restoring_checkpoint),
+        )
+        .unwrap()
+        .project;
+        let encoding = codec()
+            .encode_domain_project(
+                &deleted,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &encoding.paths,
+            )
+            .unwrap();
+        let manifest = codec()
+            .decode_manifest(
+                &encoding.resources[&CanonicalRelativePath::parse("project.toml").unwrap()].bytes,
+            )
+            .unwrap();
+        let (decoded, _) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        let tombstone = &decoded.deleted[&node];
+        assert_eq!(tombstone.restoring_checkpoint, Some(restoring_checkpoint));
+        assert_eq!(tombstone.deleted_at_unix_millis, 1_725_000);
+        assert_eq!(tombstone.subtree[0].node.title, "Research Note");
+        assert_eq!(tombstone.subtree[0].node.kind, NodeKind::Document(document));
     }
 }

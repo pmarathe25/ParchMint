@@ -16,10 +16,10 @@ use git2::{
     Signature, Time,
 };
 use parchmint_history_api::{
-    CheckpointCategory, CheckpointId, CheckpointInput, CheckpointIntentHash, CheckpointSummary,
-    HistoryCursor, HistoryError, HistoryIntegrityReport, HistoryPage, HistoryPageQuery,
-    HistoryState, HistoryStore, MaintenanceBudget, MaintenanceReport, RestorePlan, SnapshotName,
-    SnapshotPreview,
+    CheckpointCategory, CheckpointId, CheckpointInput, CheckpointIntentHash, CheckpointResource,
+    CheckpointSummary, HistoryCursor, HistoryError, HistoryIntegrityReport, HistoryPage,
+    HistoryPageQuery, HistoryReinitializeAvailability, HistoryReinitializeReport, HistoryState,
+    HistoryStore, MaintenanceBudget, MaintenanceReport, RestorePlan, SnapshotName, SnapshotPreview,
 };
 use parchmint_project_format::{CanonicalRelativePath, ContentHash};
 use parchmint_project_fs::{
@@ -96,15 +96,7 @@ impl HistoryStore for Git2HistoryStore {
                 validate_repository(&repository, root)?;
                 repository
             } else {
-                let mut options = RepositoryInitOptions::new();
-                options
-                    .initial_head("main")
-                    .external_template(false)
-                    .no_reinit(true);
-                let repository = Repository::init_opts(root, &options)
-                    .map_err(|error| storage_git("initialize embedded repository", error))?;
-                configure_new_repository(&repository, root)?;
-                repository
+                initialize_new_repository(root)?
             };
 
             configure_portability(&repository)?;
@@ -113,6 +105,87 @@ impl HistoryStore for Git2HistoryStore {
             Ok(HistoryState {
                 project,
                 checkpoint_count,
+            })
+        })
+    }
+
+    fn reinitialize_availability(&self) -> Result<HistoryReinitializeAvailability, HistoryError> {
+        self.run_serialized(
+            "inspect History reinitialization",
+            reinitialize_availability,
+        )
+    }
+
+    fn reinitialize(
+        &self,
+        project: ProjectRootCapability,
+    ) -> Result<HistoryReinitializeReport, HistoryError> {
+        self.run_serialized("reinitialize", |root| {
+            let availability = reinitialize_availability(root)?;
+            let preserves_existing = match availability {
+                HistoryReinitializeAvailability::Ready { preserves_existing } => preserves_existing,
+                HistoryReinitializeAvailability::NotNeeded => {
+                    return Err(HistoryError::InvalidInput {
+                        field: "History reinitialization",
+                        reason: "is unnecessary while History is healthy",
+                    });
+                }
+                HistoryReinitializeAvailability::Blocked { reason } => {
+                    return Err(HistoryError::Storage {
+                        operation: "reinitialize",
+                        reason,
+                    });
+                }
+            };
+
+            let git_dir = root.join(".git");
+            let preserved_history = if preserves_existing {
+                let preserved = next_preserved_history_path(root)?;
+                fs::rename(&git_dir, &preserved).map_err(|error| HistoryError::Storage {
+                    operation: "preserve damaged History",
+                    reason: error.to_string(),
+                })?;
+                Some(preserved)
+            } else {
+                None
+            };
+
+            let initialized = initialize_new_repository(root).and_then(|repository| {
+                configure_portability(&repository)?;
+                validate_repository(&repository, root)?;
+                Ok(repository)
+            });
+            let repository = match initialized {
+                Ok(repository) => repository,
+                Err(error) => {
+                    if fs::symlink_metadata(&git_dir).is_ok_and(|metadata| {
+                        metadata.is_dir() && !metadata.file_type().is_symlink()
+                    }) {
+                        let _ = fs::remove_dir_all(&git_dir);
+                    }
+                    if let Some(preserved) = &preserved_history
+                        && let Err(rollback) = fs::rename(preserved, &git_dir)
+                    {
+                        return Err(HistoryError::Storage {
+                            operation: "roll back History reinitialization",
+                            reason: format!("{error}; rollback failed: {rollback}"),
+                        });
+                    }
+                    return Err(error);
+                }
+            };
+            drop(repository);
+            Ok(HistoryReinitializeReport {
+                state: HistoryState {
+                    project,
+                    checkpoint_count: 0,
+                },
+                preserved_history: preserved_history.map(|path| {
+                    path.strip_prefix(root)
+                        .unwrap_or(path.as_path())
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                }),
             })
         })
     }
@@ -214,6 +287,44 @@ impl HistoryStore for Git2HistoryStore {
             Ok(SnapshotPreview {
                 checkpoint: record.summary(),
                 resources: snapshot.resources,
+            })
+        })
+    }
+
+    fn read_resource(
+        &self,
+        checkpoint: CheckpointId,
+        path: &CanonicalRelativePath,
+    ) -> Result<CheckpointResource, HistoryError> {
+        self.run_serialized("read resource", |root| {
+            let repository = open_repository(root)?;
+            let record = resolve_checkpoint(&repository, checkpoint)?;
+            let snapshot = load_snapshot(&repository, record.tree_id)?;
+            let content_hash = snapshot.resources.get(path).copied().ok_or_else(|| {
+                HistoryError::UnknownResource {
+                    checkpoint,
+                    path: path.clone(),
+                }
+            })?;
+            let bytes =
+                snapshot
+                    .bytes
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| HistoryError::CorruptHistory {
+                        reason: format!("checkpoint resource {} has no bytes", path.as_str()),
+                    })?;
+            let actual = ContentHash::from_bytes(Sha256::digest(&bytes).into());
+            if actual != content_hash {
+                return Err(HistoryError::CorruptHistory {
+                    reason: format!("checkpoint resource {} has the wrong hash", path.as_str()),
+                });
+            }
+            Ok(CheckpointResource {
+                checkpoint,
+                path: path.clone(),
+                content_hash,
+                bytes,
             })
         })
     }
@@ -523,6 +634,101 @@ fn configure_new_repository(repository: &Repository, root: &Path) -> Result<(), 
         .set_i64(FORMAT_MARKER, 1)
         .and_then(|()| config.set_str(HISTORY_ID, &root_id))
         .map_err(|error| storage_git("mark embedded History repository", error))
+}
+
+fn initialize_new_repository(root: &Path) -> Result<Repository, HistoryError> {
+    let mut options = RepositoryInitOptions::new();
+    options
+        .initial_head("main")
+        .external_template(false)
+        .no_reinit(true);
+    let repository = Repository::init_opts(root, &options)
+        .map_err(|error| storage_git("initialize embedded repository", error))?;
+    configure_new_repository(&repository, root)?;
+    Ok(repository)
+}
+
+fn reinitialize_availability(root: &Path) -> Result<HistoryReinitializeAvailability, HistoryError> {
+    let git_dir = root.join(".git");
+    let metadata = match fs::symlink_metadata(&git_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HistoryReinitializeAvailability::Ready {
+                preserves_existing: false,
+            });
+        }
+        Err(error) => {
+            return Err(HistoryError::Storage {
+                operation: "inspect History reinitialization",
+                reason: error.to_string(),
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(HistoryReinitializeAvailability::Blocked {
+            reason: "the .git path is not a regular app-managed History directory".into(),
+        });
+    }
+    let repository = match Repository::open(root) {
+        Ok(repository) => repository,
+        Err(error) => {
+            return Ok(HistoryReinitializeAvailability::Blocked {
+                reason: format!("cannot prove the damaged repository is app-managed: {error}"),
+            });
+        }
+    };
+    if validate_repository(&repository, root)
+        .and_then(|()| history_records(&repository).map(|_| ()))
+        .is_ok()
+    {
+        return Ok(HistoryReinitializeAvailability::NotNeeded);
+    }
+    let expected_identity = project_identity(root)?;
+    let managed = repository.config().is_ok_and(|config| {
+        config.get_i64(FORMAT_MARKER) == Ok(1)
+            && matches!(config.get_string(HISTORY_ID), Ok(identity) if identity == expected_identity)
+    });
+    if managed {
+        Ok(HistoryReinitializeAvailability::Ready {
+            preserves_existing: true,
+        })
+    } else {
+        Ok(HistoryReinitializeAvailability::Blocked {
+            reason: "the repository is not identifiable as app-managed History".into(),
+        })
+    }
+}
+
+fn next_preserved_history_path(root: &Path) -> Result<PathBuf, HistoryError> {
+    let preservation_root = root.join(".parchmint");
+    let metadata =
+        fs::symlink_metadata(&preservation_root).map_err(|error| HistoryError::Storage {
+            operation: "inspect History preservation directory",
+            reason: error.to_string(),
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(HistoryError::Storage {
+            operation: "inspect History preservation directory",
+            reason: ".parchmint is not a regular directory".into(),
+        });
+    }
+    for sequence in 1..=u32::MAX {
+        let candidate = preservation_root.join(format!("damaged-history-{sequence}.git"));
+        match fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(HistoryError::Storage {
+                    operation: "select History preservation path",
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+    Err(HistoryError::Storage {
+        operation: "select History preservation path",
+        reason: "no preservation name is available".into(),
+    })
 }
 
 fn project_identity(root: &Path) -> Result<String, HistoryError> {

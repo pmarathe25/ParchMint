@@ -6,7 +6,8 @@ use std::{
 };
 
 use parchmint_history_api::{
-    CheckpointCategory, HistoryError, HistoryPageQuery, HistoryStore, MaintenanceBudget,
+    CheckpointCategory, HistoryError, HistoryPageQuery, HistoryReinitializeAvailability,
+    HistoryStore, MaintenanceBudget,
 };
 use parchmint_project_fs::{
     FsError, NativeProjectFileSystem, ProjectFileSystem, UntrustedProjectPath,
@@ -162,6 +163,37 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
             && !path.contains("appearance")
             && !path.contains("global-dictionary")
     }));
+}
+
+#[test]
+fn checkpoint_resource_bytes_are_immutable_and_survive_reopen() {
+    let project = LockedProject::new("resource-read-reopen");
+    let first = ProjectVersion::named("Checkpoint body");
+    project.write(&first);
+    let store = project.initialize();
+    let checkpoint = checkpoint(&store, 1, &first, CheckpointCategory::ExplicitSave)
+        .expect("checkpoint should commit");
+    let document_path = first
+        .bytes()
+        .into_keys()
+        .find(|path| path.as_str().ends_with(".html"))
+        .expect("fixture should contain a document");
+    let expected = first.bytes()[&document_path].clone();
+
+    project.write(&ProjectVersion::named("Current body"));
+    drop(store);
+
+    let reopened = project.store();
+    reopened
+        .initialize(project.project.clone())
+        .expect("History should reopen");
+    let resource = reopened
+        .read_resource(checkpoint, &document_path)
+        .expect("checkpoint resource should remain readable");
+    assert_eq!(resource.checkpoint, checkpoint);
+    assert_eq!(resource.path, document_path);
+    assert_eq!(resource.bytes, expected);
+    assert_eq!(resource.content_hash, first.hashes()[&resource.path]);
 }
 
 #[test]
@@ -391,6 +423,50 @@ fn a_corrupt_git_object_is_reported_without_touching_current_files_or_other_proj
             .resources,
         healthy_version.hashes()
     );
+}
+
+#[test]
+fn app_managed_corrupt_history_can_be_preserved_and_reinitialized_explicitly() {
+    let project = LockedProject::new("corrupt-reinitialize");
+    let saved = ProjectVersion::named("Saved before corruption");
+    let current = ProjectVersion::named("Current canonical state");
+    project.write(&saved);
+    let store = project.initialize();
+    checkpoint(&store, 1, &saved, CheckpointCategory::ExplicitSave)
+        .expect("checkpoint should commit before corruption");
+    project.write(&current);
+    corrupt_head_object(&project.path);
+
+    assert_eq!(
+        store
+            .reinitialize_availability()
+            .expect("reinitialization availability should be typed"),
+        HistoryReinitializeAvailability::Ready {
+            preserves_existing: true,
+        }
+    );
+    let report = store
+        .reinitialize(project.project.clone())
+        .expect("explicit reinitialization should preserve damaged app History");
+    assert_eq!(report.state.checkpoint_count, 0);
+    let preserved = report
+        .preserved_history
+        .expect("damaged History should be preserved");
+    assert!(project.path.join(&preserved).is_dir());
+    assert!(matches!(
+        store.reinitialize_availability(),
+        Ok(HistoryReinitializeAvailability::NotNeeded)
+    ));
+    assert!(
+        store
+            .list(HistoryPageQuery::newest_first(10))
+            .expect("new History should be readable")
+            .checkpoints
+            .is_empty()
+    );
+    for (path, bytes) in current.bytes() {
+        assert_eq!(project.read(&path), bytes, "reinitialize changed {path}");
+    }
 }
 
 #[test]

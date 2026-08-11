@@ -34,8 +34,17 @@ impl NodeKind {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProjectExportSetting {
+    #[default]
+    Inherit,
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProjectExportSettings {
     pub excluded: bool,
+    pub emit_titles: ProjectExportSetting,
     pub starts_new_page: bool,
 }
 
@@ -555,6 +564,7 @@ impl Project {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.nodes.validate()?;
+        self.styles.validate()?;
         for id in self.deleted.keys() {
             if id.is_fixed_root() || self.nodes.contains(*id) {
                 return Err(DomainError::InvalidTree {

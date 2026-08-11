@@ -18,6 +18,7 @@ pub(crate) trait NativeBackend: Send + Sync + 'static {
         window: WindowCapability,
         menu: SemanticMenu,
     ) -> Result<(), PlatformError>;
+    fn remove_menu(&self, window: WindowCapability);
     fn choose_path(
         &self,
         window: WindowCapability,
@@ -44,6 +45,7 @@ pub(crate) trait NativeBackend: Send + Sync + 'static {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MenuSnapshot {
+    menu: SemanticMenu,
     commands: Vec<String>,
     contains_separator: bool,
 }
@@ -51,6 +53,7 @@ pub(crate) struct MenuSnapshot {
 impl MenuSnapshot {
     pub(crate) fn from_menu(menu: &SemanticMenu) -> Self {
         let mut snapshot = Self {
+            menu: menu.clone(),
             commands: Vec::new(),
             contains_separator: false,
         };
@@ -72,6 +75,10 @@ impl MenuSnapshot {
 
     pub(crate) fn commands(&self) -> &[String] {
         &self.commands
+    }
+
+    pub(crate) fn menu(&self) -> &SemanticMenu {
+        &self.menu
     }
 
     pub(crate) const fn contains_separator(&self) -> bool {
@@ -130,12 +137,24 @@ impl NativeBackend for SystemBackend {
         window: WindowCapability,
         menu: SemanticMenu,
     ) -> Result<(), PlatformError> {
+        // Installation retains the complete semantic tree. On Windows and
+        // macOS, the Iced event loop later supplies a validated raw handle to
+        // the narrow native-menu adapter; Linux projects the same tree as an
+        // accessible in-window menu because winit's X11/Wayland window is not
+        // a GTK window and cannot be passed to muda's GTK attachment API.
         let snapshot = MenuSnapshot::from_menu(&menu);
         self.menus
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .insert(window, snapshot);
         Ok(())
+    }
+
+    fn remove_menu(&self, window: WindowCapability) {
+        self.menus
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&window);
     }
 
     fn choose_path(

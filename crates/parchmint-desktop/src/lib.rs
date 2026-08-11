@@ -7,7 +7,8 @@ mod production;
 
 pub use production::{
     ProductionApplicationGraph, ProductionControls, ProductionFaultKind, ProductionFaultPoint,
-    ProductionMeasurement, ProductionObservation, ProductionProjectSession,
+    ProductionHistoryStatus, ProductionMeasurement, ProductionObservation,
+    ProductionProjectSession,
 };
 
 use std::{

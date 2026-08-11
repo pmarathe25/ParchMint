@@ -454,16 +454,18 @@ fn load() -> CanonicalDocumentLoad {
 
 fn load_with_comments_and_anchors() -> CanonicalDocumentLoad {
     let mut load = load();
-    load.comments.push(CanonicalComment {
-        id: CommentId::from_bytes([4; 16]),
-        range: selection(0, 0),
-        body: "later note".into(),
-    });
-    load.comments.push(CanonicalComment {
-        id: CommentId::from_bytes([3; 16]),
-        range: selection(0, 0),
-        body: "first note".into(),
-    });
+    load.comments.push(CanonicalComment::new(
+        CommentId::from_bytes([4; 16]),
+        selection(0, 0),
+        "later note",
+        BlockId::from_bytes([1; 16]),
+    ));
+    load.comments.push(CanonicalComment::new(
+        CommentId::from_bytes([3; 16]),
+        selection(0, 0),
+        "first note",
+        BlockId::from_bytes([1; 16]),
+    ));
     load.anchors = vec![
         CanonicalAnchor {
             block: BlockId::from_bytes([2; 16]),
@@ -717,6 +719,8 @@ impl EditorAdapter for NativeEditorAdapter {
                 }
                 EditorCommandKind::DeleteRange { .. }
                 | EditorCommandKind::ReplaceRange { .. }
+                | EditorCommandKind::ReplaceRangeWithSemanticText { .. }
+                | EditorCommandKind::ReplaceRangeWithSemanticFragment { .. }
                 | EditorCommandKind::ApplyParagraphStyle { .. } => {
                     return Err(EditorError::InvalidCommand {
                         reason: "native fixture does not model this command",
@@ -725,7 +729,18 @@ impl EditorAdapter for NativeEditorAdapter {
                 EditorCommandKind::ToggleInlineMark { .. }
                 | EditorCommandKind::SetLink { .. }
                 | EditorCommandKind::ToggleBlockFormat { .. }
-                | EditorCommandKind::InsertAtomicBlock { .. } => {
+                | EditorCommandKind::InsertAtomicBlock { .. }
+                | EditorCommandKind::SplitBlock { .. }
+                | EditorCommandKind::InsertSoftBreak { .. }
+                | EditorCommandKind::AdjustListDepth { .. }
+                | EditorCommandKind::CreateComment { .. }
+                | EditorCommandKind::ReplyToComment { .. }
+                | EditorCommandKind::SetCommentResolved { .. }
+                | EditorCommandKind::DeleteCommentThread { .. }
+                | EditorCommandKind::DeleteCommentMessage { .. }
+                | EditorCommandKind::EditCommentMessage { .. }
+                | EditorCommandKind::ReattachComment { .. }
+                | EditorCommandKind::ConvertCommentToDocument { .. } => {
                     state.record_document_change();
                 }
             }

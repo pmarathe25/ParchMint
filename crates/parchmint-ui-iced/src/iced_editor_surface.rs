@@ -6,13 +6,18 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Space, button, column, container, row, stack, text, text_input};
+use iced::widget::{
+    Space, button, column, container, mouse_area, pick_list, row, sensor, stack, text, text_input,
+    tooltip,
+};
 use iced::{
     Element, Font, Length,
     alignment::{Horizontal, Vertical},
 };
 use parchmint_editor_api::{EditorError, ViewId};
-use parchmint_editor_iced::{MountedEditorHost, MountedEditorMessage, MountedEditorUpdate};
+use parchmint_editor_iced::{
+    EditorViewport, MountedEditorHost, MountedEditorMessage, MountedEditorUpdate,
+};
 
 use crate::{
     EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, FindDirection, FormattingCommand,
@@ -91,6 +96,10 @@ impl EditorHostSlots {
         self.slots.insert(pane, slot);
     }
 
+    pub(crate) fn remove(&mut self, pane: EditorPane) {
+        self.slots.remove(&pane);
+    }
+
     pub(crate) fn slot(&self, pane: EditorPane) -> Option<&EditorPaneSlot> {
         self.slots.get(&pane)
     }
@@ -127,6 +136,9 @@ impl EditorHostSlots {
 /// workspace and mounted messages through their existing owners.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EditorCenterMessage {
+    BeginSplitResize,
+    HierarchyDropTarget(EditorPane),
+    CommitHierarchyDrop,
     Workspace(EditorMessage),
     PaneWorkspace {
         pane: EditorPane,
@@ -151,10 +163,17 @@ impl EditorCenterMessage {
     /// local search state; mounted messages also establish that focus.
     pub(crate) fn workspace_messages(&self) -> Vec<EditorMessage> {
         match self {
+            Self::BeginSplitResize | Self::HierarchyDropTarget(_) | Self::CommitHierarchyDrop => {
+                Vec::new()
+            }
             Self::Workspace(message) => vec![message.clone()],
             Self::PaneWorkspace { pane, message } => {
                 vec![EditorMessage::FocusPane(*pane), message.clone()]
             }
+            Self::Mounted {
+                message: MountedEditorMessage::ViewportChanged(_),
+                ..
+            } => Vec::new(),
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
             Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
@@ -170,22 +189,36 @@ pub(crate) fn editor_center_surface(
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
 ) -> Element<'static, EditorCenterMessage> {
-    let toolbar = formatting_toolbar(theme);
+    let toolbar = formatting_toolbar(workspace, theme);
     let primary = editor_pane_surface(workspace, EditorPane::Primary, theme, slots);
     let companion_visible = workspace.pane(EditorPane::Companion).is_populated()
         || slots.slot(EditorPane::Companion).is_some();
     let panes: Element<'static, EditorCenterMessage> = if companion_visible {
+        let primary_portion = (workspace.split_ratio() * 1000.0).round() as u16;
+        let companion_portion = 1000_u16.saturating_sub(primary_portion);
         row![
-            container(primary).width(Length::FillPortion(1)),
+            container(primary).width(Length::FillPortion(primary_portion)),
+            mouse_area(
+                container(Space::new().width(1).height(Length::Fill))
+                    .width(8)
+                    .height(Length::Fill)
+                    .style(move |_| components::surface(
+                        theme,
+                        Surface::Elevated,
+                        Interaction::Rest,
+                    )),
+            )
+            .on_press(EditorCenterMessage::BeginSplitResize)
+            .interaction(iced::mouse::Interaction::ResizingHorizontally),
             container(editor_pane_surface(
                 workspace,
                 EditorPane::Companion,
                 theme,
                 slots
             ))
-            .width(Length::FillPortion(1)),
+            .width(Length::FillPortion(companion_portion)),
         ]
-        .spacing(8)
+        .spacing(0)
         .height(Length::Fill)
         .into()
     } else {
@@ -229,6 +262,7 @@ fn spelling_menu_popover(
         column![text(menu.word().to_owned()).size(13)],
         |column, action| {
             let label = match &action {
+                SpellingMenuAction::AddComment => "Add Comment".to_owned(),
                 SpellingMenuAction::Replace(value) => value.clone(),
                 SpellingMenuAction::AddToDictionary(scope) => match scope {
                     crate::SpellingDictionaryScope::Project => {
@@ -282,16 +316,18 @@ fn spelling_menu_popover(
     .into()
 }
 
-fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMessage> {
+fn formatting_toolbar(
+    workspace: &EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
     let commands = [
-        (
-            "Body ▾",
-            FormattingCommand::ParagraphStyle("Body".to_owned()),
-        ),
         ("B", FormattingCommand::Bold),
         ("I", FormattingCommand::Italic),
         ("U", FormattingCommand::Underline),
         ("S", FormattingCommand::Strikethrough),
+        ("Small Caps", FormattingCommand::SmallCaps),
+        ("Superscript", FormattingCommand::Superscript),
+        ("Subscript", FormattingCommand::Subscript),
         ("☷", FormattingCommand::BulletedList),
         ("⇣", FormattingCommand::NumberedList),
         ("❞", FormattingCommand::BlockQuote),
@@ -299,9 +335,59 @@ fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMes
         ("Scene Break", FormattingCommand::SceneBreak),
         ("Page Break", FormattingCommand::PageBreak),
     ];
-    let controls = commands
-        .into_iter()
-        .fold(row![].spacing(4), |row, (label, command)| {
+    let style_selector = pick_list(
+        workspace.style_names().to_vec(),
+        Some(workspace.active_style().to_owned()),
+        |style| {
+            EditorCenterMessage::Workspace(EditorMessage::Format(
+                FormattingCommand::ParagraphStyle(style),
+            ))
+        },
+    )
+    .placeholder("Paragraph style")
+    .width(160);
+    let controls = commands.into_iter().fold(
+        row![
+            button(text("Undo").size(12))
+                .padding([5, 7])
+                .height(u32::from(COMPACT_CONTROL_HEIGHT))
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::Undo))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )),
+            button(text("Redo").size(12))
+                .padding([5, 7])
+                .height(u32::from(COMPACT_CONTROL_HEIGHT))
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::Redo))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )),
+            button(text("Save").size(12))
+                .padding([5, 7])
+                .height(u32::from(COMPACT_CONTROL_HEIGHT))
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::Save))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )),
+            button(text("Find").size(12))
+                .padding([5, 7])
+                .height(u32::from(COMPACT_CONTROL_HEIGHT))
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::OpenLocalFind))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )),
+            style_selector
+        ]
+        .spacing(4),
+        |row, (label, command)| {
             row.push(
                 button(text(label).size(12))
                     .padding([5, 7])
@@ -317,11 +403,11 @@ fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMes
                         )
                     }),
             )
-        });
-    container(controls)
+        },
+    );
+    container(controls.wrap().vertical_spacing(4))
         .padding([6, 8])
         .width(Length::Fill)
-        .height(40)
         .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
         .into()
 }
@@ -390,64 +476,219 @@ fn editor_pane_surface(
     slots: &EditorHostSlots,
 ) -> Element<'static, EditorCenterMessage> {
     let state = workspace.pane(pane);
-    let tabs = tab_strip(state, pane, theme);
+    let tabs = tab_strip(
+        state,
+        pane,
+        workspace.focused_pane() == pane,
+        slots
+            .slot(pane)
+            .and_then(EditorPaneSlot::host)
+            .map_or(1.0, |host| host.viewport().width),
+        workspace.tab_drag_source(pane),
+        workspace.tab_drag_target(pane),
+        theme,
+    );
     let search = local_search_bar(workspace.local_search(state.view()), pane, theme, slots);
-    let body = pane_body(state, pane, theme, slots);
-    container(column![tabs, search, body].spacing(6))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest))
-        .into()
+    let view = state.view();
+    let viewport_message = move |size: iced::Size| EditorCenterMessage::Mounted {
+        pane,
+        view,
+        message: MountedEditorMessage::ViewportChanged(
+            EditorViewport::new(size.width.max(1.0), size.height.max(1.0))
+                .expect("sensor clamps editor viewport dimensions"),
+        ),
+    };
+    let body = sensor(pane_body(state, pane, theme, slots))
+        .key((pane, view))
+        .on_show(viewport_message)
+        .on_resize(viewport_message);
+    mouse_area(
+        container(column![tabs, search, body].spacing(6))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
+    )
+    .on_enter(EditorCenterMessage::HierarchyDropTarget(pane))
+    .on_release(EditorCenterMessage::CommitHierarchyDrop)
+    .into()
 }
 
 fn tab_strip(
     state: &EditorPaneState,
     pane: EditorPane,
+    focused: bool,
+    measured_width: f32,
+    drag_source: Option<&str>,
+    drag_target: Option<usize>,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
     let active = state.active_document();
-    let tabs = state.tabs().iter().fold(row![].spacing(2), |row, tab| {
-        row.push(tab_button(tab, pane, active == Some(tab.id()), theme))
-    });
-    container(tabs)
-        .padding([4, 6])
-        .width(Length::Fill)
-        .height(40)
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
-        .into()
+    let layout =
+        EditorWorkspace::tab_strip_layout(measured_width, state.tabs(), active.unwrap_or_default());
+    let tab_count = state.tabs().len();
+    let tabs = state.tabs().iter().zip(layout.tabs()).enumerate().fold(
+        row![].spacing(2),
+        |row, (index, (tab, presentation))| {
+            row.push(tab_button(
+                tab,
+                presentation,
+                TabButtonContext {
+                    pane,
+                    index,
+                    count: tab_count,
+                    focused,
+                    drag_source: drag_source == Some(tab.id()),
+                    drag_target: drag_target == Some(index),
+                    theme,
+                },
+            ))
+        },
+    );
+    mouse_area(
+        container(tabs)
+            .padding([0, 6])
+            .width(Length::Fill)
+            .height(32)
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+    )
+    .on_release(EditorCenterMessage::Workspace(EditorMessage::CommitTabDrag))
+    .into()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TabButtonContext {
+    pane: EditorPane,
+    index: usize,
+    count: usize,
+    focused: bool,
+    drag_source: bool,
+    drag_target: bool,
+    theme: ParchMintTheme,
 }
 
 fn tab_button(
     tab: &TabSpec,
-    pane: EditorPane,
-    active: bool,
-    theme: ParchMintTheme,
+    presentation: &crate::TabLayout,
+    context: TabButtonContext,
 ) -> Element<'static, EditorCenterMessage> {
+    let TabButtonContext {
+        pane,
+        index,
+        count: tab_count,
+        focused,
+        drag_source,
+        drag_target,
+        theme,
+    } = context;
     let id = tab.id().to_owned();
+    let active = presentation.is_active();
     let title = if tab.is_dirty() {
-        format!("{} •", tab.title())
+        format!("{} •", presentation.display_title())
     } else {
-        tab.title().to_owned()
+        presentation.display_title().to_owned()
     };
-    let activate = button(text(title).size(13))
+    let activate: Element<'static, EditorCenterMessage> = button(text(title).size(13))
         .padding([6, 8])
+        .width(Length::Fill)
         .on_press(EditorCenterMessage::Workspace(EditorMessage::ActivateTab {
             pane,
             document_id: id.clone(),
         }))
         .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Tab, button_interaction(status, active))
-        });
+            components::button_style(
+                theme,
+                ButtonKind::Tab,
+                tab_interaction(status, active, focused),
+            )
+        })
+        .into();
+    let activate = if let Some(full_title) = presentation.tooltip() {
+        tooltip(
+            activate,
+            container(text(full_title.to_owned()).size(12)).padding([4, 6]),
+            tooltip::Position::Bottom,
+        )
+        .into()
+    } else {
+        activate
+    };
+    let drag_handle = tooltip(
+        mouse_area(container(text("⠿").size(12)).padding([5, 3]))
+            .on_press(EditorCenterMessage::Workspace(
+                EditorMessage::BeginTabDrag {
+                    pane,
+                    document_id: id.clone(),
+                },
+            ))
+            .interaction(iced::mouse::Interaction::Grab),
+        container(text(format!("Reorder {}", presentation.full_title())).size(12)).padding([4, 6]),
+        tooltip::Position::Bottom,
+    );
+    let mut actions = row![drag_handle].spacing(1);
+    if index > 0 {
+        actions = actions.push(button(text("←").size(11)).on_press(
+            EditorCenterMessage::Workspace(EditorMessage::MoveTab {
+                pane,
+                document_id: id.clone(),
+                target_index: index - 1,
+            }),
+        ));
+    }
+    if index + 1 < tab_count {
+        actions = actions.push(button(text("→").size(11)).on_press(
+            EditorCenterMessage::Workspace(EditorMessage::MoveTab {
+                pane,
+                document_id: id.clone(),
+                target_index: index + 1,
+            }),
+        ));
+    }
     let close = button(text("×").size(14))
         .padding([5, 7])
+        .width(32)
         .on_press(EditorCenterMessage::Workspace(EditorMessage::CloseTab {
             pane,
-            document_id: id,
+            document_id: id.clone(),
         }))
         .style(move |_, status| {
             components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
         });
-    row![activate, close].into()
+    let close: Element<'static, EditorCenterMessage> = tooltip(
+        close,
+        container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
+        tooltip::Position::Bottom,
+    )
+    .into();
+    mouse_area(
+        container(row![activate, actions, close].width(Length::Fill))
+            .width(Length::FillPortion(1))
+            .max_width(200)
+            .style(move |_| {
+                components::surface(
+                    theme,
+                    Surface::Panel,
+                    if drag_target && !drag_source {
+                        Interaction::Selected
+                    } else if drag_source {
+                        Interaction::Focused
+                    } else {
+                        Interaction::Rest
+                    },
+                )
+            }),
+    )
+    .on_enter(EditorCenterMessage::Workspace(
+        EditorMessage::SetTabDragTarget {
+            pane,
+            target_index: index,
+        },
+    ))
+    .interaction(if drag_source {
+        iced::mouse::Interaction::Grabbing
+    } else {
+        iced::mouse::Interaction::Pointer
+    })
+    .into()
 }
 
 fn local_search_bar(
@@ -705,6 +946,21 @@ fn button_interaction(status: iced::widget::button::Status, selected: bool) -> I
     }
 }
 
+fn tab_interaction(
+    status: iced::widget::button::Status,
+    active: bool,
+    pane_focused: bool,
+) -> Interaction {
+    match status {
+        iced::widget::button::Status::Active if active && pane_focused => Interaction::Selected,
+        iced::widget::button::Status::Active if active => Interaction::Focused,
+        iced::widget::button::Status::Active => Interaction::Rest,
+        iced::widget::button::Status::Hovered => Interaction::Hovered,
+        iced::widget::button::Status::Pressed => Interaction::Pressed,
+        iced::widget::button::Status::Disabled => Interaction::Disabled,
+    }
+}
+
 fn field_interaction(status: iced::widget::text_input::Status) -> Interaction {
     match status {
         iced::widget::text_input::Status::Active => Interaction::Rest,
@@ -739,6 +995,19 @@ mod tests {
     }
 
     #[test]
+    fn always_visible_editor_actions_reach_the_workspace_reducer() {
+        for message in [
+            EditorMessage::Undo,
+            EditorMessage::Redo,
+            EditorMessage::Save,
+            EditorMessage::OpenLocalFind,
+        ] {
+            let center = EditorCenterMessage::Workspace(message.clone());
+            assert_eq!(center.workspace_messages(), vec![message]);
+        }
+    }
+
+    #[test]
     fn mounted_message_keeps_its_pane_and_view_context() {
         let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let view = workspace.pane(EditorPane::Companion).view();
@@ -755,6 +1024,20 @@ mod tests {
             message,
             EditorCenterMessage::Mounted { pane: EditorPane::Companion, view: message_view, .. } if message_view == view
         ));
+    }
+
+    #[test]
+    fn viewport_measurement_reflows_without_stealing_editor_focus() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let view = workspace.pane(EditorPane::Companion).view();
+        let message = EditorCenterMessage::Mounted {
+            pane: EditorPane::Companion,
+            view,
+            message: MountedEditorMessage::ViewportChanged(
+                EditorViewport::new(480.0, 320.0).expect("viewport"),
+            ),
+        };
+        assert!(message.workspace_messages().is_empty());
     }
 
     #[test]
@@ -810,5 +1093,35 @@ mod tests {
                 .expect("headless center snapshot");
             assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
         }
+    }
+
+    #[test]
+    fn tab_drag_handle_publishes_a_typed_source_without_removing_button_fallbacks() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        slots.insert(
+            EditorPane::Companion,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+
+        simulator.click("⠿").expect("tab drag handle");
+
+        assert!(simulator.into_messages().any(|message| matches!(
+            message,
+            EditorCenterMessage::Workspace(EditorMessage::BeginTabDrag {
+                pane: EditorPane::Primary,
+                document_id,
+            }) if document_id == "chapter-one"
+        )));
     }
 }

@@ -7,14 +7,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use parchmint_domain::{
-    MetadataApplicability as DomainMetadataApplicability,
-    MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSettings,
-    ProjectSection,
+    MetadataApplicability as DomainMetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
+    MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSetting,
+    ProjectExportSettings, ProjectSection, StyleCatalog, StyleDefinition, StyleId, StyleProperties,
+    StyleRole, TextAlignment,
 };
+use parchmint_editor_api::{CanonicalDocumentLoad, SemanticDocument};
+use parchmint_editor_core::EditorCoreSession;
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
-use parchmint_ui_api::ProjectSnapshot;
+use parchmint_ui_api::{
+    ExportArtifact, ExportArtifactToken, HistoryMaintenanceStatus, ProjectSnapshot,
+};
+use parchmint_workspace_state::{
+    ExplorerWorkspaceState, OpenTabState, PaneLayout, SavedViewState, WorkspaceMode,
+    WorkspaceSnapshot,
+};
 
-use crate::{EditorFixture, EditorMessage, EditorPane, EditorWorkspace, TabSpec};
+use crate::{
+    EditorFixture, EditorMessage, EditorPane, EditorWorkspace, InspectorContext, RibbonDestination,
+    TabSpec,
+};
 
 /// Requirement-linked project fixture families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +83,12 @@ struct TreeClipboard {
     session: u64,
     kind: TreeClipboardKind,
     node_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HierarchyPointerDrag {
+    source_id: String,
+    destination: Option<DragDestination>,
 }
 
 /// Deterministic validation for one drag operation.
@@ -378,6 +396,20 @@ impl ExplorerState {
             .any(|node| node.document_id.as_deref() == Some(document_id))
     }
 
+    pub fn title_for_document(&self, document_id: &str) -> Option<&str> {
+        self.nodes
+            .values()
+            .find(|node| node.document_id.as_deref() == Some(document_id))
+            .map(|node| node.title.as_str())
+    }
+
+    pub fn node_id_for_document(&self, document_id: &str) -> Option<&str> {
+        self.nodes
+            .values()
+            .find(|node| node.document_id.as_deref() == Some(document_id))
+            .map(|node| node.id.as_str())
+    }
+
     /// Selected nodes in deterministic visible hierarchy order.
     pub fn selected_ids(&self) -> Vec<&str> {
         self.preorder_ids()
@@ -590,6 +622,16 @@ impl ExplorerState {
         self.ancestors(node_id).contains(&ancestor_id)
     }
 
+    fn ancestors_are_expanded(&self, node_id: &str) -> bool {
+        self.ancestors(node_id)
+            .into_iter()
+            .all(|ancestor| self.expanded.contains(ancestor))
+    }
+
+    fn depth(&self, node_id: &str) -> usize {
+        self.ancestors(node_id).len()
+    }
+
     fn preorder_ids(&self) -> Vec<&str> {
         let mut order = Vec::new();
         for root in &self.roots {
@@ -628,6 +670,9 @@ pub struct CardItem<'a> {
     pub title: &'a str,
     pub synopsis: &'a str,
     pub kind: HierarchyRowKind,
+    pub depth: usize,
+    pub expanded: bool,
+    pub visible: bool,
     pub metadata: Vec<(&'a str, &'a str, Option<&'a str>)>,
 }
 
@@ -691,11 +736,13 @@ impl<'a> CardsState<'a> {
                         (definition.visible_on_cards
                             && definition.applicability.applies_to(node.kind))
                         .then(|| {
+                            // Defaults are copied when a node is created. Existing
+                            // nodes without a stored value stay empty; a later
+                            // definition edit must never rewrite their cards.
                             let value = self
                                 .values
                                 .get(&(id.to_owned(), field_id.clone()))
-                                .map(String::as_str)
-                                .or(definition.default_value.as_deref());
+                                .map(String::as_str);
                             (field_id.as_str(), definition.label.as_str(), value)
                         })
                     })
@@ -710,6 +757,9 @@ impl<'a> CardsState<'a> {
                         HierarchyNodeKind::Group => HierarchyRowKind::Group,
                         HierarchyNodeKind::Document => HierarchyRowKind::Document,
                     },
+                    depth: self.explorer.depth(id).saturating_sub(1),
+                    expanded: self.explorer.expanded.contains(id),
+                    visible: self.explorer.ancestors_are_expanded(id),
                     metadata,
                 })
             })
@@ -723,7 +773,6 @@ pub enum MetadataFieldApplicability {
     Groups,
     Documents,
     GroupsAndDocuments,
-    None,
 }
 
 /// The text editor shape required by a metadata definition.
@@ -731,6 +780,45 @@ pub enum MetadataFieldApplicability {
 pub enum MetadataFieldTextKind {
     SingleLine,
     Multiline,
+}
+
+/// One editable Settings style property. The UI intentionally names every
+/// persisted property so no formatting control silently disappears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleProperty {
+    FontFamily,
+    FontSizePoints,
+    Weight,
+    Italic,
+    Alignment,
+    FirstLineIndentPoints,
+    LeftIndentPoints,
+    RightIndentPoints,
+    LineSpacing,
+    SpaceBeforePoints,
+    SpaceAfterPoints,
+    KeepWithNext,
+    PageBreakBefore,
+}
+
+impl StyleProperty {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FontFamily => "Font family",
+            Self::FontSizePoints => "Font size (pt)",
+            Self::Weight => "Weight",
+            Self::Italic => "Italic",
+            Self::Alignment => "Alignment",
+            Self::FirstLineIndentPoints => "First-line indent (pt)",
+            Self::LeftIndentPoints => "Left indent (pt)",
+            Self::RightIndentPoints => "Right indent (pt)",
+            Self::LineSpacing => "Line spacing",
+            Self::SpaceBeforePoints => "Space before (pt)",
+            Self::SpaceAfterPoints => "Space after (pt)",
+            Self::KeepWithNext => "Keep with next",
+            Self::PageBreakBefore => "Page break before",
+        }
+    }
 }
 
 impl MetadataFieldApplicability {
@@ -838,7 +926,9 @@ impl<'a> InspectorState<'a> {
                     label: &definition.label,
                     description: definition.description.as_deref(),
                     stored_value,
-                    effective_value: stored_value.or(definition.default_value.as_deref()),
+                    // Defaults copy on node creation. They are not a live fallback
+                    // for an existing inspector value.
+                    effective_value: stored_value,
                     applicability: definition.applicability,
                     text_kind: definition.text_kind,
                 })
@@ -859,12 +949,40 @@ pub struct MetadataFieldSummary<'a> {
     pub text_kind: MetadataFieldTextKind,
 }
 
+/// A Settings list/detail selection. IDs remain stable while labels change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsDetail {
+    MetadataField(String),
+    Style(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsCategory {
+    Appearance,
+    Metadata,
+    Styles,
+}
+
+/// One style definition projected for Settings list/detail presentation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyleSummary<'a> {
+    pub id: &'a str,
+    pub display_name: &'a str,
+    pub role: StyleRole,
+    pub inherits: Option<&'a str>,
+    pub properties: &'a StyleProperties,
+}
+
 /// Presentation state for project Settings.
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     appearance: AppearanceMode,
     metadata_definitions: BTreeMap<String, MetadataDefinition>,
     metadata_order: Vec<String>,
+    style_definitions: BTreeMap<String, StyleDefinition>,
+    style_order: Vec<String>,
+    selected_detail: Option<SettingsDetail>,
+    selected_category: SettingsCategory,
 }
 
 impl SettingsState {
@@ -896,6 +1014,21 @@ impl SettingsState {
                 ),
             ]),
             metadata_order: vec!["field-17".to_owned(), "field-18".to_owned()],
+            style_definitions: StyleCatalog::default()
+                .iter()
+                .map(|definition| {
+                    (
+                        stable_id_string(definition.id.as_bytes()),
+                        definition.clone(),
+                    )
+                })
+                .collect(),
+            style_order: StyleCatalog::default()
+                .iter()
+                .map(|definition| stable_id_string(definition.id.as_bytes()))
+                .collect(),
+            selected_detail: None,
+            selected_category: SettingsCategory::Appearance,
         }
     }
 
@@ -928,10 +1061,29 @@ impl SettingsState {
                 },
             );
         }
+        let style_order = project
+            .styles
+            .iter()
+            .map(|definition| stable_id_string(definition.id.as_bytes()))
+            .collect::<Vec<_>>();
+        let style_definitions = project
+            .styles
+            .iter()
+            .map(|definition| {
+                (
+                    stable_id_string(definition.id.as_bytes()),
+                    definition.clone(),
+                )
+            })
+            .collect();
         Self {
             appearance,
             metadata_definitions,
             metadata_order,
+            style_definitions,
+            style_order,
+            selected_detail: None,
+            selected_category: SettingsCategory::Appearance,
         }
     }
 
@@ -969,6 +1121,57 @@ impl SettingsState {
             })
             .collect()
     }
+
+    pub fn styles(&self) -> Vec<StyleSummary<'_>> {
+        self.style_order
+            .iter()
+            .filter_map(|id| {
+                let definition = self.style_definitions.get(id)?;
+                Some(StyleSummary {
+                    id,
+                    display_name: &definition.display_name,
+                    role: definition.role,
+                    inherits: definition.inherits.as_ref().and_then(|parent| {
+                        self.style_order
+                            .iter()
+                            .find(|candidate| {
+                                self.style_definitions
+                                    .get(*candidate)
+                                    .is_some_and(|style| style.id == *parent)
+                            })
+                            .map(String::as_str)
+                    }),
+                    properties: &definition.properties,
+                })
+            })
+            .collect()
+    }
+
+    pub fn selected_detail(&self) -> Option<&SettingsDetail> {
+        self.selected_detail.as_ref()
+    }
+
+    pub const fn selected_category(&self) -> SettingsCategory {
+        self.selected_category
+    }
+
+    pub fn metadata_field(&self, id: &str) -> Option<MetadataFieldSummary<'_>> {
+        self.metadata_definitions
+            .get_key_value(id)
+            .map(|(id, field)| MetadataFieldSummary {
+                id,
+                label: &field.label,
+                description: field.description.as_deref(),
+                default_value: field.default_value.as_deref(),
+                visible_on_cards: field.visible_on_cards,
+                applicability: field.applicability,
+                text_kind: field.text_kind,
+            })
+    }
+
+    pub fn style(&self, id: &str) -> Option<StyleSummary<'_>> {
+        self.styles().into_iter().find(|style| style.id == id)
+    }
 }
 
 /// One streamed search result suitable for grouping and navigation.
@@ -993,6 +1196,7 @@ pub struct GlobalSearchState {
     query_generation: u64,
     complete: bool,
     error: Option<String>,
+    scroll_offset: f32,
 }
 
 impl GlobalSearchState {
@@ -1040,6 +1244,22 @@ impl GlobalSearchState {
         &self.results
     }
 
+    pub fn windowed_results(&self) -> impl Iterator<Item = &GlobalSearchResult> {
+        let start = self.result_window_start();
+        self.results.iter().skip(start).take(80)
+    }
+
+    pub fn result_window_start(&self) -> usize {
+        (self.scroll_offset.max(0.0) / 44.0) as usize
+    }
+
+    pub fn result_window_bottom_padding(&self) -> f32 {
+        self.results
+            .len()
+            .saturating_sub(self.result_window_start().saturating_add(80)) as f32
+            * 44.0
+    }
+
     pub const fn query_generation(&self) -> u64 {
         self.query_generation
     }
@@ -1065,6 +1285,39 @@ pub enum ReplacementCheckState {
 struct ReplacementNode {
     children: Vec<String>,
     included: bool,
+    result: Option<GlobalSearchResult>,
+    issue: Option<String>,
+}
+
+/// A flattened, accessible row in the replacement-review hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplacementPreviewRowKind {
+    AllMatches,
+    Document,
+    Match,
+}
+
+/// Read-only data used to render one replacement-review row.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplacementPreviewRow<'a> {
+    pub node_id: &'a str,
+    pub kind: ReplacementPreviewRowKind,
+    pub depth: usize,
+    pub check_state: ReplacementCheckState,
+    pub document_id: Option<&'a str>,
+    pub prefix: Option<&'a str>,
+    pub matching_text: Option<&'a str>,
+    pub suffix: Option<&'a str>,
+    pub indexed_revision: Option<u64>,
+    pub issue: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplacementPreviewValidation {
+    Draft,
+    Validating,
+    Ready,
+    Failed(String),
 }
 
 /// Hierarchy-shaped global replacement preview.
@@ -1073,6 +1326,8 @@ pub struct ReplacementPreviewState {
     open: bool,
     nodes: BTreeMap<String, ReplacementNode>,
     captured_project_revision: u64,
+    captured_query_generation: u64,
+    validation: ReplacementPreviewValidation,
 }
 
 impl ReplacementPreviewState {
@@ -1085,6 +1340,8 @@ impl ReplacementPreviewState {
                     ReplacementNode {
                         children: vec!["chapter-one".to_owned(), "chapter-two".to_owned()],
                         included: true,
+                        result: None,
+                        issue: None,
                     },
                 ),
                 (
@@ -1095,6 +1352,8 @@ impl ReplacementPreviewState {
                             "chapter-one-match-2".to_owned(),
                         ],
                         included: true,
+                        result: None,
+                        issue: None,
                     },
                 ),
                 (
@@ -1102,6 +1361,8 @@ impl ReplacementPreviewState {
                     ReplacementNode {
                         children: vec!["chapter-two-match-1".to_owned()],
                         included: false,
+                        result: None,
+                        issue: None,
                     },
                 ),
                 (
@@ -1109,6 +1370,15 @@ impl ReplacementPreviewState {
                     ReplacementNode {
                         children: Vec::new(),
                         included: true,
+                        result: Some(GlobalSearchResult {
+                            document_id: "chapter-one".to_owned(),
+                            match_id: "chapter-one-match-1".to_owned(),
+                            prefix: "beside the ".to_owned(),
+                            matching_text: "river".to_owned(),
+                            suffix: ", the path".to_owned(),
+                            indexed_revision: 1,
+                        }),
+                        issue: None,
                     },
                 ),
                 (
@@ -1116,6 +1386,15 @@ impl ReplacementPreviewState {
                     ReplacementNode {
                         children: Vec::new(),
                         included: true,
+                        result: Some(GlobalSearchResult {
+                            document_id: "chapter-one".to_owned(),
+                            match_id: "chapter-one-match-2".to_owned(),
+                            prefix: "the ".to_owned(),
+                            matching_text: "river".to_owned(),
+                            suffix: " turned north".to_owned(),
+                            indexed_revision: 1,
+                        }),
+                        issue: None,
                     },
                 ),
                 (
@@ -1123,14 +1402,30 @@ impl ReplacementPreviewState {
                     ReplacementNode {
                         children: Vec::new(),
                         included: false,
+                        result: Some(GlobalSearchResult {
+                            document_id: "chapter-two".to_owned(),
+                            match_id: "chapter-two-match-1".to_owned(),
+                            prefix: "a ".to_owned(),
+                            matching_text: "river".to_owned(),
+                            suffix: " below".to_owned(),
+                            indexed_revision: 1,
+                        }),
+                        issue: None,
                     },
                 ),
             ]),
             captured_project_revision: 1,
+            captured_query_generation: 0,
+            validation: ReplacementPreviewValidation::Draft,
         }
     }
 
-    fn prepare(&mut self, results: &[GlobalSearchResult]) {
+    fn prepare(
+        &mut self,
+        results: &[GlobalSearchResult],
+        captured_project_revision: u64,
+        captured_query_generation: u64,
+    ) {
         let mut documents = BTreeMap::<String, Vec<String>>::new();
         for result in results {
             documents
@@ -1145,6 +1440,8 @@ impl ReplacementPreviewState {
             ReplacementNode {
                 children: document_ids.clone(),
                 included: true,
+                result: None,
+                issue: None,
             },
         );
         for (document, matches) in documents {
@@ -1153,18 +1450,28 @@ impl ReplacementPreviewState {
                 ReplacementNode {
                     children: matches.clone(),
                     included: true,
+                    result: None,
+                    issue: None,
                 },
             );
             for match_id in matches {
                 self.nodes.insert(
-                    match_id,
+                    match_id.clone(),
                     ReplacementNode {
                         children: Vec::new(),
                         included: true,
+                        result: results
+                            .iter()
+                            .find(|result| result.match_id == match_id)
+                            .cloned(),
+                        issue: None,
                     },
                 );
             }
         }
+        self.captured_project_revision = captured_project_revision;
+        self.captured_query_generation = captured_query_generation;
+        self.validation = ReplacementPreviewValidation::Validating;
     }
 
     pub const fn uses_middle_pane(&self) -> bool {
@@ -1210,6 +1517,92 @@ impl ReplacementPreviewState {
         self.captured_project_revision
     }
 
+    pub const fn captured_query_generation(&self) -> u64 {
+        self.captured_query_generation
+    }
+
+    pub fn validation_error(&self) -> Option<&str> {
+        match &self.validation {
+            ReplacementPreviewValidation::Failed(error) => Some(error),
+            ReplacementPreviewValidation::Draft
+            | ReplacementPreviewValidation::Validating
+            | ReplacementPreviewValidation::Ready => None,
+        }
+    }
+
+    pub const fn is_validating(&self) -> bool {
+        matches!(self.validation, ReplacementPreviewValidation::Validating)
+    }
+
+    pub const fn is_revalidated(&self) -> bool {
+        matches!(self.validation, ReplacementPreviewValidation::Ready)
+    }
+
+    pub fn can_apply(&self, project_revision: u64) -> bool {
+        self.is_revalidated()
+            && self.captured_project_revision == project_revision
+            && !self.included_match_ids().is_empty()
+    }
+
+    pub fn results(&self) -> Vec<GlobalSearchResult> {
+        self.nodes
+            .values()
+            .filter_map(|node| node.result.clone())
+            .collect()
+    }
+
+    pub fn rows(&self) -> Vec<ReplacementPreviewRow<'_>> {
+        let mut rows = Vec::new();
+        self.append_rows(
+            "all-matches",
+            0,
+            ReplacementPreviewRowKind::AllMatches,
+            &mut rows,
+        );
+        rows
+    }
+
+    fn append_rows<'a>(
+        &'a self,
+        node_id: &'a str,
+        depth: usize,
+        kind: ReplacementPreviewRowKind,
+        rows: &mut Vec<ReplacementPreviewRow<'a>>,
+    ) {
+        let Some(node) = self.nodes.get(node_id) else {
+            return;
+        };
+        let result = node.result.as_ref();
+        rows.push(ReplacementPreviewRow {
+            node_id,
+            kind,
+            depth,
+            check_state: self.check_state(node_id),
+            document_id: result.map(|result| result.document_id.as_str()),
+            prefix: result.map(|result| result.prefix.as_str()),
+            matching_text: result.map(|result| result.matching_text.as_str()),
+            suffix: result.map(|result| result.suffix.as_str()),
+            indexed_revision: result.map(|result| result.indexed_revision),
+            issue: node.issue.as_deref(),
+        });
+        for child in &node.children {
+            self.append_rows(
+                child,
+                depth + 1,
+                if self
+                    .nodes
+                    .get(child)
+                    .is_some_and(|child| child.children.is_empty())
+                {
+                    ReplacementPreviewRowKind::Match
+                } else {
+                    ReplacementPreviewRowKind::Document
+                },
+                rows,
+            );
+        }
+    }
+
     pub fn included_match_ids(&self) -> Vec<&str> {
         self.nodes
             .iter()
@@ -1225,12 +1618,38 @@ impl ReplacementPreviewState {
         if children.is_empty() {
             if let Some(node) = self.nodes.get_mut(node_id) {
                 node.included = included;
+                node.issue = None;
             }
+            self.validation = ReplacementPreviewValidation::Draft;
             return;
         }
         for child in children {
             self.set_included(&child, included);
         }
+        self.validation = ReplacementPreviewValidation::Draft;
+    }
+
+    fn select_all(&mut self, included: bool) {
+        self.set_included("all-matches", included);
+    }
+
+    fn mark_ready(&mut self, captured_project_revision: u64) {
+        self.captured_project_revision = captured_project_revision;
+        self.validation = ReplacementPreviewValidation::Ready;
+    }
+
+    fn mark_failed(&mut self, error: String) {
+        for node in self.nodes.values_mut() {
+            if node.children.is_empty() && node.included {
+                node.issue = Some(error.clone());
+            }
+        }
+        self.validation = ReplacementPreviewValidation::Failed(error);
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.validation = ReplacementPreviewValidation::Draft;
     }
 }
 
@@ -1250,14 +1669,94 @@ pub enum ProjectModal {
     DeleteMetadataField {
         field_id: String,
     },
+    DeleteStyle {
+        style_id: String,
+    },
+    ReinitializeHistory,
+}
+
+/// Authoritative category reported for a History checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryCheckpointCategory {
+    Autosave,
+    ExplicitSave,
+    StructuralChange,
+    NamedSnapshot,
+    Restoration,
+}
+
+impl HistoryCheckpointCategory {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Autosave => "Automatic save",
+            Self::ExplicitSave => "Saved project",
+            Self::StructuralChange => "Project change",
+            Self::NamedSnapshot => "Named snapshot",
+            Self::Restoration => "Restoration",
+        }
+    }
+}
+
+/// A checkpoint row projected from the History service, without inventing
+/// timestamps or document titles the service did not provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryCheckpointRow {
+    pub checkpoint_id: String,
+    pub sequence: u64,
+    pub category: HistoryCheckpointCategory,
+    pub affected_document_ids: Vec<String>,
+    pub name: Option<String>,
+}
+
+impl HistoryCheckpointRow {
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.category.label().to_owned())
+    }
+}
+
+/// The manifest and optional exact document content for a selected checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPreviewData {
+    pub checkpoint: HistoryCheckpointRow,
+    pub resource_paths: Vec<String>,
+    pub document: Option<HistoryDocumentPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryDocumentPreview {
+    pub document_id: String,
+    pub canonical_path: String,
+    pub semantic: SemanticDocument,
+}
+
+/// Current-document facts that can safely be shown beside a checkpoint
+/// manifest. The checkpoint body stays unavailable until History exposes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryCurrentDocument {
+    pub document_id: String,
+    pub title: String,
+    pub body: String,
+    pub semantic: SemanticDocument,
 }
 
 /// History list/detail presentation facts.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryState {
-    checkpoints: Vec<String>,
+    checkpoints: Vec<HistoryCheckpointRow>,
     active_document_filter: Option<String>,
+    selected_checkpoint_id: Option<String>,
+    preview: Option<HistoryPreviewData>,
+    current_document: Option<HistoryCurrentDocument>,
+    named_snapshot_draft: String,
+    creating_named_snapshot: bool,
     error: Option<String>,
+    next_cursor: Option<String>,
+    loading_more: bool,
+    scroll_offset: f32,
+    maintenance: HistoryMaintenanceStatus,
+    maintenance_message: Option<String>,
 }
 
 impl HistoryState {
@@ -1273,8 +1772,37 @@ impl HistoryState {
         false
     }
 
-    pub fn checkpoints(&self) -> &[String] {
+    pub fn checkpoints(&self) -> &[HistoryCheckpointRow] {
         &self.checkpoints
+    }
+
+    pub fn visible_checkpoints(&self) -> impl Iterator<Item = &HistoryCheckpointRow> {
+        self.checkpoints.iter().filter(|checkpoint| {
+            self.active_document_filter
+                .as_ref()
+                .is_none_or(|document_id| {
+                    checkpoint
+                        .affected_document_ids
+                        .iter()
+                        .any(|affected| affected == document_id)
+                })
+        })
+    }
+
+    pub fn windowed_checkpoints(&self) -> impl Iterator<Item = &HistoryCheckpointRow> {
+        let start = (self.scroll_offset.max(0.0) / 72.0) as usize;
+        self.visible_checkpoints().skip(start).take(60)
+    }
+
+    pub fn checkpoint_window_start(&self) -> usize {
+        (self.scroll_offset.max(0.0) / 72.0) as usize
+    }
+
+    pub fn checkpoint_window_bottom_padding(&self) -> f32 {
+        self.visible_checkpoints()
+            .count()
+            .saturating_sub(self.checkpoint_window_start().saturating_add(60)) as f32
+            * 72.0
     }
 
     pub fn active_document_filter(&self) -> Option<&str> {
@@ -1283,6 +1811,42 @@ impl HistoryState {
 
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub fn selected_checkpoint_id(&self) -> Option<&str> {
+        self.selected_checkpoint_id.as_deref()
+    }
+
+    pub fn preview(&self) -> Option<&HistoryPreviewData> {
+        self.preview.as_ref()
+    }
+
+    pub fn current_document(&self) -> Option<&HistoryCurrentDocument> {
+        self.current_document.as_ref()
+    }
+
+    pub fn named_snapshot_draft(&self) -> &str {
+        &self.named_snapshot_draft
+    }
+
+    pub const fn is_creating_named_snapshot(&self) -> bool {
+        self.creating_named_snapshot
+    }
+
+    pub fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+
+    pub const fn is_loading_more(&self) -> bool {
+        self.loading_more
+    }
+
+    pub fn maintenance(&self) -> &HistoryMaintenanceStatus {
+        &self.maintenance
+    }
+
+    pub fn maintenance_message(&self) -> Option<&str> {
+        self.maintenance_message.as_deref()
     }
 }
 
@@ -1305,7 +1869,15 @@ struct DeletedItem {
     deleted_at_unix_millis: u64,
     restoring_checkpoint_id: Option<String>,
     preview_document_id: Option<String>,
-    formatted_preview_available: bool,
+    preview_document_title: Option<String>,
+    preview: Option<DeletedDocumentPreview>,
+}
+
+#[derive(Debug, Clone)]
+struct DeletedDocumentPreview {
+    document_id: String,
+    title: String,
+    semantic: SemanticDocument,
 }
 
 /// One Recently Deleted item in deterministic tombstone-ID order.
@@ -1325,11 +1897,20 @@ pub struct RecentlyDeletedItem<'a> {
     pub formatted_preview_available: bool,
 }
 
+/// Canonical, read-only content for the selected Recently Deleted item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentlyDeletedPreview<'a> {
+    pub document_id: &'a str,
+    pub title: &'a str,
+    pub semantic: &'a SemanticDocument,
+}
+
 /// Recently Deleted list/detail presentation state.
 #[derive(Debug, Clone)]
 pub struct RecentlyDeletedState {
     items: BTreeMap<String, DeletedItem>,
     default_root: String,
+    selected_item_id: Option<String>,
 }
 
 impl RecentlyDeletedState {
@@ -1348,20 +1929,26 @@ impl RecentlyDeletedState {
                     deleted_at_unix_millis: 0,
                     restoring_checkpoint_id: None,
                     preview_document_id: Some("deleted-part".to_owned()),
-                    formatted_preview_available: true,
+                    preview_document_title: Some("Deleted Part".to_owned()),
+                    preview: Some(DeletedDocumentPreview {
+                        document_id: "deleted-part".to_owned(),
+                        title: "Deleted Part".to_owned(),
+                        semantic: SemanticDocument::default(),
+                    }),
                 },
             )]),
             default_root: "manuscript".to_owned(),
+            selected_item_id: Some("deleted-part".to_owned()),
         }
     }
 
     fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
         let project = &snapshot.project;
-        let document_ids = snapshot
+        let documents = snapshot
             .documents
             .iter()
-            .map(|document| stable_id_string(document.document_id.as_bytes()))
-            .collect::<BTreeSet<_>>();
+            .map(|document| (document.document_id, document))
+            .collect::<BTreeMap<_, _>>();
         let mut items = BTreeMap::new();
         for (node_id, tombstone) in &project.deleted {
             let id = stable_id_string(node_id.as_bytes());
@@ -1378,14 +1965,32 @@ impl RecentlyDeletedState {
             } else {
                 fallback.clone()
             };
-            let preview_document_id = tombstone.subtree.iter().find_map(|deleted| {
+            let preview_candidate = tombstone.subtree.iter().find_map(|deleted| {
                 let NodeKind::Document(document_id) = deleted.node.kind else {
                     return None;
                 };
-                let id = stable_id_string(document_id.as_bytes());
-                document_ids.contains(&id).then_some(id)
+                Some((document_id, deleted.node.title.clone()))
             });
-            let formatted_preview_available = preview_document_id.is_some();
+            let preview = preview_candidate.as_ref().and_then(|(document_id, title)| {
+                let document = documents.get(document_id)?;
+                let semantic = EditorCoreSession::open(CanonicalDocumentLoad::new(
+                    document.document_id,
+                    document.body.clone(),
+                ))
+                .ok()?
+                .canonical_projection()
+                .semantic()
+                .clone();
+                Some(DeletedDocumentPreview {
+                    document_id: stable_id_string(document_id.as_bytes()),
+                    title: title.clone(),
+                    semantic,
+                })
+            });
+            let preview_document_id = preview_candidate
+                .as_ref()
+                .map(|(document, _)| stable_id_string(document.as_bytes()));
+            let preview_document_title = preview_candidate.map(|(_, title)| title);
             items.insert(
                 id,
                 DeletedItem {
@@ -1405,13 +2010,16 @@ impl RecentlyDeletedState {
                         .restoring_checkpoint
                         .map(|id| stable_id_string(id.as_bytes())),
                     preview_document_id,
-                    formatted_preview_available,
+                    preview_document_title,
+                    preview,
                 },
             );
         }
+        let selected_item_id = selected_item_id(&items);
         Self {
             items,
             default_root: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
+            selected_item_id,
         }
     }
 
@@ -1424,13 +2032,18 @@ impl RecentlyDeletedState {
                 item.location = item.fallback.clone();
             }
         }
+        if self
+            .selected_item_id
+            .as_ref()
+            .is_some_and(|id| authoritative.items.contains_key(id))
+        {
+            authoritative.selected_item_id = self.selected_item_id.clone();
+        }
         *self = authoritative;
     }
 
     pub fn has_formatted_preview(&self) -> bool {
-        self.items
-            .values()
-            .any(|item| item.formatted_preview_available)
+        self.items.values().any(|item| item.preview.is_some())
     }
 
     pub fn restore_location(&self, node_id: &str) -> RestoreLocation {
@@ -1456,7 +2069,7 @@ impl RecentlyDeletedState {
                 deleted_at_unix_millis: item.deleted_at_unix_millis,
                 restoring_checkpoint_id: item.restoring_checkpoint_id.as_deref(),
                 preview_document_id: item.preview_document_id.as_deref(),
-                formatted_preview_available: item.formatted_preview_available,
+                formatted_preview_available: item.preview.is_some(),
             })
             .collect::<Vec<_>>();
         items.sort_by(|left, right| {
@@ -1471,7 +2084,21 @@ impl RecentlyDeletedState {
     pub fn formatted_preview_available(&self, node_id: &str) -> bool {
         self.items
             .get(node_id)
-            .is_some_and(|item| item.formatted_preview_available)
+            .is_some_and(|item| item.preview.is_some())
+    }
+
+    pub fn selected_item_id(&self) -> Option<&str> {
+        self.selected_item_id.as_deref()
+    }
+
+    pub fn selected_preview(&self) -> Option<RecentlyDeletedPreview<'_>> {
+        let item = self.items.get(self.selected_item_id.as_deref()?)?;
+        let preview = item.preview.as_ref()?;
+        Some(RecentlyDeletedPreview {
+            document_id: &preview.document_id,
+            title: &preview.title,
+            semantic: &preview.semantic,
+        })
     }
 
     pub const fn has_purge_action(&self) -> bool {
@@ -1483,14 +2110,59 @@ impl RecentlyDeletedState {
             item.location = item.fallback.clone();
         }
     }
+
+    fn select(&mut self, node_id: String) {
+        if self.items.contains_key(&node_id) {
+            self.selected_item_id = Some(node_id);
+        }
+    }
+
+    fn set_preview(
+        &mut self,
+        node_id: &str,
+        document_id: &str,
+        semantic: SemanticDocument,
+    ) -> bool {
+        let Some(item) = self.items.get_mut(node_id) else {
+            return false;
+        };
+        if item.preview_document_id.as_deref() != Some(document_id) {
+            return false;
+        }
+        let Some(title) = item.preview_document_title.clone() else {
+            return false;
+        };
+        item.preview = Some(DeletedDocumentPreview {
+            document_id: document_id.to_owned(),
+            title,
+            semantic,
+        });
+        true
+    }
+}
+
+fn selected_item_id(items: &BTreeMap<String, DeletedItem>) -> Option<String> {
+    items
+        .iter()
+        .max_by(|(left_id, left), (right_id, right)| {
+            left.deleted_at_unix_millis
+                .cmp(&right.deleted_at_unix_millis)
+                .then_with(|| right_id.cmp(left_id))
+        })
+        .map(|(id, _)| id.clone())
 }
 
 /// Export progress and terminal presentation states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportState {
     Ready,
+    ChoosingDestination,
+    Planning,
     Exporting { completed: u64, total: u64 },
-    Succeeded { output_name: String },
+    Committing,
+    Cancelling,
+    Succeeded { artifact: ExportArtifact },
+    Cancelled,
     Failed(String),
 }
 
@@ -1502,6 +2174,7 @@ pub struct ExportViewState {
     numbering_documents: bool,
     project_settings: ProjectExportSettings,
     node_settings: BTreeMap<String, ProjectExportSettings>,
+    destination: Option<String>,
 }
 
 impl Default for ExportViewState {
@@ -1512,6 +2185,7 @@ impl Default for ExportViewState {
             numbering_documents: false,
             project_settings: ProjectExportSettings::default(),
             node_settings: BTreeMap::new(),
+            destination: None,
         }
     }
 }
@@ -1533,12 +2207,34 @@ impl ExportViewState {
         &self.output_name
     }
 
+    pub fn destination(&self) -> Option<&str> {
+        self.destination.as_deref()
+    }
+
     pub const fn numbers_documents(&self) -> bool {
         self.numbering_documents
     }
 
     pub const fn can_open_result(&self) -> bool {
         matches!(self.state, ExportState::Succeeded { .. })
+    }
+
+    pub const fn can_cancel(&self) -> bool {
+        matches!(
+            self.state,
+            ExportState::Planning | ExportState::Exporting { .. } | ExportState::Committing
+        )
+    }
+
+    pub const fn can_start(&self) -> bool {
+        self.destination.is_some()
+            && matches!(
+                self.state,
+                ExportState::Ready
+                    | ExportState::Succeeded { .. }
+                    | ExportState::Cancelled
+                    | ExportState::Failed(_)
+            )
     }
 
     pub const fn can_reveal_result(&self) -> bool {
@@ -1631,6 +2327,11 @@ impl ContentState {
 pub struct RecoveryState {
     accepted: bool,
     durable_save_completed: bool,
+    accepted_records: usize,
+    affected_documents: Vec<(String, u64)>,
+    isolation: Option<String>,
+    error: Option<String>,
+    resolving: bool,
 }
 
 impl RecoveryState {
@@ -1641,21 +2342,60 @@ impl RecoveryState {
     pub const fn durable_save_completed(&self) -> bool {
         self.durable_save_completed
     }
+
+    pub const fn accepted_records(&self) -> usize {
+        self.accepted_records
+    }
+
+    pub fn affected_documents(&self) -> &[(String, u64)] {
+        &self.affected_documents
+    }
+
+    pub fn isolation(&self) -> Option<&str> {
+        self.isolation.as_deref()
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    pub const fn is_resolving(&self) -> bool {
+        self.resolving
+    }
 }
 
 /// Project operations that can complete asynchronously.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProjectTask {
-    GlobalSearch { generation: u64 },
+    GlobalSearch {
+        generation: u64,
+    },
     ReplacementPreview,
     ApplyReplacement,
     LoadHistory,
-    PreviewHistory { checkpoint_id: String },
-    RestoreHistory { checkpoint_id: String },
-    RestoreDeleted { node_id: String },
-    Save { through_revision: u64 },
-    Export { source_revision: u64 },
+    PreviewHistory {
+        checkpoint_id: String,
+    },
+    PreviewDeleted {
+        node_id: String,
+        checkpoint_id: String,
+        document_id: String,
+    },
+    RestoreHistory {
+        checkpoint_id: String,
+    },
+    RestoreDeleted {
+        node_id: String,
+    },
+    Save {
+        through_revision: u64,
+    },
+    Export {
+        source_revision: u64,
+    },
+    ReconcileRecovery,
     AcceptRecovery,
+    DiscardRecovery,
     PersistWorkspace,
 }
 
@@ -1698,9 +2438,17 @@ pub enum ProjectTaskPayload {
         revision: u64,
     },
     HistoryLoaded {
-        checkpoints: Vec<String>,
+        checkpoints: Vec<HistoryCheckpointRow>,
     },
-    HistoryPreviewReady,
+    HistoryPreviewReady {
+        preview: HistoryPreviewData,
+    },
+    DeletedPreviewReady {
+        node_id: String,
+        checkpoint_id: String,
+        document_id: String,
+        semantic: SemanticDocument,
+    },
     HistoryRestored {
         revision: u64,
     },
@@ -1713,9 +2461,21 @@ pub enum ProjectTaskPayload {
         total: u64,
     },
     ExportSucceeded {
-        output_name: String,
+        artifact: ExportArtifact,
     },
+    ExportPlanning,
+    ExportCommitting,
+    ExportCancelled,
     RecoveryAccepted {
+        revision: u64,
+    },
+    RecoveryUnavailable,
+    RecoveryAvailable {
+        accepted_records: usize,
+        affected_documents: Vec<(String, u64)>,
+        isolation: Option<String>,
+    },
+    RecoveryDiscarded {
         revision: u64,
     },
     WorkspacePersisted,
@@ -1744,7 +2504,7 @@ impl ProjectTaskCompletion {
 }
 
 /// Widget messages at the project-workspace boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProjectMessage {
     ShowExplorer,
     ShowGlobalSearch,
@@ -1773,13 +2533,22 @@ pub enum ProjectMessage {
         field_id: String,
         value: String,
     },
+    /// Compatibility intent for the two applicability controls. This cannot
+    /// produce a zero-target definition: clearing the final target is ignored.
     SetMetadataApplicability {
         field_id: String,
         applies_to_documents: bool,
     },
-    RenameMetadataField {
+    SelectMetadataField(String),
+    CreateMetadataField,
+    UpdateMetadataField {
         field_id: String,
         label: String,
+        description: Option<String>,
+        applicability: MetadataFieldApplicability,
+        text_kind: MetadataFieldTextKind,
+        default_value: Option<String>,
+        visible_on_cards: bool,
     },
     ReorderMetadataField {
         field_id: String,
@@ -1787,9 +2556,35 @@ pub enum ProjectMessage {
     },
     RequestDeleteMetadataField(String),
     ConfirmDeleteMetadataField,
+    SelectStyle(String),
+    CreateStyle,
+    RenameStyle {
+        style_id: String,
+        display_name: String,
+    },
+    SetStyleInheritance {
+        style_id: String,
+        inherits: Option<String>,
+    },
+    SetStyleProperties {
+        style_id: String,
+        properties: StyleProperties,
+    },
+    SetStyleProperty {
+        style_id: String,
+        property: StyleProperty,
+        value: String,
+    },
+    RequestDeleteStyle(String),
+    ConfirmDeleteStyle,
     ActivateCard(String),
     SetCardsSection(String),
+    BeginHierarchyDrag(String),
     SetDragDestination(Option<DragDestination>),
+    CommitHierarchyDrag,
+    CancelHierarchyDrag,
+    OpenHierarchyContextMenu(String),
+    CloseHierarchyContextMenu,
     DropHierarchy {
         source_id: String,
         destination: DragDestination,
@@ -1806,33 +2601,54 @@ pub enum ProjectMessage {
         case_sensitive: bool,
         whole_word: bool,
     },
+    SetGlobalSearchScroll(f32),
     NavigateGlobalSearchResult(String),
     OpenReplacementPreview,
     SetReplacementIncluded {
         node_id: String,
         included: bool,
     },
+    SelectAllReplacementMatches,
+    SelectNoReplacementMatches,
+    CloseReplacementPreview,
     ApplyReplacement,
     SetHistoryDocumentFilter(Option<String>),
+    SetHistoryScroll(f32),
+    SelectHistoryCheckpoint(String),
+    SetNamedSnapshotDraft(String),
     RequestNamedSnapshot(String),
     RequestHistoryRestore {
         checkpoint_id: String,
     },
     ConfirmHistoryRestore,
+    RequestHistoryReinitialize,
+    ConfirmHistoryReinitialize,
+    HistoryMaintenanceLoaded(HistoryMaintenanceStatus),
+    HistoryReinitialized(String),
     DismissModal,
+    SelectRecentlyDeleted(String),
     RestoreDeleted(String),
     UseRestoreFallback(String),
     SetAppearance(AppearanceMode),
+    SelectSettingsCategory(SettingsCategory),
     SetExportOutputName(String),
+    BrowseExportDestination,
+    SetExportDestination(Option<String>),
     SetExportNumbering(bool),
+    SetExportTitleSetting(ProjectExportSetting),
+    SetExportPageBreak(bool),
     StartExport,
+    CancelExport,
     OpenExportResult,
     RevealExportResult,
     ExportProgress {
         completed: u64,
         total: u64,
     },
-    ExportSucceeded(String),
+    ExportSucceeded(ExportArtifact),
+    ExportPlanning,
+    ExportCommitting,
+    ExportCancelled,
     ExportFailed(String),
     MarkDirty(u64),
     StartSave(u64),
@@ -1843,11 +2659,13 @@ pub enum ProjectMessage {
     CancelClose,
     SetContentState(ContentState),
     AcceptRecovery,
+    DiscardRecovery,
+    RetryRecovery,
     RecoveryDurablySaved,
 }
 
 /// Integration effects translated into application/service calls.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProjectEffect {
     OpenDocumentInPrimary(String),
     OpenDocumentInCompanion(String),
@@ -1881,19 +2699,14 @@ pub enum ProjectEffect {
         field_id: String,
         value: String,
     },
-    SetMetadataApplicability {
-        field_id: String,
-        applies_to_documents: bool,
-    },
-    RenameMetadataField {
-        field_id: String,
-        label: String,
-    },
+    UpsertMetadataField(MetadataFieldDefinition),
     ReorderMetadataField {
         field_id: String,
         target_index: usize,
     },
     DeleteMetadataField(String),
+    UpsertStyle(StyleDefinition),
+    DeleteStyle(String),
     SearchProject {
         query: String,
         case_sensitive: bool,
@@ -1915,24 +2728,38 @@ pub enum ProjectEffect {
         replacement: String,
     },
     CreateNamedSnapshot(String),
+    PreviewHistory(String),
+    PreviewDeleted {
+        node_id: String,
+        checkpoint_id: String,
+        document_id: String,
+    },
     RestoreHistory {
         checkpoint_id: String,
         scope: HistoryRestoreScope,
     },
+    ReinitializeHistory,
     RestoreDeletedSubtree {
         node_id: String,
         location: RestoreLocation,
     },
     ApplyAppearanceToAllWindows(AppearanceMode),
+    SetProjectExportSettings(ProjectExportSettings),
     ExportEntireManuscript {
         output_name: String,
         number_documents: bool,
         source_revision: u64,
     },
-    OpenExportResult(String),
-    RevealExportResult(String),
+    ChooseExportDestination {
+        output_name: String,
+    },
+    CancelExport,
+    OpenExportResult(ExportArtifactToken),
+    RevealExportResult(ExportArtifactToken),
     SaveThroughRevision(u64),
     FocusRecoveredEditor,
+    ReconcileRecovery,
+    DiscardRecovery,
 }
 
 /// Project-facing presentation model integrated with the mounted editor model.
@@ -1946,6 +2773,8 @@ pub struct ProjectWorkspace {
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
     cards_drag_destination: Option<DragDestination>,
+    pointer_drag: Option<HierarchyPointerDrag>,
+    hierarchy_context_menu: Option<String>,
     last_activated_document: Option<String>,
     metadata_values: BTreeMap<(String, String), String>,
     settings: SettingsState,
@@ -1992,9 +2821,25 @@ impl ProjectWorkspace {
                 suffix: ", the path".to_owned(),
                 indexed_revision: 1,
             }];
+            global_search.complete = true;
         }
         let history = HistoryState {
-            checkpoints: vec!["snapshot-draft-two".to_owned(), "autosave-17".to_owned()],
+            checkpoints: vec![
+                HistoryCheckpointRow {
+                    checkpoint_id: "snapshot-draft-two".to_owned(),
+                    sequence: 2,
+                    category: HistoryCheckpointCategory::NamedSnapshot,
+                    affected_document_ids: vec!["chapter-one".to_owned()],
+                    name: Some("Draft Two".to_owned()),
+                },
+                HistoryCheckpointRow {
+                    checkpoint_id: "autosave-17".to_owned(),
+                    sequence: 1,
+                    category: HistoryCheckpointCategory::Autosave,
+                    affected_document_ids: vec!["chapter-one".to_owned()],
+                    name: None,
+                },
+            ],
             ..HistoryState::default()
         };
         Self {
@@ -2008,6 +2853,8 @@ impl ProjectWorkspace {
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
+            pointer_drag: None,
+            hierarchy_context_menu: None,
             last_activated_document: None,
             metadata_values: BTreeMap::from([(
                 ("chapter-one".to_owned(), "field-17".to_owned()),
@@ -2024,6 +2871,11 @@ impl ProjectWorkspace {
             recovery: RecoveryState {
                 accepted: false,
                 durable_save_completed: false,
+                accepted_records: 1,
+                affected_documents: Vec::new(),
+                isolation: None,
+                error: None,
+                resolving: false,
             },
             modal: None,
             editor: EditorWorkspace::from_fixture(EditorFixture::DualPane),
@@ -2053,6 +2905,8 @@ impl ProjectWorkspace {
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_drag_destination: None,
+            pointer_drag: None,
+            hierarchy_context_menu: None,
             last_activated_document: None,
             metadata_values,
             settings,
@@ -2061,6 +2915,8 @@ impl ProjectWorkspace {
                 open: false,
                 nodes: BTreeMap::new(),
                 captured_project_revision: snapshot.project.revision.value(),
+                captured_query_generation: 0,
+                validation: ReplacementPreviewValidation::Draft,
             },
             history: HistoryState::default(),
             recently_deleted,
@@ -2078,6 +2934,11 @@ impl ProjectWorkspace {
             recovery: RecoveryState {
                 accepted: false,
                 durable_save_completed: false,
+                accepted_records: 0,
+                affected_documents: Vec::new(),
+                isolation: None,
+                error: None,
+                resolving: false,
             },
             modal: None,
             editor: EditorWorkspace::from_snapshot(snapshot),
@@ -2108,6 +2969,22 @@ impl ProjectWorkspace {
                     | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
                     DragDestination::EditorPane(_) => true,
                 });
+        self.pointer_drag = self.pointer_drag.take().filter(|drag| {
+            self.explorer.nodes.contains_key(&drag.source_id)
+                && drag
+                    .destination
+                    .as_ref()
+                    .is_none_or(|destination| match destination {
+                        DragDestination::BeforeSibling(id)
+                        | DragDestination::AfterSibling(id)
+                        | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
+                        DragDestination::EditorPane(_) => true,
+                    })
+        });
+        self.hierarchy_context_menu = self
+            .hierarchy_context_menu
+            .take()
+            .filter(|node| self.explorer.nodes.contains_key(node));
         if self
             .last_activated_document
             .as_deref()
@@ -2118,6 +2995,14 @@ impl ProjectWorkspace {
         self.global_search
             .results
             .retain(|result| self.explorer.contains_document(&result.document_id));
+        if self.replacement_preview.open
+            && self.replacement_preview.captured_project_revision != self.project_revision
+        {
+            self.replacement_preview.mark_failed(
+                "The project changed after this replacement preview was captured. Revalidate the selected matches before applying."
+                    .to_owned(),
+            );
+        }
         if self
             .history
             .active_document_filter
@@ -2130,6 +3015,13 @@ impl ProjectWorkspace {
             &self.modal,
             Some(ProjectModal::DeleteMetadataField { field_id })
                 if !self.settings.metadata_definitions.contains_key(field_id)
+        ) {
+            self.modal = None;
+        }
+        if matches!(
+            &self.modal,
+            Some(ProjectModal::DeleteStyle { style_id })
+                if !self.settings.style_definitions.contains_key(style_id)
         ) {
             self.modal = None;
         }
@@ -2232,6 +3124,22 @@ impl ProjectWorkspace {
             })
     }
 
+    pub fn hierarchy_drag_source(&self) -> Option<&str> {
+        self.pointer_drag
+            .as_ref()
+            .map(|drag| drag.source_id.as_str())
+    }
+
+    pub fn hierarchy_drag_destination(&self) -> Option<&DragDestination> {
+        self.pointer_drag
+            .as_ref()
+            .and_then(|drag| drag.destination.as_ref())
+    }
+
+    pub fn hierarchy_context_menu(&self) -> Option<&str> {
+        self.hierarchy_context_menu.as_deref()
+    }
+
     /// Clears a cut payload only after the runtime reports a durable move and
     /// refreshed authoritative snapshot. Copy payloads remain reusable.
     pub fn complete_tree_paste(&mut self, kind: TreeClipboardKind) {
@@ -2239,6 +3147,21 @@ impl ProjectWorkspace {
             self.explorer.complete_cut();
             self.tree_clipboard = None;
         }
+    }
+
+    pub fn select_tree_roots(&mut self, node_ids: &[String]) {
+        self.explorer.selected = node_ids
+            .iter()
+            .filter(|node_id| {
+                self.explorer
+                    .nodes
+                    .get(*node_id)
+                    .is_some_and(|node| node.kind != HierarchyNodeKind::Root)
+            })
+            .cloned()
+            .collect();
+        self.explorer.selection_anchor = node_ids.last().cloned();
+        self.explorer.normalize_selection();
     }
 
     pub fn cards(&self) -> CardsState<'_> {
@@ -2262,6 +3185,21 @@ impl ProjectWorkspace {
         }
     }
 
+    pub fn explorer_active_panes(&self, node_id: &str) -> (bool, bool) {
+        let Some(document_id) = self
+            .explorer
+            .nodes
+            .get(node_id)
+            .and_then(|node| node.document_id.as_deref())
+        else {
+            return (false, false);
+        };
+        (
+            self.editor.pane(EditorPane::Primary).active_document() == Some(document_id),
+            self.editor.pane(EditorPane::Companion).active_document() == Some(document_id),
+        )
+    }
+
     pub fn inspector(&self) -> InspectorState<'_> {
         InspectorState {
             explorer: &self.explorer,
@@ -2269,6 +3207,20 @@ impl ProjectWorkspace {
             field_order: &self.settings.metadata_order,
             values: &self.metadata_values,
         }
+    }
+
+    /// The Inspector follows the most recently focused editor or Explorer row.
+    /// Explorer selection is also the deterministic fallback when neither has
+    /// an applicable context.
+    pub fn inspector_node_id(&self) -> Option<&str> {
+        match self.editor.inspector_context() {
+            InspectorContext::Document { document_id } => {
+                self.explorer.node_id_for_document(document_id)
+            }
+            InspectorContext::Group { group_id } => Some(group_id.as_str()),
+            InspectorContext::None => None,
+        }
+        .or_else(|| self.explorer.selected_ids().into_iter().next())
     }
 
     pub fn settings(&self) -> &SettingsState {
@@ -2287,8 +3239,55 @@ impl ProjectWorkspace {
         &self.history
     }
 
+    /// The History filter follows the active tab in the focused editor pane.
+    pub fn focused_history_document(&self) -> Option<&str> {
+        self.editor
+            .pane(self.editor.focused_pane())
+            .active_document()
+    }
+
+    /// Native integration supplies the authoritative current document only
+    /// while a History preview is being shown.
+    pub fn set_history_current_document(&mut self, document: Option<HistoryCurrentDocument>) {
+        self.history.current_document = document;
+    }
+
+    pub fn complete_history_workflow(&mut self) {
+        self.history.creating_named_snapshot = false;
+        self.history.named_snapshot_draft.clear();
+        self.history.error = None;
+    }
+
+    pub fn begin_history_load_more(&mut self) {
+        self.history.loading_more = self.history.next_cursor.is_some();
+        self.history.error = None;
+    }
+
+    pub fn finish_history_page(&mut self, next_cursor: Option<String>) {
+        self.history.next_cursor = next_cursor;
+        self.history.loading_more = false;
+    }
+
+    pub fn fail_history_workflow(&mut self, error: String) {
+        self.history.creating_named_snapshot = false;
+        self.history.error = Some(error);
+    }
+
     pub fn recently_deleted(&self) -> &RecentlyDeletedState {
         &self.recently_deleted
+    }
+
+    pub fn selected_deleted_preview_effect(&self) -> Option<ProjectEffect> {
+        let node_id = self.recently_deleted.selected_item_id.as_ref()?;
+        let item = self.recently_deleted.items.get(node_id)?;
+        if item.preview.is_some() {
+            return None;
+        }
+        Some(ProjectEffect::PreviewDeleted {
+            node_id: node_id.clone(),
+            checkpoint_id: item.restoring_checkpoint_id.clone()?,
+            document_id: item.preview_document_id.clone()?,
+        })
     }
 
     pub fn export(&self) -> &ExportViewState {
@@ -2331,6 +3330,120 @@ impl ProjectWorkspace {
         true
     }
 
+    pub fn workspace_snapshot(
+        &self,
+        layout: &crate::ShellLayout,
+        destination: RibbonDestination,
+    ) -> WorkspaceSnapshot {
+        let mut tabs = Vec::new();
+        let mut views = BTreeMap::new();
+        for pane in [EditorPane::Primary, EditorPane::Companion] {
+            let pane_state = self.editor.pane(pane);
+            for tab in pane_state.tabs() {
+                let Some(node_id) = self.explorer.node_id_for_document(tab.id()) else {
+                    continue;
+                };
+                let Some(node) = stable_id_bytes(node_id).map(parchmint_domain::NodeId::from_bytes)
+                else {
+                    continue;
+                };
+                tabs.push(OpenTabState {
+                    view: pane_state.view(),
+                    node,
+                });
+            }
+            if let Some(document) = pane_state.active_document()
+                && let Some(node_id) = self.explorer.node_id_for_document(document)
+                && let Some(node) =
+                    stable_id_bytes(node_id).map(parchmint_domain::NodeId::from_bytes)
+            {
+                views.insert(
+                    pane_state.view(),
+                    SavedViewState {
+                        node,
+                        scroll_offset: pane_state.scroll_offset().max(0.0).round() as u64,
+                    },
+                );
+            }
+        }
+        WorkspaceSnapshot {
+            layout: PaneLayout {
+                explorer_width: layout.explorer_width(),
+                inspector_width: layout.inspector_width(),
+                split_ratio: self.editor.split_ratio(),
+                explorer_collapsed: !layout.explorer_is_visible(),
+                inspector_collapsed: !layout.inspector_is_visible(),
+                companion_open: self.editor.pane(EditorPane::Companion).is_populated(),
+            },
+            explorer: ExplorerWorkspaceState {
+                expanded_sections: self
+                    .explorer
+                    .expanded
+                    .iter()
+                    .filter_map(|id| stable_id_bytes(id))
+                    .map(parchmint_domain::NodeId::from_bytes)
+                    .collect(),
+            },
+            tabs,
+            active_view: Some(self.editor.pane(self.editor.focused_pane()).view()),
+            views,
+            mode: if destination == RibbonDestination::Cards {
+                WorkspaceMode::Cards
+            } else {
+                WorkspaceMode::Editor
+            },
+        }
+    }
+
+    pub fn apply_workspace_snapshot(&mut self, snapshot: &WorkspaceSnapshot) -> RibbonDestination {
+        self.explorer.expanded = snapshot
+            .explorer
+            .expanded_sections
+            .iter()
+            .map(|node| stable_id_string(node.as_bytes()))
+            .filter(|node| self.explorer.nodes.contains_key(node))
+            .collect();
+        let tabs = snapshot
+            .tabs
+            .iter()
+            .filter_map(|tab| {
+                let node_id = stable_id_string(tab.node.as_bytes());
+                let row = self.explorer.row(&node_id)?;
+                Some((
+                    tab.view,
+                    TabSpec::new(row.document_id?.to_owned(), row.title.to_owned()),
+                ))
+            })
+            .collect();
+        let scroll_offsets = snapshot
+            .views
+            .iter()
+            .map(|(view, state)| (*view, state.scroll_offset as f32))
+            .collect();
+        let active_documents = snapshot
+            .views
+            .iter()
+            .filter_map(|(view, state)| {
+                let node_id = stable_id_string(state.node.as_bytes());
+                self.explorer
+                    .row(&node_id)?
+                    .document_id
+                    .map(|document| (*view, document.to_owned()))
+            })
+            .collect();
+        self.editor.restore_workspace_views(
+            tabs,
+            snapshot.active_view,
+            &scroll_offsets,
+            &active_documents,
+        );
+        self.editor.set_split_ratio(snapshot.layout.split_ratio);
+        match snapshot.mode {
+            WorkspaceMode::Editor => RibbonDestination::Editor,
+            WorkspaceMode::Cards => RibbonDestination::Cards,
+        }
+    }
+
     pub fn begin_session(&mut self, session: u64, project_revision: u64) {
         self.session = session;
         self.project_revision = project_revision;
@@ -2338,6 +3451,15 @@ impl ProjectWorkspace {
         self.next_request = 0;
         self.tree_clipboard = None;
         self.explorer.cancel_cut();
+    }
+
+    /// Blocks editable presentation while the startup recovery journal is
+    /// reconciled for this exact project session.
+    pub fn begin_recovery_reconciliation(&mut self) -> ProjectTaskTicket {
+        self.content_state = ContentState::Loading;
+        self.recovery.resolving = true;
+        self.recovery.error = None;
+        self.begin_task(ProjectTask::ReconcileRecovery)
     }
 
     /// Starts one task and invalidates an older request for the same task key.
@@ -2371,7 +3493,9 @@ impl ProjectWorkspace {
             ProjectTaskPayload::SearchBatch {
                 finished: false,
                 ..
-            } | ProjectTaskPayload::ExportProgress { .. }
+            } | ProjectTaskPayload::ExportPlanning
+                | ProjectTaskPayload::ExportProgress { .. }
+                | ProjectTaskPayload::ExportCommitting
         );
         let task = ticket.task.clone();
         let accepted = self.apply_completion(completion);
@@ -2382,6 +3506,14 @@ impl ProjectWorkspace {
     }
 
     pub fn update(&mut self, message: ProjectMessage) -> Vec<ProjectEffect> {
+        if !matches!(
+            &message,
+            ProjectMessage::OpenHierarchyContextMenu(_)
+                | ProjectMessage::CloseHierarchyContextMenu
+                | ProjectMessage::RenameNode { .. }
+        ) {
+            self.hierarchy_context_menu = None;
+        }
         match message {
             ProjectMessage::ShowExplorer => {
                 self.sidebar = SidebarSurface::Explorer;
@@ -2393,6 +3525,23 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
                 self.explorer.select(&node_id, gesture);
+                if let Some(node) = self.explorer.nodes.get(&node_id) {
+                    let context = match node.kind {
+                        HierarchyNodeKind::Document => InspectorContext::Document {
+                            document_id: node
+                                .document_id
+                                .clone()
+                                .expect("document hierarchy nodes have document ids"),
+                        },
+                        HierarchyNodeKind::Root | HierarchyNodeKind::Group => {
+                            InspectorContext::Group {
+                                group_id: node_id.clone(),
+                            }
+                        }
+                    };
+                    self.editor
+                        .update(EditorMessage::SetInspectorContext(context));
+                }
                 Vec::new()
             }
             ProjectMessage::ToggleHierarchyExpanded(node_id) => {
@@ -2467,34 +3616,76 @@ impl ProjectWorkspace {
                 let Some(field) = self.settings.metadata_definitions.get_mut(&field_id) else {
                     return Vec::new();
                 };
+                let previous = field.applicability;
                 field.applicability = match (field.applicability, applies_to_documents) {
                     (MetadataFieldApplicability::GroupsAndDocuments, false) => {
                         MetadataFieldApplicability::Groups
                     }
                     (MetadataFieldApplicability::Groups, true)
-                    | (MetadataFieldApplicability::Documents, true)
-                    | (MetadataFieldApplicability::None, true) => {
+                    | (MetadataFieldApplicability::Documents, true) => {
                         MetadataFieldApplicability::GroupsAndDocuments
                     }
-                    (MetadataFieldApplicability::Documents, false) => {
-                        MetadataFieldApplicability::None
-                    }
+                    // A definition must target Groups, Documents, or both.
+                    (MetadataFieldApplicability::Documents, false) => field.applicability,
                     (current, _) => current,
                 };
-                vec![ProjectEffect::SetMetadataApplicability {
-                    field_id,
-                    applies_to_documents,
-                }]
+                (field.applicability != previous)
+                    .then(|| self.metadata_effect(&field_id))
+                    .flatten()
+                    .into_iter()
+                    .collect()
             }
-            ProjectMessage::RenameMetadataField { field_id, label } => {
+            ProjectMessage::SelectMetadataField(field_id) => {
+                if self.settings.metadata_definitions.contains_key(&field_id) {
+                    self.settings.selected_category = SettingsCategory::Metadata;
+                    self.settings.selected_detail = Some(SettingsDetail::MetadataField(field_id));
+                }
+                Vec::new()
+            }
+            ProjectMessage::CreateMetadataField => {
+                let id = self.new_metadata_field_id();
+                self.settings.metadata_order.push(id.clone());
+                self.settings.metadata_definitions.insert(
+                    id.clone(),
+                    MetadataDefinition {
+                        label: "New field".to_owned(),
+                        description: None,
+                        applicability: MetadataFieldApplicability::Documents,
+                        text_kind: MetadataFieldTextKind::SingleLine,
+                        default_value: None,
+                        visible_on_cards: false,
+                    },
+                );
+                self.settings.selected_detail = Some(SettingsDetail::MetadataField(id.clone()));
+                self.metadata_effect(&id).into_iter().collect()
+            }
+            ProjectMessage::UpdateMetadataField {
+                field_id,
+                label,
+                description,
+                applicability,
+                text_kind,
+                default_value,
+                visible_on_cards,
+            } => {
+                if label.trim().is_empty()
+                    || (text_kind == MetadataFieldTextKind::SingleLine
+                        && default_value
+                            .as_deref()
+                            .is_some_and(|value| value.contains(['\r', '\n'])))
+                {
+                    return Vec::new();
+                }
                 let Some(field) = self.settings.metadata_definitions.get_mut(&field_id) else {
                     return Vec::new();
                 };
-                if label.trim().is_empty() {
-                    return Vec::new();
-                }
-                field.label = label.clone();
-                vec![ProjectEffect::RenameMetadataField { field_id, label }]
+                field.label = label;
+                field.description = description.filter(|value| !value.trim().is_empty());
+                field.applicability = applicability;
+                field.text_kind = text_kind;
+                field.default_value = default_value;
+                field.visible_on_cards = visible_on_cards;
+                self.metadata_effect(&field_id).into_iter().collect()
             }
             ProjectMessage::ReorderMetadataField {
                 field_id,
@@ -2510,6 +3701,10 @@ impl ProjectWorkspace {
                 };
                 let field = self.settings.metadata_order.remove(index);
                 let target = target_index.min(self.settings.metadata_order.len());
+                if index == target {
+                    self.settings.metadata_order.insert(index, field);
+                    return Vec::new();
+                }
                 self.settings.metadata_order.insert(target, field);
                 vec![ProjectEffect::ReorderMetadataField {
                     field_id,
@@ -2534,6 +3729,122 @@ impl ProjectWorkspace {
                     .retain(|(_, candidate), _| candidate != &field_id);
                 vec![ProjectEffect::DeleteMetadataField(field_id)]
             }
+            ProjectMessage::SelectStyle(style_id) => {
+                if self.settings.style_definitions.contains_key(&style_id) {
+                    self.settings.selected_category = SettingsCategory::Styles;
+                    self.settings.selected_detail = Some(SettingsDetail::Style(style_id));
+                }
+                Vec::new()
+            }
+            ProjectMessage::CreateStyle => {
+                let (id, domain_id) = self.new_style_id();
+                let definition = StyleDefinition::custom(domain_id, "New style");
+                self.settings.style_order.push(id.clone());
+                self.settings
+                    .style_definitions
+                    .insert(id.clone(), definition.clone());
+                self.settings.selected_detail = Some(SettingsDetail::Style(id));
+                vec![ProjectEffect::UpsertStyle(definition)]
+            }
+            ProjectMessage::RenameStyle {
+                style_id,
+                display_name,
+            } => {
+                if display_name.trim().is_empty() {
+                    return Vec::new();
+                }
+                let Some(definition) = self.settings.style_definitions.get_mut(&style_id) else {
+                    return Vec::new();
+                };
+                definition.display_name = display_name;
+                vec![ProjectEffect::UpsertStyle(definition.clone())]
+            }
+            ProjectMessage::SetStyleInheritance { style_id, inherits } => {
+                let parent = inherits
+                    .as_ref()
+                    .and_then(|id| self.settings.style_definitions.get(id));
+                let Some(definition) = self.settings.style_definitions.get(&style_id).cloned()
+                else {
+                    return Vec::new();
+                };
+                if inherits.as_ref().is_some_and(|id| id == &style_id)
+                    || (inherits.is_some() && parent.is_none())
+                    || self.style_would_cycle(&style_id, inherits.as_deref())
+                {
+                    return Vec::new();
+                }
+                let mut definition = definition;
+                definition.inherits = parent.map(|style| style.id);
+                self.settings
+                    .style_definitions
+                    .insert(style_id, definition.clone());
+                vec![ProjectEffect::UpsertStyle(definition)]
+            }
+            ProjectMessage::SetStyleProperties {
+                style_id,
+                properties,
+            } => {
+                if !style_properties_are_finite(&properties) {
+                    return Vec::new();
+                }
+                let Some(definition) = self.settings.style_definitions.get_mut(&style_id) else {
+                    return Vec::new();
+                };
+                definition.properties = properties;
+                vec![ProjectEffect::UpsertStyle(definition.clone())]
+            }
+            ProjectMessage::SetStyleProperty {
+                style_id,
+                property,
+                value,
+            } => {
+                let Some(definition) = self.settings.style_definitions.get_mut(&style_id) else {
+                    return Vec::new();
+                };
+                let previous = definition.properties.clone();
+                if !set_style_property(&mut definition.properties, property, &value) {
+                    definition.properties = previous;
+                    return Vec::new();
+                }
+                vec![ProjectEffect::UpsertStyle(definition.clone())]
+            }
+            ProjectMessage::RequestDeleteStyle(style_id) => {
+                if self
+                    .settings
+                    .style_definitions
+                    .get(&style_id)
+                    .is_some_and(|style| !style.role.is_reserved())
+                {
+                    self.modal = Some(ProjectModal::DeleteStyle { style_id });
+                }
+                Vec::new()
+            }
+            ProjectMessage::ConfirmDeleteStyle => {
+                let Some(ProjectModal::DeleteStyle { style_id }) = self.modal.take() else {
+                    return Vec::new();
+                };
+                let can_delete =
+                    self.settings
+                        .style_definitions
+                        .get(&style_id)
+                        .is_some_and(|style| {
+                            !style.role.is_reserved()
+                                && !self
+                                    .settings
+                                    .style_definitions
+                                    .values()
+                                    .any(|candidate| candidate.inherits == Some(style.id))
+                        });
+                if !can_delete {
+                    return Vec::new();
+                }
+                self.settings.style_definitions.remove(&style_id);
+                self.settings.style_order.retain(|id| id != &style_id);
+                if self.settings.selected_detail == Some(SettingsDetail::Style(style_id.clone())) {
+                    self.settings.selected_detail = None;
+                }
+                vec![ProjectEffect::DeleteStyle(style_id)]
+            }
             ProjectMessage::ActivateCard(document_id) => self.activate_card(document_id),
             ProjectMessage::SetCardsSection(section) => {
                 if self
@@ -2546,8 +3857,59 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
+            ProjectMessage::BeginHierarchyDrag(source_id) => {
+                if self
+                    .explorer
+                    .nodes
+                    .get(&source_id)
+                    .is_some_and(|node| node.kind != HierarchyNodeKind::Root)
+                {
+                    self.pointer_drag = Some(HierarchyPointerDrag {
+                        source_id,
+                        destination: None,
+                    });
+                    self.cards_drag_destination = None;
+                    self.hierarchy_context_menu = None;
+                }
+                Vec::new()
+            }
             ProjectMessage::SetDragDestination(destination) => {
-                self.cards_drag_destination = destination;
+                if let Some(drag) = self.pointer_drag.as_mut()
+                    && self.explorer.nodes.contains_key(&drag.source_id)
+                {
+                    self.cards_drag_destination = destination.clone();
+                    drag.destination = destination;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CommitHierarchyDrag => {
+                let drag = self.pointer_drag.take();
+                self.cards_drag_destination = None;
+                let Some(HierarchyPointerDrag {
+                    source_id,
+                    destination: Some(destination),
+                }) = drag
+                else {
+                    return Vec::new();
+                };
+                self.drop_hierarchy(source_id, destination)
+            }
+            ProjectMessage::CancelHierarchyDrag => {
+                self.pointer_drag = None;
+                self.cards_drag_destination = None;
+                Vec::new()
+            }
+            ProjectMessage::OpenHierarchyContextMenu(node_id) => {
+                if self.explorer.nodes.contains_key(&node_id) {
+                    self.explorer.select(&node_id, SelectionGesture::Replace);
+                    self.hierarchy_context_menu = Some(node_id);
+                    self.pointer_drag = None;
+                    self.cards_drag_destination = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CloseHierarchyContextMenu => {
+                self.hierarchy_context_menu = None;
                 Vec::new()
             }
             ProjectMessage::DropHierarchy {
@@ -2622,12 +3984,23 @@ impl ProjectWorkspace {
                 self.global_search.query_generation =
                     self.global_search.query_generation.saturating_add(1);
                 self.global_search.results.clear();
+                self.global_search.scroll_offset = 0.0;
                 self.global_search.complete = false;
                 self.global_search.error = None;
+                self.replacement_preview.close();
                 vec![self.search_effect()]
+            }
+            ProjectMessage::SetGlobalSearchScroll(offset) => {
+                if offset.is_finite() {
+                    self.global_search.scroll_offset = offset.max(0.0);
+                }
+                Vec::new()
             }
             ProjectMessage::SetGlobalReplacement(replacement) => {
                 self.global_search.replacement = replacement;
+                if self.replacement_preview.open {
+                    self.replacement_preview.validation = ReplacementPreviewValidation::Draft;
+                }
                 Vec::new()
             }
             ProjectMessage::SetGlobalSearchOptions {
@@ -2639,8 +4012,10 @@ impl ProjectWorkspace {
                 self.global_search.query_generation =
                     self.global_search.query_generation.saturating_add(1);
                 self.global_search.results.clear();
+                self.global_search.scroll_offset = 0.0;
                 self.global_search.complete = false;
                 self.global_search.error = None;
+                self.replacement_preview.close();
                 vec![self.search_effect()]
             }
             ProjectMessage::NavigateGlobalSearchResult(match_id) => {
@@ -2650,11 +4025,27 @@ impl ProjectWorkspace {
                 }]
             }
             ProjectMessage::OpenReplacementPreview => {
+                if !self.global_search.complete || self.global_search.results.is_empty() {
+                    self.replacement_preview.open = true;
+                    self.replacement_preview.mark_failed(
+                        "Wait for the project search to finish and return at least one match."
+                            .to_owned(),
+                    );
+                    return Vec::new();
+                }
                 self.replacement_preview.open = true;
-                self.replacement_preview.captured_project_revision = self.project_revision;
-                if matches!(self.source, ProjectWorkspaceSource::Production) {
-                    self.replacement_preview
-                        .prepare(&self.global_search.results);
+                if !self.replacement_preview.nodes.is_empty()
+                    && self.replacement_preview.captured_query_generation
+                        == self.global_search.query_generation
+                    && self.replacement_preview.captured_project_revision == self.project_revision
+                {
+                    self.replacement_preview.validation = ReplacementPreviewValidation::Validating;
+                } else {
+                    self.replacement_preview.prepare(
+                        &self.global_search.results,
+                        self.project_revision,
+                        self.global_search.query_generation,
+                    );
                 }
                 vec![ProjectEffect::BuildReplacementPreview {
                     query_generation: self.global_search.query_generation,
@@ -2666,7 +4057,22 @@ impl ProjectWorkspace {
                 self.replacement_preview.set_included(&node_id, included);
                 Vec::new()
             }
+            ProjectMessage::SelectAllReplacementMatches => {
+                self.replacement_preview.select_all(true);
+                Vec::new()
+            }
+            ProjectMessage::SelectNoReplacementMatches => {
+                self.replacement_preview.select_all(false);
+                Vec::new()
+            }
+            ProjectMessage::CloseReplacementPreview => {
+                self.replacement_preview.close();
+                Vec::new()
+            }
             ProjectMessage::ApplyReplacement => {
+                if !self.replacement_preview.can_apply(self.project_revision) {
+                    return Vec::new();
+                }
                 vec![ProjectEffect::ApplyGlobalReplacement {
                     captured_project_revision: self.replacement_preview.captured_project_revision,
                     included_match_ids: self
@@ -2680,14 +4086,50 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SetHistoryDocumentFilter(document_id) => {
                 self.history.active_document_filter = document_id;
+                self.history.checkpoints.clear();
+                self.history.selected_checkpoint_id = None;
+                self.history.preview = None;
+                self.history.current_document = None;
+                self.history.next_cursor = None;
+                self.history.loading_more = false;
+                self.history.error = None;
+                self.history.scroll_offset = 0.0;
+                Vec::new()
+            }
+            ProjectMessage::SetHistoryScroll(offset) => {
+                if offset.is_finite() {
+                    self.history.scroll_offset = offset.max(0.0);
+                }
+                Vec::new()
+            }
+            ProjectMessage::SelectHistoryCheckpoint(checkpoint_id) => {
+                if !self
+                    .history
+                    .visible_checkpoints()
+                    .any(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+                {
+                    return Vec::new();
+                }
+                self.history.selected_checkpoint_id = Some(checkpoint_id.clone());
+                self.history.preview = None;
+                self.history.error = None;
+                vec![ProjectEffect::PreviewHistory(checkpoint_id)]
+            }
+            ProjectMessage::SetNamedSnapshotDraft(value) => {
+                self.history.named_snapshot_draft = value;
+                self.history.error = None;
                 Vec::new()
             }
             ProjectMessage::RequestNamedSnapshot(name) => {
                 let name = name.trim().to_owned();
-                (!name.is_empty())
-                    .then_some(ProjectEffect::CreateNamedSnapshot(name))
-                    .into_iter()
-                    .collect()
+                if name.is_empty() {
+                    self.history.error = Some("A snapshot name is required.".to_owned());
+                    return Vec::new();
+                }
+                self.history.named_snapshot_draft = name.clone();
+                self.history.creating_named_snapshot = true;
+                self.history.error = None;
+                vec![ProjectEffect::CreateNamedSnapshot(name)]
             }
             ProjectMessage::RequestHistoryRestore { checkpoint_id } => {
                 self.modal = Some(ProjectModal::HistoryRestore {
@@ -2709,9 +4151,39 @@ impl ProjectWorkspace {
                     scope,
                 }]
             }
+            ProjectMessage::RequestHistoryReinitialize => {
+                if matches!(
+                    self.history.maintenance,
+                    HistoryMaintenanceStatus::Reinitializable { .. }
+                ) {
+                    self.modal = Some(ProjectModal::ReinitializeHistory);
+                }
+                Vec::new()
+            }
+            ProjectMessage::ConfirmHistoryReinitialize => {
+                if self.modal.take() == Some(ProjectModal::ReinitializeHistory) {
+                    vec![ProjectEffect::ReinitializeHistory]
+                } else {
+                    Vec::new()
+                }
+            }
+            ProjectMessage::HistoryMaintenanceLoaded(status) => {
+                self.history.maintenance = status;
+                Vec::new()
+            }
+            ProjectMessage::HistoryReinitialized(message) => {
+                self.history.maintenance = HistoryMaintenanceStatus::Available;
+                self.history.maintenance_message = Some(message);
+                self.history.error = None;
+                Vec::new()
+            }
             ProjectMessage::DismissModal => {
                 self.modal = None;
                 Vec::new()
+            }
+            ProjectMessage::SelectRecentlyDeleted(node_id) => {
+                self.recently_deleted.select(node_id);
+                self.selected_deleted_preview_effect().into_iter().collect()
             }
             ProjectMessage::RestoreDeleted(node_id) => {
                 if !self.recently_deleted.items.contains_key(&node_id) {
@@ -2728,45 +4200,82 @@ impl ProjectWorkspace {
                 self.settings.appearance = appearance;
                 vec![ProjectEffect::ApplyAppearanceToAllWindows(appearance)]
             }
+            ProjectMessage::SelectSettingsCategory(category) => {
+                self.settings.selected_category = category;
+                Vec::new()
+            }
             ProjectMessage::SetExportOutputName(output_name) => {
                 if !output_name.trim().is_empty() {
                     self.export.output_name = output_name;
                 }
                 Vec::new()
             }
+            ProjectMessage::BrowseExportDestination => {
+                self.export.state = ExportState::ChoosingDestination;
+                vec![ProjectEffect::ChooseExportDestination {
+                    output_name: self.export.output_name.clone(),
+                }]
+            }
+            ProjectMessage::SetExportDestination(destination) => {
+                self.export.destination = destination;
+                self.export.state = ExportState::Ready;
+                Vec::new()
+            }
             ProjectMessage::SetExportNumbering(number_documents) => {
                 self.export.numbering_documents = number_documents;
                 Vec::new()
             }
+            ProjectMessage::SetExportTitleSetting(setting) => {
+                self.export.project_settings.emit_titles = setting;
+                vec![ProjectEffect::SetProjectExportSettings(
+                    self.export.project_settings,
+                )]
+            }
+            ProjectMessage::SetExportPageBreak(starts_new_page) => {
+                self.export.project_settings.starts_new_page = starts_new_page;
+                vec![ProjectEffect::SetProjectExportSettings(
+                    self.export.project_settings,
+                )]
+            }
             ProjectMessage::StartExport => {
-                self.export.state = ExportState::Exporting {
-                    completed: 0,
-                    total: 0,
-                };
+                if self.export.destination.is_none() {
+                    return Vec::new();
+                }
+                self.export.state = ExportState::Planning;
                 vec![ProjectEffect::ExportEntireManuscript {
                     output_name: self.export.output_name.clone(),
                     number_documents: self.export.numbering_documents,
                     source_revision: self.project_revision,
                 }]
             }
-            ProjectMessage::OpenExportResult => match &self.export.state {
-                ExportState::Succeeded { output_name } => {
-                    vec![ProjectEffect::OpenExportResult(output_name.clone())]
-                }
-                ExportState::Ready | ExportState::Exporting { .. } | ExportState::Failed(_) => {
+            ProjectMessage::CancelExport => {
+                if self.export.can_cancel() {
+                    self.export.state = ExportState::Cancelling;
+                    vec![ProjectEffect::CancelExport]
+                } else {
                     Vec::new()
                 }
+            }
+            ProjectMessage::OpenExportResult => match &self.export.state {
+                ExportState::Succeeded { artifact } => {
+                    vec![ProjectEffect::OpenExportResult(artifact.token)]
+                }
+                _ => Vec::new(),
             },
             ProjectMessage::RevealExportResult => match &self.export.state {
-                ExportState::Succeeded { output_name } => {
-                    vec![ProjectEffect::RevealExportResult(output_name.clone())]
+                ExportState::Succeeded { artifact } => {
+                    vec![ProjectEffect::RevealExportResult(artifact.token)]
                 }
-                ExportState::Ready | ExportState::Exporting { .. } | ExportState::Failed(_) => {
-                    Vec::new()
-                }
+                _ => Vec::new(),
             },
+            ProjectMessage::ExportPlanning => {
+                if !matches!(self.export.state, ExportState::Cancelling) {
+                    self.export.state = ExportState::Planning;
+                }
+                Vec::new()
+            }
             ProjectMessage::ExportProgress { completed, total } => {
-                if matches!(self.export.state, ExportState::Exporting { .. }) {
+                if !matches!(self.export.state, ExportState::Cancelling) {
                     self.export.state = ExportState::Exporting {
                         completed: completed.min(total),
                         total,
@@ -2774,8 +4283,18 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
-            ProjectMessage::ExportSucceeded(output_name) => {
-                self.export.state = ExportState::Succeeded { output_name };
+            ProjectMessage::ExportCommitting => {
+                if !matches!(self.export.state, ExportState::Cancelling) {
+                    self.export.state = ExportState::Committing;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ExportSucceeded(artifact) => {
+                self.export.state = ExportState::Succeeded { artifact };
+                Vec::new()
+            }
+            ProjectMessage::ExportCancelled => {
+                self.export.state = ExportState::Cancelled;
                 Vec::new()
             }
             ProjectMessage::ExportFailed(error) => {
@@ -2819,9 +4338,28 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::AcceptRecovery => {
-                self.recovery.accepted = true;
-                self.content_state = ContentState::Ready;
+                if self.content_state != ContentState::Recovery || self.recovery.resolving {
+                    return Vec::new();
+                }
+                self.recovery.resolving = true;
+                self.recovery.error = None;
                 vec![ProjectEffect::FocusRecoveredEditor]
+            }
+            ProjectMessage::DiscardRecovery => {
+                if self.content_state != ContentState::Recovery || self.recovery.resolving {
+                    return Vec::new();
+                }
+                self.recovery.resolving = true;
+                self.recovery.error = None;
+                vec![ProjectEffect::DiscardRecovery]
+            }
+            ProjectMessage::RetryRecovery => {
+                if self.content_state != ContentState::Recovery || self.recovery.resolving {
+                    return Vec::new();
+                }
+                self.recovery.resolving = true;
+                self.recovery.error = None;
+                vec![ProjectEffect::ReconcileRecovery]
             }
             ProjectMessage::RecoveryDurablySaved => {
                 self.recovery.durable_save_completed = true;
@@ -2829,6 +4367,76 @@ impl ProjectWorkspace {
                 Vec::new()
             }
         }
+    }
+
+    fn metadata_effect(&self, field_id: &str) -> Option<ProjectEffect> {
+        let definition = self.settings.metadata_definitions.get(field_id)?;
+        let id = metadata_id_from_stable(field_id)?;
+        Some(ProjectEffect::UpsertMetadataField(
+            MetadataFieldDefinition {
+                id,
+                label: definition.label.clone(),
+                description: definition.description.clone(),
+                applicability: match definition.applicability {
+                    MetadataFieldApplicability::Groups => DomainMetadataApplicability::Groups,
+                    MetadataFieldApplicability::Documents => DomainMetadataApplicability::Documents,
+                    MetadataFieldApplicability::GroupsAndDocuments => {
+                        DomainMetadataApplicability::GroupsAndDocuments
+                    }
+                },
+                text_kind: match definition.text_kind {
+                    MetadataFieldTextKind::SingleLine => DomainMetadataTextKind::SingleLine,
+                    MetadataFieldTextKind::Multiline => DomainMetadataTextKind::Multiline,
+                },
+                default_value: definition.default_value.clone(),
+                visible_on_cards: definition.visible_on_cards,
+            },
+        ))
+    }
+
+    fn new_metadata_field_id(&self) -> String {
+        for candidate in 1_u64.. {
+            let mut bytes = *b"PMMETAFIELD00000";
+            bytes[8..].copy_from_slice(&candidate.to_be_bytes());
+            let id = stable_id_string(&bytes);
+            if !self.settings.metadata_definitions.contains_key(&id) {
+                return id;
+            }
+        }
+        unreachable!("u64 ID space is not exhausted")
+    }
+
+    fn new_style_id(&self) -> (String, StyleId) {
+        for candidate in 1_u64.. {
+            let mut bytes = *b"PMCUSTSTYLE00000";
+            bytes[8..].copy_from_slice(&candidate.to_be_bytes());
+            let domain_id = StyleId::from_bytes(bytes);
+            let id = stable_id_string(domain_id.as_bytes());
+            if !self.settings.style_definitions.contains_key(&id) {
+                return (id, domain_id);
+            }
+        }
+        unreachable!("u64 ID space is not exhausted")
+    }
+
+    fn style_would_cycle(&self, style_id: &str, proposed_parent: Option<&str>) -> bool {
+        let mut cursor = proposed_parent;
+        while let Some(id) = cursor {
+            if id == style_id {
+                return true;
+            }
+            cursor = self.settings.style_definitions.get(id).and_then(|style| {
+                style.inherits.as_ref().and_then(|parent| {
+                    self.settings
+                        .style_definitions
+                        .iter()
+                        .find_map(|(id, candidate)| {
+                            (candidate.id == *parent).then_some(id.as_str())
+                        })
+                })
+            });
+        }
+        false
     }
 
     pub(crate) const fn fixture(&self) -> ProjectFixture {
@@ -2956,7 +4564,10 @@ impl ProjectWorkspace {
             | ProjectTask::ApplyReplacement
             | ProjectTask::RestoreHistory { .. }
             | ProjectTask::RestoreDeleted { .. }
-            | ProjectTask::AcceptRecovery => {
+            | ProjectTask::PreviewDeleted { .. }
+            | ProjectTask::ReconcileRecovery
+            | ProjectTask::AcceptRecovery
+            | ProjectTask::DiscardRecovery => {
                 ticket.captured_project_revision == self.project_revision
             }
             ProjectTask::GlobalSearch { generation } => {
@@ -2980,39 +4591,133 @@ impl ProjectWorkspace {
             }
             ProjectTaskPayload::ReplacementPreviewReady => {
                 self.replacement_preview.open = true;
-                self.replacement_preview.captured_project_revision =
-                    completion.ticket.captured_project_revision;
+                self.replacement_preview
+                    .mark_ready(completion.ticket.captured_project_revision);
                 true
             }
             ProjectTaskPayload::ReplacementApplied { revision }
             | ProjectTaskPayload::HistoryRestored { revision }
-            | ProjectTaskPayload::DeletedRestored { revision }
-            | ProjectTaskPayload::RecoveryAccepted { revision } => {
+            | ProjectTaskPayload::DeletedRestored { revision } => {
                 self.project_revision = revision;
                 self.save.state = SaveState::Dirty {
                     current_revision: revision,
                 };
+                if matches!(completion.ticket.task, ProjectTask::ApplyReplacement) {
+                    self.replacement_preview.close();
+                }
+                true
+            }
+            ProjectTaskPayload::RecoveryAccepted { revision } => {
+                self.project_revision = revision;
+                self.save.state = SaveState::SavedThrough(revision);
+                self.recovery.accepted = true;
+                self.recovery.durable_save_completed = true;
+                self.recovery.resolving = false;
+                self.recovery.error = None;
+                self.content_state = self.ready_content_state();
+                true
+            }
+            ProjectTaskPayload::RecoveryDiscarded { revision } => {
+                self.project_revision = revision;
+                self.save.state = SaveState::SavedThrough(revision);
+                self.recovery.accepted = false;
+                self.recovery.durable_save_completed = false;
+                self.recovery.resolving = false;
+                self.recovery.error = None;
+                self.content_state = self.ready_content_state();
+                true
+            }
+            ProjectTaskPayload::RecoveryUnavailable => {
+                self.recovery = RecoveryState {
+                    accepted: false,
+                    durable_save_completed: false,
+                    accepted_records: 0,
+                    affected_documents: Vec::new(),
+                    isolation: None,
+                    error: None,
+                    resolving: false,
+                };
+                self.content_state = self.ready_content_state();
+                true
+            }
+            ProjectTaskPayload::RecoveryAvailable {
+                accepted_records,
+                affected_documents,
+                isolation,
+            } => {
+                self.recovery.accepted_records = accepted_records;
+                self.recovery.affected_documents = affected_documents;
+                self.recovery.isolation = isolation;
+                self.recovery.error = None;
+                self.recovery.resolving = false;
+                self.content_state = ContentState::Recovery;
                 true
             }
             ProjectTaskPayload::HistoryLoaded { checkpoints } => {
                 self.history.checkpoints = checkpoints;
+                self.history.loading_more = false;
+                if self
+                    .history
+                    .selected_checkpoint_id
+                    .as_ref()
+                    .is_some_and(|selected| {
+                        !self
+                            .history
+                            .checkpoints
+                            .iter()
+                            .any(|checkpoint| &checkpoint.checkpoint_id == selected)
+                    })
+                {
+                    self.history.selected_checkpoint_id = None;
+                    self.history.preview = None;
+                }
                 self.history.error = None;
                 true
             }
-            ProjectTaskPayload::HistoryPreviewReady => true,
+            ProjectTaskPayload::HistoryPreviewReady { preview } => {
+                self.history.preview = Some(preview);
+                self.history.error = None;
+                true
+            }
+            ProjectTaskPayload::DeletedPreviewReady {
+                node_id,
+                checkpoint_id: _,
+                document_id,
+                semantic,
+            } => self
+                .recently_deleted
+                .set_preview(&node_id, &document_id, semantic),
             ProjectTaskPayload::SavedThrough(revision) => {
                 self.finish_save(revision);
                 true
             }
-            ProjectTaskPayload::ExportProgress { completed, total } => {
-                self.export.state = ExportState::Exporting {
-                    completed: completed.min(total),
-                    total,
-                };
+            ProjectTaskPayload::ExportPlanning => {
+                if !matches!(self.export.state, ExportState::Cancelling) {
+                    self.export.state = ExportState::Planning;
+                }
                 true
             }
-            ProjectTaskPayload::ExportSucceeded { output_name } => {
-                self.export.state = ExportState::Succeeded { output_name };
+            ProjectTaskPayload::ExportProgress { completed, total } => {
+                if !matches!(self.export.state, ExportState::Cancelling) {
+                    self.export.state = ExportState::Exporting {
+                        completed: completed.min(total),
+                        total,
+                    };
+                }
+                true
+            }
+            ProjectTaskPayload::ExportCommitting => {
+                if !matches!(self.export.state, ExportState::Cancelling) {
+                    self.export.state = ExportState::Committing;
+                }
+                true
+            }
+            ProjectTaskPayload::ExportSucceeded { artifact } => {
+                self.export.state = ExportState::Succeeded { artifact };
+                true
+            }
+            ProjectTaskPayload::ExportCancelled => {
+                self.export.state = ExportState::Cancelled;
                 true
             }
             ProjectTaskPayload::WorkspacePersisted => true,
@@ -3021,21 +4726,46 @@ impl ProjectWorkspace {
                     ProjectTask::GlobalSearch { .. } => self.global_search.error = Some(error),
                     ProjectTask::LoadHistory
                     | ProjectTask::PreviewHistory { .. }
-                    | ProjectTask::RestoreHistory { .. } => self.history.error = Some(error),
+                    | ProjectTask::RestoreHistory { .. } => {
+                        self.history.loading_more = false;
+                        self.history.error = Some(error);
+                    }
+                    ProjectTask::PreviewDeleted { .. } => {}
                     ProjectTask::Export { .. } => self.export.state = ExportState::Failed(error),
-                    ProjectTask::Save { .. } | ProjectTask::AcceptRecovery => {
+                    ProjectTask::Save { .. } => {
                         self.save.state = SaveState::Error(error);
                         self.save.recovery_intact = true;
                     }
-                    ProjectTask::ReplacementPreview
-                    | ProjectTask::ApplyReplacement
-                    | ProjectTask::RestoreDeleted { .. }
-                    | ProjectTask::PersistWorkspace => {
+                    ProjectTask::ReconcileRecovery
+                    | ProjectTask::AcceptRecovery
+                    | ProjectTask::DiscardRecovery => {
+                        self.recovery.error = Some(error);
+                        self.recovery.resolving = false;
+                        self.content_state = ContentState::Recovery;
+                        self.save.recovery_intact = true;
+                    }
+                    ProjectTask::ReplacementPreview | ProjectTask::ApplyReplacement => {
+                        self.replacement_preview.mark_failed(error);
+                    }
+                    ProjectTask::RestoreDeleted { .. } | ProjectTask::PersistWorkspace => {
                         self.content_state = ContentState::Error(error)
                     }
                 }
                 true
             }
+        }
+    }
+
+    fn ready_content_state(&self) -> ContentState {
+        if self
+            .explorer
+            .nodes
+            .values()
+            .any(|node| node.kind == HierarchyNodeKind::Document)
+        {
+            ContentState::Ready
+        } else {
+            ContentState::Empty
         }
     }
 
@@ -3068,7 +4798,10 @@ fn project_payload_matches(task: &ProjectTask, payload: &ProjectTaskPayload) -> 
             ProjectTaskPayload::HistoryLoaded { .. } | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::PreviewHistory { .. },
-            ProjectTaskPayload::HistoryPreviewReady | ProjectTaskPayload::Failed(_)
+            ProjectTaskPayload::HistoryPreviewReady { .. } | ProjectTaskPayload::Failed(_)
+        ) | (
+            ProjectTask::PreviewDeleted { .. },
+            ProjectTaskPayload::DeletedPreviewReady { .. } | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::RestoreHistory { .. },
             ProjectTaskPayload::HistoryRestored { .. } | ProjectTaskPayload::Failed(_)
@@ -3080,12 +4813,23 @@ fn project_payload_matches(task: &ProjectTask, payload: &ProjectTaskPayload) -> 
             ProjectTaskPayload::SavedThrough(_) | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::Export { .. },
-            ProjectTaskPayload::ExportProgress { .. }
+            ProjectTaskPayload::ExportPlanning
+                | ProjectTaskPayload::ExportProgress { .. }
+                | ProjectTaskPayload::ExportCommitting
                 | ProjectTaskPayload::ExportSucceeded { .. }
+                | ProjectTaskPayload::ExportCancelled
+                | ProjectTaskPayload::Failed(_)
+        ) | (
+            ProjectTask::ReconcileRecovery,
+            ProjectTaskPayload::RecoveryUnavailable
+                | ProjectTaskPayload::RecoveryAvailable { .. }
                 | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::AcceptRecovery,
             ProjectTaskPayload::RecoveryAccepted { .. } | ProjectTaskPayload::Failed(_)
+        ) | (
+            ProjectTask::DiscardRecovery,
+            ProjectTaskPayload::RecoveryDiscarded { .. } | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::PersistWorkspace,
             ProjectTaskPayload::WorkspacePersisted | ProjectTaskPayload::Failed(_)
@@ -3099,6 +4843,27 @@ fn project_payload_claim_is_exact(task: &ProjectTask, payload: &ProjectTaskPaylo
             ProjectTask::Save { through_revision },
             ProjectTaskPayload::SavedThrough(saved_revision),
         ) => through_revision == saved_revision,
+        (
+            ProjectTask::PreviewHistory { checkpoint_id },
+            ProjectTaskPayload::HistoryPreviewReady { preview },
+        ) => checkpoint_id == &preview.checkpoint.checkpoint_id,
+        (
+            ProjectTask::PreviewDeleted {
+                node_id,
+                checkpoint_id,
+                document_id,
+            },
+            ProjectTaskPayload::DeletedPreviewReady {
+                node_id: result_node,
+                checkpoint_id: result_checkpoint,
+                document_id: result_document,
+                ..
+            },
+        ) => {
+            node_id == result_node
+                && checkpoint_id == result_checkpoint
+                && document_id == result_document
+        }
         _ => true,
     }
 }
@@ -3119,6 +4884,10 @@ fn same_task_family(left: &ProjectTask, right: &ProjectTask) -> bool {
                 ProjectTask::PreviewHistory { .. }
             )
             | (
+                ProjectTask::PreviewDeleted { .. },
+                ProjectTask::PreviewDeleted { .. }
+            )
+            | (
                 ProjectTask::RestoreHistory { .. },
                 ProjectTask::RestoreHistory { .. }
             )
@@ -3129,6 +4898,11 @@ fn same_task_family(left: &ProjectTask, right: &ProjectTask) -> bool {
             | (ProjectTask::Save { .. }, ProjectTask::Save { .. })
             | (ProjectTask::Export { .. }, ProjectTask::Export { .. })
             | (ProjectTask::AcceptRecovery, ProjectTask::AcceptRecovery)
+            | (
+                ProjectTask::ReconcileRecovery,
+                ProjectTask::ReconcileRecovery
+            )
+            | (ProjectTask::DiscardRecovery, ProjectTask::DiscardRecovery)
             | (ProjectTask::PersistWorkspace, ProjectTask::PersistWorkspace)
     )
 }
@@ -3141,6 +4915,121 @@ fn stable_id_string(bytes: &[u8; 16]) -> String {
         write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
     }
     serialized
+}
+
+fn stable_id_bytes(value: &str) -> Option<[u8; 16]> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+fn metadata_id_from_stable(value: &str) -> Option<MetadataFieldId> {
+    stable_id_bytes(value).map(MetadataFieldId::from_bytes)
+}
+
+fn set_style_property(
+    properties: &mut StyleProperties,
+    property: StyleProperty,
+    value: &str,
+) -> bool {
+    match property {
+        StyleProperty::FontFamily => {
+            properties.font_family = optional_trimmed(value).map(str::to_owned)
+        }
+        StyleProperty::FontSizePoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.font_size_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::Weight => match optional_trimmed(value).map(str::parse).transpose() {
+            Ok(value) => properties.weight = value,
+            Err(_) => return false,
+        },
+        StyleProperty::Italic => match optional_trimmed(value).map(str::parse).transpose() {
+            Ok(value) => properties.italic = value,
+            Err(_) => return false,
+        },
+        StyleProperty::Alignment => {
+            properties.alignment = match optional_trimmed(value) {
+                None => None,
+                Some("Start") => Some(TextAlignment::Start),
+                Some("Center") => Some(TextAlignment::Center),
+                Some("End") => Some(TextAlignment::End),
+                Some("Justify") => Some(TextAlignment::Justify),
+                Some(_) => return false,
+            };
+        }
+        StyleProperty::FirstLineIndentPoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.first_line_indent_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::LeftIndentPoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.left_indent_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::RightIndentPoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.right_indent_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::LineSpacing => match optional_trimmed(value).map(str::parse).transpose() {
+            Ok(value) => properties.line_spacing = value,
+            Err(_) => return false,
+        },
+        StyleProperty::SpaceBeforePoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.space_before_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::SpaceAfterPoints => {
+            match optional_trimmed(value).map(str::parse).transpose() {
+                Ok(value) => properties.space_after_points = value,
+                Err(_) => return false,
+            }
+        }
+        StyleProperty::KeepWithNext => match optional_trimmed(value).map(str::parse).transpose() {
+            Ok(value) => properties.keep_with_next = value,
+            Err(_) => return false,
+        },
+        StyleProperty::PageBreakBefore => match optional_trimmed(value).map(str::parse).transpose()
+        {
+            Ok(value) => properties.page_break_before = value,
+            Err(_) => return false,
+        },
+    }
+    style_properties_are_finite(properties)
+}
+
+fn optional_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn style_properties_are_finite(properties: &StyleProperties) -> bool {
+    [
+        properties.font_size_points,
+        properties.first_line_indent_points,
+        properties.left_indent_points,
+        properties.right_indent_points,
+        properties.line_spacing,
+        properties.space_before_points,
+        properties.space_after_points,
+    ]
+    .into_iter()
+    .flatten()
+    .all(f32::is_finite)
 }
 
 fn metadata_values_from_project(project: &Project) -> BTreeMap<(String, String), String> {
@@ -3168,6 +5057,217 @@ fn is_research_section(section_id: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn history_row(
+        checkpoint_id: &str,
+        category: HistoryCheckpointCategory,
+        name: Option<&str>,
+        affected_document_ids: Vec<&str>,
+    ) -> HistoryCheckpointRow {
+        HistoryCheckpointRow {
+            checkpoint_id: checkpoint_id.to_owned(),
+            sequence: 7,
+            category,
+            affected_document_ids: affected_document_ids
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            name: name.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn history_projects_category_name_and_document_summary_without_ids() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        let row = &workspace.history().checkpoints()[0];
+
+        assert_eq!(row.label(), "Draft Two");
+        assert_eq!(row.category, HistoryCheckpointCategory::NamedSnapshot);
+        assert_eq!(row.affected_document_ids.len(), 1);
+        assert_eq!(
+            HistoryCheckpointCategory::Restoration.label(),
+            "Restoration"
+        );
+    }
+
+    #[test]
+    fn named_snapshot_trims_name_and_exposes_success_or_error_state() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        assert!(
+            workspace
+                .update(ProjectMessage::RequestNamedSnapshot("   ".to_owned()))
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.history().error(),
+            Some("A snapshot name is required.")
+        );
+
+        let effects = workspace.update(ProjectMessage::RequestNamedSnapshot(
+            " Before launch ".to_owned(),
+        ));
+        assert_eq!(
+            effects,
+            [ProjectEffect::CreateNamedSnapshot(
+                "Before launch".to_owned()
+            )]
+        );
+        assert!(workspace.history().is_creating_named_snapshot());
+        workspace.complete_history_workflow();
+        assert!(!workspace.history().is_creating_named_snapshot());
+        assert_eq!(workspace.history().named_snapshot_draft(), "");
+
+        workspace.fail_history_workflow("duplicate snapshot name".to_owned());
+        assert_eq!(workspace.history().error(), Some("duplicate snapshot name"));
+    }
+
+    #[test]
+    fn history_active_document_filter_and_preview_reject_stale_selection() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        workspace.finish_history_page(Some("old-page".to_owned()));
+        workspace.update(ProjectMessage::SetHistoryDocumentFilter(Some(
+            "chapter-one".to_owned(),
+        )));
+        assert_eq!(
+            workspace.history().active_document_filter(),
+            Some("chapter-one")
+        );
+        assert_eq!(workspace.history().visible_checkpoints().count(), 0);
+        assert_eq!(workspace.history().next_cursor(), None);
+
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        let first = workspace.begin_task(ProjectTask::PreviewHistory {
+            checkpoint_id: "snapshot-draft-two".to_owned(),
+        });
+        let second = workspace.begin_task(ProjectTask::PreviewHistory {
+            checkpoint_id: "autosave-17".to_owned(),
+        });
+        let first_preview = HistoryPreviewData {
+            checkpoint: history_row(
+                "snapshot-draft-two",
+                HistoryCheckpointCategory::NamedSnapshot,
+                Some("Draft Two"),
+                vec!["chapter-one"],
+            ),
+            resource_paths: vec!["documents/chapter-one.json".to_owned()],
+            document: None,
+        };
+        assert!(
+            !workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                first,
+                ProjectTaskPayload::HistoryPreviewReady {
+                    preview: first_preview,
+                },
+            ))
+        );
+
+        let preview = HistoryPreviewData {
+            checkpoint: history_row(
+                "autosave-17",
+                HistoryCheckpointCategory::Autosave,
+                None,
+                vec!["chapter-one"],
+            ),
+            resource_paths: vec!["documents/chapter-one.json".to_owned()],
+            document: None,
+        };
+        assert!(
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                second,
+                ProjectTaskPayload::HistoryPreviewReady {
+                    preview: preview.clone(),
+                },
+            ))
+        );
+        assert_eq!(workspace.history().preview(), Some(&preview));
+
+        workspace.set_history_current_document(Some(HistoryCurrentDocument {
+            document_id: "chapter-one".to_owned(),
+            title: "Chapter One".to_owned(),
+            body: "<p>Current text</p>".to_owned(),
+            semantic: SemanticDocument::default(),
+        }));
+        assert_eq!(
+            workspace
+                .history()
+                .current_document()
+                .map(|document| document.body.as_str()),
+            Some("<p>Current text</p>")
+        );
+    }
+
+    #[test]
+    fn reopened_deleted_tombstone_requests_and_accepts_only_its_checkpoint_content() {
+        let node = parchmint_domain::NodeId::from_bytes([0x31; 16]);
+        let document = parchmint_domain::DocumentId::from_bytes([0x32; 16]);
+        let checkpoint = parchmint_domain::CheckpointId::from_bytes([0x33; 16]);
+        let mut project = Project::new(parchmint_domain::ProjectId::from_bytes([0x34; 16]));
+        project = parchmint_domain::apply_project_command(
+            &project,
+            project.revision,
+            parchmint_domain::ProjectCommand::create_document(
+                node,
+                document,
+                parchmint_domain::NodeId::manuscript_root(),
+                0,
+                "Deleted chapter",
+            ),
+        )
+        .unwrap()
+        .project;
+        project = parchmint_domain::apply_project_command(
+            &project,
+            project.revision,
+            parchmint_domain::ProjectCommand::delete_node_from_checkpoint(node, 99, checkpoint),
+        )
+        .unwrap()
+        .project;
+        let mut workspace = ProjectWorkspace::from_snapshot(&ProjectSnapshot {
+            project,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        });
+        let effect = workspace
+            .selected_deleted_preview_effect()
+            .expect("reopened tombstone should request History content");
+        let ProjectEffect::PreviewDeleted {
+            node_id,
+            checkpoint_id,
+            document_id,
+        } = effect
+        else {
+            panic!("unexpected deleted preview effect")
+        };
+        let ticket = workspace.begin_task(ProjectTask::PreviewDeleted {
+            node_id: node_id.clone(),
+            checkpoint_id: checkpoint_id.clone(),
+            document_id: document_id.clone(),
+        });
+        assert!(
+            !workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket.clone(),
+                ProjectTaskPayload::DeletedPreviewReady {
+                    node_id: node_id.clone(),
+                    checkpoint_id: "stale".into(),
+                    document_id: document_id.clone(),
+                    semantic: SemanticDocument::default(),
+                },
+            ))
+        );
+        assert!(
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket,
+                ProjectTaskPayload::DeletedPreviewReady {
+                    node_id,
+                    checkpoint_id,
+                    document_id,
+                    semantic: SemanticDocument::default(),
+                },
+            ))
+        );
+        assert!(workspace.recently_deleted().selected_preview().is_some());
+    }
+
     #[test]
     fn stale_session_request_payload_and_revision_are_rejected() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
@@ -3182,7 +5282,19 @@ mod tests {
         assert!(
             !workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                 second.clone(),
-                ProjectTaskPayload::HistoryPreviewReady,
+                ProjectTaskPayload::HistoryPreviewReady {
+                    preview: HistoryPreviewData {
+                        checkpoint: HistoryCheckpointRow {
+                            checkpoint_id: "checkpoint".to_owned(),
+                            sequence: 1,
+                            category: HistoryCheckpointCategory::Autosave,
+                            affected_document_ids: Vec::new(),
+                            name: None,
+                        },
+                        resource_paths: Vec::new(),
+                        document: None,
+                    },
+                },
             ))
         );
 
@@ -3273,11 +5385,138 @@ mod tests {
     }
 
     #[test]
+    fn pointer_drag_commits_only_a_live_validated_source_and_target() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        assert_eq!(workspace.hierarchy_drag_source(), Some("chapter-one"));
+        let destination = DragDestination::AfterSibling("chapter-two".to_owned());
+        workspace.update(ProjectMessage::SetDragDestination(Some(
+            destination.clone(),
+        )));
+        assert_eq!(workspace.hierarchy_drag_destination(), Some(&destination));
+        assert!(matches!(
+            workspace.update(ProjectMessage::CommitHierarchyDrag).as_slice(),
+            [ProjectEffect::MoveHierarchy { destination: actual, .. }] if actual == &destination
+        ));
+        assert_eq!(workspace.hierarchy_drag_source(), None);
+
+        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        workspace.update(ProjectMessage::SetDragDestination(Some(
+            DragDestination::AfterSibling("chapter-two".to_owned()),
+        )));
+        workspace.explorer.nodes.remove("chapter-one");
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .is_empty()
+        );
+        assert_eq!(workspace.hierarchy_drag_source(), None);
+    }
+
+    #[test]
+    fn export_requires_an_explicit_destination_before_starting() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Export);
+        assert!(!workspace.export().can_start());
+        assert_eq!(
+            workspace.update(ProjectMessage::BrowseExportDestination),
+            vec![ProjectEffect::ChooseExportDestination {
+                output_name: "manuscript.html".to_owned(),
+            }]
+        );
+        workspace.update(ProjectMessage::SetExportDestination(Some(
+            "/tmp/manuscript.html".to_owned(),
+        )));
+        assert!(workspace.export().can_start());
+        assert!(matches!(
+            workspace.update(ProjectMessage::StartExport).as_slice(),
+            [ProjectEffect::ExportEntireManuscript { .. }]
+        ));
+    }
+
+    #[test]
+    fn history_reinitialize_requires_availability_and_confirmation() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        workspace.update(ProjectMessage::HistoryMaintenanceLoaded(
+            HistoryMaintenanceStatus::Reinitializable {
+                problem: "damaged store".to_owned(),
+            },
+        ));
+        assert!(
+            workspace
+                .update(ProjectMessage::RequestHistoryReinitialize)
+                .is_empty()
+        );
+        assert_eq!(workspace.modal(), Some(ProjectModal::ReinitializeHistory));
+        assert_eq!(
+            workspace.update(ProjectMessage::ConfirmHistoryReinitialize),
+            vec![ProjectEffect::ReinitializeHistory]
+        );
+    }
+
+    #[test]
+    fn search_and_history_windows_follow_scroll_offsets_without_folding_all_rows() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+        workspace.global_search.results = (0..200)
+            .map(|index| GlobalSearchResult {
+                document_id: "chapter-one".to_owned(),
+                match_id: format!("match-{index}"),
+                prefix: String::new(),
+                matching_text: "x".to_owned(),
+                suffix: String::new(),
+                indexed_revision: 1,
+            })
+            .collect();
+        workspace.update(ProjectMessage::SetGlobalSearchScroll(4_400.0));
+        assert_eq!(workspace.global_search().result_window_start(), 100);
+        assert_eq!(workspace.global_search().windowed_results().count(), 80);
+
+        workspace.history.checkpoints = (0..200)
+            .map(|index| HistoryCheckpointRow {
+                checkpoint_id: format!("checkpoint-{index}"),
+                sequence: index,
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+            })
+            .collect();
+        workspace.update(ProjectMessage::SetHistoryScroll(7_200.0));
+        assert_eq!(workspace.history().checkpoint_window_start(), 100);
+        assert_eq!(workspace.history().windowed_checkpoints().count(), 60);
+    }
+
+    #[test]
+    fn pointer_drag_and_context_menu_cancel_without_dispatching_a_move() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        workspace.update(ProjectMessage::SetDragDestination(Some(
+            DragDestination::BeforeSibling("chapter-two".to_owned()),
+        )));
+        assert!(
+            workspace
+                .update(ProjectMessage::CancelHierarchyDrag)
+                .is_empty()
+        );
+        assert_eq!(workspace.hierarchy_drag_source(), None);
+
+        workspace.update(ProjectMessage::OpenHierarchyContextMenu(
+            "chapter-two".to_owned(),
+        ));
+        assert_eq!(workspace.hierarchy_context_menu(), Some("chapter-two"));
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-two"]);
+        workspace.update(ProjectMessage::CopySelection);
+        assert_eq!(workspace.hierarchy_context_menu(), None);
+    }
+
+    #[test]
     fn group_clipboard_survives_navigation_and_cut_clears_only_on_completion() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
             node_id: "part-one".to_owned(),
             gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-three".to_owned(),
+            gesture: SelectionGesture::Additive,
         });
         assert!(workspace.update(ProjectMessage::CopySelection).is_empty());
         assert_eq!(
@@ -3291,23 +5530,24 @@ mod tests {
                 destination: DragDestination::IntoGroup("research".to_owned()),
             }),
             [ProjectEffect::PasteCopiedSubtrees {
-                node_ids: vec!["part-one".to_owned()],
+                node_ids: vec!["part-one".to_owned(), "chapter-three".to_owned()],
                 destination: DragDestination::IntoGroup("research".to_owned()),
             }]
         );
         assert!(workspace.update(ProjectMessage::CutSelection).is_empty());
         assert!(workspace.explorer().is_cut_pending("part-one"));
+        assert!(workspace.explorer().is_cut_pending("chapter-three"));
         assert_eq!(
             workspace.tree_clipboard_kind(),
             Some(TreeClipboardKind::Cut)
         );
         assert_eq!(
             workspace.update(ProjectMessage::PasteSelection {
-                destination: DragDestination::AfterSibling("chapter-three".to_owned()),
+                destination: DragDestination::IntoGroup("research".to_owned()),
             }),
             [ProjectEffect::PasteCutSubtrees {
-                node_ids: vec!["part-one".to_owned()],
-                destination: DragDestination::AfterSibling("chapter-three".to_owned()),
+                node_ids: vec!["part-one".to_owned(), "chapter-three".to_owned()],
+                destination: DragDestination::IntoGroup("research".to_owned()),
             }]
         );
         assert!(workspace.explorer().is_cut_pending("part-one"));
@@ -3333,6 +5573,28 @@ mod tests {
                     destination: DragDestination::IntoGroup("research".to_owned()),
                 })
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn copied_roots_become_the_selection_without_consuming_the_copy_payload() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::CopySelection);
+
+        workspace.select_tree_roots(&["chapter-three".to_owned(), "research-notes".to_owned()]);
+        workspace.complete_tree_paste(TreeClipboardKind::Copy);
+
+        assert_eq!(
+            workspace.explorer().selected_ids(),
+            ["chapter-three", "research-notes"]
+        );
+        assert_eq!(
+            workspace.tree_clipboard_kind(),
+            Some(TreeClipboardKind::Copy)
         );
     }
 

@@ -5,31 +5,37 @@ use std::{
     fs,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, mpsc},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
 
 use parchmint_search_api::{
     BlockId, DocumentId, MetadataFieldId, ProjectId, ProjectionReceipt, RebuildReport, RevisionId,
-    SearchBatch, SearchBatchSink, SearchDocumentProjection, SearchError, SearchField, SearchHit,
-    SearchIndex, SearchIndexProblem, SearchIndexState, SearchIntegrityReport,
-    SearchProjectionSource, SearchProjectionVisitor, SearchQuery, SearchSnippet,
-    SearchTextProjection, TextRange,
+    SearchBatch, SearchBatchSink, SearchDocumentProjection, SearchError, SearchField,
+    SearchFrontierId, SearchHit, SearchIndex, SearchIndexProblem, SearchIndexState,
+    SearchIntegrityReport, SearchProjectionSource, SearchProjectionVisitor, SearchQuery,
+    SearchRebuildStatus, SearchSnippet, SearchTextProjection, TextRange,
 };
 use rusqlite::{Connection, ErrorCode, InterruptHandle, OptionalExtension, Transaction, params};
 
 const APPLICATION_ID: i32 = 0x504d_5349;
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 const RESULT_BATCH_SIZE: usize = 64;
 const REBUILD_BUFFER_SIZE: usize = 8;
+const FIRST_REBUILD_GENERATION: u64 = 1 << 63;
 
 const SCHEMA: &str = r#"
     PRAGMA application_id = 1347244873;
-    PRAGMA user_version = 1;
+    PRAGMA user_version = 2;
 
     CREATE TABLE index_metadata (
         project_id BLOB NOT NULL CHECK(length(project_id) = 16),
+        frontier_identity BLOB CHECK(frontier_identity IS NULL OR length(frontier_identity) = 32),
         rebuild_complete INTEGER NOT NULL CHECK(rebuild_complete IN (0, 1))
     ) STRICT;
 
@@ -84,6 +90,14 @@ pub struct SqliteSearchIndex {
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     operation: Mutex<()>,
     cancellation: Arc<Cancellation>,
+    rebuild_status: Arc<Mutex<SearchRebuildStatus>>,
+    background_rebuild: Mutex<Option<BackgroundRebuild>>,
+    next_rebuild_generation: AtomicU64,
+}
+
+struct BackgroundRebuild {
+    generation: u64,
+    worker: thread::JoinHandle<()>,
 }
 
 impl SqliteSearchIndex {
@@ -104,12 +118,16 @@ impl SqliteSearchIndex {
                 Worker::new(database_path, worker_cancellation).run(receiver);
             })
             .expect("the search worker thread should start");
+        let rebuild_status = Arc::new(Mutex::new(SearchRebuildStatus::Idle));
 
         Self {
             sender,
             worker: Mutex::new(Some(worker)),
             operation: Mutex::new(()),
             cancellation,
+            rebuild_status,
+            background_rebuild: Mutex::new(None),
+            next_rebuild_generation: AtomicU64::new(FIRST_REBUILD_GENERATION),
         }
     }
 
@@ -141,6 +159,7 @@ impl SqliteSearchIndex {
         self.sender
             .send(Command::Rebuild {
                 projections: projection_receiver,
+                frontier: source.frontier_identity(),
                 reply,
             })
             .map_err(|_| worker_stopped("start rebuild"))?;
@@ -168,6 +187,166 @@ impl SqliteSearchIndex {
             reason: "worker aborted a completed projection stream".into(),
         })
     }
+
+    fn background_status(&self) -> SearchRebuildStatus {
+        self.rebuild_status.lock().map_or_else(
+            |_| SearchRebuildStatus::Failed {
+                generation: 0,
+                reason: "search rebuild status is unavailable".into(),
+            },
+            |status| status.clone(),
+        )
+    }
+
+    fn require_not_rebuilding(&self) -> Result<(), SearchError> {
+        if let SearchRebuildStatus::Running { generation, .. } = self.background_status() {
+            return Err(SearchError::Rebuilding { generation });
+        }
+        Ok(())
+    }
+
+    fn stop_background_rebuild(&self) {
+        let task = self
+            .background_rebuild
+            .lock()
+            .ok()
+            .and_then(|mut task| task.take());
+        if let Some(task) = task {
+            self.cancellation.cancel(task.generation);
+            let _ = task.worker.join();
+        }
+    }
+
+    fn start_background_rebuild(
+        &self,
+        source: Arc<dyn SearchProjectionSource>,
+        previous: SearchIndexProblem,
+    ) -> Result<u64, SearchError> {
+        let generation = self.next_rebuild_generation.fetch_add(1, Ordering::Relaxed);
+        let frontier = source.frontier_identity();
+        let (projection_sender, projection_receiver) = mpsc::sync_channel(REBUILD_BUFFER_SIZE);
+        let (reply, reply_receiver) = mpsc::sync_channel(1);
+        self.sender
+            .send(Command::Rebuild {
+                projections: projection_receiver,
+                frontier,
+                reply,
+            })
+            .map_err(|_| worker_stopped("start background rebuild"))?;
+        *self
+            .rebuild_status
+            .lock()
+            .map_err(|_| worker_stopped("record background rebuild"))? =
+            SearchRebuildStatus::Running {
+                generation,
+                previous,
+                processed_documents: 0,
+            };
+        let cancellation = Arc::clone(&self.cancellation);
+        let status = Arc::clone(&self.rebuild_status);
+        let worker = thread::Builder::new()
+            .name("parchmint-search-rebuild-source".into())
+            .spawn(move || {
+                let mut visitor = BackgroundRebuildVisitor {
+                    sender: &projection_sender,
+                    cancellation: &cancellation,
+                    generation,
+                    status: &status,
+                };
+                let source_result = source.visit_projections(&mut visitor);
+                let cancelled = cancellation.is_cancelled(generation);
+                let terminal = if source_result.is_ok() && !cancelled {
+                    RebuildInput::Finish
+                } else {
+                    RebuildInput::Abort
+                };
+                let terminal_result = projection_sender.send(terminal);
+                drop(projection_sender);
+                let worker_result = reply_receiver.recv();
+                let next = if cancelled {
+                    SearchRebuildStatus::Cancelled { generation }
+                } else if let Err(error) = source_result {
+                    SearchRebuildStatus::Failed {
+                        generation,
+                        reason: error.to_string(),
+                    }
+                } else if terminal_result.is_err() {
+                    SearchRebuildStatus::Failed {
+                        generation,
+                        reason: "search rebuild worker stopped before publication".into(),
+                    }
+                } else {
+                    match worker_result {
+                        Ok(Ok(Some(report))) => SearchRebuildStatus::Complete {
+                            generation,
+                            indexed_documents: report.indexed_documents,
+                        },
+                        Ok(Ok(None)) => SearchRebuildStatus::Cancelled { generation },
+                        Ok(Err(error)) => SearchRebuildStatus::Failed {
+                            generation,
+                            reason: error.to_string(),
+                        },
+                        Err(_) => SearchRebuildStatus::Failed {
+                            generation,
+                            reason: "search rebuild worker stopped before replying".into(),
+                        },
+                    }
+                };
+                if let Ok(mut current) = status.lock()
+                    && matches!(
+                        &*current,
+                        SearchRebuildStatus::Running {
+                            generation: active,
+                            ..
+                        } if *active == generation
+                    )
+                {
+                    *current = next;
+                }
+            })
+            .map_err(|error| SearchError::Storage {
+                operation: "start background rebuild",
+                reason: error.to_string(),
+            })?;
+        *self
+            .background_rebuild
+            .lock()
+            .map_err(|_| worker_stopped("retain background rebuild"))? =
+            Some(BackgroundRebuild { generation, worker });
+        Ok(generation)
+    }
+}
+
+struct BackgroundRebuildVisitor<'a> {
+    sender: &'a mpsc::SyncSender<RebuildInput>,
+    cancellation: &'a Cancellation,
+    generation: u64,
+    status: &'a Mutex<SearchRebuildStatus>,
+}
+
+impl SearchProjectionVisitor for BackgroundRebuildVisitor<'_> {
+    fn visit(&mut self, projection: SearchDocumentProjection) -> Result<(), SearchError> {
+        if self.cancellation.is_cancelled(self.generation) {
+            return Err(SearchError::Rebuilding {
+                generation: self.generation,
+            });
+        }
+        projection.validate()?;
+        self.sender
+            .send(RebuildInput::Projection(projection))
+            .map_err(|_| worker_stopped("stream background rebuild projection"))?;
+        if let Ok(mut status) = self.status.lock()
+            && let SearchRebuildStatus::Running {
+                generation,
+                processed_documents,
+                ..
+            } = &mut *status
+            && *generation == self.generation
+        {
+            *processed_documents = processed_documents.saturating_add(1);
+        }
+        Ok(())
+    }
 }
 
 impl SearchIndex for SqliteSearchIndex {
@@ -177,7 +356,13 @@ impl SearchIndex for SqliteSearchIndex {
         source: &dyn SearchProjectionSource,
     ) -> Result<SearchIndexState, SearchError> {
         let _guard = self.operation_guard()?;
-        let problem = self.request("open", |reply| Command::Open { project, reply })?;
+        self.stop_background_rebuild();
+        let frontier = source.frontier_identity();
+        let problem = self.request("open", |reply| Command::Open {
+            project,
+            frontier,
+            reply,
+        })?;
         if let Some(previous) = problem {
             self.rebuild_from(source)?;
             Ok(SearchIndexState::Rebuilt { previous })
@@ -186,11 +371,42 @@ impl SearchIndex for SqliteSearchIndex {
         }
     }
 
+    fn open_or_rebuild_background(
+        &self,
+        project: ProjectId,
+        source: Arc<dyn SearchProjectionSource>,
+    ) -> Result<SearchIndexState, SearchError> {
+        let _guard = self.operation_guard()?;
+        self.stop_background_rebuild();
+        let frontier = source.frontier_identity();
+        let problem = self.request("open", |reply| Command::Open {
+            project,
+            frontier,
+            reply,
+        })?;
+        let Some(previous) = problem else {
+            if let Ok(mut status) = self.rebuild_status.lock() {
+                *status = SearchRebuildStatus::Idle;
+            }
+            return Ok(SearchIndexState::Opened);
+        };
+        let generation = self.start_background_rebuild(source, previous)?;
+        Ok(SearchIndexState::Rebuilding {
+            previous,
+            generation,
+        })
+    }
+
+    fn rebuild_status(&self) -> SearchRebuildStatus {
+        self.background_status()
+    }
+
     fn replace_document(
         &self,
         projection: SearchDocumentProjection,
     ) -> Result<ProjectionReceipt, SearchError> {
         projection.validate()?;
+        self.require_not_rebuilding()?;
         let _guard = self.operation_guard()?;
         self.request("replace document", |reply| Command::Replace {
             projection,
@@ -203,6 +419,7 @@ impl SearchIndex for SqliteSearchIndex {
         id: DocumentId,
         revision: RevisionId,
     ) -> Result<ProjectionReceipt, SearchError> {
+        self.require_not_rebuilding()?;
         let _guard = self.operation_guard()?;
         self.request("delete document", |reply| Command::Delete {
             id,
@@ -213,6 +430,7 @@ impl SearchIndex for SqliteSearchIndex {
 
     fn query(&self, query: SearchQuery, sink: Box<dyn SearchBatchSink>) -> Result<(), SearchError> {
         query.validate()?;
+        self.require_not_rebuilding()?;
         let _guard = self.operation_guard()?;
         self.request("query", |reply| Command::Query { query, sink, reply })
     }
@@ -222,18 +440,27 @@ impl SearchIndex for SqliteSearchIndex {
     }
 
     fn verify(&self) -> Result<SearchIntegrityReport, SearchError> {
+        if let SearchRebuildStatus::Running { previous, .. } = self.background_status() {
+            return Ok(SearchIntegrityReport {
+                indexed_documents: 0,
+                healthy: false,
+                problem: Some(previous),
+            });
+        }
         let _guard = self.operation_guard()?;
         self.request("verify", |reply| Command::Verify { reply })
     }
 
     fn rebuild(&self, source: &dyn SearchProjectionSource) -> Result<RebuildReport, SearchError> {
         let _guard = self.operation_guard()?;
+        self.stop_background_rebuild();
         self.rebuild_from(source)
     }
 }
 
 impl Drop for SqliteSearchIndex {
     fn drop(&mut self) {
+        self.stop_background_rebuild();
         let _ = self.sender.send(Command::Shutdown);
         if let Ok(mut worker) = self.worker.lock()
             && let Some(worker) = worker.take()
@@ -246,6 +473,7 @@ impl Drop for SqliteSearchIndex {
 enum Command {
     Open {
         project: ProjectId,
+        frontier: Option<SearchFrontierId>,
         reply: Reply<Option<SearchIndexProblem>>,
     },
     Replace {
@@ -267,6 +495,7 @@ enum Command {
     },
     Rebuild {
         projections: mpsc::Receiver<RebuildInput>,
+        frontier: Option<SearchFrontierId>,
         reply: Reply<Option<RebuildReport>>,
     },
     Shutdown,
@@ -382,8 +611,12 @@ impl Worker {
     fn run(mut self, receiver: mpsc::Receiver<Command>) {
         while let Ok(command) = receiver.recv() {
             match command {
-                Command::Open { project, reply } => {
-                    send_reply(reply, self.open(project));
+                Command::Open {
+                    project,
+                    frontier,
+                    reply,
+                } => {
+                    send_reply(reply, self.open(project, frontier));
                 }
                 Command::Replace { projection, reply } => {
                     send_reply(reply, self.replace_document(&projection));
@@ -397,21 +630,29 @@ impl Worker {
                     send_reply(reply, self.query(&query, sink.as_ref()));
                 }
                 Command::Verify { reply } => send_reply(reply, self.verify()),
-                Command::Rebuild { projections, reply } => {
-                    send_reply(reply, self.rebuild(&projections));
+                Command::Rebuild {
+                    projections,
+                    frontier,
+                    reply,
+                } => {
+                    send_reply(reply, self.rebuild(&projections, frontier));
                 }
                 Command::Shutdown => break,
             }
         }
     }
 
-    fn open(&mut self, project: ProjectId) -> Result<Option<SearchIndexProblem>, SearchError> {
+    fn open(
+        &mut self,
+        project: ProjectId,
+        frontier: Option<SearchFrontierId>,
+    ) -> Result<Option<SearchIndexProblem>, SearchError> {
         self.database = None;
 
         let existed = self.database_path.is_file();
         if !existed {
-            let database = self.create_database(project)?;
-            self.install_database(project, database);
+            let database = self.create_database(project, frontier)?;
+            self.install_database(project, frontier, database);
             return Ok(Some(SearchIndexProblem::Missing));
         }
 
@@ -421,33 +662,44 @@ impl Worker {
                 let Some(problem) = sqlite_problem(&error) else {
                     return Err(sqlite_error("open", error));
                 };
-                let database = self.recreate_database(project)?;
-                self.install_database(project, database);
+                let database = self.recreate_database(project, frontier)?;
+                self.install_database(project, frontier, database);
                 return Ok(Some(problem));
             }
         };
-        let problem = match inspect_connection(&connection, project) {
+        let problem = match inspect_connection(&connection, project, frontier) {
+            Ok(None) if frontier.is_none() => SearchIndexProblem::Incompatible,
             Ok(None) => {
-                self.install_database(project, connection);
+                self.install_database(project, frontier, connection);
                 return Ok(None);
             }
             Ok(Some(problem)) => problem,
             Err(error) => sqlite_problem(&error).ok_or_else(|| sqlite_error("inspect", error))?,
         };
         drop(connection);
-        let database = self.recreate_database(project)?;
-        self.install_database(project, database);
+        let database = self.recreate_database(project, frontier)?;
+        self.install_database(project, frontier, database);
         Ok(Some(problem))
     }
 
-    fn install_database(&mut self, project: ProjectId, connection: Connection) {
+    fn install_database(
+        &mut self,
+        project: ProjectId,
+        frontier: Option<SearchFrontierId>,
+        connection: Connection,
+    ) {
         self.database = Some(ProjectDatabase {
             project,
+            frontier,
             connection,
         });
     }
 
-    fn create_database(&self, project: ProjectId) -> Result<Connection, SearchError> {
+    fn create_database(
+        &self,
+        project: ProjectId,
+        frontier: Option<SearchFrontierId>,
+    ) -> Result<Connection, SearchError> {
         let parent = self
             .database_path
             .parent()
@@ -466,8 +718,12 @@ impl Worker {
             .map_err(|error| sqlite_error("create schema", error))?;
         transaction
             .execute(
-                "INSERT INTO index_metadata(project_id, rebuild_complete) VALUES (?1, 0)",
-                params![project.as_bytes().as_slice()],
+                "INSERT INTO index_metadata(project_id, frontier_identity, rebuild_complete)
+                 VALUES (?1, ?2, 0)",
+                params![
+                    project.as_bytes().as_slice(),
+                    frontier.map(|identity| identity.as_bytes().to_vec())
+                ],
             )
             .map_err(|error| sqlite_error("record project identity", error))?;
         transaction
@@ -476,9 +732,13 @@ impl Worker {
         Ok(connection)
     }
 
-    fn recreate_database(&self, project: ProjectId) -> Result<Connection, SearchError> {
+    fn recreate_database(
+        &self,
+        project: ProjectId,
+        frontier: Option<SearchFrontierId>,
+    ) -> Result<Connection, SearchError> {
         remove_database_files(&self.database_path)?;
-        self.create_database(project)
+        self.create_database(project, frontier)
     }
 
     fn database_mut(
@@ -501,9 +761,15 @@ impl Worker {
             .transaction()
             .map_err(|error| sqlite_error("begin document replacement", error))?;
         let receipt = replace_in_transaction(&transaction, projection)?;
+        if receipt.replaced {
+            invalidate_frontier(&transaction)?;
+        }
         transaction
             .commit()
             .map_err(|error| sqlite_error("commit document replacement", error))?;
+        if receipt.replaced {
+            database.frontier = None;
+        }
         Ok(receipt)
     }
 
@@ -542,9 +808,11 @@ impl Worker {
                 ],
             )
             .map_err(|error| sqlite_error("record document deletion", error))?;
+        invalidate_frontier(&transaction)?;
         transaction
             .commit()
             .map_err(|error| sqlite_error("commit document deletion", error))?;
+        database.frontier = None;
         Ok(ProjectionReceipt {
             document_id: id,
             indexed_revision: revision,
@@ -569,7 +837,7 @@ impl Worker {
 
     fn verify(&mut self) -> Result<SearchIntegrityReport, SearchError> {
         let database = self.database_mut("verify")?;
-        match inspect_connection(&database.connection, database.project) {
+        match inspect_connection(&database.connection, database.project, database.frontier) {
             Ok(None) => Ok(SearchIntegrityReport {
                 indexed_documents: indexed_document_count(&database.connection)?,
                 healthy: true,
@@ -586,12 +854,13 @@ impl Worker {
     fn rebuild(
         &mut self,
         projections: &mpsc::Receiver<RebuildInput>,
+        frontier: Option<SearchFrontierId>,
     ) -> Result<Option<RebuildReport>, SearchError> {
         let (project, inspection) = {
             let database = self.database_mut("rebuild")?;
             (
                 database.project,
-                inspect_connection(&database.connection, database.project),
+                inspect_connection(&database.connection, database.project, frontier),
             )
         };
         let needs_recreation = match inspection {
@@ -601,8 +870,8 @@ impl Worker {
         };
         if needs_recreation {
             self.database = None;
-            let connection = self.recreate_database(project)?;
-            self.install_database(project, connection);
+            let connection = self.recreate_database(project, frontier)?;
+            self.install_database(project, frontier, connection);
         }
 
         let database = self.database_mut("rebuild")?;
@@ -621,11 +890,16 @@ impl Worker {
                 Ok(RebuildInput::Finish) => {
                     let indexed_documents = indexed_document_count(&transaction)?;
                     transaction
-                        .execute("UPDATE index_metadata SET rebuild_complete = 1", [])
+                        .execute(
+                            "UPDATE index_metadata
+                             SET frontier_identity = ?1, rebuild_complete = 1",
+                            params![frontier.map(|identity| identity.as_bytes().to_vec())],
+                        )
                         .map_err(|error| sqlite_error("complete rebuild", error))?;
                     transaction
                         .commit()
                         .map_err(|error| sqlite_error("commit rebuild", error))?;
+                    database.frontier = frontier;
                     return Ok(Some(RebuildReport { indexed_documents }));
                 }
                 Ok(RebuildInput::Abort) | Err(_) => return Ok(None),
@@ -634,8 +908,16 @@ impl Worker {
     }
 }
 
+fn invalidate_frontier(transaction: &Transaction<'_>) -> Result<(), SearchError> {
+    transaction
+        .execute("UPDATE index_metadata SET frontier_identity = NULL", [])
+        .map_err(|error| sqlite_error("invalidate search frontier", error))?;
+    Ok(())
+}
+
 struct ProjectDatabase {
     project: ProjectId,
+    frontier: Option<SearchFrontierId>,
     connection: Connection,
 }
 
@@ -661,7 +943,9 @@ fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
 fn inspect_connection(
     connection: &Connection,
     project: ProjectId,
+    expected_frontier: Option<SearchFrontierId>,
 ) -> rusqlite::Result<Option<SearchIndexProblem>> {
+    type StoredIndexMetadata = (i64, Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>);
     let application_id: i32 =
         connection.query_row("PRAGMA application_id", [], |row| row.get(0))?;
     let schema_version: i32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -686,17 +970,19 @@ fn inspect_connection(
         return Ok(Some(SearchIndexProblem::Incompatible));
     }
 
-    let (metadata_count, stored_project, rebuild_complete): (i64, Option<Vec<u8>>, Option<i64>) =
+    let (metadata_count, stored_project, stored_frontier, rebuild_complete): StoredIndexMetadata =
         match connection.query_row(
-            "SELECT count(*), min(project_id), min(rebuild_complete) FROM index_metadata",
+            "SELECT count(*), min(project_id), min(frontier_identity), min(rebuild_complete)
+             FROM index_metadata",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ) {
             Ok(metadata) => metadata,
             Err(error) => return inspection_schema_error(error),
         };
     if metadata_count != 1
         || stored_project.as_deref() != Some(project.as_bytes().as_slice())
+        || stored_frontier != expected_frontier.map(|identity| identity.as_bytes().to_vec())
         || rebuild_complete != Some(1)
     {
         return Ok(Some(SearchIndexProblem::Incompatible));
@@ -731,7 +1017,10 @@ fn replace_in_transaction(
     if let Some((indexed_revision, deleted)) =
         current_document(transaction, projection.document_id)?
         && (indexed_revision > projection.revision
-            || (deleted && indexed_revision == projection.revision))
+            || (deleted && indexed_revision == projection.revision)
+            || (!deleted
+                && indexed_revision == projection.revision
+                && projection_matches(transaction, projection)?))
     {
         return Ok(ProjectionReceipt {
             document_id: projection.document_id,
@@ -764,6 +1053,51 @@ fn replace_in_transaction(
         indexed_revision: projection.revision,
         replaced: true,
     })
+}
+
+fn projection_matches(
+    transaction: &Transaction<'_>,
+    projection: &SearchDocumentProjection,
+) -> Result<bool, SearchError> {
+    let count: i64 = transaction
+        .query_row(
+            "SELECT count(*) FROM search_content WHERE document_id = ?1",
+            params![projection.document_id.as_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("compare indexed projection", error))?;
+    if usize::try_from(count).ok() != Some(projection.texts.len()) {
+        return Ok(false);
+    }
+    for text in &projection.texts {
+        let (field_kind, metadata): (i64, Option<&[u8]>) = match &text.field {
+            SearchField::Body => (0, None),
+            SearchField::DisplayTitle => (1, None),
+            SearchField::Synopsis => (2, None),
+            SearchField::Metadata(id) => (3, Some(id.as_bytes().as_slice())),
+        };
+        let found: i64 = transaction
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM search_content
+                    WHERE document_id = ?1 AND block_id = ?2 AND field_kind = ?3
+                      AND metadata_field_id IS ?4 AND text = ?5
+                )",
+                params![
+                    projection.document_id.as_bytes().as_slice(),
+                    text.block_id.as_bytes().as_slice(),
+                    field_kind,
+                    metadata,
+                    text.text,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| sqlite_error("compare indexed projection", error))?;
+        if found == 0 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn insert_text(

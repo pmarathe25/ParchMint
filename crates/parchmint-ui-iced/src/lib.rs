@@ -458,6 +458,46 @@ impl ShellLayout {
         self.inspector_width = self.clamp_sidebar(width);
     }
 
+    pub const fn explorer_width(&self) -> u32 {
+        self.explorer_width
+    }
+
+    pub const fn inspector_width(&self) -> u32 {
+        self.inspector_width
+    }
+
+    pub const fn explorer_is_visible(&self) -> bool {
+        self.explorer_visible
+    }
+
+    pub const fn inspector_is_visible(&self) -> bool {
+        self.inspector_visible
+    }
+
+    pub const fn requested_width(&self) -> u32 {
+        self.requested_width
+    }
+
+    pub fn resize_window(&mut self, width: u32, height: u32) {
+        self.requested_width = width;
+        self.requested_height = height;
+        self.explorer_width = self.clamp_sidebar(self.explorer_width);
+        self.inspector_width = self.clamp_sidebar(self.inspector_width);
+    }
+
+    pub fn restore_panes(
+        &mut self,
+        explorer_width: u32,
+        inspector_width: u32,
+        explorer_visible: bool,
+        inspector_visible: bool,
+    ) {
+        self.resize_explorer(explorer_width);
+        self.resize_inspector(inspector_width);
+        self.set_explorer_visible(explorer_visible);
+        self.set_inspector_visible(inspector_visible);
+    }
+
     pub fn set_explorer_visible(&mut self, visible: bool) {
         self.explorer_visible = visible;
     }
@@ -662,6 +702,10 @@ impl Shell {
 
     pub fn layout(&self) -> &ShellLayout {
         &self.layout
+    }
+
+    pub fn layout_mut(&mut self) -> &mut ShellLayout {
+        &mut self.layout
     }
 
     pub fn set_layout(&mut self, layout: ShellLayout) {

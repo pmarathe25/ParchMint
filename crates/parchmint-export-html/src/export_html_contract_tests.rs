@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use parchmint_export_api::{
     DocumentId, ExportDefaults, ExportError, ExportHandle, ExportNode, ExportPlan, ExportRequest,
@@ -84,7 +85,12 @@ fn bytes(sink: &CaptureSink) -> Vec<u8> {
 fn render(plan: &ExportPlan) -> String {
     let mut sink = CaptureSink::default();
     HtmlExporter
-        .render(plan, &mut sink, &ExportHandle::new())
+        .render(
+            plan,
+            &mut sink,
+            &ExportHandle::new(),
+            &parchmint_export_api::IgnoreExportProgress,
+        )
         .expect("render succeeds");
     String::from_utf8(bytes(&sink)).expect("UTF-8 HTML")
 }
@@ -180,6 +186,7 @@ fn writes_are_chunked_and_cancellation_aborts_before_completion() {
         ),
         &mut sink,
         &handle,
+        &parchmint_export_api::IgnoreExportProgress,
     );
 
     assert_eq!(result, Err(ExportError::Cancelled));
@@ -189,4 +196,68 @@ fn writes_are_chunked_and_cancellation_aborts_before_completion() {
     );
     assert!(sink.aborted);
     assert!(!sink.complete);
+}
+
+#[derive(Default)]
+struct RecordingProgress(Mutex<Vec<parchmint_export_api::ExportProgress>>);
+
+impl parchmint_export_api::ExportProgressSink for RecordingProgress {
+    fn report(&self, progress: parchmint_export_api::ExportProgress) {
+        self.0.lock().expect("progress log").push(progress);
+    }
+}
+
+#[test]
+fn progress_is_determinate_for_each_planned_semantic_item() {
+    let progress = RecordingProgress::default();
+    let mut sink = CaptureSink::default();
+    HtmlExporter
+        .render(
+            &plan(
+                vec![
+                    ExportNode::document(document_id(1), "First", ExportSettings::default()),
+                    ExportNode::document(document_id(2), "Second", ExportSettings::default()),
+                ],
+                BTreeMap::from([
+                    (
+                        document_id(1),
+                        ExportSource {
+                            revision: 1.into(),
+                            body: "one".into(),
+                        },
+                    ),
+                    (
+                        document_id(2),
+                        ExportSource {
+                            revision: 1.into(),
+                            body: "two".into(),
+                        },
+                    ),
+                ]),
+                "",
+            ),
+            &mut sink,
+            &ExportHandle::new(),
+            &progress,
+        )
+        .expect("render");
+
+    assert_eq!(
+        *progress.0.lock().expect("progress log"),
+        vec![
+            parchmint_export_api::ExportProgress::Rendering {
+                completed: 0,
+                total: 2,
+            },
+            parchmint_export_api::ExportProgress::Rendering {
+                completed: 1,
+                total: 2,
+            },
+            parchmint_export_api::ExportProgress::Rendering {
+                completed: 2,
+                total: 2,
+            },
+            parchmint_export_api::ExportProgress::Committing,
+        ]
+    );
 }
