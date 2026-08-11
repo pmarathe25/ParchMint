@@ -22,9 +22,37 @@ pub const CORE_ICON_SIZE: u16 = 20;
 pub const DEFAULT_RADIUS: f32 = 4.0;
 pub const FOCUS_BORDER_WIDTH: f32 = 2.0;
 
-/// Application typography contract. Font bytes are intentionally not claimed
-/// here: the checked-in source specifies Source Sans 3, but no redistributable
-/// asset is currently present in this repository.
+/// Exact launcher composition metrics from the Penpot launcher frame.
+///
+/// These constants are intentionally reusable: the launcher is a full-window
+/// application surface, so future first-run and project-picker surfaces use
+/// the same reading-column geometry instead of independent magic numbers.
+pub const LAUNCHER_INSET: u16 = 72;
+pub const LAUNCHER_RHYTHM: u16 = 28;
+pub const LAUNCHER_ACTION_ROW_HEIGHT: u16 = 52;
+pub const LAUNCHER_PROJECT_CARD_WIDTH: u16 = 520;
+pub const LAUNCHER_PROJECT_CARD_HEIGHT: u16 = 96;
+pub const LAUNCHER_PROJECT_CARD_GAP: u16 = 22;
+pub const LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING: u16 = 16;
+pub const LAUNCHER_PROJECT_CARD_VERTICAL_PADDING: u16 = 10;
+pub const LAUNCHER_PROJECT_ICON_SIZE: u16 = 20;
+pub const LAUNCHER_LAST_OPENED_ICON_SIZE: u16 = 14;
+pub const LAUNCHER_PROJECT_TITLE_WIDTH: u16 = 124;
+pub const LAUNCHER_PROJECT_HEADER_GAP: u16 = 14;
+pub const LAUNCHER_PROJECT_METADATA_GAP: u16 = 12;
+pub const LAUNCHER_PROJECT_NAME_MAX_CHARS: usize = 24;
+pub const LAUNCHER_PROJECT_PATH_MAX_CHARS: usize = 38;
+
+/// Exact launcher type sizes from the Penpot source.
+pub const LAUNCHER_WORDMARK_SIZE: u16 = 24;
+pub const LAUNCHER_TITLE_SIZE: u16 = 24;
+pub const LAUNCHER_SUBTITLE_SIZE: u16 = 14;
+pub const LAUNCHER_PROJECT_NAME_SIZE: u16 = 15;
+pub const LAUNCHER_PROJECT_PATH_SIZE: u16 = 12;
+pub const LAUNCHER_PROJECT_LAST_OPENED_SIZE: u16 = 11;
+
+/// Application typography contract. The matching Source Sans 3 assets are
+/// bundled by the native and deterministic headless renderers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Typography {
     pub family: &'static str,
@@ -82,13 +110,8 @@ pub const UI_CODE_PATH: Typography = Typography {
     line_height: 1.4,
 };
 
-/// Deterministic UI rendering is blocked on adding the official static font
-/// files `SourceSans3-Regular.ttf`, `SourceSans3-Medium.ttf`,
-/// `SourceSans3-Semibold.ttf`, and `SourceSans3-Bold.ttf`, all under the SIL
-/// Open Font License 1.1. Do not substitute an untracked system sans for this
-/// contract. Deterministic prose samples additionally need
-/// `SourceSerif4-Regular.ttf` under the same license.
-pub const FONT_ASSET_BLOCKER: &str = "Source Sans 3 and Source Serif 4 font bytes are not bundled";
+/// Bundled families used by the native and deterministic headless renderers.
+pub const BUNDLED_FONT_FAMILIES: &[&str] = &["Source Sans 3", "Source Serif 4"];
 
 /// All colors used by shared widgets. Field names are roles, never hue names.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -210,6 +233,16 @@ impl ParchMintTheme {
             },
         )
     }
+
+    /// Recovers a ParchMint appearance from one of this module's generated
+    /// Iced themes. This lets reusable widget styles remain semantic in both
+    /// native and headless rendering without a parallel Light/Dark branch.
+    pub fn from_iced_theme(theme: &Theme) -> Option<Self> {
+        [ResolvedAppearance::Light, ResolvedAppearance::Dark]
+            .into_iter()
+            .map(Self::new)
+            .find(|candidate| candidate.iced_theme().palette() == theme.palette())
+    }
 }
 
 fn semantic_color(role: &str, dark: bool) -> Color {
@@ -252,5 +285,16 @@ mod tests {
         assert_eq!(light.iced_theme().palette().primary, light.palette().accent);
         assert_eq!(dark.iced_theme().palette().danger, dark.palette().error);
         assert!(generated_token_count() >= 50);
+        assert_eq!(
+            ParchMintTheme::from_iced_theme(&light.iced_theme()),
+            Some(light)
+        );
+        assert_eq!(
+            ParchMintTheme::from_iced_theme(&dark.iced_theme()),
+            Some(dark)
+        );
+        assert_eq!(LAUNCHER_INSET, 72);
+        assert_eq!(LAUNCHER_PROJECT_CARD_WIDTH, 520);
+        assert_eq!(LAUNCHER_PROJECT_CARD_HEIGHT, 96);
     }
 }

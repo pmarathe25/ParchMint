@@ -260,9 +260,9 @@ fn production_element(
     appearance: VisualAppearance,
 ) -> iced::Element<'static, ()> {
     use crate::{
-        iced_editor_surface::editor_center_surface,
-        iced_project_surface::{verification_project_surface, ProjectSurfaceMessage},
         ProjectWorkspace, RibbonDestination,
+        iced_editor_surface::{EditorCenterChrome, editor_center_surface_with_chrome},
+        iced_project_surface::{ProjectSurfaceMessage, verification_project_surface},
     };
 
     if target == VisualTarget::Launcher {
@@ -270,12 +270,17 @@ fn production_element(
         return crate::native::NativeDesktop::verification_launcher_element();
     }
 
-    let snapshot = verification_snapshot();
+    let snapshot = verification_snapshot(target);
     let workspace = verification_workspace(target, appearance, &snapshot);
     let workspace: &'static ProjectWorkspace = Box::leak(Box::new(workspace));
     let slots = editor_slots(&snapshot, workspace, target, appearance);
     let theme = presentation(appearance);
-    let editor = editor_center_surface(workspace.editor(), theme, &slots, None)
+    let chrome = if target == VisualTarget::GlobalSearch {
+        EditorCenterChrome::ManuscriptOnly
+    } else {
+        EditorCenterChrome::Full
+    };
+    let editor = editor_center_surface_with_chrome(workspace.editor(), theme, &slots, None, chrome)
         .map(ProjectSurfaceMessage::EditorCenter);
     let destination = match target {
         VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::ErrorRecovery => {
@@ -300,8 +305,8 @@ fn editor_slots(
     appearance: VisualAppearance,
 ) -> crate::iced_editor_surface::EditorHostSlots {
     use crate::{
-        iced_editor_surface::{EditorHostSlots, EditorPaneSlot},
         EditorPane,
+        iced_editor_surface::{EditorHostSlots, EditorPaneSlot},
     };
 
     let mut slots = EditorHostSlots::default();
@@ -324,8 +329,7 @@ fn editor_slots(
             parchmint_editor_iced::EditorIcedConfig::default(),
         )
         .expect("verification adapter starts");
-        let viewport = parchmint_editor_iced::EditorViewport::new(720.0, 520.0)
-            .expect("verification viewport is valid");
+        let viewport = verification_editor_viewport(target, pane, workspace);
         let theme = match appearance {
             VisualAppearance::Light => parchmint_editor_iced::EditorSurfaceTheme::light(),
             VisualAppearance::Dark => parchmint_editor_iced::EditorSurfaceTheme::dark(),
@@ -349,12 +353,64 @@ fn editor_slots(
     slots
 }
 
+/// Returns the initial mounted-host allocation for a 1440 x 900 Penpot target.
+///
+/// A native window subsequently reflows the host through the viewport sensor,
+/// but a headless capture has no application update loop to consume that
+/// sensor message before its first frame. The initial geometry must therefore
+/// be the real pane allocation, not a generic editor-sized fallback.
 #[cfg(feature = "visual-verification")]
-fn verification_snapshot() -> parchmint_ui_api::ProjectSnapshot {
+fn verification_editor_viewport(
+    target: VisualTarget,
+    pane: crate::EditorPane,
+    workspace: &crate::ProjectWorkspace,
+) -> parchmint_editor_iced::EditorViewport {
+    const EDITOR_SPLITTER_WIDTH: u32 = 8;
+    const FORMAT_TOOLBAR_HEIGHT: u32 = 44;
+    const TAB_STRIP_HEIGHT: u32 = 36;
+
+    let (width, height) = match target {
+        VisualTarget::EditorSingle => {
+            let center = crate::iced_project_surface::verification_center_geometry(
+                crate::RibbonDestination::Editor,
+            );
+            (
+                center.width,
+                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
+            )
+        }
+        VisualTarget::EditorDual => {
+            let center = crate::iced_project_surface::verification_center_geometry(
+                crate::RibbonDestination::Editor,
+            );
+            let available_width = center.width - EDITOR_SPLITTER_WIDTH;
+            let portion = match pane {
+                crate::EditorPane::Primary => workspace.editor().split_ratio(),
+                crate::EditorPane::Companion => 1.0 - workspace.editor().split_ratio(),
+            };
+            (
+                (available_width as f64 * portion).round() as u32,
+                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
+            )
+        }
+        VisualTarget::GlobalSearch => {
+            let center = crate::iced_project_surface::verification_center_geometry(
+                crate::RibbonDestination::GlobalSearch,
+            );
+            (center.width, center.height)
+        }
+        _ => unreachable!("only mounted editor targets request a viewport"),
+    };
+    parchmint_editor_iced::EditorViewport::new(width as f32, height as f32)
+        .expect("verification pane allocation is valid")
+}
+
+#[cfg(feature = "visual-verification")]
+fn verification_snapshot(target: VisualTarget) -> parchmint_ui_api::ProjectSnapshot {
     use parchmint_application::{DocumentSnapshot, DocumentVisibility};
     use parchmint_domain::{
-        apply_project_command, DocumentId, MetadataApplicability, MetadataFieldDefinition,
-        MetadataFieldId, MetadataTextKind, NodeId, Project, ProjectCommand, ProjectId,
+        DocumentId, MetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
+        MetadataTextKind, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
     };
     use parchmint_editor_api::EditorRevision;
 
@@ -497,13 +553,23 @@ fn verification_snapshot() -> parchmint_ui_api::ProjectSnapshot {
             .expect("verification project command is valid")
             .project;
     }
+    let chapter_one_body = match target {
+        VisualTarget::GlobalSearch => {
+            "<h1>Chapter One</h1><p>The harbor held the last of the evening light.</p><p>Active match is outlined; other matches remain highlighted.</p><p>Search results are revalidated before navigation.</p>".to_owned()
+        }
+        VisualTarget::History => {
+            "<p>Chapter One</p><p>The harbor held the last of the evening light.</p><p>Mara turned the sealed letter in her fingers.</p><p>By morning, the tide had erased every footprint.</p>".to_owned()
+        }
+        _ => "<h1>Chapter One</h1><p>The harbor held the last of the evening light. Mara waited beneath the clock tower, turning the unopened letter between her fingers.</p><blockquote>“Some journeys begin long before the road.”</blockquote><hr><p>By morning, the tide had erased every footprint.</p>".to_owned(),
+    };
+
     parchmint_ui_api::ProjectSnapshot {
         project,
         document_summaries: Vec::new(),
         documents: vec![
             DocumentSnapshot {
                 document_id: chapter_one,
-                body: "<h1>Chapter One</h1><p>The harbor held the last of the evening light. Mara waited beneath the clock tower, turning the unopened letter between her fingers.</p><blockquote>“Some journeys begin long before the road.”</blockquote><hr><p>By morning, the tide had erased every footprint.</p>".to_owned(),
+                body: chapter_one_body,
                 comments: Vec::new(),
                 revision: EditorRevision::from(1),
                 visibility: DocumentVisibility::Open,
@@ -529,7 +595,7 @@ fn verification_snapshot() -> parchmint_ui_api::ProjectSnapshot {
             },
             DocumentSnapshot {
                 document_id: old_chapter,
-                body: "<h1>Old Chapter</h1><p>The harbor held the last of the evening light.</p><blockquote>“Some journeys begin long before the road.”</blockquote><p>Mara kept the unopened letter hidden.</p>".to_owned(),
+                body: "<h1>Old Chapter</h1><p>The harbor held the last of the evening light.</p><blockquote>“Some journeys begin long before the road.”</blockquote><p>Mara turned the <strong>unopened letter</strong> in her fingers.</p>".to_owned(),
                 comments: Vec::new(), revision: EditorRevision::from(1), visibility: DocumentVisibility::Closed,
             },
         ],
@@ -586,6 +652,39 @@ fn verification_semantic_body(
     .clone()
 }
 
+/// Builds the selected History document exactly as native integration does:
+/// from the active document in the loaded project snapshot.
+#[cfg(feature = "visual-verification")]
+fn verification_history_current_document(
+    snapshot: &parchmint_ui_api::ProjectSnapshot,
+    workspace: &crate::ProjectWorkspace,
+) -> Option<crate::HistoryCurrentDocument> {
+    let document_id = workspace.focused_history_document()?.to_owned();
+    let document = snapshot
+        .documents
+        .iter()
+        .find(|document| stable_id(document.document_id.as_bytes()) == document_id)?;
+    let title = snapshot
+        .project
+        .nodes
+        .iter()
+        .find_map(|(_, node)| match node.kind {
+            parchmint_domain::NodeKind::Document(candidate)
+                if candidate == document.document_id =>
+            {
+                Some(node.title.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "Active document".to_owned());
+    Some(crate::HistoryCurrentDocument {
+        document_id,
+        title,
+        body: document.body.clone(),
+        semantic: verification_semantic_body(document.document_id, document.body.clone()),
+    })
+}
+
 /// Hydrates every catalog board through the public workspace reducer and task
 /// completion boundary. The deterministic payloads model service responses;
 /// rendering consumes only the resulting production workspace state.
@@ -597,9 +696,8 @@ fn verification_workspace(
 ) -> crate::ProjectWorkspace {
     use crate::{
         ContentState, DragDestination, GlobalSearchResult, HistoryCheckpointCategory,
-        HistoryCheckpointRow, HistoryCurrentDocument, HistoryDocumentPreview, HistoryPreviewData,
-        ProjectMessage, ProjectTask, ProjectTaskCompletion, ProjectTaskPayload, SelectionGesture,
-        SettingsCategory,
+        HistoryCheckpointRow, HistoryDocumentPreview, HistoryPreviewData, ProjectMessage,
+        ProjectTask, ProjectTaskCompletion, ProjectTaskPayload, SelectionGesture, SettingsCategory,
     };
     use parchmint_domain::ProjectExportSetting;
 
@@ -621,6 +719,7 @@ fn verification_workspace(
     match target {
         VisualTarget::Launcher => unreachable!("launcher has its own native state"),
         VisualTarget::EditorSingle => {
+            let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one.clone()));
             let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_two.clone()));
             let _ = workspace.update(ProjectMessage::DropHierarchy {
                 source_id: harbor_notes,
@@ -630,6 +729,7 @@ fn verification_workspace(
             let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
         }
         VisualTarget::EditorDual => {
+            let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one.clone()));
             for node_id in [chapter_two.clone(), map.clone(), chapter_one.clone()] {
                 let _ = workspace.update(ProjectMessage::OpenHierarchyNode(node_id));
             }
@@ -676,14 +776,6 @@ fn verification_workspace(
                             GlobalSearchResult {
                                 document_id: chapter_one_document.clone(),
                                 match_id: "chapter-one-harbor-2".to_owned(),
-                                prefix: "Mara returned to the ".to_owned(),
-                                matching_text: "harbor".to_owned(),
-                                suffix: " before the bells rang.".to_owned(),
-                                indexed_revision: 1,
-                            },
-                            GlobalSearchResult {
-                                document_id: harbor_notes_document.clone(),
-                                match_id: "harbor-notes-1".to_owned(),
                                 prefix: "...a ".to_owned(),
                                 matching_text: "harbor".to_owned(),
                                 suffix: " road beneath the cliffs.".to_owned(),
@@ -691,10 +783,18 @@ fn verification_workspace(
                             },
                             GlobalSearchResult {
                                 document_id: harbor_notes_document.clone(),
-                                match_id: "harbor-notes-2".to_owned(),
-                                prefix: "Every ".to_owned(),
+                                match_id: "harbor-notes-1".to_owned(),
+                                prefix: "...the ".to_owned(),
                                 matching_text: "harbor".to_owned(),
-                                suffix: " keeps its own weather.".to_owned(),
+                                suffix: " held the last of the evening light.".to_owned(),
+                                indexed_revision: 1,
+                            },
+                            GlobalSearchResult {
+                                document_id: harbor_notes_document.clone(),
+                                match_id: "harbor-notes-2".to_owned(),
+                                prefix: "...a ".to_owned(),
+                                matching_text: "harbor".to_owned(),
+                                suffix: " road beneath the cliffs.".to_owned(),
                                 indexed_revision: 1,
                             },
                             GlobalSearchResult {
@@ -720,8 +820,7 @@ fn verification_workspace(
             );
         }
         VisualTarget::History => {
-            let history_checkpoint_body = "<p>1 The harbor held the last of the evening light.</p><p>2 Mara waited beneath the clock tower.</p><p>3 The unopened letter remained on the desk.</p><p>4 By morning, the tide had erased every footprint.</p>".to_owned();
-            let history_current_body = "<p>1 The harbor held the last of the evening light.</p><p>2 Mara waited beneath the clock tower.</p><p>3 The sealed letter remained on the desk.</p><p>4 By morning, the tide had erased every footprint.</p>".to_owned();
+            let history_checkpoint_body = "<p>Chapter One</p><p>The harbor held the last of the evening light.</p><p>Mara turned the unopened letter in her fingers.</p><p>By morning, the tide had erased every footprint.</p>".to_owned();
             let checkpoints = vec![
                 HistoryCheckpointRow {
                     checkpoint_id: "autosave-chapter-one".to_owned(),
@@ -766,6 +865,9 @@ fn verification_workspace(
             let _ = workspace.update(ProjectMessage::SelectHistoryCheckpoint(
                 "autosave-chapter-one".to_owned(),
             ));
+            workspace.set_history_current_document(verification_history_current_document(
+                snapshot, &workspace,
+            ));
             let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
                 checkpoint_id: "autosave-chapter-one".to_owned(),
             });
@@ -797,15 +899,6 @@ fn verification_workspace(
                     },
                 ))
             );
-            workspace.set_history_current_document(Some(HistoryCurrentDocument {
-                document_id: stable_id(snapshot.documents[0].document_id.as_bytes()),
-                title: "Chapter One".to_owned(),
-                body: history_current_body.clone(),
-                semantic: verification_semantic_body(
-                    snapshot.documents[0].document_id,
-                    history_current_body,
-                ),
-            }));
         }
         VisualTarget::SettingsAppearance => {
             let _ = workspace.update(ProjectMessage::SelectSettingsCategory(
@@ -876,10 +969,13 @@ fn assert_scenario_contract(
                 primary.active_document(),
                 primary.tabs().first().map(|tab| tab.id())
             );
-            assert!(!workspace
-                .editor()
-                .pane(crate::EditorPane::Companion)
-                .is_populated());
+            assert!(
+                !workspace
+                    .editor()
+                    .pane(crate::EditorPane::Companion)
+                    .is_populated()
+            );
+            assert_part_one_expanded(workspace);
             assert_chapter_one_inspector(workspace);
         }
         VisualTarget::EditorDual => {
@@ -909,10 +1005,19 @@ fn assert_scenario_contract(
                 companion.active_document(),
                 companion.tabs().get(1).map(|tab| tab.id())
             );
+            assert_part_one_expanded(workspace);
             assert_chapter_one_inspector(workspace);
         }
         VisualTarget::Cards => {
             let cards = workspace.cards().items();
+            let manuscript_section =
+                stable_id(parchmint_domain::NodeId::manuscript_root().as_bytes());
+            assert_eq!(workspace.cards().section_id(), manuscript_section.as_str());
+            assert!(
+                cards
+                    .iter()
+                    .any(|item| item.title == "Part One" && item.expanded)
+            );
             assert!(cards.iter().any(|item| item.title == "Part One"
                 && item.synopsis == "The opening movement of the novel."));
             assert!(cards.iter().any(|item| item.title == "Chapter One"
@@ -922,21 +1027,27 @@ fn assert_scenario_contract(
                 && item.synopsis == "The sealed letter changes what Mara believes."));
             assert!(cards.iter().any(|item| item.title == "Part Two"
                 && item.synopsis == "The fallout after the harbor reveal."));
-            assert!(cards.iter().any(|item| item.title == "Chapter One"
-                && item
-                    .metadata
+            assert!(cards.iter().any(|item| {
+                item.title == "Chapter One"
+                    && item
+                        .metadata
+                        .iter()
+                        .any(|(_, label, value)| *label == "POV" && *value == Some("Mara"))
+                    && item
+                        .metadata
+                        .iter()
+                        .any(|(_, label, value)| *label == "Words" && *value == Some("1,240"))
+            }));
+            assert!(
+                cards
                     .iter()
-                    .any(|(_, label, value)| *label == "POV" && *value == Some("Mara"))
-                && item
-                    .metadata
+                    .any(|item| item.title == "Chapter One" && item.visible)
+            );
+            assert!(
+                cards
                     .iter()
-                    .any(|(_, label, value)| *label == "Words" && *value == Some("1,240"))));
-            assert!(cards
-                .iter()
-                .any(|item| item.title == "Chapter One" && item.visible));
-            assert!(cards
-                .iter()
-                .any(|item| item.title == "Chapter Two" && item.visible));
+                    .any(|item| item.title == "Chapter Two" && item.visible)
+            );
             assert!(workspace.cards().last_activated_document().is_some());
             assert_chapter_one_inspector(workspace);
         }
@@ -945,6 +1056,44 @@ fn assert_scenario_contract(
             assert!(workspace.global_search().replacement().is_empty());
             assert!(workspace.global_search().is_complete());
             assert_eq!(workspace.global_search().results().len(), 6);
+            assert!(workspace.global_search().results_are_grouped_by_document());
+            let results = workspace.global_search().results();
+            let active_document = workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .active_document()
+                .expect("search has an active Chapter One document");
+            assert!(
+                results[..2]
+                    .iter()
+                    .all(|result| result.document_id.as_str() == active_document)
+            );
+            let harbor_notes_document = &results[2].document_id;
+            assert_ne!(harbor_notes_document.as_str(), active_document);
+            assert!(
+                results[2..]
+                    .iter()
+                    .all(|result| result.document_id.as_str() == harbor_notes_document.as_str())
+            );
+            assert_eq!(
+                results[0].prefix.as_str(),
+                "...the ",
+                "first Chapter One result matches the Penpot scenario text"
+            );
+            assert_eq!(results[1].suffix, " road beneath the cliffs.");
+            assert_eq!(
+                results[..4]
+                    .iter()
+                    .map(|result| (result.prefix.as_str(), result.suffix.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    ("...the ", " held the last of the evening light."),
+                    ("...a ", " road beneath the cliffs."),
+                    ("...the ", " held the last of the evening light."),
+                    ("...a ", " road beneath the cliffs."),
+                ],
+                "visible Search result groups follow the checked-in Penpot reference order"
+            );
             assert_eq!(
                 workspace
                     .global_search()
@@ -959,10 +1108,12 @@ fn assert_scenario_contract(
                     .count(),
                 2
             );
-            assert!(workspace
-                .editor()
-                .pane(crate::EditorPane::Primary)
-                .is_populated());
+            assert!(
+                workspace
+                    .editor()
+                    .pane(crate::EditorPane::Primary)
+                    .is_populated()
+            );
             assert_chapter_one_inspector(workspace);
         }
         VisualTarget::History => {
@@ -971,11 +1122,13 @@ fn assert_scenario_contract(
                 workspace.history().selected_checkpoint_id(),
                 Some("autosave-chapter-one")
             );
-            assert!(workspace
-                .history()
-                .preview()
-                .and_then(|preview| preview.document.as_ref())
-                .is_some());
+            assert!(
+                workspace
+                    .history()
+                    .preview()
+                    .and_then(|preview| preview.document.as_ref())
+                    .is_some()
+            );
             assert_eq!(
                 workspace
                     .history()
@@ -999,6 +1152,55 @@ fn assert_scenario_contract(
             assert!(checkpoint.contains("unopened letter"));
             assert!(current.contains("sealed letter"));
             assert_ne!(current, checkpoint);
+            let comparison = workspace
+                .history()
+                .comparison()
+                .expect("selected checkpoint and current document are comparable");
+            assert_eq!(comparison.document_title, "Chapter One");
+            assert_eq!(comparison.lines.len(), 4);
+            assert_eq!(
+                comparison.change_summary(),
+                crate::HistoryChangeSummary {
+                    added_lines: 0,
+                    removed_lines: 0,
+                    modified_lines: 1,
+                }
+            );
+            let modified = comparison
+                .lines
+                .iter()
+                .find(|line| line.kind == crate::HistoryComparisonLineKind::Modified)
+                .expect("comparison includes the changed line rendered by History");
+            assert_eq!(
+                modified.before.as_ref().map(|line| line.line_number),
+                Some(3)
+            );
+            assert_eq!(
+                modified.after.as_ref().map(|line| line.line_number),
+                Some(3)
+            );
+            assert!(
+                modified
+                    .before
+                    .as_ref()
+                    .expect("modified checkpoint line exists")
+                    .spans
+                    .iter()
+                    .any(
+                        |span| span.kind == crate::HistoryComparisonSpanKind::Removed
+                            && span.text == "unopened"
+                    )
+            );
+            assert!(
+                modified
+                    .after
+                    .as_ref()
+                    .expect("modified current line exists")
+                    .spans
+                    .iter()
+                    .any(|span| span.kind == crate::HistoryComparisonSpanKind::Added
+                        && span.text == "sealed")
+            );
         }
         VisualTarget::SettingsAppearance => {
             assert_eq!(
@@ -1034,7 +1236,21 @@ fn assert_scenario_contract(
                 .selected_preview()
                 .expect("Old Chapter has a canonical preview");
             assert_eq!(preview.title, "Old Chapter");
-            assert!(preview.semantic.plain_text().contains("unopened letter"));
+            let text = preview.semantic.plain_text();
+            assert!(text.contains("The harbor held the last of the evening light."));
+            assert!(text.contains("Some journeys begin long before the road."));
+            assert!(text.contains("Mara turned the unopened letter in her fingers."));
+            assert!(
+                preview
+                    .semantic
+                    .blocks()
+                    .iter()
+                    .flat_map(|block| block.marks())
+                    .any(|mark| {
+                        matches!(mark.mark(), parchmint_editor_api::SemanticInlineMark::Bold)
+                            && mark.range().start().value() < mark.range().end().value()
+                    })
+            );
         }
     }
 }
@@ -1048,20 +1264,68 @@ fn assert_chapter_one_inspector(workspace: &crate::ProjectWorkspace) {
         Some("The harbor has fallen silent, and Mara must decide whom to trust.")
     );
     let items = workspace.inspector().metadata_items(&chapter_one);
-    assert!(items
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "POV" && item.effective_value == Some("Mara"))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.label == "Status" && item.effective_value == Some("Draft"))
+    );
+}
+
+#[cfg(feature = "visual-verification")]
+fn assert_part_one_expanded(workspace: &crate::ProjectWorkspace) {
+    let part_one = verification_part_one_node_id();
+    let rows = workspace.explorer().rows();
+    let row = rows
         .iter()
-        .any(|item| item.label == "POV" && item.effective_value == Some("Mara")));
-    assert!(items
-        .iter()
-        .any(|item| item.label == "Status" && item.effective_value == Some("Draft")));
+        .find(|row| row.id == part_one.as_str())
+        .expect("verification project includes Part One");
+    assert!(row.expanded, "Part One exposes Chapter One and Chapter Two");
+    assert!(
+        rows.iter()
+            .any(|row| row.title == "Chapter One" && row.parent_id == Some(part_one.as_str()))
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.title == "Chapter Two" && row.parent_id == Some(part_one.as_str()))
+    );
 }
 
 #[cfg(all(test, feature = "visual-verification"))]
 mod tests {
-    use iced::Size;
+    use iced::widget::{Canvas, Row, Space, canvas};
+    use iced::{Color, Point, Rectangle, Size};
     use iced_test::Simulator;
 
     use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    struct ScaleTransformMarker;
+
+    impl canvas::Program<()> for ScaleTransformMarker {
+        type State = ();
+
+        fn draw(
+            &self,
+            _state: &Self::State,
+            renderer: &iced::Renderer,
+            _theme: &iced::Theme,
+            bounds: Rectangle,
+            _cursor: iced::mouse::Cursor,
+        ) -> Vec<canvas::Geometry> {
+            let mut frame = canvas::Frame::new(renderer, bounds.size());
+            frame.fill_rectangle(
+                Point::new(20.0, 10.0),
+                Size::new(4.0, 4.0),
+                Color::from_rgb8(255, 0, 0),
+            );
+            vec![frame.into_geometry()]
+        }
+    }
 
     #[test]
     fn catalog_has_every_penpot_fixture_at_the_2x_reference_size() {
@@ -1076,6 +1340,55 @@ mod tests {
                 assert!(!target.reference_id(appearance).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn mounted_editor_viewports_match_the_target_pane_allocations() {
+        let snapshot = verification_snapshot(VisualTarget::EditorSingle);
+        let single = verification_workspace(
+            VisualTarget::EditorSingle,
+            VisualAppearance::Light,
+            &snapshot,
+        );
+        assert_eq!(
+            verification_editor_viewport(
+                VisualTarget::EditorSingle,
+                crate::EditorPane::Primary,
+                &single,
+            ),
+            parchmint_editor_iced::EditorViewport::new(840.0, 736.0)
+                .expect("single-pane allocation"),
+        );
+
+        let dual_snapshot = verification_snapshot(VisualTarget::EditorDual);
+        let dual = verification_workspace(
+            VisualTarget::EditorDual,
+            VisualAppearance::Light,
+            &dual_snapshot,
+        );
+        for pane in [crate::EditorPane::Primary, crate::EditorPane::Companion] {
+            assert_eq!(
+                verification_editor_viewport(VisualTarget::EditorDual, pane, &dual),
+                parchmint_editor_iced::EditorViewport::new(416.0, 736.0)
+                    .expect("dual-pane allocation"),
+            );
+        }
+
+        let search_snapshot = verification_snapshot(VisualTarget::GlobalSearch);
+        let search = verification_workspace(
+            VisualTarget::GlobalSearch,
+            VisualAppearance::Light,
+            &search_snapshot,
+        );
+        assert_eq!(
+            verification_editor_viewport(
+                VisualTarget::GlobalSearch,
+                crate::EditorPane::Primary,
+                &search,
+            ),
+            parchmint_editor_iced::EditorViewport::new(760.0, 848.0)
+                .expect("manuscript-only search allocation"),
+        );
     }
 
     #[test]
@@ -1101,8 +1414,102 @@ mod tests {
     }
 
     #[test]
+    fn production_cards_target_renders_the_selected_inspector_content() {
+        let target = VisualTarget::Cards;
+        let appearance = VisualAppearance::Light;
+        let spec = visual_target_spec(target);
+        let theme = presentation(appearance);
+        let mut simulator = Simulator::<()>::with_size(
+            visual_settings(),
+            Size::new(spec.width as f32, spec.height as f32),
+            production_element(target, appearance),
+        );
+
+        assert!(simulator.find("Inspector").is_ok());
+        assert!(simulator.find("No selection").is_err());
+        for content in [
+            "Chapter One",
+            "SYNOPSIS",
+            "The harbor has fallen silent, and Mara must decide whom to trust.",
+            "POV",
+            "Mara",
+            "Status",
+            "Draft",
+            "No comments",
+        ] {
+            assert!(
+                simulator.find(content).is_ok(),
+                "production Cards Inspector shows {content}"
+            );
+        }
+        let snapshot = simulator
+            .snapshot(&theme.iced_theme())
+            .expect("production Cards target renders headlessly");
+        assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
+    }
+
+    #[test]
+    fn canvas_translation_is_scaled_to_physical_pixels() {
+        let element: iced::Element<'static, ()> = Row::new()
+            .push(Space::new().width(100.0))
+            .push(Canvas::new(ScaleTransformMarker).width(80.0).height(40.0))
+            .into();
+        let mut simulator =
+            Simulator::<()>::with_size(iced::Settings::default(), Size::new(200.0, 60.0), element);
+        let snapshot = simulator
+            .snapshot(&iced::Theme::Light)
+            .expect("translated Canvas should render headlessly");
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let output_stem = std::env::temp_dir().join(format!(
+            "parchmint-iced-tiny-skia-scale-{}-{unique}",
+            std::process::id()
+        ));
+        snapshot
+            .matches_image(&output_stem)
+            .expect("write Canvas transform regression screenshot");
+        let output_path = renderer_output_path(&output_stem);
+
+        let file =
+            std::fs::File::open(&output_path).expect("open Canvas transform regression screenshot");
+        let decoder = png::Decoder::new(std::io::BufReader::new(file));
+        let mut reader = decoder
+            .read_info()
+            .expect("decode Canvas transform regression screenshot");
+        let mut bytes = vec![
+            0;
+            reader
+                .output_buffer_size()
+                .expect("Canvas transform screenshot should fit in memory")
+        ];
+        let info = reader
+            .next_frame(&mut bytes)
+            .expect("read Canvas transform regression pixels");
+        assert_eq!((info.width, info.height), (400, 120));
+        assert_eq!(info.color_type, png::ColorType::Rgba);
+
+        let marker_x = bytes[..info.buffer_size()]
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(index, pixel)| {
+                (pixel == [255, 0, 0, 255]).then_some(index % info.width as usize)
+            })
+            .min();
+        std::fs::remove_file(output_path).expect("remove Canvas transform regression screenshot");
+
+        assert_eq!(
+            marker_x,
+            Some(240),
+            "logical Canvas x=100 plus local marker x=20 must scale to physical x=240 at 2x"
+        );
+    }
+
+    #[test]
     fn editor_catalog_hydrates_production_snapshot_and_mounts_real_host() {
-        let snapshot = verification_snapshot();
+        let snapshot = verification_snapshot(VisualTarget::EditorDual);
         let workspace =
             verification_workspace(VisualTarget::EditorDual, VisualAppearance::Light, &snapshot);
         assert_eq!(
@@ -1123,9 +1530,11 @@ mod tests {
         );
         assert_eq!(snapshot.documents.len(), 5);
         assert!(snapshot.documents[0].body.contains("harbor held the last"));
-        assert!(snapshot.documents[0]
-            .body
-            .contains("<blockquote>“Some journeys begin long before the road.”</blockquote>"));
+        assert!(
+            snapshot.documents[0]
+                .body
+                .contains("<blockquote>“Some journeys begin long before the road.”</blockquote>")
+        );
         assert_eq!(
             workspace.explorer().synopsis(&verification_node_id()),
             Some("The harbor has fallen silent, and Mara must decide whom to trust.")
@@ -1142,13 +1551,27 @@ mod tests {
     }
 
     #[test]
+    fn history_catalog_mounts_the_selected_checkpoint_comparison() {
+        let spec = visual_target_spec(VisualTarget::History);
+        let mut simulator = Simulator::<()>::with_size(
+            visual_settings(),
+            Size::new(spec.width as f32, spec.height as f32),
+            production_element(VisualTarget::History, VisualAppearance::Light),
+        );
+        assert!(simulator.find("Checkpoint").is_ok());
+        assert!(simulator.find("Current").is_ok());
+        assert!(simulator.find("unopened").is_ok());
+        assert!(simulator.find("sealed").is_ok());
+    }
+
+    #[test]
     fn catalog_scenarios_satisfy_their_production_state_contracts() {
-        let snapshot = verification_snapshot();
         for target in VisualTarget::ALL {
             if target == VisualTarget::Launcher {
                 continue;
             }
             for appearance in VisualAppearance::ALL {
+                let snapshot = verification_snapshot(target);
                 let workspace = verification_workspace(target, appearance, &snapshot);
                 assert_scenario_contract(target, appearance, &workspace);
             }

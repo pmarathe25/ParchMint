@@ -12,14 +12,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+use iced::widget::svg::Handle;
 use iced::{
-    Element, Event, Length, Subscription, Task, Theme, event,
+    Element, Event, Font, Length, Subscription, Task, Theme, event, font,
     futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc},
     keyboard, mouse,
-    widget::{button, column, container, row, text, text_input},
+    widget::{Space, button, column, container, row, svg, text, text_input},
     window,
 };
 use parchmint_application::{ReplacementEdit, ReplacementSelection};
+use parchmint_design_system::production_icon_svg;
 use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, CanonicalComment, CanonicalCommentAnchor,
     CanonicalCommentMessage, CanonicalDocumentLoad, CommentId, EditorAdapter,
@@ -62,7 +64,18 @@ use crate::{
         RecoveryDiscardedResult, RecoveryReconcileResult, SearchBatchResult, SearchRequest,
         SearchStart,
     },
-    design_tokens::ParchMintTheme,
+    components::{self, ButtonKind, Interaction},
+    design_tokens::{
+        LAUNCHER_ACTION_ROW_HEIGHT, LAUNCHER_INSET, LAUNCHER_LAST_OPENED_ICON_SIZE,
+        LAUNCHER_PROJECT_CARD_GAP, LAUNCHER_PROJECT_CARD_HEIGHT,
+        LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING, LAUNCHER_PROJECT_CARD_VERTICAL_PADDING,
+        LAUNCHER_PROJECT_CARD_WIDTH, LAUNCHER_PROJECT_HEADER_GAP, LAUNCHER_PROJECT_ICON_SIZE,
+        LAUNCHER_PROJECT_LAST_OPENED_SIZE, LAUNCHER_PROJECT_METADATA_GAP,
+        LAUNCHER_PROJECT_NAME_MAX_CHARS, LAUNCHER_PROJECT_NAME_SIZE,
+        LAUNCHER_PROJECT_PATH_MAX_CHARS, LAUNCHER_PROJECT_PATH_SIZE, LAUNCHER_PROJECT_TITLE_WIDTH,
+        LAUNCHER_RHYTHM, LAUNCHER_SUBTITLE_SIZE, LAUNCHER_TITLE_SIZE, LAUNCHER_WORDMARK_SIZE,
+        ParchMintTheme,
+    },
     iced_editor_surface::{EditorCenterMessage, EditorHostSlots, editor_center_surface},
     iced_project_surface::{
         ProjectSurfaceMessage, SidebarPanel, native_project_surface as workspace_surface,
@@ -6536,32 +6549,48 @@ fn launcher_surface(
     status: Option<String>,
 ) -> Element<'static, Message> {
     let create_action = if creating_project {
-        button("New Project").width(144).height(36)
+        launcher_button("New Project", ButtonKind::Primary)
+            .width(144)
+            .height(36)
     } else {
-        button("Create Project")
+        launcher_button("Create Project", ButtonKind::Primary)
             .width(144)
             .height(36)
             .on_press(Message::ShowNewProject)
     };
     let mut content = column![
-        text("ParchMint").size(24),
-        text("Recent projects").size(24),
-        text("Open a recent project, create a new one, or choose another project folder.").size(16),
+        launcher_text(
+            "ParchMint",
+            LAUNCHER_WORDMARK_SIZE,
+            LauncherTextKind::Wordmark
+        ),
+        launcher_text(
+            "Recent projects",
+            LAUNCHER_TITLE_SIZE,
+            LauncherTextKind::Primary
+        ),
+        launcher_text(
+            "Open a recent project, create a new one, or choose another project folder.",
+            LAUNCHER_SUBTITLE_SIZE,
+            LauncherTextKind::Secondary,
+        ),
         row![
             create_action,
             if opening_project {
-                button("Opening Project…").width(128).height(36)
+                launcher_button("Opening Project…", ButtonKind::Secondary)
+                    .width(128)
+                    .height(36)
             } else {
-                button("Open Project")
+                launcher_button("Open Project", ButtonKind::Secondary)
                     .width(128)
                     .height(36)
                     .on_press(Message::ChooseOpenProject)
             }
         ]
-        .spacing(12),
+        .spacing(12)
+        .height(f32::from(LAUNCHER_ACTION_ROW_HEIGHT)),
     ]
-    .spacing(24)
-    .max_width(720);
+    .spacing(f32::from(LAUNCHER_RHYTHM));
     if creating_project {
         content = content.push(
             column![
@@ -6584,42 +6613,205 @@ fn launcher_surface(
         );
     }
     if recent_projects.is_empty() {
-        content = content.push(text("No recent projects yet.").size(14));
-    }
-    for project in recent_projects {
-        let path = project.path().to_owned();
-        content = content.push(
-            button(
-                row![
-                    text("▱").size(24),
-                    column![
-                        text(project.name().to_owned()).size(18),
-                        text(path.clone()).size(14),
-                        text(format!("◷  Opened {}", project.last_opened())).size(13),
-                    ]
-                    .spacing(6),
-                ]
-                .spacing(14),
-            )
-            .padding([10, 14])
-            .width(520)
-            .height(96)
-            .on_press(Message::OpenProject(PathBuf::from(path))),
+        content = content.push(launcher_text(
+            "No recent projects yet.",
+            LAUNCHER_SUBTITLE_SIZE,
+            LauncherTextKind::Secondary,
+        ));
+    } else {
+        let cards = recent_projects.iter().fold(
+            column!().spacing(f32::from(LAUNCHER_PROJECT_CARD_GAP)),
+            |cards, project| cards.push(launcher_project_card(project)),
         );
+        content = content.push(cards);
     }
     if let Some(status) = status {
-        content = content.push(text(status).size(14));
+        content = content.push(launcher_text(
+            status,
+            LAUNCHER_SUBTITLE_SIZE,
+            LauncherTextKind::Secondary,
+        ));
     }
     container(content)
         .padding(iced::Padding {
-            top: 72.0,
-            right: 72.0,
-            bottom: 72.0,
-            left: 100.0,
+            top: f32::from(LAUNCHER_INSET),
+            right: f32::from(LAUNCHER_INSET),
+            bottom: f32::from(LAUNCHER_INSET),
+            left: f32::from(LAUNCHER_INSET),
         })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+#[derive(Clone, Copy)]
+enum LauncherTextKind {
+    Wordmark,
+    Primary,
+    Secondary,
+    Muted,
+}
+
+fn launcher_text(
+    value: impl text::IntoFragment<'static>,
+    size: u16,
+    kind: LauncherTextKind,
+) -> iced::widget::Text<'static> {
+    text(value)
+        .size(f32::from(size))
+        .line_height(match kind {
+            LauncherTextKind::Wordmark | LauncherTextKind::Primary => 1.2,
+            LauncherTextKind::Secondary => 1.4,
+            LauncherTextKind::Muted if size == LAUNCHER_PROJECT_PATH_SIZE => 1.35,
+            LauncherTextKind::Muted => 1.2,
+        })
+        .font(
+            if matches!(kind, LauncherTextKind::Wordmark | LauncherTextKind::Primary) {
+                Font {
+                    weight: font::Weight::Semibold,
+                    ..Font::DEFAULT
+                }
+            } else {
+                Font::DEFAULT
+            },
+        )
+        .style(move |theme| {
+            let palette = launcher_theme(theme).palette();
+            iced::widget::text::Style {
+                color: Some(match kind {
+                    LauncherTextKind::Wordmark => palette.accent,
+                    LauncherTextKind::Primary => palette.primary_text,
+                    LauncherTextKind::Secondary => palette.secondary_text,
+                    LauncherTextKind::Muted => palette.muted_text,
+                }),
+            }
+        })
+}
+
+fn launcher_button(
+    label: &'static str,
+    kind: ButtonKind,
+) -> iced::widget::Button<'static, Message> {
+    button(
+        launcher_text(label, 12, LauncherTextKind::Primary).style(move |theme| {
+            let palette = launcher_theme(theme).palette();
+            iced::widget::text::Style {
+                color: Some(match kind {
+                    ButtonKind::Primary => palette.on_accent_text,
+                    _ => palette.primary_text,
+                }),
+            }
+        }),
+    )
+    .style(move |theme, status| {
+        components::button_style(
+            launcher_theme(theme),
+            kind,
+            launcher_button_interaction(status),
+        )
+    })
+}
+
+fn launcher_project_card(project: &RecentProject) -> iced::widget::Button<'static, Message> {
+    let path = project.path().to_owned();
+    let folder = launcher_icon("launcher-project", LAUNCHER_PROJECT_ICON_SIZE);
+    let clock = launcher_icon("launcher-last-opened", LAUNCHER_LAST_OPENED_ICON_SIZE);
+    let details = column![
+        row![
+            launcher_text(
+                truncate_launcher_label(project.name(), LAUNCHER_PROJECT_NAME_MAX_CHARS),
+                LAUNCHER_PROJECT_NAME_SIZE,
+                LauncherTextKind::Primary,
+            )
+            .width(f32::from(LAUNCHER_PROJECT_TITLE_WIDTH))
+            .wrapping(text::Wrapping::None),
+            launcher_text(
+                truncate_launcher_label(&path, LAUNCHER_PROJECT_PATH_MAX_CHARS),
+                LAUNCHER_PROJECT_PATH_SIZE,
+                LauncherTextKind::Muted,
+            )
+            .width(Length::Fill)
+            .wrapping(text::Wrapping::None),
+        ]
+        .spacing(f32::from(LAUNCHER_PROJECT_HEADER_GAP))
+        .height(24)
+        .align_y(iced::alignment::Vertical::Center),
+        Space::new().height(f32::from(LAUNCHER_PROJECT_METADATA_GAP)),
+        row![
+            clock,
+            launcher_text(
+                format!("Opened {}", project.last_opened()),
+                LAUNCHER_PROJECT_LAST_OPENED_SIZE,
+                LauncherTextKind::Muted,
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::alignment::Vertical::Center),
+    ];
+    button(
+        row![column![Space::new().height(4), folder], details]
+            .spacing(12)
+            .align_y(iced::alignment::Vertical::Top),
+    )
+    .padding([
+        LAUNCHER_PROJECT_CARD_VERTICAL_PADDING,
+        LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING,
+    ])
+    .width(f32::from(LAUNCHER_PROJECT_CARD_WIDTH))
+    .height(f32::from(LAUNCHER_PROJECT_CARD_HEIGHT))
+    .on_press(Message::OpenProject(PathBuf::from(path)))
+    .style(move |theme, status| {
+        components::button_style(
+            launcher_theme(theme),
+            ButtonKind::Secondary,
+            launcher_button_interaction(status),
+        )
+    })
+}
+
+fn truncate_launcher_label(value: &str, maximum_chars: usize) -> String {
+    let mut characters = value.chars();
+    let visible = characters.by_ref().take(maximum_chars).collect::<String>();
+
+    if characters.next().is_some() {
+        format!("{visible}…")
+    } else {
+        visible
+    }
+}
+
+fn launcher_icon(name: &'static str, size: u16) -> iced::widget::Svg<'static> {
+    let source =
+        production_icon_svg(name).expect("launcher icon is checked into the design system");
+    svg(Handle::from_memory(source.as_bytes()))
+        .width(f32::from(size))
+        .height(f32::from(size))
+        .style(move |theme, _| iced::widget::svg::Style {
+            color: Some(launcher_theme(theme).palette().muted_text),
+        })
+}
+
+fn launcher_theme(theme: &Theme) -> ParchMintTheme {
+    ParchMintTheme::from_iced_theme(theme).unwrap_or_else(|| {
+        if theme.palette().background.r
+            + theme.palette().background.g
+            + theme.palette().background.b
+            < 1.5
+        {
+            ParchMintTheme::new(ResolvedAppearance::Dark)
+        } else {
+            ParchMintTheme::new(ResolvedAppearance::Light)
+        }
+    })
+}
+
+fn launcher_button_interaction(status: iced::widget::button::Status) -> Interaction {
+    match status {
+        iced::widget::button::Status::Active => Interaction::Rest,
+        iced::widget::button::Status::Hovered => Interaction::Hovered,
+        iced::widget::button::Status::Pressed => Interaction::Pressed,
+        iced::widget::button::Status::Disabled => Interaction::Disabled,
+    }
 }
 
 fn legacy_project_surface(
@@ -6912,6 +7104,51 @@ mod tests {
             .is_err()
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn launcher_foundation_preserves_penpot_geometry_and_semantic_variants() {
+        assert_eq!(LAUNCHER_INSET, 72);
+        assert_eq!(LAUNCHER_RHYTHM, 28);
+        assert_eq!(LAUNCHER_ACTION_ROW_HEIGHT, 52);
+        assert_eq!(LAUNCHER_PROJECT_CARD_WIDTH, 520);
+        assert_eq!(LAUNCHER_PROJECT_CARD_HEIGHT, 96);
+        assert_eq!(LAUNCHER_PROJECT_CARD_GAP, 22);
+        assert_eq!(LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING, 16);
+        assert_eq!(LAUNCHER_PROJECT_CARD_VERTICAL_PADDING, 10);
+        assert_eq!(LAUNCHER_PROJECT_TITLE_WIDTH, 124);
+        assert_eq!(LAUNCHER_PROJECT_HEADER_GAP, 14);
+        assert_eq!(LAUNCHER_PROJECT_METADATA_GAP, 12);
+
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            assert_eq!(
+                components::button_style(theme, ButtonKind::Primary, Interaction::Rest).background,
+                Some(iced::Background::Color(theme.palette().accent))
+            );
+            assert_eq!(
+                components::button_style(theme, ButtonKind::Secondary, Interaction::Rest)
+                    .background,
+                Some(iced::Background::Color(theme.palette().panel))
+            );
+            assert_eq!(
+                ParchMintTheme::from_iced_theme(&theme.iced_theme()),
+                Some(theme)
+            );
+        }
+    }
+
+    #[test]
+    fn launcher_card_labels_truncate_on_character_boundaries_without_wrapping() {
+        assert_eq!(truncate_launcher_label("Northbound", 24), "Northbound");
+        assert_eq!(truncate_launcher_label("aé日b", 3), "aé日…");
+        assert_eq!(
+            truncate_launcher_label(
+                "/Projects/a-recent-project-with-a-deliberately-long-name",
+                LAUNCHER_PROJECT_PATH_MAX_CHARS,
+            ),
+            "/Projects/a-recent-project-with-a-deli…"
+        );
     }
 
     #[test]

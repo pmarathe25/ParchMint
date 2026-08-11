@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use iced::widget::text_editor;
 use parchmint_domain::{
     MetadataApplicability as DomainMetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
     MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSetting,
@@ -650,6 +651,19 @@ impl ExplorerState {
     }
 }
 
+fn synopsis_editors(explorer: &ExplorerState) -> BTreeMap<String, text_editor::Content> {
+    explorer
+        .nodes
+        .iter()
+        .map(|(node_id, node)| {
+            (
+                node_id.clone(),
+                text_editor::Content::with_text(&node.synopsis),
+            )
+        })
+        .collect()
+}
+
 /// Cards-specific projection over the shared hierarchy state.
 pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
@@ -958,9 +972,115 @@ pub enum SettingsDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCategory {
+    General,
     Appearance,
-    Metadata,
     Styles,
+    Metadata,
+    Dictionaries,
+}
+
+impl SettingsCategory {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Styles => "Styles",
+            Self::Metadata => "Metadata fields",
+            Self::Dictionaries => "Dictionaries",
+        }
+    }
+}
+
+/// One stable Settings navigation item. The selection is always one of these
+/// categories, even when its detail surface has no project-backed controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsCategoryItem {
+    pub category: SettingsCategory,
+    pub label: &'static str,
+    pub selected: bool,
+}
+
+/// Dictionary storage scopes. Project words are authored project data; global
+/// words remain application preferences and are intentionally not mirrored in
+/// a project snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictionaryScope {
+    Project,
+    Global,
+}
+
+impl DictionaryScope {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Project => "Project dictionary",
+            Self::Global => "Global dictionary",
+        }
+    }
+}
+
+/// One selectable dictionary scope. An unavailable scope has no editable
+/// words in this presentation state, rather than a stale copied value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictionaryScopeItem {
+    pub scope: DictionaryScope,
+    pub label: &'static str,
+    pub available: bool,
+    pub selected: bool,
+}
+
+/// Settings projection for the fixed v1 spelling language and dictionary data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DictionarySettingsState {
+    project_words: Vec<String>,
+    selected_scope: DictionaryScope,
+}
+
+impl DictionarySettingsState {
+    fn fixture() -> Self {
+        Self {
+            project_words: Vec::new(),
+            selected_scope: DictionaryScope::Project,
+        }
+    }
+
+    fn from_project(project: &Project) -> Self {
+        Self {
+            project_words: project.dictionary.iter().map(str::to_owned).collect(),
+            selected_scope: DictionaryScope::Project,
+        }
+    }
+
+    pub const fn language(&self) -> &'static str {
+        "en-US"
+    }
+
+    pub const fn selected_scope(&self) -> DictionaryScope {
+        self.selected_scope
+    }
+
+    pub const fn scope_available(&self, scope: DictionaryScope) -> bool {
+        matches!(scope, DictionaryScope::Project)
+    }
+
+    pub fn scopes(&self) -> [DictionaryScopeItem; 2] {
+        [DictionaryScope::Project, DictionaryScope::Global].map(|scope| DictionaryScopeItem {
+            scope,
+            label: scope.label(),
+            available: self.scope_available(scope),
+            selected: self.selected_scope == scope,
+        })
+    }
+
+    pub fn words(&self) -> Option<&[String]> {
+        self.scope_available(self.selected_scope)
+            .then_some(self.project_words.as_slice())
+    }
+
+    fn select_scope(&mut self, scope: DictionaryScope) {
+        if self.scope_available(scope) {
+            self.selected_scope = scope;
+        }
+    }
 }
 
 /// One style definition projected for Settings list/detail presentation.
@@ -977,6 +1097,7 @@ pub struct StyleSummary<'a> {
 #[derive(Debug, Clone)]
 pub struct SettingsState {
     appearance: AppearanceMode,
+    dictionaries: DictionarySettingsState,
     metadata_definitions: BTreeMap<String, MetadataDefinition>,
     metadata_order: Vec<String>,
     style_definitions: BTreeMap<String, StyleDefinition>,
@@ -991,6 +1112,7 @@ impl SettingsState {
     fn fixture() -> Self {
         Self {
             appearance: AppearanceMode::System,
+            dictionaries: DictionarySettingsState::fixture(),
             metadata_definitions: BTreeMap::from([
                 (
                     "field-17".to_owned(),
@@ -1082,6 +1204,7 @@ impl SettingsState {
             .collect();
         Self {
             appearance,
+            dictionaries: DictionarySettingsState::from_project(project),
             metadata_definitions,
             metadata_order,
             style_definitions,
@@ -1107,6 +1230,25 @@ impl SettingsState {
 
     pub const fn appearance_is_outside_project_undo_save_and_history(&self) -> bool {
         true
+    }
+
+    pub fn categories(&self) -> [SettingsCategoryItem; 5] {
+        [
+            SettingsCategory::General,
+            SettingsCategory::Appearance,
+            SettingsCategory::Styles,
+            SettingsCategory::Metadata,
+            SettingsCategory::Dictionaries,
+        ]
+        .map(|category| SettingsCategoryItem {
+            category,
+            label: category.label(),
+            selected: self.selected_category == category,
+        })
+    }
+
+    pub fn dictionaries(&self) -> &DictionarySettingsState {
+        &self.dictionaries
     }
 
     pub fn metadata_fields(&self) -> Vec<MetadataFieldSummary<'_>> {
@@ -1728,6 +1870,22 @@ impl HistoryCheckpointRow {
             .clone()
             .unwrap_or_else(|| self.category.label().to_owned())
     }
+
+    /// Deterministic display summary for the authoritative affected-document
+    /// IDs reported by History.
+    pub fn affected_summary(&self) -> String {
+        match self.affected_document_ids.len() {
+            0 => "No documents".to_owned(),
+            1 => "1 document".to_owned(),
+            count => format!("{count} documents"),
+        }
+    }
+
+    /// History has no persisted wall-clock field. The git-backed provider's
+    /// synthetic commit time is an identity-stability detail, not display data.
+    pub const fn recorded_at_unix_millis(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The manifest and optional exact document content for a selected checkpoint.
@@ -1753,6 +1911,80 @@ pub struct HistoryCurrentDocument {
     pub title: String,
     pub body: String,
     pub semantic: SemanticDocument,
+}
+
+/// How one aligned before/after row changed between a checkpoint and the
+/// current canonical semantic document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryComparisonLineKind {
+    Unchanged,
+    Added,
+    Removed,
+    Modified,
+}
+
+/// How one text span participates in a comparison row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryComparisonSpanKind {
+    Unchanged,
+    Added,
+    Removed,
+}
+
+/// One contiguous text span within a comparison line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparisonSpan {
+    pub kind: HistoryComparisonSpanKind,
+    pub text: String,
+}
+
+/// One numbered line on either side of a History comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparisonTextLine {
+    pub line_number: usize,
+    pub spans: Vec<HistoryComparisonSpan>,
+}
+
+/// One aligned, line-numbered checkpoint/current comparison row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparisonLine {
+    pub kind: HistoryComparisonLineKind,
+    pub before: Option<HistoryComparisonTextLine>,
+    pub after: Option<HistoryComparisonTextLine>,
+}
+
+/// Deterministic counts derived from the typed comparison rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryChangeSummary {
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub modified_lines: usize,
+}
+
+/// Read-only comparison of one exact checkpoint document with its loaded
+/// current counterpart. It carries no mutation or persistence semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryComparison {
+    pub checkpoint_id: String,
+    pub document_id: String,
+    pub document_title: String,
+    pub lines: Vec<HistoryComparisonLine>,
+}
+
+impl HistoryComparison {
+    pub fn change_summary(&self) -> HistoryChangeSummary {
+        self.lines
+            .iter()
+            .fold(HistoryChangeSummary::default(), |mut summary, line| {
+                match line.kind {
+                    HistoryComparisonLineKind::Added => summary.added_lines += 1,
+                    HistoryComparisonLineKind::Removed => summary.removed_lines += 1,
+                    HistoryComparisonLineKind::Modified => summary.modified_lines += 1,
+                    HistoryComparisonLineKind::Unchanged => {}
+                }
+                summary
+            })
+    }
 }
 
 /// History list/detail presentation facts.
@@ -1839,6 +2071,22 @@ impl HistoryState {
         self.current_document.as_ref()
     }
 
+    /// Builds a typed comparison only when the selected checkpoint preview and
+    /// current presentation facts refer to the same loaded document.
+    pub fn comparison(&self) -> Option<HistoryComparison> {
+        let preview = self.preview.as_ref()?;
+        let before = preview.document.as_ref()?;
+        let after = self.current_document.as_ref()?;
+        if before.document_id != after.document_id {
+            return None;
+        }
+        Some(compare_history_documents(
+            &preview.checkpoint.checkpoint_id,
+            before,
+            after,
+        ))
+    }
+
     pub fn named_snapshot_draft(&self) -> &str {
         &self.named_snapshot_draft
     }
@@ -1861,6 +2109,341 @@ impl HistoryState {
 
     pub fn maintenance_message(&self) -> Option<&str> {
         self.maintenance_message.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HistoryLineEdit {
+    Unchanged(String),
+    Added(String),
+    Removed(String),
+}
+
+fn compare_history_documents(
+    checkpoint_id: &str,
+    before: &HistoryDocumentPreview,
+    after: &HistoryCurrentDocument,
+) -> HistoryComparison {
+    let before_text = before.semantic.plain_text();
+    let after_text = after.semantic.plain_text();
+    let before_lines = semantic_lines(&before.semantic, &before_text);
+    let after_lines = semantic_lines(&after.semantic, &after_text);
+    let edits = history_line_edits(&before_lines, &after_lines);
+    HistoryComparison {
+        checkpoint_id: checkpoint_id.to_owned(),
+        document_id: before.document_id.clone(),
+        document_title: after.title.clone(),
+        lines: comparison_rows(edits),
+    }
+}
+
+fn semantic_lines<'a>(semantic: &SemanticDocument, text: &'a str) -> Vec<&'a str> {
+    if semantic.blocks().is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    }
+}
+
+fn history_line_edits(before: &[&str], after: &[&str]) -> Vec<HistoryLineEdit> {
+    const MAX_LCS_CELLS: usize = 1_000_000;
+    let rows = before.len().saturating_add(1);
+    let columns = after.len().saturating_add(1);
+    if rows
+        .checked_mul(columns)
+        .is_none_or(|cells| cells > MAX_LCS_CELLS)
+    {
+        return bounded_history_line_edits(before, after);
+    }
+
+    let mut lengths = vec![0_usize; rows * columns];
+    for before_index in (0..before.len()).rev() {
+        for after_index in (0..after.len()).rev() {
+            let index = before_index * columns + after_index;
+            lengths[index] = if before[before_index] == after[after_index] {
+                lengths[(before_index + 1) * columns + after_index + 1] + 1
+            } else {
+                lengths[(before_index + 1) * columns + after_index]
+                    .max(lengths[before_index * columns + after_index + 1])
+            };
+        }
+    }
+
+    let mut edits = Vec::with_capacity(before.len().max(after.len()));
+    let (mut before_index, mut after_index) = (0, 0);
+    while before_index < before.len() && after_index < after.len() {
+        if before[before_index] == after[after_index] {
+            edits.push(HistoryLineEdit::Unchanged(before[before_index].to_owned()));
+            before_index += 1;
+            after_index += 1;
+        } else if lengths[(before_index + 1) * columns + after_index]
+            >= lengths[before_index * columns + after_index + 1]
+        {
+            edits.push(HistoryLineEdit::Removed(before[before_index].to_owned()));
+            before_index += 1;
+        } else {
+            edits.push(HistoryLineEdit::Added(after[after_index].to_owned()));
+            after_index += 1;
+        }
+    }
+    edits.extend(
+        before[before_index..]
+            .iter()
+            .map(|line| HistoryLineEdit::Removed((*line).to_owned())),
+    );
+    edits.extend(
+        after[after_index..]
+            .iter()
+            .map(|line| HistoryLineEdit::Added((*line).to_owned())),
+    );
+    edits
+}
+
+/// Keeps memory bounded for unusually large documents while preserving exact
+/// shared prefix/suffix lines and honestly marking the entire middle changed.
+fn bounded_history_line_edits(before: &[&str], after: &[&str]) -> Vec<HistoryLineEdit> {
+    let prefix = before
+        .iter()
+        .zip(after)
+        .take_while(|(before, after)| before == after)
+        .count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(before, after)| before == after)
+        .count();
+    let mut edits = before[..prefix]
+        .iter()
+        .map(|line| HistoryLineEdit::Unchanged((*line).to_owned()))
+        .collect::<Vec<_>>();
+    edits.extend(
+        before[prefix..before.len() - suffix]
+            .iter()
+            .map(|line| HistoryLineEdit::Removed((*line).to_owned())),
+    );
+    edits.extend(
+        after[prefix..after.len() - suffix]
+            .iter()
+            .map(|line| HistoryLineEdit::Added((*line).to_owned())),
+    );
+    edits.extend(
+        before[before.len() - suffix..]
+            .iter()
+            .map(|line| HistoryLineEdit::Unchanged((*line).to_owned())),
+    );
+    edits
+}
+
+fn comparison_rows(edits: Vec<HistoryLineEdit>) -> Vec<HistoryComparisonLine> {
+    let mut rows = Vec::with_capacity(edits.len());
+    let (mut before_line_number, mut after_line_number) = (1, 1);
+    let mut index = 0;
+    while index < edits.len() {
+        if let HistoryLineEdit::Unchanged(text) = &edits[index] {
+            rows.push(HistoryComparisonLine {
+                kind: HistoryComparisonLineKind::Unchanged,
+                before: Some(comparison_text_line(
+                    before_line_number,
+                    text,
+                    HistoryComparisonSpanKind::Unchanged,
+                )),
+                after: Some(comparison_text_line(
+                    after_line_number,
+                    text,
+                    HistoryComparisonSpanKind::Unchanged,
+                )),
+            });
+            before_line_number += 1;
+            after_line_number += 1;
+            index += 1;
+            continue;
+        }
+
+        let chunk_start = index;
+        while index < edits.len() && !matches!(&edits[index], HistoryLineEdit::Unchanged(_)) {
+            index += 1;
+        }
+        let removed = edits[chunk_start..index]
+            .iter()
+            .filter_map(|edit| match edit {
+                HistoryLineEdit::Removed(text) => Some(text.as_str()),
+                HistoryLineEdit::Added(_) | HistoryLineEdit::Unchanged(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let added = edits[chunk_start..index]
+            .iter()
+            .filter_map(|edit| match edit {
+                HistoryLineEdit::Added(text) => Some(text.as_str()),
+                HistoryLineEdit::Removed(_) | HistoryLineEdit::Unchanged(_) => None,
+            })
+            .collect::<Vec<_>>();
+        for pair_index in 0..removed.len().max(added.len()) {
+            let before_text = removed.get(pair_index).copied();
+            let after_text = added.get(pair_index).copied();
+            let (kind, before_spans, after_spans) = match (before_text, after_text) {
+                (Some(before), Some(after)) => {
+                    let (before_spans, after_spans) = modified_history_spans(before, after);
+                    (
+                        HistoryComparisonLineKind::Modified,
+                        Some(before_spans),
+                        Some(after_spans),
+                    )
+                }
+                (Some(before), None) => (
+                    HistoryComparisonLineKind::Removed,
+                    Some(vec![history_span(
+                        HistoryComparisonSpanKind::Removed,
+                        before,
+                    )]),
+                    None,
+                ),
+                (None, Some(after)) => (
+                    HistoryComparisonLineKind::Added,
+                    None,
+                    Some(vec![history_span(HistoryComparisonSpanKind::Added, after)]),
+                ),
+                (None, None) => unreachable!("comparison chunk must contain a line"),
+            };
+            let before = before_spans.map(|spans| {
+                let line = HistoryComparisonTextLine {
+                    line_number: before_line_number,
+                    spans,
+                };
+                before_line_number += 1;
+                line
+            });
+            let after = after_spans.map(|spans| {
+                let line = HistoryComparisonTextLine {
+                    line_number: after_line_number,
+                    spans,
+                };
+                after_line_number += 1;
+                line
+            });
+            rows.push(HistoryComparisonLine {
+                kind,
+                before,
+                after,
+            });
+        }
+    }
+    rows
+}
+
+fn comparison_text_line(
+    line_number: usize,
+    text: &str,
+    kind: HistoryComparisonSpanKind,
+) -> HistoryComparisonTextLine {
+    HistoryComparisonTextLine {
+        line_number,
+        spans: vec![history_span(kind, text)],
+    }
+}
+
+fn modified_history_spans(
+    before: &str,
+    after: &str,
+) -> (Vec<HistoryComparisonSpan>, Vec<HistoryComparisonSpan>) {
+    let prefix_bytes = before
+        .chars()
+        .zip(after.chars())
+        .take_while(|(before, after)| before == after)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+    let prefix_bytes = history_word_start(before, prefix_bytes);
+    let before_rest = &before[prefix_bytes..];
+    let after_rest = &after[prefix_bytes..];
+    let suffix_bytes = before_rest
+        .chars()
+        .rev()
+        .zip(after_rest.chars().rev())
+        .take_while(|(before, after)| before == after)
+        .map(|(character, _)| character.len_utf8())
+        .sum::<usize>();
+    let before_changed_end = history_word_end(before, before.len() - suffix_bytes);
+    let after_changed_end = history_word_end(after, after.len() - suffix_bytes);
+    (
+        history_change_spans(
+            before,
+            prefix_bytes,
+            before_changed_end,
+            HistoryComparisonSpanKind::Removed,
+        ),
+        history_change_spans(
+            after,
+            prefix_bytes,
+            after_changed_end,
+            HistoryComparisonSpanKind::Added,
+        ),
+    )
+}
+
+fn history_word_start(text: &str, mut boundary: usize) -> usize {
+    while boundary > 0 && boundary < text.len() {
+        let before = text[..boundary].chars().next_back();
+        let after = text[boundary..].chars().next();
+        if !before.is_some_and(history_word_character) || !after.is_some_and(history_word_character)
+        {
+            break;
+        }
+        boundary = text[..boundary]
+            .char_indices()
+            .next_back()
+            .map_or(0, |(index, _)| index);
+    }
+    boundary
+}
+
+fn history_word_end(text: &str, mut boundary: usize) -> usize {
+    while boundary > 0 && boundary < text.len() {
+        let before = text[..boundary].chars().next_back();
+        let after = text[boundary..].chars().next();
+        if !before.is_some_and(history_word_character) || !after.is_some_and(history_word_character)
+        {
+            break;
+        }
+        boundary += after
+            .expect("word boundary includes a following character")
+            .len_utf8();
+    }
+    boundary
+}
+
+fn history_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn history_change_spans(
+    text: &str,
+    prefix_end: usize,
+    changed_end: usize,
+    changed_kind: HistoryComparisonSpanKind,
+) -> Vec<HistoryComparisonSpan> {
+    let mut spans = Vec::with_capacity(3);
+    if prefix_end > 0 {
+        spans.push(history_span(
+            HistoryComparisonSpanKind::Unchanged,
+            &text[..prefix_end],
+        ));
+    }
+    if changed_end > prefix_end {
+        spans.push(history_span(changed_kind, &text[prefix_end..changed_end]));
+    }
+    if changed_end < text.len() {
+        spans.push(history_span(
+            HistoryComparisonSpanKind::Unchanged,
+            &text[changed_end..],
+        ));
+    }
+    spans
+}
+
+fn history_span(kind: HistoryComparisonSpanKind, text: &str) -> HistoryComparisonSpan {
+    HistoryComparisonSpan {
+        kind,
+        text: text.to_owned(),
     }
 }
 
@@ -2348,6 +2931,24 @@ pub struct RecoveryState {
     resolving: bool,
 }
 
+/// One document affected by recovery. Recovery reconciliation reports a
+/// document revision, but it does not report recovered word counts or edit
+/// timestamps, so those values remain unavailable instead of being inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryDocumentSummary<'a> {
+    pub document_id: &'a str,
+    pub display_title: Option<&'a str>,
+    pub recovered_word_count: Option<usize>,
+    pub last_edit: Option<&'a str>,
+    pub revision: u64,
+}
+
+/// Whether recovery can honestly confirm the History note shown by a surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryHistoryPreservation {
+    Unavailable,
+}
+
 impl RecoveryState {
     pub const fn is_disposable_after_durable_save(&self) -> bool {
         self.accepted && self.durable_save_completed
@@ -2375,6 +2976,10 @@ impl RecoveryState {
 
     pub const fn is_resolving(&self) -> bool {
         self.resolving
+    }
+
+    pub const fn history_preservation(&self) -> RecoveryHistoryPreservation {
+        RecoveryHistoryPreservation::Unavailable
     }
 }
 
@@ -2542,6 +3147,12 @@ pub enum ProjectMessage {
         node_id: String,
         synopsis: String,
     },
+    /// Applies one local multiline-editor action before emitting the existing
+    /// synopsis persistence effect.
+    EditSynopsis {
+        node_id: String,
+        action: text_editor::Action,
+    },
     SetMetadataValue {
         node_id: String,
         field_id: String,
@@ -2649,6 +3260,7 @@ pub enum ProjectMessage {
     UseRestoreFallback(String),
     SetAppearance(AppearanceMode),
     SelectSettingsCategory(SettingsCategory),
+    SelectDictionaryScope(DictionaryScope),
     SetExportOutputName(String),
     BrowseExportDestination,
     SetExportDestination(Option<String>),
@@ -2794,6 +3406,7 @@ pub struct ProjectWorkspace {
     pointer_drag: Option<HierarchyPointerDrag>,
     hierarchy_context_menu: Option<String>,
     last_activated_document: Option<String>,
+    synopsis_editors: BTreeMap<String, text_editor::Content>,
     metadata_values: BTreeMap<(String, String), String>,
     settings: SettingsState,
     global_search: GlobalSearchState,
@@ -2860,12 +3473,14 @@ impl ProjectWorkspace {
             ],
             ..HistoryState::default()
         };
+        let explorer = ExplorerState::fixture();
+        let synopsis_editors = synopsis_editors(&explorer);
         Self {
             source: ProjectWorkspaceSource::Fixture(fixture),
             session: 37,
             project_revision: 1,
             sidebar,
-            explorer: ExplorerState::fixture(),
+            explorer,
             tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
             cards_drag_destination: Some(DragDestination::BeforeSibling(
@@ -2874,6 +3489,7 @@ impl ProjectWorkspace {
             pointer_drag: None,
             hierarchy_context_menu: None,
             last_activated_document: None,
+            synopsis_editors,
             metadata_values: BTreeMap::from([(
                 ("chapter-one".to_owned(), "field-17".to_owned()),
                 "first person".to_owned(),
@@ -2905,6 +3521,7 @@ impl ProjectWorkspace {
     /// Hydrates a production workspace from one authoritative project snapshot.
     pub fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
         let explorer = ExplorerState::from_project(&snapshot.project);
+        let synopsis_editors = synopsis_editors(&explorer);
         let settings = SettingsState::from_project(&snapshot.project, AppearanceMode::System);
         let metadata_values = metadata_values_from_project(&snapshot.project);
         let recently_deleted = RecentlyDeletedState::from_snapshot(snapshot);
@@ -2926,6 +3543,7 @@ impl ProjectWorkspace {
             pointer_drag: None,
             hierarchy_context_menu: None,
             last_activated_document: None,
+            synopsis_editors,
             metadata_values,
             settings,
             global_search: GlobalSearchState::default(),
@@ -2969,8 +3587,18 @@ impl ProjectWorkspace {
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         self.project_revision = snapshot.project.revision.value();
         self.explorer.reconcile_project(&snapshot.project);
+        self.synopsis_editors = synopsis_editors(&self.explorer);
         self.metadata_values = metadata_values_from_project(&snapshot.project);
+        let selected_category = self.settings.selected_category;
+        let selected_detail = self.settings.selected_detail.clone();
         self.settings = SettingsState::from_project(&snapshot.project, self.settings.appearance);
+        self.settings.selected_category = selected_category;
+        self.settings.selected_detail = selected_detail.filter(|detail| match detail {
+            SettingsDetail::MetadataField(id) => {
+                self.settings.metadata_definitions.contains_key(id)
+            }
+            SettingsDetail::Style(id) => self.settings.style_definitions.contains_key(id),
+        });
         self.recently_deleted.reconcile_snapshot(snapshot);
         self.export.reconcile_project(&snapshot.project);
         self.editor.reconcile_snapshot(snapshot);
@@ -3227,6 +3855,16 @@ impl ProjectWorkspace {
         }
     }
 
+    pub(crate) fn synopsis_editor(&self, node_id: &str) -> Option<&text_editor::Content> {
+        self.synopsis_editors.get(node_id)
+    }
+
+    fn replace_synopsis_editor(&mut self, node_id: &str, synopsis: &str) {
+        if let Some(editor) = self.synopsis_editors.get_mut(node_id) {
+            *editor = text_editor::Content::with_text(synopsis);
+        }
+    }
+
     /// The Inspector follows the most recently focused editor or Explorer row.
     /// Explorer selection is also the deterministic fallback when neither has
     /// an applicable context.
@@ -3322,6 +3960,22 @@ impl ProjectWorkspace {
 
     pub fn recovery(&self) -> &RecoveryState {
         &self.recovery
+    }
+
+    /// Resolves recovery document IDs against the current project hierarchy.
+    /// The recovery service supplies no recovered word count or last-edit time.
+    pub fn recovery_summary(&self) -> Vec<RecoveryDocumentSummary<'_>> {
+        self.recovery
+            .affected_documents()
+            .iter()
+            .map(|(document_id, revision)| RecoveryDocumentSummary {
+                document_id,
+                display_title: self.explorer.title_for_document(document_id),
+                recovered_word_count: None,
+                last_edit: None,
+                revision: *revision,
+            })
+            .collect()
     }
 
     pub fn modal(&self) -> Option<ProjectModal> {
@@ -3605,6 +4259,20 @@ impl ProjectWorkspace {
                 vec![ProjectEffect::CommitNodeTitle { node_id, title }]
             }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
+                self.explorer.set_synopsis(&node_id, synopsis.clone());
+                self.replace_synopsis_editor(&node_id, &synopsis);
+                vec![ProjectEffect::CommitSynopsis { node_id, synopsis }]
+            }
+            ProjectMessage::EditSynopsis { node_id, action } => {
+                let is_edit = action.is_edit();
+                let Some(editor) = self.synopsis_editors.get_mut(&node_id) else {
+                    return Vec::new();
+                };
+                editor.perform(action);
+                if !is_edit {
+                    return Vec::new();
+                }
+                let synopsis = editor.text();
                 self.explorer.set_synopsis(&node_id, synopsis.clone());
                 vec![ProjectEffect::CommitSynopsis { node_id, synopsis }]
             }
@@ -4254,6 +4922,10 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SelectSettingsCategory(category) => {
                 self.settings.selected_category = category;
+                Vec::new()
+            }
+            ProjectMessage::SelectDictionaryScope(scope) => {
+                self.settings.dictionaries.select_scope(scope);
                 Vec::new()
             }
             ProjectMessage::SetExportOutputName(output_name) => {
@@ -5133,11 +5805,259 @@ mod tests {
         let row = &workspace.history().checkpoints()[0];
 
         assert_eq!(row.label(), "Draft Two");
+        assert_eq!(row.affected_summary(), "1 document");
+        assert_eq!(row.recorded_at_unix_millis(), None);
         assert_eq!(row.category, HistoryCheckpointCategory::NamedSnapshot);
         assert_eq!(row.affected_document_ids.len(), 1);
         assert_eq!(
             HistoryCheckpointCategory::Restoration.label(),
             "Restoration"
+        );
+    }
+
+    #[test]
+    fn history_comparison_projects_numbered_rows_and_changed_spans_from_loaded_semantics() {
+        fn semantic(lines: &[&str]) -> SemanticDocument {
+            SemanticDocument::new(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, text)| {
+                        parchmint_editor_api::SemanticBlock::new(
+                            parchmint_editor_api::BlockId::from_bytes([index as u8; 16]),
+                            parchmint_editor_api::SemanticBlockKind::Paragraph,
+                            None,
+                            *text,
+                            Vec::new(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+
+        let history = HistoryState {
+            preview: Some(HistoryPreviewData {
+                checkpoint: history_row(
+                    "checkpoint-7",
+                    HistoryCheckpointCategory::Autosave,
+                    None,
+                    vec!["chapter-one"],
+                ),
+                resource_paths: vec!["documents/chapter-one.html".to_owned()],
+                document: Some(HistoryDocumentPreview {
+                    document_id: "chapter-one".to_owned(),
+                    canonical_path: "documents/chapter-one.html".to_owned(),
+                    semantic: semantic(&["The blue house", "Keep", "Remove me"]),
+                }),
+            }),
+            current_document: Some(HistoryCurrentDocument {
+                document_id: "chapter-one".to_owned(),
+                title: "Chapter One".to_owned(),
+                body: "<p>The green house</p><p>Keep</p><p>Added one</p><p>Added two</p>"
+                    .to_owned(),
+                semantic: semantic(&["The green house", "Keep", "Added one", "Added two"]),
+            }),
+            ..HistoryState::default()
+        };
+
+        let comparison = history.comparison().expect("same document is comparable");
+        assert_eq!(comparison.checkpoint_id, "checkpoint-7");
+        assert_eq!(comparison.document_title, "Chapter One");
+        assert_eq!(
+            comparison.change_summary(),
+            HistoryChangeSummary {
+                added_lines: 1,
+                removed_lines: 0,
+                modified_lines: 2,
+            }
+        );
+        assert_eq!(
+            comparison.lines[0].kind,
+            HistoryComparisonLineKind::Modified
+        );
+        assert_eq!(
+            comparison.lines[0]
+                .before
+                .as_ref()
+                .map(|line| line.line_number),
+            Some(1)
+        );
+        assert_eq!(
+            comparison.lines[0]
+                .after
+                .as_ref()
+                .map(|line| line.line_number),
+            Some(1)
+        );
+        assert_eq!(
+            comparison.lines[0]
+                .before
+                .as_ref()
+                .expect("modified before line")
+                .spans,
+            [
+                HistoryComparisonSpan {
+                    kind: HistoryComparisonSpanKind::Unchanged,
+                    text: "The ".to_owned(),
+                },
+                HistoryComparisonSpan {
+                    kind: HistoryComparisonSpanKind::Removed,
+                    text: "blue".to_owned(),
+                },
+                HistoryComparisonSpan {
+                    kind: HistoryComparisonSpanKind::Unchanged,
+                    text: " house".to_owned(),
+                },
+            ]
+        );
+        assert_eq!(
+            comparison.lines[1].kind,
+            HistoryComparisonLineKind::Unchanged
+        );
+        assert_eq!(
+            comparison.lines[2].kind,
+            HistoryComparisonLineKind::Modified
+        );
+        assert_eq!(comparison.lines[3].kind, HistoryComparisonLineKind::Added);
+        assert!(comparison.lines[3].before.is_none());
+        assert_eq!(
+            comparison.lines[3]
+                .after
+                .as_ref()
+                .map(|line| line.line_number),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn history_comparison_refuses_unrelated_loaded_documents() {
+        let history = HistoryState {
+            preview: Some(HistoryPreviewData {
+                checkpoint: history_row(
+                    "checkpoint-7",
+                    HistoryCheckpointCategory::Autosave,
+                    None,
+                    vec!["chapter-one"],
+                ),
+                resource_paths: Vec::new(),
+                document: Some(HistoryDocumentPreview {
+                    document_id: "chapter-one".to_owned(),
+                    canonical_path: "documents/chapter-one.html".to_owned(),
+                    semantic: SemanticDocument::default(),
+                }),
+            }),
+            current_document: Some(HistoryCurrentDocument {
+                document_id: "chapter-two".to_owned(),
+                title: "Chapter Two".to_owned(),
+                body: String::new(),
+                semantic: SemanticDocument::default(),
+            }),
+            ..HistoryState::default()
+        };
+
+        assert_eq!(history.comparison(), None);
+    }
+
+    #[test]
+    fn settings_navigation_keeps_all_design_categories_and_refuses_unavailable_global_words() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
+        assert_eq!(
+            workspace
+                .settings()
+                .categories()
+                .map(|category| category.label),
+            [
+                "General",
+                "Appearance",
+                "Styles",
+                "Metadata fields",
+                "Dictionaries",
+            ]
+        );
+
+        workspace.update(ProjectMessage::SelectSettingsCategory(
+            SettingsCategory::Dictionaries,
+        ));
+        assert_eq!(
+            workspace.settings().selected_category(),
+            SettingsCategory::Dictionaries
+        );
+
+        let dictionaries = workspace.settings().dictionaries();
+        assert_eq!(dictionaries.language(), "en-US");
+        assert_eq!(dictionaries.selected_scope(), DictionaryScope::Project);
+        assert_eq!(
+            dictionaries
+                .scopes()
+                .map(|scope| (scope.scope, scope.available, scope.selected)),
+            [
+                (DictionaryScope::Project, true, true),
+                (DictionaryScope::Global, false, false),
+            ]
+        );
+
+        workspace.update(ProjectMessage::SelectDictionaryScope(
+            DictionaryScope::Global,
+        ));
+        assert_eq!(
+            workspace.settings().dictionaries().selected_scope(),
+            DictionaryScope::Project
+        );
+    }
+
+    #[test]
+    fn dictionary_settings_reads_project_words_without_copying_global_preferences() {
+        let project_id = parchmint_domain::ProjectId::from_bytes([0x47; 16]);
+        let mut project = Project::new(project_id);
+        project.dictionary.insert("harbor").unwrap();
+        let workspace = ProjectWorkspace::from_snapshot(&ProjectSnapshot {
+            project,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        });
+
+        assert_eq!(
+            workspace.settings().dictionaries().words(),
+            Some(["harbor".to_owned()].as_slice())
+        );
+        assert!(
+            !workspace
+                .settings()
+                .dictionaries()
+                .scope_available(DictionaryScope::Global)
+        );
+    }
+
+    #[test]
+    fn recovery_summary_resolves_titles_without_inventing_missing_display_data() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::ErrorRecovery);
+        let ticket = workspace.begin_task(ProjectTask::ReconcileRecovery);
+        assert!(
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket,
+                ProjectTaskPayload::RecoveryAvailable {
+                    accepted_records: 2,
+                    affected_documents: vec![("chapter-one".to_owned(), 8)],
+                    isolation: None,
+                },
+            ))
+        );
+
+        assert_eq!(workspace.recovery().accepted_records(), 2);
+        assert_eq!(
+            workspace.recovery_summary(),
+            [RecoveryDocumentSummary {
+                document_id: "chapter-one",
+                display_title: Some("Chapter One"),
+                recovered_word_count: None,
+                last_edit: None,
+                revision: 8,
+            }]
+        );
+        assert_eq!(
+            workspace.recovery().history_preservation(),
+            RecoveryHistoryPreservation::Unavailable
         );
     }
 
@@ -5701,6 +6621,34 @@ mod tests {
                 .pane(EditorPane::Primary)
                 .active_document(),
             Some("chapter-three")
+        );
+    }
+
+    #[test]
+    fn synopsis_editor_preserves_multiline_text_and_commits_only_edits() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        assert!(
+            workspace
+                .update(ProjectMessage::EditSynopsis {
+                    node_id: "chapter-one".to_owned(),
+                    action: text_editor::Action::Move(text_editor::Motion::End),
+                })
+                .is_empty()
+        );
+
+        let effects = workspace.update(ProjectMessage::EditSynopsis {
+            node_id: "chapter-one".to_owned(),
+            action: text_editor::Action::Edit(text_editor::Edit::Enter),
+        });
+        let [ProjectEffect::CommitSynopsis { node_id, synopsis }] = effects.as_slice() else {
+            panic!("a multiline synopsis edit must use the existing persistence effect");
+        };
+        assert_eq!(node_id, "chapter-one");
+        assert!(synopsis.contains('\n'));
+        assert_eq!(
+            workspace.explorer().synopsis("chapter-one"),
+            Some(synopsis.as_str())
         );
     }
 }

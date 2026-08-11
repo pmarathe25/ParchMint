@@ -11,7 +11,9 @@ use parchmint_editor_api::{
 use std::sync::{Arc, Mutex};
 
 use crate::adapter::EditorIcedAdapter;
-use crate::layout::{BlockLayoutGeometry, EditorFontFamily, EditorRectangle, EditorViewport};
+use crate::layout::{
+    BlockLayoutGeometry, EditorFontFamily, EditorRectangle, EditorScalarGeometry, EditorViewport,
+};
 
 /// An sRGB surface color owned by the ParchMint editor boundary.
 ///
@@ -416,178 +418,156 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         let background = Path::rectangle(Point::ORIGIN, bounds.size());
         frame.fill(&background, content.theme.manuscript().iced());
 
-        for selection in content.geometry.selection_rectangles(content.selection) {
-            fill_rectangle(&mut frame, selection, content.theme.selection().iced());
-        }
+        frame.with_clip(canvas_clip_bounds(bounds), |frame| {
+            for selection in content.geometry.selection_rectangles(content.selection) {
+                fill_rectangle(frame, selection, content.theme.selection().iced());
+            }
 
-        for scalar in content.geometry.draw_scalars() {
-            if scalar.character == '\n' {
-                continue;
-            }
-            if let Some(kind) = scalar.atomic {
-                let line = EditorRectangle {
-                    x: scalar.bounds.x - scalar.bounds.width * 1.5,
-                    y: scalar.bounds.y + scalar.bounds.height * 0.5,
-                    width: scalar.bounds.width * 4.0,
-                    height: 1.0,
-                };
-                fill_rectangle(&mut frame, line, content.theme.text().iced());
-                if kind == AtomicBlockKind::PageBreak {
-                    fill_rectangle(
-                        &mut frame,
-                        EditorRectangle {
-                            y: line.y + 3.0,
-                            ..line
-                        },
-                        content.theme.text().iced(),
-                    );
+            for scalar in content.geometry.draw_scalars() {
+                // Tabs have already contributed their semantic advance to the
+                // shared geometry. Painting their control code asks the font
+                // fallback for a missing-glyph box, so leave the tab blank
+                // while preserving its caret and hit-test position.
+                if scalar.character == '\n' || scalar.character == '\t' {
+                    continue;
                 }
-                continue;
-            }
-            if scalar.block_start
-                && scalar.block_kind == parchmint_editor_api::SemanticBlockKind::BlockQuote
-            {
-                fill_rectangle(
-                    &mut frame,
-                    EditorRectangle {
-                        x: scalar.bounds.x - 12.0,
-                        y: scalar.bounds.y,
-                        width: 2.0,
-                        height: scalar.bounds.height,
-                    },
-                    content.theme.text().iced(),
-                );
-            }
-            if let Some(marker) = scalar.list_marker {
-                frame.fill_text(Text {
-                    content: if marker == 0 {
-                        "•".to_owned()
-                    } else {
-                        format!("{marker}.")
-                    },
-                    position: Point::new(scalar.bounds.x - 20.0, scalar.bounds.y),
-                    color: content.theme.text().iced(),
-                    size: iced::Pixels::from(16.0),
-                    ..Text::default()
-                });
-            }
-            let raised = scalar.superscript;
-            let lowered = scalar.subscript;
-            let small_caps = scalar.small_caps && scalar.character.is_lowercase();
-            frame.fill_text(Text {
-                content: if scalar.small_caps {
-                    scalar.character.to_uppercase().collect()
-                } else {
-                    scalar.character.to_string()
-                },
-                position: Point::new(
-                    scalar.bounds.x,
-                    scalar.bounds.y
-                        + if raised {
-                            -scalar.bounds.height * 0.25
-                        } else if lowered {
-                            scalar.bounds.height * 0.25
+                if let Some(kind) = scalar.atomic {
+                    draw_atomic_block(frame, scalar, kind, content.theme);
+                    continue;
+                }
+                if let Some(marker) = scalar.list_marker {
+                    frame.fill_text(Text {
+                        content: if marker == 0 {
+                            "•".to_owned()
                         } else {
-                            0.0
+                            format!("{marker}.")
                         },
-                ),
-                color: if scalar.link {
-                    content.theme.link().iced()
-                } else {
-                    content.theme.text().iced()
-                },
-                size: iced::Pixels::from(if raised || lowered || small_caps {
-                    scalar.font_size * 0.75
-                } else {
-                    scalar.font_size
-                }),
-                font: iced::Font {
-                    family: match scalar.font_family {
-                        EditorFontFamily::SansSerif => iced::font::Family::SansSerif,
-                        EditorFontFamily::Serif => iced::font::Family::Serif,
-                        EditorFontFamily::Monospace => iced::font::Family::Monospace,
-                    },
-                    weight: if scalar.bold || scalar.font_weight >= 700 {
-                        iced::font::Weight::Bold
-                    } else if scalar.font_weight >= 500 {
-                        iced::font::Weight::Medium
+                        position: Point::new(scalar.bounds.x - 20.0, scalar.bounds.y),
+                        color: content.theme.text().iced(),
+                        size: iced::Pixels::from(16.0),
+                        ..Text::default()
+                    });
+                }
+                let raised = scalar.superscript;
+                let lowered = scalar.subscript;
+                let small_caps = scalar.small_caps && scalar.character.is_lowercase();
+                frame.fill_text(Text {
+                    content: if scalar.small_caps {
+                        scalar.character.to_uppercase().collect()
                     } else {
-                        iced::font::Weight::Normal
+                        scalar.character.to_string()
                     },
-                    style: if scalar.italic || scalar.block_italic {
-                        iced::font::Style::Italic
-                    } else {
-                        iced::font::Style::Normal
-                    },
-                    ..iced::Font::default()
-                },
-                ..Text::default()
-            });
-            if scalar.underline || scalar.link {
-                fill_rectangle(
-                    &mut frame,
-                    EditorRectangle {
-                        x: scalar.bounds.x,
-                        y: scalar.bounds.y + scalar.bounds.height - 2.0,
-                        width: scalar.bounds.width,
-                        height: 1.0,
-                    },
-                    if scalar.link {
+                    position: Point::new(
+                        scalar.bounds.x,
+                        scalar.bounds.y
+                            + if raised {
+                                -scalar.bounds.height * 0.25
+                            } else if lowered {
+                                scalar.bounds.height * 0.25
+                            } else {
+                                0.0
+                            },
+                    ),
+                    color: if scalar.link {
                         content.theme.link().iced()
                     } else {
                         content.theme.text().iced()
                     },
-                );
-            }
-            if scalar.strikethrough {
-                fill_rectangle(
-                    &mut frame,
-                    EditorRectangle {
-                        x: scalar.bounds.x,
-                        y: scalar.bounds.y + scalar.bounds.height * 0.5,
-                        width: scalar.bounds.width,
-                        height: 1.0,
+                    size: iced::Pixels::from(if raised || lowered || small_caps {
+                        scalar.font_size * 0.75
+                    } else {
+                        scalar.font_size
+                    }),
+                    font: iced::Font {
+                        family: match scalar.font_family {
+                            EditorFontFamily::SansSerif => {
+                                iced::font::Family::Name("Source Sans 3")
+                            }
+                            EditorFontFamily::Serif => iced::font::Family::Name("Source Serif 4"),
+                            EditorFontFamily::Monospace => iced::font::Family::Monospace,
+                        },
+                        weight: if scalar.bold || scalar.font_weight >= 700 {
+                            iced::font::Weight::Bold
+                        } else if scalar.font_weight >= 500 {
+                            iced::font::Weight::Medium
+                        } else {
+                            iced::font::Weight::Normal
+                        },
+                        style: if scalar.italic || scalar.block_italic {
+                            iced::font::Style::Italic
+                        } else {
+                            iced::font::Style::Normal
+                        },
+                        ..iced::Font::default()
                     },
-                    content.theme.text().iced(),
-                );
+                    ..Text::default()
+                });
+                if scalar.underline || scalar.link {
+                    fill_rectangle(
+                        frame,
+                        EditorRectangle {
+                            x: scalar.bounds.x,
+                            y: scalar.bounds.y + scalar.bounds.height - 2.0,
+                            width: scalar.bounds.width,
+                            height: 1.0,
+                        },
+                        if scalar.link {
+                            content.theme.link().iced()
+                        } else {
+                            content.theme.text().iced()
+                        },
+                    );
+                }
+                if scalar.strikethrough {
+                    fill_rectangle(
+                        frame,
+                        EditorRectangle {
+                            x: scalar.bounds.x,
+                            y: scalar.bounds.y + scalar.bounds.height * 0.5,
+                            width: scalar.bounds.width,
+                            height: 1.0,
+                        },
+                        content.theme.text().iced(),
+                    );
+                }
             }
-        }
 
-        for decoration in &content.spellcheck {
-            for rectangle in content.geometry.selection_rectangles(decoration.range()) {
-                fill_rectangle(
-                    &mut frame,
-                    EditorRectangle {
-                        x: rectangle.x,
-                        y: rectangle.y + rectangle.height - 1.0,
-                        width: rectangle.width,
-                        height: 2.0,
-                    },
-                    content.theme.spellcheck().iced(),
-                );
+            for decoration in &content.spellcheck {
+                for rectangle in content.geometry.selection_rectangles(decoration.range()) {
+                    fill_rectangle(
+                        frame,
+                        EditorRectangle {
+                            x: rectangle.x,
+                            y: rectangle.y + rectangle.height - 1.0,
+                            width: rectangle.width,
+                            height: 2.0,
+                        },
+                        content.theme.spellcheck().iced(),
+                    );
+                }
             }
-        }
 
-        for decoration in &content.comments {
-            for rectangle in content.geometry.selection_rectangles(decoration.range()) {
-                let rectangle = if decoration.active() {
-                    rectangle
-                } else {
-                    EditorRectangle {
-                        y: rectangle.y + rectangle.height - 2.0,
-                        height: 2.0,
-                        ..rectangle
-                    }
-                };
-                fill_rectangle(&mut frame, rectangle, content.theme.comment().iced());
+            for decoration in &content.comments {
+                for rectangle in content.geometry.selection_rectangles(decoration.range()) {
+                    let rectangle = if decoration.active() {
+                        rectangle
+                    } else {
+                        EditorRectangle {
+                            y: rectangle.y + rectangle.height - 2.0,
+                            height: 2.0,
+                            ..rectangle
+                        }
+                    };
+                    fill_rectangle(frame, rectangle, content.theme.comment().iced());
+                }
             }
-        }
 
-        if self.draws_focused_caret(state, &content)
-            && let Some(caret) = content.geometry.caret(content.selection.head())
-        {
-            fill_rectangle(&mut frame, caret, content.theme.caret().iced());
-        }
+            if self.draws_focused_caret(state, &content)
+                && let Some(caret) = content.geometry.caret(content.selection.head())
+            {
+                fill_rectangle(frame, caret, content.theme.caret().iced());
+            }
+        });
 
         vec![frame.into_geometry()]
     }
@@ -603,6 +583,15 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         } else {
             mouse::Interaction::default()
         }
+    }
+}
+
+fn canvas_clip_bounds(bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        x: 0.0,
+        y: 0.0,
+        width: bounds.width,
+        height: bounds.height,
     }
 }
 
@@ -1326,6 +1315,41 @@ fn fill_rectangle(frame: &mut Frame, rectangle: EditorRectangle, color: Color) {
     frame.fill(&path, color);
 }
 
+fn draw_atomic_block(
+    frame: &mut Frame,
+    scalar: &EditorScalarGeometry,
+    kind: AtomicBlockKind,
+    theme: EditorSurfaceTheme,
+) {
+    match kind {
+        AtomicBlockKind::SceneBreak => frame.fill_text(Text {
+            content: "✳".to_owned(),
+            position: Point::new(scalar.bounds.x, scalar.bounds.y),
+            color: theme.text().iced(),
+            size: iced::Pixels::from(20.0),
+            font: iced::Font::with_name("Source Serif 4"),
+            ..Text::default()
+        }),
+        AtomicBlockKind::PageBreak => {
+            let line = EditorRectangle {
+                x: scalar.bounds.x,
+                y: scalar.bounds.y + scalar.bounds.height * 0.5,
+                width: 96.0,
+                height: 1.0,
+            };
+            fill_rectangle(frame, line, theme.text().iced());
+            fill_rectangle(
+                frame,
+                EditorRectangle {
+                    y: line.y + 3.0,
+                    ..line
+                },
+                theme.text().iced(),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1337,6 +1361,34 @@ mod tests {
     use super::*;
     use crate::layout::{EditorViewport, VisibleEditorBlock};
     use crate::{EditorIcedConfig, EditorResourceLimits};
+
+    fn regression_layout_metrics() -> crate::EditorLayoutMetrics {
+        crate::EditorLayoutMetrics {
+            inset_x: 16.0,
+            inset_y: 16.0,
+            scalar_width: 8.0,
+            line_height: 20.0,
+            caret_width: 1.0,
+        }
+    }
+
+    #[test]
+    fn canvas_clip_bounds_stay_local_to_the_allocated_pane() {
+        assert_eq!(
+            canvas_clip_bounds(Rectangle {
+                x: 440.0,
+                y: 176.0,
+                width: 389.0,
+                height: 736.0,
+            }),
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 389.0,
+                height: 736.0,
+            },
+        );
+    }
 
     #[test]
     fn primary_modifier_maps_copy_cut_paste_and_plain_paste_shortcuts() {
@@ -1419,7 +1471,11 @@ mod tests {
 
     #[test]
     fn mounted_navigation_extends_selection_and_scroll_is_clamped_to_content() {
-        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig {
+            layout_metrics: regression_layout_metrics(),
+            ..EditorIcedConfig::default()
+        })
+        .expect("adapter");
         let document = DocumentId::from_bytes([51; 16]);
         let block = BlockId::from_bytes([51; 16]);
         let session = adapter
@@ -1571,6 +1627,8 @@ mod tests {
             None,
         )
         .expect("geometry");
+        let first = geometry.draw_scalars()[0].bounds;
+        let fourth = geometry.draw_scalars()[3].bounds;
         let content = Arc::new(Mutex::new(SurfaceContent {
             geometry,
             selection: EditorSelection::new(0.into(), 0.into()),
@@ -1591,7 +1649,7 @@ mod tests {
             &mut state,
             &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(16.0, 16.0)),
+            mouse::Cursor::Available(Point::new(first.x, first.y)),
         );
         let (message, _, _) = press.expect("press action").into_inner();
         assert_eq!(message, Some(MountedEditorMessage::Focus(0.into())));
@@ -1600,10 +1658,10 @@ mod tests {
             &surface,
             &mut state,
             &iced::Event::Mouse(mouse::Event::CursorMoved {
-                position: Point::new(40.0, 16.0),
+                position: Point::new(fourth.x, fourth.y),
             }),
             bounds,
-            mouse::Cursor::Available(Point::new(40.0, 16.0)),
+            mouse::Cursor::Available(Point::new(fourth.x, fourth.y)),
         );
         let (message, _, _) = drag.expect("drag action").into_inner();
         assert_eq!(
@@ -1622,7 +1680,7 @@ mod tests {
             &mut state,
             &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
             bounds,
-            mouse::Cursor::Available(Point::new(40.0, 16.0)),
+            mouse::Cursor::Available(Point::new(fourth.x, fourth.y)),
         );
         let (message, _, _) = shift_press.expect("shift press action").into_inner();
         assert_eq!(
@@ -1795,6 +1853,7 @@ mod tests {
                 max_visible_blocks_per_view: 6,
                 ..EditorResourceLimits::default()
             },
+            layout_metrics: regression_layout_metrics(),
             ..EditorIcedConfig::default()
         })
         .expect("adapter");
@@ -1937,7 +1996,11 @@ mod tests {
 
     #[test]
     fn spelling_ranges_produce_visible_underline_geometry_and_secondary_hits() {
-        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig {
+            layout_metrics: regression_layout_metrics(),
+            ..EditorIcedConfig::default()
+        })
+        .expect("adapter");
         let session = adapter
             .open_session(CanonicalDocumentLoad::new(
                 DocumentId::from_bytes([34; 16]),
@@ -1983,16 +2046,17 @@ mod tests {
             .expect("surface");
         let content = surface.content();
         assert_eq!(content.geometry.selection_rectangles(range).len(), 3);
-        assert_eq!(spelling_range_at(&content, 18.0, 18.0), Some(range));
+        let first = content.geometry.draw_scalars()[0].bounds;
+        assert_eq!(spelling_range_at(&content, first.x, first.y), Some(range));
         assert_eq!(spelling_range_at(&content, 200.0, 80.0), None);
         assert!(
-            comment_range_at(&content, 18.0, 18.0)
+            comment_range_at(&content, first.x, first.y)
                 .unwrap()
                 .is_collapsed()
         );
         let mut selected = content;
         selected.selection = range;
-        assert_eq!(comment_range_at(&selected, 18.0, 18.0), Some(range));
+        assert_eq!(comment_range_at(&selected, first.x, first.y), Some(range));
     }
 
     #[test]
@@ -2034,7 +2098,11 @@ mod tests {
 
     #[test]
     fn prefocused_mounted_surface_initializes_canvas_focus_before_input() {
-        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter");
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig {
+            layout_metrics: regression_layout_metrics(),
+            ..EditorIcedConfig::default()
+        })
+        .expect("adapter");
         let session = adapter
             .open_session(CanonicalDocumentLoad::new(
                 DocumentId::from_bytes([34; 16]),

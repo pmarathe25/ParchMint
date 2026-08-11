@@ -15,6 +15,7 @@ mod iced_editor_surface;
     reason = "the private Iced surface is exercised by headless fixture tests"
 )]
 mod iced_project_surface;
+mod icons;
 mod native;
 mod project_runtime;
 mod project_workspace;
@@ -364,7 +365,8 @@ impl ShellLayout {
     pub const STATUS_BAR_HEIGHT: u32 = 32;
     pub const MIN_HIT_TARGET: u32 = 32;
     const DEFAULT_EXPLORER_WIDTH: u32 = 280;
-    const DEFAULT_INSPECTOR_WIDTH: u32 = 360;
+    /// Matches the persistent Inspector column in the 1440 px desktop shell.
+    const DEFAULT_INSPECTOR_WIDTH: u32 = 320;
 
     pub fn for_window(width: u32, height: u32) -> Self {
         Self::for_window_at_scale(width, height, 1.0)

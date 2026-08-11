@@ -41,10 +41,13 @@ pub struct EditorLayoutMetrics {
 impl Default for EditorLayoutMetrics {
     fn default() -> Self {
         Self {
-            inset_x: 16.0,
-            inset_y: 16.0,
-            scalar_width: 8.0,
-            line_height: 20.0,
+            // Match the manuscript page rather than the surrounding desktop
+            // chrome. These values are shared by painting, hit testing,
+            // selection, scrolling, and virtualization.
+            inset_x: 54.0,
+            inset_y: 62.0,
+            scalar_width: 9.0,
+            line_height: 29.0,
             caret_width: 1.0,
         }
     }
@@ -95,7 +98,6 @@ struct VisibleLayoutLine {
     start: DocumentPosition,
     end: DocumentPosition,
     chunks: Vec<VisibleLayoutChunk>,
-    tabs: Vec<usize>,
     scalar_len: usize,
     hard_break: Option<DocumentPosition>,
     span_index: Option<usize>,
@@ -266,13 +268,11 @@ fn build_layout_lines(
     let mut line_start = document_start.value();
     let mut line_text = String::new();
     let mut line_scalar_len = 0_usize;
-    let mut tabs = Vec::new();
     let mut position = document_start.value();
     let finish_line = |lines: &mut Vec<VisibleLayoutLine>,
                        line_start: u64,
                        line_text: &mut String,
                        line_scalar_len: usize,
-                       tabs: &mut Vec<usize>,
                        hard_break: Option<DocumentPosition>| {
         let span_index = spans
             .iter()
@@ -311,7 +311,6 @@ fn build_layout_lines(
             start: DocumentPosition::from(line_start),
             end: DocumentPosition::from(line_start.saturating_add(line_scalar_len as u64)),
             chunks,
-            tabs: std::mem::take(tabs),
             scalar_len: line_scalar_len,
             hard_break,
             span_index,
@@ -325,16 +324,12 @@ fn build_layout_lines(
                 line_start,
                 &mut line_text,
                 line_scalar_len,
-                &mut tabs,
                 Some(DocumentPosition::from(position)),
             );
             position = position.saturating_add(1);
             line_start = position;
             line_scalar_len = 0;
             continue;
-        }
-        if character == '\t' {
-            tabs.push(line_scalar_len);
         }
         line_text.push(character);
         line_scalar_len += 1;
@@ -345,7 +340,6 @@ fn build_layout_lines(
         line_start,
         &mut line_text,
         line_scalar_len,
-        &mut tabs,
         None,
     );
     lines
@@ -435,13 +429,33 @@ struct LineHeightEntry {
     start: DocumentPosition,
     end: DocumentPosition,
     scalar_len: usize,
-    tabs: Vec<usize>,
+    /// Logical advances used by both the canvas positions and the caret map.
+    ///
+    /// Canvas shapes a proportional font, so a fixed cell for every scalar
+    /// causes wide glyphs to paint into their neighbours while spaces become
+    /// visibly too wide. Keeping the deterministic advances here makes the
+    /// viewport cache, rendering, hit testing, and wrapping use one model.
+    scalar_advances: Vec<f32>,
+    /// Scalar offsets that begin a visual row. These are computed once from
+    /// word boundaries and consumed by every geometry path.
+    wrap_before: Vec<usize>,
+    /// A cursor state at every chunk boundary. Lookup may scan at most one
+    /// chunk, keeping deep single-line documents linear to index and bounded
+    /// to materialize.
+    prefix_cursors: Vec<PrefixCursor>,
     start_y: f32,
     end_y: f32,
     line_height: f32,
     first_x: f32,
     right_edge: f32,
     chunk_rows: Vec<(usize, usize)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PrefixCursor {
+    scalar_offset: usize,
+    row: usize,
+    x: f32,
 }
 
 /// The one geometry object used for block drawing, hit testing, carets, and selections.
@@ -742,9 +756,25 @@ fn build_height_index(
                     .unwrap_or(0.0),
             );
         }
+        let characters = line
+            .chunks
+            .iter()
+            .flat_map(|chunk| chunk.text.chars())
+            .collect::<Vec<_>>();
+        let scalar_advances = characters
+            .iter()
+            .copied()
+            .map(|character| scalar_advance(character, span, metrics))
+            .collect::<Vec<_>>();
         let first_x = metrics.inset_x
             + span.map_or(0.0, |span| {
-                block_indent(span, metrics) + alignment_offset(span, viewport, metrics)
+                block_indent(span, metrics)
+                    + alignment_offset(
+                        span,
+                        viewport,
+                        metrics,
+                        scalar_advances.iter().copied().sum(),
+                    )
             });
         let right_indent = span
             .and_then(|span| span.style.right_indent_points)
@@ -755,29 +785,51 @@ fn build_height_index(
             .map_or(metrics.line_height, |spacing| {
                 metrics.line_height * spacing.max(0.1)
             });
+        let right_edge = (viewport.width - metrics.inset_x - right_indent)
+            .max(metrics.inset_x + metrics.scalar_width);
+        let wrap_before =
+            word_wrap_offsets(&characters, &scalar_advances, first_x, right_edge, metrics);
         let mut entry = LineHeightEntry {
             line_index,
             start: line.start,
             end: line.end,
             scalar_len: line.scalar_len,
-            tabs: line.tabs.clone(),
+            scalar_advances,
+            wrap_before,
+            prefix_cursors: Vec::with_capacity(line.chunks.len().saturating_add(1)),
             start_y: y,
             end_y: y,
             line_height,
             first_x,
-            right_edge: metrics.inset_x + viewport.width - right_indent,
+            // The manuscript needs symmetric page margins. The old expression
+            // added the left inset to the viewport width, which placed the
+            // wrapping edge outside the canvas and let prose run under the
+            // inspector in narrow panes.
+            right_edge,
             chunk_rows: Vec::with_capacity(line.chunks.len()),
         };
+        let mut cursor = PrefixCursor {
+            scalar_offset: 0,
+            row: 0,
+            x: entry.first_x,
+        };
+        let mut wrap_index = 0_usize;
         for chunk in &line.chunks {
-            let start = cursor_after_prefix(chunk.scalar_offset, &entry, metrics).0;
-            let end = cursor_after_prefix(
-                chunk.scalar_offset.saturating_add(chunk.scalar_len),
-                &entry,
-                metrics,
-            )
-            .0;
-            entry.chunk_rows.push((start, end));
+            entry.prefix_cursors.push(cursor);
+            let start = cursor.row;
+            let end_offset = chunk.scalar_offset.saturating_add(chunk.scalar_len);
+            for scalar_offset in chunk.scalar_offset..end_offset {
+                if entry.wrap_before.get(wrap_index) == Some(&scalar_offset) {
+                    cursor.row = cursor.row.saturating_add(1);
+                    cursor.x = metrics.inset_x;
+                    wrap_index += 1;
+                }
+                cursor.x += entry.scalar_advances[scalar_offset];
+            }
+            cursor.scalar_offset = end_offset;
+            entry.chunk_rows.push((start, cursor.row));
         }
+        entry.prefix_cursors.push(cursor);
         let rows = cursor_after_prefix(line.scalar_len, &entry, metrics)
             .0
             .saturating_add(1);
@@ -800,87 +852,74 @@ fn cursor_after_prefix(
     metrics: EditorLayoutMetrics,
 ) -> (usize, f32) {
     let scalar_count = scalar_count.min(entry.scalar_len);
-    let mut row = 0_usize;
-    let mut x = entry.first_x;
-    let mut offset = 0_usize;
-    for tab in entry
-        .tabs
-        .iter()
-        .copied()
-        .take_while(|tab| *tab < scalar_count)
-    {
-        advance_normal_run(
-            tab.saturating_sub(offset),
-            &mut row,
-            &mut x,
-            entry.right_edge,
-            metrics,
-        );
-        advance_width(
-            metrics.scalar_width * TAB_COLUMNS,
-            &mut row,
-            &mut x,
-            entry.right_edge,
-            metrics,
-        );
-        offset = tab.saturating_add(1);
+    let checkpoint_index = entry
+        .prefix_cursors
+        .partition_point(|cursor| cursor.scalar_offset <= scalar_count)
+        .saturating_sub(1);
+    let checkpoint = entry.prefix_cursors[checkpoint_index];
+    let mut row = checkpoint.row;
+    let mut x = checkpoint.x;
+    for scalar_offset in checkpoint.scalar_offset..scalar_count {
+        apply_wrap_before(scalar_offset, entry, &mut row, &mut x, metrics);
+        x += entry.scalar_advances[scalar_offset];
     }
-    advance_normal_run(
-        scalar_count.saturating_sub(offset),
-        &mut row,
-        &mut x,
-        entry.right_edge,
-        metrics,
-    );
     (row, x)
 }
 
-fn advance_normal_run(
-    count: usize,
+fn apply_wrap_before(
+    scalar_offset: usize,
+    entry: &LineHeightEntry,
     row: &mut usize,
     x: &mut f32,
-    right_edge: f32,
     metrics: EditorLayoutMetrics,
 ) {
-    if count == 0 {
-        return;
-    }
-    if *x > metrics.inset_x && *x + metrics.scalar_width > right_edge {
+    if entry.wrap_before.binary_search(&scalar_offset).is_ok() {
         *row = row.saturating_add(1);
         *x = metrics.inset_x;
     }
-    let available = ((right_edge - *x) / metrics.scalar_width).floor().max(0.0) as usize;
-    let fit = if *x <= metrics.inset_x {
-        available.max(1)
-    } else {
-        available
-    };
-    if count <= fit {
-        *x += count as f32 * metrics.scalar_width;
-        return;
-    }
-    let remaining = count.saturating_sub(fit);
-    *row = row.saturating_add(1);
-    let capacity = ((right_edge - metrics.inset_x) / metrics.scalar_width)
-        .floor()
-        .max(1.0) as usize;
-    *row = row.saturating_add((remaining - 1) / capacity);
-    let final_count = (remaining - 1) % capacity + 1;
-    *x = metrics.inset_x + final_count as f32 * metrics.scalar_width;
 }
 
-fn advance_width(
-    width: f32,
-    row: &mut usize,
-    x: &mut f32,
+fn word_wrap_offsets(
+    characters: &[char],
+    advances: &[f32],
+    first_x: f32,
     right_edge: f32,
     metrics: EditorLayoutMetrics,
-) {
-    if *x > metrics.inset_x && *x + width > right_edge {
-        *row = row.saturating_add(1);
-        *x = metrics.inset_x;
+) -> Vec<usize> {
+    let mut wraps = Vec::new();
+    let mut offset = 0_usize;
+    let mut x = first_x;
+    while offset < characters.len() {
+        if characters[offset].is_whitespace() {
+            if x > metrics.inset_x && x + advances[offset] > right_edge {
+                wraps.push(offset);
+                x = metrics.inset_x;
+            }
+            x += advances[offset];
+            offset += 1;
+            continue;
+        }
+
+        let word_start = offset;
+        while offset < characters.len() && !characters[offset].is_whitespace() {
+            offset += 1;
+        }
+        let word_width = advances[word_start..offset].iter().copied().sum::<f32>();
+        if x > metrics.inset_x && x + word_width > right_edge {
+            wraps.push(word_start);
+            x = metrics.inset_x;
+        }
+        for (scalar_offset, advance) in advances.iter().enumerate().take(offset).skip(word_start) {
+            // Only an individual token wider than a row falls back to scalar
+            // breaking. Ordinary words always move as a complete run.
+            if x > metrics.inset_x && x + *advance > right_edge {
+                wraps.push(scalar_offset);
+                x = metrics.inset_x;
+            }
+            x += *advance;
+        }
     }
-    *x += width;
+    wraps
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -904,15 +943,13 @@ fn materialize_chunk(
             .value()
             .checked_add(offset as u64)
             .ok_or("document position overflowed")?;
-        let width = if character == '\t' {
-            metrics.scalar_width * TAB_COLUMNS
-        } else {
-            metrics.scalar_width
-        };
-        if x > metrics.inset_x && x + width > entry.right_edge {
-            row = row.saturating_add(1);
-            x = metrics.inset_x;
-        }
+        let width = entry
+            .scalar_advances
+            .get(chunk.scalar_offset.saturating_add(offset))
+            .copied()
+            .ok_or("layout chunk advance is missing")?;
+        let scalar_offset = chunk.scalar_offset.saturating_add(offset);
+        apply_wrap_before(scalar_offset, entry, &mut row, &mut x, metrics);
         let global_y = entry.start_y + row as f32 * entry.line_height;
         let y = global_y - pixel_scroll_y;
         let visible = global_y + entry.line_height >= overscan_top && global_y <= overscan_bottom;
@@ -1012,12 +1049,15 @@ fn scalar_geometry(
         font_size: span
             .and_then(|span| span.style.font_size_points)
             .map(points_to_pixels)
-            .unwrap_or(16.0),
-        font_weight: span.and_then(|span| span.style.weight).unwrap_or(400),
+            .unwrap_or_else(|| default_font_size(span.map(|span| span.kind))),
+        font_weight: span
+            .and_then(|span| span.style.weight)
+            .unwrap_or_else(|| default_font_weight(span.map(|span| span.kind))),
         block_italic: span.and_then(|span| span.style.italic).unwrap_or(false),
         font_family: span
-            .map(|span| editor_font_family(span.style.font_family.as_deref()))
-            .unwrap_or(EditorFontFamily::SansSerif),
+            .and_then(|span| span.style.font_family.as_deref())
+            .map(editor_font_family)
+            .unwrap_or(EditorFontFamily::Serif),
         atomic: input
             .atomic_nodes
             .iter()
@@ -1036,7 +1076,10 @@ fn block_indent(span: &VisibleBlockSpan, metrics: EditorLayoutMetrics) -> f32 {
         SemanticBlockKind::UnorderedListItem | SemanticBlockKind::OrderedListItem => {
             explicit + metrics.scalar_width * 3.0 * (span.list_depth.saturating_add(1) as f32)
         }
-        SemanticBlockKind::BlockQuote => explicit + metrics.scalar_width * 3.0,
+        // Quotes in the manuscript use their own prose rhythm, not the
+        // inspector-style rule and indent that previously shifted them away
+        // from the page edge.
+        SemanticBlockKind::BlockQuote => explicit,
         _ => explicit,
     }
 }
@@ -1045,11 +1088,11 @@ fn alignment_offset(
     span: &VisibleBlockSpan,
     viewport: EditorViewport,
     metrics: EditorLayoutMetrics,
+    content_width: f32,
 ) -> f32 {
-    let content_width = (span.end.value() - span.start.value()) as f32 * metrics.scalar_width;
     let indents = block_indent(span, metrics)
         + points_to_pixels(span.style.right_indent_points.unwrap_or(0.0));
-    let remaining = (viewport.width - indents - content_width).max(0.0);
+    let remaining = (viewport.width - metrics.inset_x * 2.0 - indents - content_width).max(0.0);
     match span.style.alignment.unwrap_or(TextAlignment::Start) {
         TextAlignment::Start | TextAlignment::Justify => 0.0,
         TextAlignment::Center => remaining * 0.5,
@@ -1061,8 +1104,8 @@ fn points_to_pixels(points: f32) -> f32 {
     points * (4.0 / 3.0)
 }
 
-fn editor_font_family(value: Option<&str>) -> EditorFontFamily {
-    let value = value.unwrap_or_default().to_ascii_lowercase();
+fn editor_font_family(value: &str) -> EditorFontFamily {
+    let value = value.to_ascii_lowercase();
     if value.contains("mono") || value.contains("courier") {
         EditorFontFamily::Monospace
     } else if value.contains("serif") && !value.contains("sans") {
@@ -1070,6 +1113,94 @@ fn editor_font_family(value: Option<&str>) -> EditorFontFamily {
     } else {
         EditorFontFamily::SansSerif
     }
+}
+
+fn default_font_size(kind: Option<SemanticBlockKind>) -> f32 {
+    match kind.unwrap_or(SemanticBlockKind::Paragraph) {
+        SemanticBlockKind::Heading1 => 24.0,
+        SemanticBlockKind::Heading2 => 20.0,
+        SemanticBlockKind::Heading3 => 18.0,
+        _ => 20.0,
+    }
+}
+
+fn default_font_weight(kind: Option<SemanticBlockKind>) -> u16 {
+    match kind.unwrap_or(SemanticBlockKind::Paragraph) {
+        // The bundled Source Serif face is regular-only. Keep reserved
+        // headings on that available face; an explicit catalog weight still
+        // takes precedence in `scalar_geometry`.
+        SemanticBlockKind::Heading1 | SemanticBlockKind::Heading2 | SemanticBlockKind::Heading3 => {
+            400
+        }
+        _ => 400,
+    }
+}
+
+/// Returns a deterministic, font-size-aware advance for the bundled serif and
+/// sans families. This is deliberately part of semantic layout rather than a
+/// paint-only adjustment: selection rectangles, carets, wrapping, scrolling,
+/// and Canvas now agree on proportional text geometry at every scale factor.
+fn scalar_advance(
+    character: char,
+    span: Option<&VisibleBlockSpan>,
+    metrics: EditorLayoutMetrics,
+) -> f32 {
+    if character == '\t' {
+        return metrics.scalar_width * TAB_COLUMNS;
+    }
+
+    let font_size = span
+        .and_then(|span| span.style.font_size_points)
+        .map(points_to_pixels)
+        .unwrap_or_else(|| default_font_size(span.map(|span| span.kind)));
+    let family = span
+        .and_then(|span| span.style.font_family.as_deref())
+        .map(editor_font_family)
+        .unwrap_or(EditorFontFamily::Serif);
+    let base = metrics.scalar_width * (font_size / 20.0);
+    if family == EditorFontFamily::Monospace {
+        return base;
+    }
+
+    // Source Serif 4's common Latin advances, normalized to the 9px body
+    // advance at 20px. The same ratios remain a close deterministic model for
+    // Source Sans 3; the monospace path above remains exact.
+    let proportion = match character {
+        ' ' => 0.52,
+        '\u{2009}' | '\u{200A}' => 0.25,
+        '\u{2002}' | '\u{2003}' => 0.9,
+        'i' | 'j' | 'l' | 'I' | '!' | '|' => 0.57,
+        'f' => 0.65,
+        'r' => 0.87,
+        't' | 'J' => 0.74,
+        'a' => 1.13,
+        'b' | 'd' | 'h' | 'n' | 'p' | 'q' | 'u' => 1.22,
+        'c' => 0.97,
+        'e' | 'v' => 1.07,
+        'g' | 'o' => 1.18,
+        'k' => 1.12,
+        'm' => 1.83,
+        's' => 0.88,
+        'w' => 1.59,
+        'x' => 1.06,
+        'y' => 1.02,
+        'z' => 0.9,
+        'A' | 'V' | 'Y' => 1.45,
+        'B' | 'E' | 'F' | 'P' | 'R' => 1.3,
+        'C' | 'D' | 'G' | 'O' | 'Q' => 1.48,
+        'H' | 'K' | 'N' | 'U' => 1.52,
+        'L' => 1.17,
+        'M' => 1.75,
+        'S' | 'T' => 1.25,
+        'W' => 2.05,
+        'X' | 'Z' => 1.42,
+        '0'..='9' => 1.11,
+        '.' | ',' | ':' | ';' | '\'' | '"' | '`' => 0.52,
+        '-' | '_' | '(' | ')' | '[' | ']' | '{' | '}' => 0.68,
+        _ if character.is_ascii_punctuation() => 0.82,
+        _ => 1.22,
+    };
+    (base * proportion).max(metrics.caret_width)
 }
 
 fn resolve_block_style(
@@ -1202,6 +1333,16 @@ mod tests {
         BlockId::from_bytes([value; 16])
     }
 
+    fn regression_metrics() -> EditorLayoutMetrics {
+        EditorLayoutMetrics {
+            inset_x: 16.0,
+            inset_y: 16.0,
+            scalar_width: 8.0,
+            line_height: 20.0,
+            caret_width: 1.0,
+        }
+    }
+
     #[test]
     fn explicit_catalog_style_controls_deterministic_geometry_and_text_style() {
         let mut catalog = StyleCatalog::default();
@@ -1253,7 +1394,7 @@ mod tests {
             &visible,
             EditorViewport::new(200.0, 100.0).expect("viewport"),
             0.0,
-            EditorLayoutMetrics::default(),
+            regression_metrics(),
             None,
         )
         .expect("geometry");
@@ -1263,14 +1404,14 @@ mod tests {
         assert!(first.block_italic);
         assert_eq!(first.font_family, EditorFontFamily::Monospace);
         assert_eq!(first.bounds.height, 30.0);
-        assert!(first.bounds.x > EditorLayoutMetrics::default().inset_x + 12.0);
+        assert!(first.bounds.x > regression_metrics().inset_x + 12.0);
         assert!(first.small_caps);
         assert!(geometry.draw_scalars()[1].superscript);
         assert!(geometry.draw_scalars()[2].subscript);
     }
 
     #[test]
-    fn nested_list_and_quote_blocks_have_visible_deterministic_indentation() {
+    fn nested_lists_indent_while_quotes_remain_on_the_manuscript_margin() {
         let semantic = SemanticDocument::new(vec![
             SemanticBlock::new(
                 block(1),
@@ -1301,7 +1442,7 @@ mod tests {
             &visible,
             EditorViewport::new(400.0, 200.0).expect("viewport"),
             0.0,
-            EditorLayoutMetrics::default(),
+            regression_metrics(),
             None,
         )
         .expect("geometry");
@@ -1315,7 +1456,315 @@ mod tests {
         assert_eq!(starts[1].list_marker, Some(1));
         assert!(starts[1].bounds.x > starts[0].bounds.x);
         assert_eq!(starts[2].block_kind, SemanticBlockKind::BlockQuote);
-        assert!(starts[2].bounds.x > EditorLayoutMetrics::default().inset_x);
+        assert_eq!(starts[2].bounds.x, regression_metrics().inset_x);
+    }
+
+    #[test]
+    fn manuscript_defaults_wrap_inside_symmetric_page_margins() {
+        let metrics = EditorLayoutMetrics::default();
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(block(8), "abcdefghijk", DocumentPosition::default()),
+            EditorViewport::new(200.0, 160.0).expect("viewport"),
+            0.0,
+            metrics,
+            None,
+        )
+        .expect("geometry");
+        let scalars = geometry.draw_scalars();
+        assert_eq!(scalars[0].bounds.x, metrics.inset_x);
+        assert_eq!(scalars[0].bounds.y, metrics.inset_y);
+        assert!(scalars[10].bounds.y >= metrics.inset_y + metrics.line_height);
+    }
+
+    #[test]
+    fn proportional_advances_are_monotonic_and_scale_without_glyph_collisions() {
+        let input = VisibleEditorBlock::new(
+            block(12),
+            "Wider minds write wisely, then rest.",
+            DocumentPosition::default(),
+        );
+        let one_x_metrics = regression_metrics();
+        let one_x = BlockLayoutGeometry::build(
+            &input,
+            EditorViewport::new(152.0, 140.0).expect("viewport"),
+            0.0,
+            one_x_metrics,
+            None,
+        )
+        .expect("one-times geometry");
+        let two_x_metrics = EditorLayoutMetrics {
+            inset_x: one_x_metrics.inset_x * 2.0,
+            inset_y: one_x_metrics.inset_y * 2.0,
+            scalar_width: one_x_metrics.scalar_width * 2.0,
+            line_height: one_x_metrics.line_height * 2.0,
+            caret_width: one_x_metrics.caret_width * 2.0,
+        };
+        let two_x = BlockLayoutGeometry::build(
+            &input,
+            EditorViewport::new(304.0, 280.0).expect("viewport"),
+            0.0,
+            two_x_metrics,
+            None,
+        )
+        .expect("two-times geometry");
+
+        let one_x_scalars = one_x.draw_scalars();
+        let two_x_scalars = two_x.draw_scalars();
+        assert_eq!(one_x_scalars.len(), two_x_scalars.len());
+        assert!(
+            one_x_scalars.iter().any(|scalar| scalar.character == 'W'
+                && scalar.bounds.width > one_x_metrics.scalar_width)
+        );
+        assert!(
+            one_x_scalars.iter().any(|scalar| scalar.character == 'i'
+                && scalar.bounds.width < one_x_metrics.scalar_width)
+        );
+
+        for (index, (one, two)) in one_x_scalars.iter().zip(two_x_scalars).enumerate() {
+            assert_eq!(two.position, one.position, "scalar {index} position");
+            assert!((two.bounds.x - one.bounds.x * 2.0).abs() < 0.001);
+            assert!((two.bounds.y - one.bounds.y * 2.0).abs() < 0.001);
+            assert!((two.bounds.width - one.bounds.width * 2.0).abs() < 0.001);
+            if let Some(next) = one_x_scalars.get(index + 1)
+                && (next.bounds.y - one.bounds.y).abs() < f32::EPSILON
+            {
+                assert!(
+                    next.bounds.x >= one.bounds.x + one.bounds.width,
+                    "same-line scalar {index} overlaps its successor"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn proportional_wrapping_stays_inside_the_manuscript_pane() {
+        let metrics = regression_metrics();
+        let viewport = EditorViewport::new(152.0, 140.0).expect("viewport");
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(
+                block(13),
+                "The harbor held the last of the evening light.",
+                DocumentPosition::default(),
+            ),
+            viewport,
+            0.0,
+            metrics,
+            None,
+        )
+        .expect("geometry");
+        let right_edge = viewport.width - metrics.inset_x;
+        let scalars = geometry.draw_scalars();
+        assert!(
+            scalars
+                .iter()
+                .any(|scalar| scalar.bounds.y > metrics.inset_y)
+        );
+        assert!(scalars.iter().all(|scalar| {
+            scalar.bounds.x >= metrics.inset_x
+                && scalar.bounds.x + scalar.bounds.width <= right_edge + f32::EPSILON
+        }));
+    }
+
+    #[test]
+    fn ordinary_words_move_as_a_complete_run_at_the_wrap_boundary() {
+        let metrics = regression_metrics();
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(block(14), "one two turning", DocumentPosition::default()),
+            EditorViewport::new(128.0, 120.0).expect("viewport"),
+            0.0,
+            metrics,
+            None,
+        )
+        .expect("geometry");
+        let scalars = geometry.draw_scalars();
+        let turning = &scalars[8..];
+
+        assert!(
+            turning
+                .iter()
+                .all(|scalar| scalar.bounds.y == turning[0].bounds.y)
+        );
+        assert!(turning[0].bounds.y > scalars[7].bounds.y);
+        assert_eq!(turning[0].bounds.x, metrics.inset_x);
+    }
+
+    #[test]
+    fn overlong_tokens_fall_back_to_scalar_breaking_inside_the_pane() {
+        let metrics = regression_metrics();
+        let viewport = EditorViewport::new(70.0, 140.0).expect("viewport");
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(block(15), "wwwww", DocumentPosition::default()),
+            viewport,
+            0.0,
+            metrics,
+            None,
+        )
+        .expect("geometry");
+        let scalars = geometry.draw_scalars();
+
+        assert!(
+            scalars
+                .iter()
+                .any(|scalar| scalar.bounds.y > metrics.inset_y)
+        );
+        assert!(scalars.iter().all(|scalar| {
+            scalar.bounds.x + scalar.bounds.width <= viewport.width - metrics.inset_x
+        }));
+    }
+
+    #[test]
+    fn punctuation_stays_with_its_word_while_spaces_remain_break_opportunities() {
+        let metrics = regression_metrics();
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(block(16), "word, next", DocumentPosition::default()),
+            EditorViewport::new(100.0, 120.0).expect("viewport"),
+            0.0,
+            metrics,
+            None,
+        )
+        .expect("geometry");
+        let scalars = geometry.draw_scalars();
+
+        assert_eq!(scalars[3].character, 'd');
+        assert_eq!(scalars[4].character, ',');
+        assert_eq!(scalars[3].bounds.y, scalars[4].bounds.y);
+        assert_eq!(scalars[5].character, ' ');
+        assert!(scalars[6].bounds.y > scalars[5].bounds.y);
+        assert_eq!(scalars[6].bounds.x, metrics.inset_x);
+    }
+
+    #[test]
+    fn semantic_defaults_render_manuscript_serif_hierarchy() {
+        let visible = VisibleEditorBlock::from_semantic(
+            block(7),
+            &SemanticDocument::new(vec![
+                SemanticBlock::new(
+                    block(7),
+                    SemanticBlockKind::Heading1,
+                    None,
+                    "Heading",
+                    Vec::new(),
+                ),
+                SemanticBlock::new(
+                    block(8),
+                    SemanticBlockKind::Paragraph,
+                    None,
+                    "Body",
+                    Vec::new(),
+                ),
+            ]),
+            DocumentPosition::default(),
+        );
+        let geometry = BlockLayoutGeometry::build(
+            &visible,
+            EditorViewport::new(480.0, 240.0).expect("viewport"),
+            0.0,
+            regression_metrics(),
+            None,
+        )
+        .expect("geometry");
+        let heading = &geometry.draw_scalars()[0];
+        let body = geometry
+            .draw_scalars()
+            .iter()
+            .find(|scalar| scalar.character == 'B')
+            .expect("paragraph scalar");
+        assert_eq!(heading.font_family, EditorFontFamily::Serif);
+        assert_eq!(heading.font_size, 24.0);
+        assert_eq!(heading.font_weight, 400);
+        assert_eq!(body.font_family, EditorFontFamily::Serif);
+        assert_eq!(body.font_size, 20.0);
+        assert_eq!(body.font_weight, 400);
+    }
+
+    #[test]
+    fn explicit_heading_weight_overrides_available_default_face_weight() {
+        let mut catalog = StyleCatalog::default();
+        catalog
+            .upsert(StyleDefinition {
+                id: StyleCatalog::heading_1_id(),
+                display_name: "Heading 1".into(),
+                role: StyleRole::Heading1,
+                inherits: None,
+                properties: StyleProperties {
+                    weight: Some(700),
+                    ..StyleProperties::default()
+                },
+            })
+            .expect("replace reserved heading properties");
+        let semantic = SemanticDocument::new(vec![SemanticBlock::new(
+            block(9),
+            SemanticBlockKind::Heading1,
+            None,
+            "Heading",
+            Vec::new(),
+        )]);
+        let visible = VisibleEditorBlock::from_semantic_with_styles(
+            block(9),
+            &semantic,
+            DocumentPosition::default(),
+            &StyleCatalogProjection::new(catalog),
+        );
+        let geometry = BlockLayoutGeometry::build(
+            &visible,
+            EditorViewport::new(480.0, 120.0).expect("viewport"),
+            0.0,
+            regression_metrics(),
+            None,
+        )
+        .expect("geometry");
+
+        assert_eq!(
+            geometry.draw_scalars()[0].font_family,
+            EditorFontFamily::Serif
+        );
+        assert_eq!(geometry.draw_scalars()[0].font_weight, 700);
+    }
+
+    #[test]
+    fn centered_blocks_use_proportional_advances_for_their_offset() {
+        let mut catalog = StyleCatalog::default();
+        catalog
+            .upsert(StyleDefinition {
+                id: StyleCatalog::body_id(),
+                display_name: "Body".into(),
+                role: StyleRole::Body,
+                inherits: None,
+                properties: StyleProperties {
+                    alignment: Some(TextAlignment::Center),
+                    ..StyleProperties::default()
+                },
+            })
+            .expect("replace body alignment");
+        let centered = |text: &str| {
+            let visible = VisibleEditorBlock::from_semantic_with_styles(
+                block(8),
+                &SemanticDocument::new(vec![SemanticBlock::new(
+                    block(8),
+                    SemanticBlockKind::Paragraph,
+                    Some("body".into()),
+                    text,
+                    Vec::new(),
+                )]),
+                DocumentPosition::default(),
+                &StyleCatalogProjection::new(catalog.clone()),
+            );
+            BlockLayoutGeometry::build(
+                &visible,
+                EditorViewport::new(200.0, 120.0).expect("viewport"),
+                0.0,
+                regression_metrics(),
+                None,
+            )
+            .expect("geometry")
+        };
+        let wide = centered("WW");
+        let narrow = centered("ii");
+
+        assert!(
+            wide.draw_scalars()[0].bounds.x < narrow.draw_scalars()[0].bounds.x,
+            "a wider centered run must begin farther left"
+        );
     }
 
     #[test]
@@ -1325,7 +1774,7 @@ mod tests {
             &VisibleEditorBlock::new(block(9), "abc\ndef", DocumentPosition::default()),
             viewport,
             0.0,
-            EditorLayoutMetrics::default(),
+            regression_metrics(),
             None,
         )
         .expect("geometry");
@@ -1346,9 +1795,8 @@ mod tests {
         let text = vec!["paragraph"; 5_000].join("\n");
         let input = VisibleEditorBlock::new(block(10), text, DocumentPosition::default());
         let viewport = EditorViewport::new(400.0, 200.0).expect("viewport");
-        let first =
-            BlockLayoutGeometry::build(&input, viewport, 0.0, EditorLayoutMetrics::default(), None)
-                .expect("first viewport");
+        let first = BlockLayoutGeometry::build(&input, viewport, 0.0, regression_metrics(), None)
+            .expect("first viewport");
 
         assert!(first.layout_work().materialized_lines <= 24);
         assert!(first.layout_work().materialized_chunks <= 24);
@@ -1359,7 +1807,7 @@ mod tests {
             &input,
             viewport,
             40_000.0,
-            EditorLayoutMetrics::default(),
+            regression_metrics(),
             Some(&first),
         )
         .expect("scrolled viewport");
@@ -1380,22 +1828,25 @@ mod tests {
         )
         .with_bold_ranges(vec![EditorSelection::new(0.into(), scalar_count.into())]);
         let viewport = EditorViewport::new(200.0, 100.0).expect("viewport");
-        let geometry = BlockLayoutGeometry::build(
-            &input,
-            viewport,
-            100_000.0,
-            EditorLayoutMetrics::default(),
-            None,
-        )
-        .expect("deep huge-paragraph viewport");
+        let geometry =
+            BlockLayoutGeometry::build(&input, viewport, 100_000.0, regression_metrics(), None)
+                .expect("deep huge-paragraph viewport");
 
         let work = geometry.layout_work();
         assert_eq!(work.materialized_lines, 1);
         assert!(work.materialized_chunks <= 2);
         assert!(work.materialized_scalars <= 450);
+        assert_eq!(
+            geometry.height_index[0].prefix_cursors.len(),
+            input.layout_lines[0].chunks.len() + 1,
+            "cursor checkpoints stay bounded to chunk boundaries"
+        );
         assert_eq!(geometry.document_range().end().value(), scalar_count);
         let first = geometry.draw_scalars().first().expect("visible scalar");
-        assert!(first.position.value() > 100_000);
+        assert!(
+            first.position.value() > scalar_count / 3,
+            "a deep scroll must not materialize document-head scalars"
+        );
         assert!(first.bold);
         let selection = EditorSelection::new(
             first.position,
