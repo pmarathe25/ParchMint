@@ -100,7 +100,9 @@ impl From<u64> for EditorRevision {
     }
 }
 
-/// A UTF-8 scalar position in the session's canonical document body.
+/// A UTF-8 scalar position in rendered semantic document text.
+///
+/// Canonical HTML tags and attributes never contribute to this coordinate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DocumentPosition(u64);
 
@@ -155,6 +157,52 @@ impl EditorSelection {
         } else {
             self.anchor
         }
+    }
+}
+
+/// Immutable clipboard data captured from one exact semantic selection.
+///
+/// `restricted_html` uses only the editor's canonical safe subset. Hosts may
+/// write only `plain_text` when their platform clipboard contract does not yet
+/// support rich output. The captured revision and range let a later cut
+/// completion reject intervening edits instead of deleting newer content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorClipboardContent {
+    revision: EditorRevision,
+    selection: EditorSelection,
+    plain_text: String,
+    restricted_html: Option<String>,
+}
+
+impl EditorClipboardContent {
+    pub fn new(
+        revision: EditorRevision,
+        selection: EditorSelection,
+        plain_text: impl Into<String>,
+        restricted_html: Option<String>,
+    ) -> Self {
+        Self {
+            revision,
+            selection,
+            plain_text: plain_text.into(),
+            restricted_html,
+        }
+    }
+
+    pub const fn revision(&self) -> EditorRevision {
+        self.revision
+    }
+
+    pub const fn selection(&self) -> EditorSelection {
+        self.selection
+    }
+
+    pub fn plain_text(&self) -> &str {
+        &self.plain_text
+    }
+
+    pub fn restricted_html(&self) -> Option<&str> {
+        self.restricted_html.as_deref()
     }
 }
 
@@ -266,7 +314,9 @@ pub struct CanonicalAnchor {
     pub position: DocumentPosition,
 }
 
-/// ParchMint-owned data used to open one document session.
+/// ParchMint-owned data used to open one document session. `body` is the
+/// restricted canonical HTML persistence form; adapters expose its parsed
+/// semantic content for editing and rendering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalDocumentLoad {
     pub document_id: DocumentId,
@@ -274,6 +324,169 @@ pub struct CanonicalDocumentLoad {
     pub comments: Vec<CanonicalComment>,
     pub anchors: Vec<CanonicalAnchor>,
     pub styles: StyleCatalogProjection,
+}
+
+/// A supported inline mark in the semantic editor projection.
+///
+/// Document positions address the rendered UTF-8 scalar text, never bytes or
+/// characters in the canonical HTML serialization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SemanticInlineMark {
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+    SmallCaps,
+    Superscript,
+    Subscript,
+    Link(String),
+}
+
+/// Inline marks that can be toggled without an associated value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineMarkKind {
+    Bold,
+    Italic,
+    Underline,
+    Strikethrough,
+}
+
+impl InlineMarkKind {
+    pub const fn semantic(self) -> SemanticInlineMark {
+        match self {
+            Self::Bold => SemanticInlineMark::Bold,
+            Self::Italic => SemanticInlineMark::Italic,
+            Self::Underline => SemanticInlineMark::Underline,
+            Self::Strikethrough => SemanticInlineMark::Strikethrough,
+        }
+    }
+}
+
+/// One marked range relative to the start of a semantic block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticMarkRange {
+    range: EditorSelection,
+    mark: SemanticInlineMark,
+}
+
+impl SemanticMarkRange {
+    pub const fn new(range: EditorSelection, mark: SemanticInlineMark) -> Self {
+        Self { range, mark }
+    }
+
+    pub const fn range(&self) -> EditorSelection {
+        self.range
+    }
+
+    pub const fn mark(&self) -> &SemanticInlineMark {
+        &self.mark
+    }
+}
+
+/// The structural role of one rendered text block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticBlockKind {
+    Paragraph,
+    Heading1,
+    Heading2,
+    Heading3,
+    BlockQuote,
+    UnorderedListItem,
+    OrderedListItem,
+    SceneBreak,
+    PageBreak,
+}
+
+/// Block formats toggled over one or more selected text blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockFormatKind {
+    BulletedList,
+    NumberedList,
+    BlockQuote,
+}
+
+/// Non-text structural blocks represented canonically by restricted `<hr>`
+/// elements with an authoritative `data-kind` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomicBlockKind {
+    SceneBreak,
+    PageBreak,
+}
+
+/// One WYSIWYG block projected independently from canonical HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticBlock {
+    id: BlockId,
+    kind: SemanticBlockKind,
+    paragraph_style: Option<String>,
+    text: String,
+    marks: Vec<SemanticMarkRange>,
+}
+
+impl SemanticBlock {
+    pub fn new(
+        id: BlockId,
+        kind: SemanticBlockKind,
+        paragraph_style: Option<String>,
+        text: impl Into<String>,
+        marks: Vec<SemanticMarkRange>,
+    ) -> Self {
+        Self {
+            id,
+            kind,
+            paragraph_style,
+            text: text.into(),
+            marks,
+        }
+    }
+
+    pub const fn id(&self) -> BlockId {
+        self.id
+    }
+
+    pub const fn kind(&self) -> SemanticBlockKind {
+        self.kind
+    }
+
+    pub fn paragraph_style(&self) -> Option<&str> {
+        self.paragraph_style.as_deref()
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn marks(&self) -> &[SemanticMarkRange] {
+        &self.marks
+    }
+}
+
+/// Renderable semantic content for one exact editor revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SemanticDocument {
+    blocks: Vec<SemanticBlock>,
+}
+
+impl SemanticDocument {
+    pub fn new(blocks: Vec<SemanticBlock>) -> Self {
+        Self { blocks }
+    }
+
+    pub fn blocks(&self) -> &[SemanticBlock] {
+        &self.blocks
+    }
+
+    /// Plain rendered text with one scalar paragraph boundary between blocks.
+    pub fn plain_text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| match block.kind() {
+                SemanticBlockKind::SceneBreak | SemanticBlockKind::PageBreak => "\u{fffc}",
+                _ => block.text(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 impl CanonicalDocumentLoad {
@@ -297,6 +510,7 @@ pub struct CanonicalProjection {
     comments: Vec<CanonicalComment>,
     anchors: Vec<CanonicalAnchor>,
     word_count: usize,
+    semantic: SemanticDocument,
 }
 
 /// A recovery batch whose bytes are durable but whose process-local frontier
@@ -675,6 +889,35 @@ impl CanonicalProjection {
         anchors: Vec<CanonicalAnchor>,
         word_count: usize,
     ) -> Self {
+        let body = body.into();
+        Self {
+            document_id,
+            revision,
+            semantic: SemanticDocument::new(vec![SemanticBlock::new(
+                BlockId::from_bytes(*document_id.as_bytes()),
+                SemanticBlockKind::Paragraph,
+                None,
+                body.clone(),
+                Vec::new(),
+            )]),
+            body,
+            comments,
+            anchors,
+            word_count,
+        }
+    }
+
+    /// Builds a canonical persistence projection with a separate semantic
+    /// rendering projection.
+    pub fn new_semantic(
+        document_id: DocumentId,
+        revision: EditorRevision,
+        body: impl Into<String>,
+        semantic: SemanticDocument,
+        comments: Vec<CanonicalComment>,
+        anchors: Vec<CanonicalAnchor>,
+        word_count: usize,
+    ) -> Self {
         Self {
             document_id,
             revision,
@@ -682,6 +925,7 @@ impl CanonicalProjection {
             comments,
             anchors,
             word_count,
+            semantic,
         }
     }
 
@@ -707,6 +951,10 @@ impl CanonicalProjection {
 
     pub const fn word_count(&self) -> usize {
         self.word_count
+    }
+
+    pub const fn semantic(&self) -> &SemanticDocument {
+        &self.semantic
     }
 }
 
@@ -750,6 +998,24 @@ pub enum EditorCommandKind {
     ApplyParagraphStyle {
         range: EditorSelection,
         style: StyleId,
+    },
+    ToggleInlineMark {
+        range: EditorSelection,
+        mark: InlineMarkKind,
+    },
+    /// Applies or updates a link over a non-empty range. `None` removes link
+    /// formatting from the selected text.
+    SetLink {
+        range: EditorSelection,
+        target: Option<String>,
+    },
+    ToggleBlockFormat {
+        range: EditorSelection,
+        format: BlockFormatKind,
+    },
+    InsertAtomicBlock {
+        selection: EditorSelection,
+        kind: AtomicBlockKind,
     },
     Undo,
     Redo,
@@ -947,6 +1213,14 @@ pub trait EditorAdapter: Send + Sync {
         session: SharedEditorSession,
         view: ViewId,
     ) -> Result<EditorSelection, EditorError>;
+
+    /// Captures a non-empty selection from the authoritative semantic session.
+    /// A collapsed selection returns `Ok(None)` and is a safe clipboard no-op.
+    fn selection_clipboard(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Option<EditorClipboardContent>, EditorError>;
 
     fn selection_geometry(
         &self,

@@ -329,7 +329,9 @@ pub enum EditorCommand {
     ToggleBulletedList,
     ToggleNumberedList,
     ToggleBlockQuote,
-    EditLink,
+    SetLink {
+        target: Option<String>,
+    },
     InsertSceneBreak,
     InsertPageBreak,
     Undo,
@@ -349,21 +351,65 @@ pub enum EditorCommand {
     },
 }
 
-impl From<FormattingCommand> for EditorCommand {
-    fn from(command: FormattingCommand) -> Self {
-        match command {
-            FormattingCommand::ParagraphStyle(style) => Self::ApplyParagraphStyle(style),
-            FormattingCommand::Bold => Self::ToggleBold,
-            FormattingCommand::Italic => Self::ToggleItalic,
-            FormattingCommand::Underline => Self::ToggleUnderline,
-            FormattingCommand::Strikethrough => Self::ToggleStrikethrough,
-            FormattingCommand::BulletedList => Self::ToggleBulletedList,
-            FormattingCommand::NumberedList => Self::ToggleNumberedList,
-            FormattingCommand::BlockQuote => Self::ToggleBlockQuote,
-            FormattingCommand::Link => Self::EditLink,
-            FormattingCommand::SceneBreak => Self::InsertSceneBreak,
-            FormattingCommand::PageBreak => Self::InsertPageBreak,
+impl FormattingCommand {
+    fn editor_command(self) -> Option<EditorCommand> {
+        match self {
+            FormattingCommand::ParagraphStyle(style) => {
+                Some(EditorCommand::ApplyParagraphStyle(style))
+            }
+            FormattingCommand::Bold => Some(EditorCommand::ToggleBold),
+            FormattingCommand::Italic => Some(EditorCommand::ToggleItalic),
+            FormattingCommand::Underline => Some(EditorCommand::ToggleUnderline),
+            FormattingCommand::Strikethrough => Some(EditorCommand::ToggleStrikethrough),
+            FormattingCommand::BulletedList => Some(EditorCommand::ToggleBulletedList),
+            FormattingCommand::NumberedList => Some(EditorCommand::ToggleNumberedList),
+            FormattingCommand::BlockQuote => Some(EditorCommand::ToggleBlockQuote),
+            FormattingCommand::Link => None,
+            FormattingCommand::SceneBreak => Some(EditorCommand::InsertSceneBreak),
+            FormattingCommand::PageBreak => Some(EditorCommand::InsertPageBreak),
         }
+    }
+}
+
+/// Draft state for the editor-owned link popover.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkEditorState {
+    open: bool,
+    target: String,
+    validation_error: Option<String>,
+}
+
+impl LinkEditorState {
+    pub const fn is_open(&self) -> bool {
+        self.open
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn validation_error(&self) -> Option<&str> {
+        self.validation_error.as_deref()
+    }
+
+    fn open(&mut self) {
+        *self = Self {
+            open: true,
+            ..Self::default()
+        };
+    }
+
+    fn set_target(&mut self, target: String) {
+        self.target = target;
+        self.validation_error = None;
+    }
+
+    fn reject_empty_target(&mut self) {
+        self.validation_error = Some("Enter a URL before applying a link.".to_owned());
+    }
+
+    fn close(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -958,6 +1004,11 @@ pub enum EditorMessage {
         target_index: usize,
     },
     Format(FormattingCommand),
+    OpenLinkEditor,
+    SetLinkTarget(String),
+    ApplyLink,
+    RemoveLink,
+    CancelLinkEditor,
     Undo,
     Redo,
     OpenLocalFind,
@@ -1056,6 +1107,7 @@ pub struct EditorWorkspace {
     companion: EditorPaneState,
     focused_pane: EditorPane,
     toolbar_focused: bool,
+    link_editor: LinkEditorState,
     local_search: BTreeMap<ViewId, LocalSearchState>,
     decorations: BTreeMap<ViewId, EditorDecorations>,
     selection_word_counts: BTreeMap<ViewId, Option<usize>>,
@@ -1127,6 +1179,7 @@ impl EditorWorkspace {
             companion,
             focused_pane: EditorPane::Primary,
             toolbar_focused: false,
+            link_editor: LinkEditorState::default(),
             local_search,
             decorations,
             selection_word_counts,
@@ -1191,6 +1244,7 @@ impl EditorWorkspace {
             companion,
             focused_pane: EditorPane::Primary,
             toolbar_focused: false,
+            link_editor: LinkEditorState::default(),
             local_search,
             decorations,
             selection_word_counts,
@@ -1370,6 +1424,10 @@ impl EditorWorkspace {
         self.toolbar_focused
     }
 
+    pub fn link_editor(&self) -> &LinkEditorState {
+        &self.link_editor
+    }
+
     pub fn status_bar(&self) -> EditorStatusBar {
         let pane = self.pane(self.focused_pane);
         let selection = self
@@ -1522,7 +1580,30 @@ impl EditorWorkspace {
                 self.pane_mut(pane).move_tab(&document_id, target_index);
                 Vec::new()
             }
-            EditorMessage::Format(command) => self.command(EditorCommand::from(command)),
+            EditorMessage::OpenLinkEditor => {
+                self.link_editor.open();
+                Vec::new()
+            }
+            EditorMessage::Format(command) => {
+                if let Some(command) = command.editor_command() {
+                    self.command(command)
+                } else {
+                    self.link_editor.open();
+                    Vec::new()
+                }
+            }
+            EditorMessage::SetLinkTarget(target) => {
+                if self.link_editor.is_open() {
+                    self.link_editor.set_target(target);
+                }
+                Vec::new()
+            }
+            EditorMessage::ApplyLink => self.apply_link(),
+            EditorMessage::RemoveLink => self.remove_link(),
+            EditorMessage::CancelLinkEditor => {
+                self.link_editor.close();
+                Vec::new()
+            }
             EditorMessage::Undo => self.command(EditorCommand::Undo),
             EditorMessage::Redo => self.command(EditorCommand::Redo),
             EditorMessage::OpenLocalFind => {
@@ -1622,6 +1703,30 @@ impl EditorWorkspace {
     fn command(&self, command: EditorCommand) -> Vec<EditorEffect> {
         let view = self.pane(self.focused_pane).view;
         vec![EditorEffect::Command { view, command }]
+    }
+
+    fn apply_link(&mut self) -> Vec<EditorEffect> {
+        if !self.link_editor.is_open() {
+            return Vec::new();
+        }
+        let target = self.link_editor.target().trim();
+        if target.is_empty() {
+            self.link_editor.reject_empty_target();
+            return Vec::new();
+        }
+        let target = target.to_owned();
+        self.link_editor.close();
+        self.command(EditorCommand::SetLink {
+            target: Some(target),
+        })
+    }
+
+    fn remove_link(&mut self) -> Vec<EditorEffect> {
+        if !self.link_editor.is_open() {
+            return Vec::new();
+        }
+        self.link_editor.close();
+        self.command(EditorCommand::SetLink { target: None })
     }
 
     fn open_tab(&mut self, pane: EditorPane, tab: TabSpec) -> Vec<EditorEffect> {

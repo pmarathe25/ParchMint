@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use parchmint_editor_api::{
     AsyncResult, BlockId, CanonicalDocumentLoad, CanonicalProjection, DocumentPosition,
-    EditorAdapter, EditorCapabilities, EditorCommand, EditorCommandKind, EditorCommandOrigin,
-    EditorError, EditorEvent, EditorRevision, EditorSelection, EditorViewState, EventStream,
-    ProjectDocumentOperation, SearchDecoration, SelectionGeometry, SharedEditorSession,
-    SpellcheckDecoration, StyleCatalogProjection, ViewHostCapability, ViewId,
+    EditorAdapter, EditorCapabilities, EditorClipboardContent, EditorCommand, EditorCommandKind,
+    EditorCommandOrigin, EditorError, EditorEvent, EditorRevision, EditorSelection,
+    EditorViewState, EventStream, ProjectDocumentOperation, SearchDecoration, SelectionGeometry,
+    SharedEditorSession, SpellcheckDecoration, StyleCatalogProjection, ViewHostCapability, ViewId,
 };
 use parchmint_editor_core::feasibility::{PasteSource, SanitizedPaste, sanitize_paste};
 use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession};
@@ -387,7 +387,7 @@ impl EditorIcedAdapter {
             state.require_open()?;
             let revision = state.core.revision();
             let primary = state.core.primary_block();
-            let body = state.core.canonical_projection().body().to_owned();
+            let projection = state.core.canonical_projection();
             let pending = std::mem::take(&mut state.pending_blocks);
             let mut relayouts = Vec::new();
             for (view, mounted) in &mut state.views {
@@ -396,8 +396,11 @@ impl EditorIcedAdapter {
                         continue;
                     };
                     if *block == primary {
-                        cached.input =
-                            VisibleEditorBlock::new(primary, &body, cached.input.document_start());
+                        cached.input = VisibleEditorBlock::from_semantic(
+                            primary,
+                            projection.semantic(),
+                            cached.input.document_start(),
+                        );
                     }
                     cached.geometry = layout_block(
                         &cached.input,
@@ -464,20 +467,26 @@ impl EditorIcedAdapter {
         view: ViewId,
         source: &UntrustedClipboardContent,
     ) -> Result<SanitizedPaste, EditorError> {
-        let paste = if let Some(html) = source.html() {
-            sanitize_paste(PasteSource::RichHtml(html))
-        } else {
-            sanitize_paste(PasteSource::PlainText(
-                source.plain_text().unwrap_or_default(),
-            ))
-        };
-        if paste.text().chars().count() > self.config.resource_limits.max_clipboard_scalars {
-            return Err(invalid(
-                "sanitized clipboard text exceeds the editor resource limit",
-            ));
-        }
+        let paste = self.sanitize_clipboard(source)?;
         if !paste.text().is_empty() {
             self.replace_selection(session, view, paste.text())?;
+        }
+        Ok(paste)
+    }
+
+    /// Applies untrusted clipboard data only if the session is still at the
+    /// revision and selection captured before the asynchronous platform read.
+    pub fn paste_untrusted_at(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        selection: EditorSelection,
+        expected_revision: EditorRevision,
+        source: &UntrustedClipboardContent,
+    ) -> Result<SanitizedPaste, EditorError> {
+        let paste = self.sanitize_clipboard(source)?;
+        if !paste.text().is_empty() {
+            self.replace_selection_at(session, view, selection, expected_revision, paste.text())?;
         }
         Ok(paste)
     }
@@ -501,9 +510,9 @@ impl EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             let projection = state.core.canonical_projection();
-            Ok(VisibleEditorBlock::new(
+            Ok(VisibleEditorBlock::from_semantic(
                 state.core.primary_block(),
-                projection.body(),
+                projection.semantic(),
                 DocumentPosition::default(),
             ))
         })
@@ -517,6 +526,17 @@ impl EditorIcedAdapter {
     ) -> Result<(), EditorError> {
         let selection = self.selection(session.clone(), view)?;
         let revision = self.revision(session.clone())?;
+        self.replace_selection_at(session, view, selection, revision, text)
+    }
+
+    fn replace_selection_at(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        selection: EditorSelection,
+        revision: EditorRevision,
+        text: &str,
+    ) -> Result<(), EditorError> {
         let start = selection.start();
         let kind = if selection.is_collapsed() {
             EditorCommandKind::InsertText {
@@ -554,6 +574,25 @@ impl EditorIcedAdapter {
                 },
             ),
         )
+    }
+
+    fn sanitize_clipboard(
+        &self,
+        source: &UntrustedClipboardContent,
+    ) -> Result<SanitizedPaste, EditorError> {
+        let paste = if let Some(html) = source.html() {
+            sanitize_paste(PasteSource::RichHtml(html))
+        } else {
+            sanitize_paste(PasteSource::PlainText(
+                source.plain_text().unwrap_or_default(),
+            ))
+        };
+        if paste.text().chars().count() > self.config.resource_limits.max_clipboard_scalars {
+            return Err(invalid(
+                "sanitized clipboard text exceeds the editor resource limit",
+            ));
+        }
+        Ok(paste)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, AdapterRuntime>, EditorError> {
@@ -704,6 +743,17 @@ impl EditorAdapter for EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             state.core.selection(view)
+        })
+    }
+
+    fn selection_clipboard(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Option<EditorClipboardContent>, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            state.core.selection_clipboard(view)
         })
     }
 

@@ -169,6 +169,11 @@ impl MountedEditorBinding {
         Ok(frame)
     }
 
+    /// Restores editor focus after a native task without changing selection.
+    pub fn restore_focus(&self) -> Result<(), EditorError> {
+        self.host.restore_focus()
+    }
+
     /// Rebinds semantic colors without remounting the editor session or view.
     pub fn set_theme(&mut self, theme: crate::EditorSurfaceTheme) {
         self.host.set_theme(theme);

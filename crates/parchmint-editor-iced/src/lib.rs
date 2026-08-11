@@ -10,8 +10,8 @@ pub use adapter::{
     EditorStartupError, MountedViewPresentation, MountedViewSnapshot, ProjectionBudget,
 };
 pub use iced_surface::{
-    EditorSurfaceColor, EditorSurfaceTheme, MountedEditorConfig, MountedEditorHost,
-    MountedEditorKeyCommand, MountedEditorMessage, MountedEditorUpdate,
+    EditorSurfaceColor, EditorSurfaceTheme, MountedEditorClipboardIntent, MountedEditorConfig,
+    MountedEditorHost, MountedEditorKeyCommand, MountedEditorMessage, MountedEditorUpdate,
 };
 pub use layout::{
     BlockLayoutGeometry, EditorLayoutMetrics, EditorRectangle, EditorScalarGeometry,

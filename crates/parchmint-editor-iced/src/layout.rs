@@ -1,4 +1,7 @@
-use parchmint_editor_api::{BlockId, DocumentPosition, EditorSelection, SelectionRectangle};
+use parchmint_editor_api::{
+    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, SelectionRectangle,
+    SemanticBlockKind, SemanticInlineMark,
+};
 
 const TAB_COLUMNS: f32 = 4.0;
 
@@ -67,6 +70,14 @@ pub struct VisibleEditorBlock {
     block: BlockId,
     text: String,
     document_start: DocumentPosition,
+    mark_ranges: Vec<VisibleMarkRange>,
+    atomic_nodes: Vec<(DocumentPosition, AtomicBlockKind)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VisibleMarkRange {
+    range: EditorSelection,
+    mark: SemanticInlineMark,
 }
 
 impl VisibleEditorBlock {
@@ -75,6 +86,58 @@ impl VisibleEditorBlock {
             block,
             text: text.into(),
             document_start,
+            mark_ranges: Vec::new(),
+            atomic_nodes: Vec::new(),
+        }
+    }
+
+    pub fn with_bold_ranges(mut self, ranges: Vec<EditorSelection>) -> Self {
+        self.mark_ranges
+            .extend(ranges.into_iter().map(|range| VisibleMarkRange {
+                range,
+                mark: SemanticInlineMark::Bold,
+            }));
+        self
+    }
+
+    pub fn from_semantic(
+        block: BlockId,
+        semantic: &parchmint_editor_api::SemanticDocument,
+        document_start: DocumentPosition,
+    ) -> Self {
+        let mut offset = document_start.value();
+        let mut mark_ranges = Vec::new();
+        let mut atomic_nodes = Vec::new();
+        for semantic_block in semantic.blocks() {
+            for mark in semantic_block.marks() {
+                mark_ranges.push(VisibleMarkRange {
+                    range: EditorSelection::new(
+                        DocumentPosition::from(offset + mark.range().start().value()),
+                        DocumentPosition::from(offset + mark.range().end().value()),
+                    ),
+                    mark: mark.mark().clone(),
+                });
+            }
+            let scalar_len = match semantic_block.kind() {
+                SemanticBlockKind::SceneBreak => {
+                    atomic_nodes
+                        .push((DocumentPosition::from(offset), AtomicBlockKind::SceneBreak));
+                    1
+                }
+                SemanticBlockKind::PageBreak => {
+                    atomic_nodes.push((DocumentPosition::from(offset), AtomicBlockKind::PageBreak));
+                    1
+                }
+                _ => semantic_block.text().chars().count() as u64,
+            };
+            offset += scalar_len + 1;
+        }
+        Self {
+            block,
+            text: semantic.plain_text(),
+            document_start,
+            mark_ranges,
+            atomic_nodes,
         }
     }
 
@@ -117,6 +180,12 @@ pub struct EditorScalarGeometry {
     pub position: DocumentPosition,
     pub character: char,
     pub bounds: EditorRectangle,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
+    pub link: bool,
+    pub atomic: Option<AtomicBlockKind>,
 }
 
 /// The one geometry object used for block drawing, hit testing, carets, and selections.
@@ -186,6 +255,24 @@ impl BlockLayoutGeometry {
                     position: DocumentPosition::from(position),
                     character,
                     bounds,
+                    bold: has_mark(&input.mark_ranges, position, |mark| {
+                        matches!(mark, SemanticInlineMark::Bold)
+                    }),
+                    italic: has_mark(&input.mark_ranges, position, |mark| {
+                        matches!(mark, SemanticInlineMark::Italic)
+                    }),
+                    underline: has_mark(&input.mark_ranges, position, |mark| {
+                        matches!(mark, SemanticInlineMark::Underline)
+                    }),
+                    strikethrough: has_mark(&input.mark_ranges, position, |mark| {
+                        matches!(mark, SemanticInlineMark::Strikethrough)
+                    }),
+                    link: has_mark(&input.mark_ranges, position, |mark| {
+                        matches!(mark, SemanticInlineMark::Link(_))
+                    }),
+                    atomic: input.atomic_nodes.iter().find_map(|(candidate, kind)| {
+                        (candidate.value() == position).then_some(*kind)
+                    }),
                 });
             }
             if y > metrics.inset_y + viewport.height {
@@ -267,6 +354,18 @@ impl BlockLayoutGeometry {
             .map(|scalar| scalar.bounds)
             .collect()
     }
+}
+
+fn has_mark(
+    ranges: &[VisibleMarkRange],
+    position: u64,
+    predicate: impl Fn(&SemanticInlineMark) -> bool,
+) -> bool {
+    ranges.iter().any(|range| {
+        range.range.start().value() <= position
+            && position < range.range.end().value()
+            && predicate(&range.mark)
+    })
 }
 
 fn replace_or_push_caret(

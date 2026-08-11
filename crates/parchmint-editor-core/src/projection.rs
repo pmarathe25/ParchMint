@@ -2,30 +2,28 @@ use std::collections::VecDeque;
 
 use crate::{
     CanonicalAnchor, CanonicalComment, CanonicalProjection, DocumentId, EditorRevision,
-    SemanticBlockSnapshot,
+    SemanticDocumentSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Projection {
     pub(super) document_id: DocumentId,
     pub(super) revision: EditorRevision,
-    pub(super) blocks: Vec<SemanticBlockSnapshot>,
+    pub(super) document: SemanticDocumentSnapshot,
     pub(super) comments: Vec<CanonicalComment>,
     pub(super) anchors: Vec<CanonicalAnchor>,
 }
 
 impl Projection {
     pub(super) fn canonical(self) -> CanonicalProjection {
-        let body = self
-            .blocks
-            .iter()
-            .map(|block| block.text.as_str())
-            .collect::<String>();
-        let word_count = body.split_whitespace().count();
-        CanonicalProjection::new(
+        let word_count = self.document.word_count();
+        let semantic = self.document.semantic_projection();
+        let body = crate::semantic_html::serialize(&self.document);
+        CanonicalProjection::new_semantic(
             self.document_id,
             self.revision,
             body,
+            semantic,
             self.comments,
             self.anchors,
             word_count,

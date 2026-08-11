@@ -80,6 +80,53 @@ fn formatting_commands_and_undo_route_to_the_focused_pane_without_losing_context
 }
 
 #[test]
+fn link_editor_applies_trimmed_targets_removes_links_and_cancels_without_commands() {
+    let mut workspace = EditorWorkspace::from_fixture(EditorFixture::SameDocumentTwoViews);
+    let companion = workspace.pane(EditorPane::Companion).view();
+    workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+
+    assert!(
+        workspace
+            .update(EditorMessage::Format(FormattingCommand::Link))
+            .is_empty()
+    );
+    assert!(workspace.link_editor().is_open());
+    workspace.update(EditorMessage::SetLinkTarget(
+        "  https://example.com/story  ".into(),
+    ));
+    assert_eq!(
+        workspace.update(EditorMessage::ApplyLink),
+        [EditorEffect::Command {
+            view: companion,
+            command: EditorCommand::SetLink {
+                target: Some("https://example.com/story".into()),
+            },
+        }]
+    );
+    assert!(!workspace.link_editor().is_open());
+
+    workspace.update(EditorMessage::OpenLinkEditor);
+    assert_eq!(
+        workspace.update(EditorMessage::RemoveLink),
+        [EditorEffect::Command {
+            view: companion,
+            command: EditorCommand::SetLink { target: None },
+        }]
+    );
+
+    workspace.update(EditorMessage::OpenLinkEditor);
+    workspace.update(EditorMessage::SetLinkTarget("   ".into()));
+    assert!(workspace.update(EditorMessage::ApplyLink).is_empty());
+    assert_eq!(
+        workspace.link_editor().validation_error(),
+        Some("Enter a URL before applying a link.")
+    );
+    assert!(workspace.link_editor().is_open());
+    assert!(workspace.update(EditorMessage::CancelLinkEditor).is_empty());
+    assert!(!workspace.link_editor().is_open());
+}
+
+#[test]
 fn local_find_and_replace_are_independent_per_view_and_replacement_is_editor_scoped() {
     let mut workspace = EditorWorkspace::from_fixture(EditorFixture::SameDocumentTwoViews);
     let primary = workspace.pane(EditorPane::Primary).view();

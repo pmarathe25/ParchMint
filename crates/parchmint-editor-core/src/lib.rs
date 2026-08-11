@@ -8,20 +8,23 @@
 mod document_engine;
 pub mod feasibility;
 mod projection;
+mod semantic_html;
 
 use std::collections::BTreeMap;
 
 use document_engine::{
     DocumentEngine, EngineEdit, EngineError, PositionMapping, PrivateTextEngine,
-    SemanticBlockSnapshot, SemanticDocumentSnapshot,
+    SemanticDocumentSnapshot,
 };
 use projection::{Projection, ProjectionBatch, ProjectionQueue};
 
 pub use parchmint_editor_api::{
-    AsyncResult, BlockId, CanonicalAnchor, CanonicalComment, CanonicalDocumentLoad,
-    CanonicalProjection, CommentId, DocumentId, DocumentPosition, EditorCommand, EditorCommandKind,
-    EditorCommandOrigin, EditorError, EditorRevision, EditorSelection, EditorViewState,
-    StyleCatalogProjection, ViewId,
+    AsyncResult, AtomicBlockKind, BlockFormatKind, BlockId, CanonicalAnchor, CanonicalComment,
+    CanonicalDocumentLoad, CanonicalProjection, CommentId, DocumentId, DocumentPosition,
+    EditorClipboardContent, EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorError,
+    EditorRevision, EditorSelection, EditorViewState, InlineMarkKind, SemanticBlock,
+    SemanticBlockKind, SemanticDocument, SemanticInlineMark, SemanticMarkRange,
+    StyleCatalogProjection, StyleId, ViewId,
 };
 
 const DEFAULT_PROJECTION_CAPACITY: usize = 2;
@@ -140,8 +143,10 @@ struct StoredComment {
 
 #[derive(Debug, Clone)]
 struct UndoEntry {
-    forward: EngineEdit,
-    inverse: EngineEdit,
+    before: SemanticDocumentSnapshot,
+    after: SemanticDocumentSnapshot,
+    forward_mapping: PositionMapping,
+    changed_blocks: Vec<BlockId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +161,7 @@ struct EditorSession<E: DocumentEngine> {
     primary_block: BlockId,
     revision: EditorRevision,
     next_transaction: u64,
+    next_block: u64,
     views: BTreeMap<ViewId, EditorViewState>,
     comments: BTreeMap<CommentId, StoredComment>,
     anchors: Vec<CanonicalAnchor>,
@@ -176,7 +182,9 @@ impl<E: DocumentEngine> EditorSession<E> {
             styles,
         } = load;
         let primary_block = BlockId::from_bytes(*document_id.as_bytes());
-        let body_len = body.chars().count();
+        let document = semantic_html::parse(&body, primary_block).map_err(invalid)?;
+        let plain_text = document.plain_text();
+        let body_len = plain_text.chars().count();
 
         validate_comments(&comments, body_len)?;
         validate_anchors(&anchors, body_len)?;
@@ -186,7 +194,7 @@ impl<E: DocumentEngine> EditorSession<E> {
             if stored_comments.contains_key(&comment.id) {
                 return Err(invalid("duplicate comment id"));
             }
-            let anchor = comment_anchor(primary_block, comment.range, &body)?;
+            let anchor = comment_anchor(primary_block, comment.range, &plain_text)?;
             stored_comments.insert(
                 comment.id,
                 StoredComment {
@@ -196,14 +204,9 @@ impl<E: DocumentEngine> EditorSession<E> {
             );
         }
 
-        engine
-            .load(SemanticDocumentSnapshot {
-                blocks: vec![SemanticBlockSnapshot {
-                    id: primary_block,
-                    text: body,
-                }],
-            })
-            .map_err(engine_error)?;
+        let next_block = u64::try_from(document.blocks.len())
+            .map_err(|_| invalid("semantic block count exceeds the public range"))?;
+        engine.load(document).map_err(engine_error)?;
 
         let mut session = Self {
             engine,
@@ -211,6 +214,7 @@ impl<E: DocumentEngine> EditorSession<E> {
             primary_block,
             revision: EditorRevision::default(),
             next_transaction: 1,
+            next_block,
             views: BTreeMap::new(),
             comments: stored_comments,
             anchors,
@@ -277,27 +281,134 @@ impl<E: DocumentEngine> EditorSession<E> {
                 let (at, removed) = self.validated_range(*range)?;
                 self.apply_new_edit(EngineEdit::new(at, removed, text.clone()))
             }
+            EditorCommandKind::ToggleInlineMark { range, mark } => {
+                let (start, length) = self.validated_range(*range)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| invalid("selection range overflows"))?;
+                self.apply_format_change(|engine| {
+                    engine.toggle_inline_mark(start, end, mark.semantic())
+                })
+            }
+            EditorCommandKind::SetLink { range, target } => {
+                let (start, length) = self.validated_range(*range)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| invalid("selection range overflows"))?;
+                if let Some(target) = target {
+                    validate_link_target(target)?;
+                }
+                self.apply_format_change(|engine| engine.set_link(start, end, target.clone()))
+            }
+            EditorCommandKind::ToggleBlockFormat { range, format } => {
+                let (start, length) = self.validated_range(*range)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| invalid("selection range overflows"))?;
+                let target = match format {
+                    BlockFormatKind::BulletedList => SemanticBlockKind::UnorderedListItem,
+                    BlockFormatKind::NumberedList => SemanticBlockKind::OrderedListItem,
+                    BlockFormatKind::BlockQuote => SemanticBlockKind::BlockQuote,
+                };
+                self.apply_format_change(|engine| engine.toggle_block_format(start, end, target))
+            }
+            EditorCommandKind::InsertAtomicBlock { selection, kind } => {
+                self.validate_selection(*selection)?;
+                if !selection.is_collapsed() {
+                    return Err(invalid(
+                        "atomic block insertion requires a collapsed selection",
+                    ));
+                }
+                self.apply_atomic_block(position(selection.head())?, *kind)
+            }
             EditorCommandKind::Undo => self.apply_undo(),
             EditorCommandKind::Redo => self.apply_redo(),
-            EditorCommandKind::ApplyParagraphStyle { .. } => Err(invalid(
-                "paragraph style transactions are not available yet",
-            )),
+            EditorCommandKind::ApplyParagraphStyle { range, style } => {
+                let (start, length) = self.validated_range(*range)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| invalid("selection range overflows"))?;
+                let style = canonical_style_id(*style);
+                self.apply_format_change(|engine| engine.apply_paragraph_style(start, end, style))
+            }
         }
     }
 
     fn apply_new_edit(&mut self, edit: EngineEdit) -> Result<AppliedEditorChange, EditorError> {
         let (id, revision) = self.next_change_identity()?;
-        let change = self.engine.apply(edit.clone()).map_err(engine_error)?;
-        let inverse = EngineEdit::new(
-            edit.at(),
-            edit.inserted().chars().count(),
-            change.removed_text().to_owned(),
-        );
+        let before = self.engine.snapshot();
+        let change = self.engine.apply(edit).map_err(engine_error)?;
+        let after = self.engine.snapshot();
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         self.undo.push(UndoEntry {
-            forward: edit,
-            inverse,
+            before,
+            after,
+            forward_mapping: change.mapping(),
+            changed_blocks: changed_blocks.clone(),
+        });
+        self.redo.clear();
+        Ok(AppliedEditorChange {
+            revision: self.revision,
+            transaction: Some(id),
+            changed_blocks,
+        })
+    }
+
+    fn apply_format_change(
+        &mut self,
+        operation: impl FnOnce(&mut E) -> Result<document_engine::EngineChange, EngineError>,
+    ) -> Result<AppliedEditorChange, EditorError> {
+        let (id, revision) = self.next_change_identity()?;
+        let before = self.engine.snapshot();
+        let change = operation(&mut self.engine).map_err(engine_error)?;
+        let after = self.engine.snapshot();
+        let changed_blocks = change.changed_blocks().to_vec();
+        self.finish_change(id, revision, change.mapping())?;
+        self.undo.push(UndoEntry {
+            before,
+            after,
+            forward_mapping: change.mapping(),
+            changed_blocks: changed_blocks.clone(),
+        });
+        self.redo.clear();
+        Ok(AppliedEditorChange {
+            revision: self.revision,
+            transaction: Some(id),
+            changed_blocks,
+        })
+    }
+
+    fn apply_atomic_block(
+        &mut self,
+        at: usize,
+        kind: AtomicBlockKind,
+    ) -> Result<AppliedEditorChange, EditorError> {
+        let (id, revision) = self.next_change_identity()?;
+        let after_sequence = self
+            .next_block
+            .checked_add(1)
+            .ok_or_else(|| invalid("semantic block id space exhausted"))?;
+        let next_block = self
+            .next_block
+            .checked_add(2)
+            .ok_or_else(|| invalid("semantic block id space exhausted"))?;
+        let atomic_id = derived_block_id(self.document_id, self.next_block);
+        let after_id = derived_block_id(self.document_id, after_sequence);
+        let before = self.engine.snapshot();
+        let change = self
+            .engine
+            .insert_atomic_block(at, kind, atomic_id, after_id)
+            .map_err(engine_error)?;
+        let after = self.engine.snapshot();
+        let changed_blocks = change.changed_blocks().to_vec();
+        self.finish_change(id, revision, change.mapping())?;
+        self.next_block = next_block;
+        self.undo.push(UndoEntry {
+            before,
+            after,
+            forward_mapping: change.mapping(),
+            changed_blocks: changed_blocks.clone(),
         });
         self.redo.clear();
         Ok(AppliedEditorChange {
@@ -310,15 +421,16 @@ impl<E: DocumentEngine> EditorSession<E> {
     fn apply_undo(&mut self) -> Result<AppliedEditorChange, EditorError> {
         let (id, revision) = self.next_change_identity()?;
         let entry = self.undo.pop().ok_or_else(|| invalid("nothing to undo"))?;
-        let change = match self.engine.apply(entry.inverse.clone()) {
-            Ok(change) => change,
+        let mapping = entry.forward_mapping.inverse();
+        let changed_blocks = entry.changed_blocks.clone();
+        match self.engine.load(entry.before.clone()) {
+            Ok(()) => (),
             Err(error) => {
                 self.undo.push(entry);
                 return Err(engine_error(error));
             }
-        };
-        let changed_blocks = change.changed_blocks().to_vec();
-        self.finish_change(id, revision, change.mapping())?;
+        }
+        self.finish_change(id, revision, mapping)?;
         self.redo.push(entry);
         Ok(AppliedEditorChange {
             revision: self.revision,
@@ -330,15 +442,16 @@ impl<E: DocumentEngine> EditorSession<E> {
     fn apply_redo(&mut self) -> Result<AppliedEditorChange, EditorError> {
         let (id, revision) = self.next_change_identity()?;
         let entry = self.redo.pop().ok_or_else(|| invalid("nothing to redo"))?;
-        let change = match self.engine.apply(entry.forward.clone()) {
-            Ok(change) => change,
+        let mapping = entry.forward_mapping;
+        let changed_blocks = entry.changed_blocks.clone();
+        match self.engine.load(entry.after.clone()) {
+            Ok(()) => (),
             Err(error) => {
                 self.redo.push(entry);
                 return Err(engine_error(error));
             }
-        };
-        let changed_blocks = change.changed_blocks().to_vec();
-        self.finish_change(id, revision, change.mapping())?;
+        }
+        self.finish_change(id, revision, mapping)?;
         self.undo.push(entry);
         Ok(AppliedEditorChange {
             revision: self.revision,
@@ -444,7 +557,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         Projection {
             document_id: self.document_id,
             revision: self.revision,
-            blocks: self.engine.blocks(),
+            document: self.engine.snapshot(),
             comments,
             anchors,
         }
@@ -502,6 +615,30 @@ impl EditorCoreSession {
             .get(&view)
             .map(EditorViewState::selection)
             .ok_or(EditorError::UnknownView { view })
+    }
+
+    /// Captures copy data from the current semantic snapshot without exposing
+    /// the private engine or canonical persistence tags to the mounted host.
+    pub fn selection_clipboard(
+        &self,
+        view: ViewId,
+    ) -> Result<Option<EditorClipboardContent>, EditorError> {
+        let selection = self.selection(view)?;
+        if selection.is_collapsed() {
+            return Ok(None);
+        }
+        let (start, length) = self.inner.validated_range(selection)?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| invalid("selection range overflows"))?;
+        let (plain_text, restricted_html) =
+            semantic_html::serialize_selection(&self.inner.engine.snapshot(), start, end);
+        Ok(Some(EditorClipboardContent::new(
+            self.revision(),
+            selection,
+            plain_text,
+            Some(restricted_html),
+        )))
     }
 
     pub fn set_style_catalog(&mut self, styles: StyleCatalogProjection) {
@@ -654,6 +791,64 @@ fn next_revision(revision: EditorRevision) -> Result<EditorRevision, EditorError
         .checked_add(1)
         .map(EditorRevision::from)
         .ok_or_else(|| invalid("editor revision space exhausted"))
+}
+
+fn canonical_style_id(style: StyleId) -> String {
+    if style == parchmint_editor_api::StyleCatalog::body_id() {
+        return "body".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::document_title_id() {
+        return "document-title".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::heading_1_id() {
+        return "heading-1".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::heading_2_id() {
+        return "heading-2".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::heading_3_id() {
+        return "heading-3".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::block_quote_id() {
+        return "block-quote".into();
+    }
+    if style == parchmint_editor_api::StyleCatalog::verse_id() {
+        return "verse".into();
+    }
+    style
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn derived_block_id(document: DocumentId, sequence: u64) -> BlockId {
+    let mut bytes = *document.as_bytes();
+    for (slot, byte) in bytes[8..].iter_mut().zip(sequence.to_be_bytes()) {
+        *slot ^= byte;
+    }
+    BlockId::from_bytes(bytes)
+}
+
+fn validate_link_target(target: &str) -> Result<(), EditorError> {
+    if target.is_empty()
+        || target.starts_with(['/', '\\'])
+        || target.starts_with("//")
+        || target.contains('\\')
+    {
+        return Err(invalid("link target is not safe canonical HTML"));
+    }
+    if let Some((scheme, _)) = target.split_once(':') {
+        if !matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto"
+        ) {
+            return Err(invalid("link target is not safe canonical HTML"));
+        }
+    } else if target.split('/').any(|segment| segment == "..") {
+        return Err(invalid("link target is not safe canonical HTML"));
+    }
+    Ok(())
 }
 
 fn invalid(reason: &'static str) -> EditorError {

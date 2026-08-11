@@ -722,6 +722,12 @@ impl EditorAdapter for NativeEditorAdapter {
                         reason: "native fixture does not model this command",
                     });
                 }
+                EditorCommandKind::ToggleInlineMark { .. }
+                | EditorCommandKind::SetLink { .. }
+                | EditorCommandKind::ToggleBlockFormat { .. }
+                | EditorCommandKind::InsertAtomicBlock { .. } => {
+                    state.record_document_change();
+                }
             }
             Ok(())
         })
@@ -739,6 +745,48 @@ impl EditorAdapter for NativeEditorAdapter {
                 .get(&view)
                 .map(EditorViewState::selection)
                 .ok_or(EditorError::UnknownView { view })
+        })
+    }
+
+    fn selection_clipboard(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Option<EditorClipboardContent>, EditorError> {
+        self.with_session(session, |state| {
+            state.require_open()?;
+            let selection = state
+                .views
+                .get(&view)
+                .map(EditorViewState::selection)
+                .ok_or(EditorError::UnknownView { view })?;
+            if selection.is_collapsed() {
+                return Ok(None);
+            }
+            let text = state.load.body.chars().collect::<Vec<_>>();
+            let start = usize::try_from(selection.start().value()).map_err(|_| {
+                EditorError::InvalidCommand {
+                    reason: "selection start exceeds the fixture range",
+                }
+            })?;
+            let end = usize::try_from(selection.end().value()).map_err(|_| {
+                EditorError::InvalidCommand {
+                    reason: "selection end exceeds the fixture range",
+                }
+            })?;
+            let selected = text
+                .get(start..end)
+                .ok_or(EditorError::InvalidCommand {
+                    reason: "selection is outside the fixture document",
+                })?
+                .iter()
+                .collect::<String>();
+            Ok(Some(EditorClipboardContent::new(
+                state.revision,
+                selection,
+                selected,
+                None,
+            )))
         })
     }
 

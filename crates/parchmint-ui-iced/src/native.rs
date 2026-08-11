@@ -16,15 +16,19 @@ use iced::{
 };
 use parchmint_application::{ReplacementEdit, ReplacementSelection};
 use parchmint_editor_api::{
-    CanonicalDocumentLoad, EditorAdapter, EditorCommand as AdapterEditorCommand, EditorCommandKind,
-    EditorCommandOrigin, EditorRevision, EditorSelection,
+    AtomicBlockKind, BlockFormatKind, CanonicalDocumentLoad, EditorAdapter,
+    EditorCommand as AdapterEditorCommand, EditorCommandKind, EditorCommandOrigin, EditorRevision,
+    EditorSelection, InlineMarkKind, SharedEditorSession, ViewId,
 };
 use parchmint_editor_iced::{
     EditorIcedAdapter, EditorSurfaceTheme, EditorViewport, MountedEditorBinding,
-    MountedEditorBindingConfig, MountedEditorSession,
+    MountedEditorBindingConfig, MountedEditorClipboardIntent, MountedEditorSession,
 };
 use parchmint_export_api::{ExportNumbering, ExportRunOptions};
-use parchmint_platform_api::{PathDialog, PathDialogKind, WindowCapability};
+use parchmint_platform_api::{
+    ClipboardContent, ClipboardFormats, PathDialog, PathDialogKind, UntrustedClipboardContent,
+    WindowCapability,
+};
 use parchmint_preferences::{
     AppearanceMode, RecentProject as PreferenceRecentProject, ResolvedAppearance,
 };
@@ -268,6 +272,16 @@ enum Message {
         revision: u64,
         result: Result<(), String>,
     },
+    ClipboardWriteFinished {
+        window: window::Id,
+        request: NativeClipboardRequest,
+        result: Result<(), String>,
+    },
+    ClipboardReadFinished {
+        window: window::Id,
+        request: NativeClipboardRequest,
+        result: Result<UntrustedClipboardContent, String>,
+    },
     AutosaveTick(Instant),
     SaveFinished {
         window: window::Id,
@@ -329,6 +343,18 @@ enum Message {
         window: window::Id,
         result: Result<(), String>,
     },
+}
+
+#[derive(Debug, Clone)]
+struct NativeClipboardRequest {
+    capability: WindowCapability,
+    project_session: ProjectSessionCapability,
+    pane: EditorPane,
+    view: ViewId,
+    editor_session: SharedEditorSession,
+    revision: EditorRevision,
+    selection: EditorSelection,
+    intent: MountedEditorClipboardIntent,
 }
 
 pub(crate) struct NativeDesktop {
@@ -480,6 +506,16 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            Message::ClipboardWriteFinished {
+                window,
+                request,
+                result,
+            } => self.finish_clipboard_write(window, request, result),
+            Message::ClipboardReadFinished {
+                window,
+                request,
+                result,
+            } => self.finish_clipboard_read(window, request, result),
             Message::AutosaveTick(now) => self.autosave_tick(now),
             Message::SaveFinished { window, result } => {
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
@@ -1288,6 +1324,21 @@ impl NativeDesktop {
                 if let EditorCenterMessage::Mounted {
                     pane,
                     view,
+                    message: parchmint_editor_iced::MountedEditorMessage::Clipboard(intent),
+                } = &message
+                {
+                    return match Self::clipboard_task(id, state, *pane, *view, *intent) {
+                        Ok(task) => task,
+                        Err(error) => {
+                            self.status = Some(error);
+                            Task::none()
+                        }
+                    };
+                }
+
+                if let EditorCenterMessage::Mounted {
+                    pane,
+                    view,
                     message,
                 } = message
                 {
@@ -1374,6 +1425,246 @@ impl NativeDesktop {
                 Message::ProjectEffectFinished { window, result }
             })
         }))
+    }
+
+    fn clipboard_task(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        pane: EditorPane,
+        view: ViewId,
+        intent: MountedEditorClipboardIntent,
+    ) -> Result<Task<Message>, String> {
+        let binding = state
+            .editor_bindings
+            .get(&pane)
+            .ok_or_else(|| "clipboard action targets an unmounted editor".to_owned())?;
+        if binding.view() != view {
+            return Err("clipboard action view does not match the mounted editor".to_owned());
+        }
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| "project editor adapter is unavailable".to_owned())?;
+        let editor_session = binding.session();
+        let (revision, selection, plain_text) = match intent {
+            MountedEditorClipboardIntent::Copy | MountedEditorClipboardIntent::Cut => {
+                let Some(content) = adapter
+                    .selection_clipboard(editor_session.clone(), view)
+                    .map_err(|error| error.to_string())?
+                else {
+                    binding.restore_focus().map_err(|error| error.to_string())?;
+                    return Ok(Task::none());
+                };
+                (
+                    content.revision(),
+                    content.selection(),
+                    Some(content.plain_text().to_owned()),
+                )
+            }
+            MountedEditorClipboardIntent::Paste => (
+                adapter
+                    .revision(editor_session.clone())
+                    .map_err(|error| error.to_string())?,
+                adapter
+                    .selection(editor_session.clone(), view)
+                    .map_err(|error| error.to_string())?,
+                None,
+            ),
+        };
+        let request = NativeClipboardRequest {
+            capability: state.project.window,
+            project_session: state.project.session,
+            pane,
+            view,
+            editor_session,
+            revision,
+            selection,
+            intent,
+        };
+        let ports = state
+            .project
+            .ports()
+            .cloned()
+            .ok_or_else(|| "project clipboard port is unavailable".to_owned())?;
+
+        match plain_text {
+            Some(plain_text) => {
+                let capability = request.capability;
+                let completion = request.clone();
+                Ok(Task::perform(
+                    async move {
+                        let access = ports.access().map_err(|error| error.to_string())?;
+                        let result = access
+                            .platform_services()
+                            .map_err(|error| error.to_string())?
+                            .clipboard
+                            .write(capability, ClipboardContent::plain_text(plain_text))
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if result.window() != capability {
+                            return Err("clipboard write returned for a stale window".to_owned());
+                        }
+                        Ok(())
+                    },
+                    move |result| Message::ClipboardWriteFinished {
+                        window,
+                        request: completion,
+                        result,
+                    },
+                ))
+            }
+            None => {
+                let capability = request.capability;
+                let completion = request.clone();
+                Ok(Task::perform(
+                    async move {
+                        let access = ports.access().map_err(|error| error.to_string())?;
+                        let result = access
+                            .platform_services()
+                            .map_err(|error| error.to_string())?
+                            .clipboard
+                            .read(capability, ClipboardFormats::plain_text_and_html())
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if result.window() != capability {
+                            return Err("clipboard read returned for a stale window".to_owned());
+                        }
+                        Ok(result.into_value())
+                    },
+                    move |result| Message::ClipboardReadFinished {
+                        window,
+                        request: completion,
+                        result,
+                    },
+                ))
+            }
+        }
+    }
+
+    fn finish_clipboard_write(
+        &mut self,
+        window: window::Id,
+        request: NativeClipboardRequest,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        if self.project_windows.get(&request.capability) != Some(&window) {
+            self.status = Some("clipboard completion targets a stale window".to_owned());
+            return Task::none();
+        }
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            self.status = Some("clipboard completion targets a closed window".to_owned());
+            return Task::none();
+        };
+        let binding = match clipboard_target(state, &request) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        if request.intent == MountedEditorClipboardIntent::Copy {
+            match result {
+                Ok(()) => {
+                    self.status = binding.restore_focus().err().map(|error| error.to_string());
+                }
+                Err(error) => {
+                    let _ = binding.restore_focus();
+                    self.status = Some(error);
+                }
+            }
+            return Task::none();
+        }
+        if request.intent != MountedEditorClipboardIntent::Cut {
+            self.status = Some("clipboard write completion has the wrong intent".to_owned());
+            return Task::none();
+        }
+        let Some(adapter) = state.project.editor_adapter().cloned() else {
+            self.status = Some("project editor adapter is unavailable".to_owned());
+            return Task::none();
+        };
+        let mutation = apply_completed_cut(adapter.as_ref(), binding, &request, result);
+        self.finish_clipboard_mutation(window, mutation)
+    }
+
+    fn finish_clipboard_read(
+        &mut self,
+        window: window::Id,
+        request: NativeClipboardRequest,
+        result: Result<UntrustedClipboardContent, String>,
+    ) -> Task<Message> {
+        if self.project_windows.get(&request.capability) != Some(&window) {
+            self.status = Some("clipboard completion targets a stale window".to_owned());
+            return Task::none();
+        }
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            self.status = Some("clipboard completion targets a closed window".to_owned());
+            return Task::none();
+        };
+        let binding = match clipboard_target(state, &request) {
+            Ok(binding) => binding,
+            Err(error) => {
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        if request.intent != MountedEditorClipboardIntent::Paste {
+            self.status = Some("clipboard read completion has the wrong intent".to_owned());
+            return Task::none();
+        }
+        let source = match result {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = binding.restore_focus();
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        let Some(adapter) = state.project.editor_adapter().cloned() else {
+            self.status = Some("project editor adapter is unavailable".to_owned());
+            return Task::none();
+        };
+        let mutation = apply_completed_paste(adapter.as_ref(), binding, &request, &source);
+        self.finish_clipboard_mutation(window, mutation)
+    }
+
+    fn finish_clipboard_mutation(
+        &mut self,
+        window: window::Id,
+        mutation: Result<Option<ClipboardMutation>, String>,
+    ) -> Task<Message> {
+        let mutation = match mutation {
+            Ok(Some(mutation)) => mutation,
+            Ok(None) => {
+                self.status = None;
+                return Task::none();
+            }
+            Err(error) => {
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            self.status = Some("clipboard mutation completed for a closed window".to_owned());
+            return Task::none();
+        };
+        let Some(workspace) = state.workspace.as_mut() else {
+            self.status = Some("project workspace is unavailable".to_owned());
+            return Task::none();
+        };
+        workspace.update(ProjectMessage::MarkDirty(mutation.revision.value()));
+        state
+            .autosave
+            .mark_dirty(mutation.revision.value(), Instant::now());
+        let Some(ports) = state.project.ports().cloned() else {
+            self.status = Some("This project session has no persistence port.".into());
+            return Task::none();
+        };
+        let Some(adapter) = state.project.editor_adapter().cloned() else {
+            self.status = Some("This project session has no editor adapter.".into());
+            return Task::none();
+        };
+        self.status = mutation.presentation_error;
+        Self::persist_projection_task(window, ports, adapter, mutation.session, mutation.revision)
     }
 
     fn editor_effect_tasks(
@@ -1797,6 +2088,63 @@ impl NativeDesktop {
                     style,
                 })?;
             }
+            crate::EditorCommand::ToggleBold => {
+                execute(EditorCommandKind::ToggleInlineMark {
+                    range: selection,
+                    mark: InlineMarkKind::Bold,
+                })?;
+            }
+            crate::EditorCommand::ToggleItalic => {
+                execute(EditorCommandKind::ToggleInlineMark {
+                    range: selection,
+                    mark: InlineMarkKind::Italic,
+                })?;
+            }
+            crate::EditorCommand::ToggleUnderline => {
+                execute(EditorCommandKind::ToggleInlineMark {
+                    range: selection,
+                    mark: InlineMarkKind::Underline,
+                })?;
+            }
+            crate::EditorCommand::ToggleStrikethrough => {
+                execute(EditorCommandKind::ToggleInlineMark {
+                    range: selection,
+                    mark: InlineMarkKind::Strikethrough,
+                })?;
+            }
+            crate::EditorCommand::SetLink { target } => {
+                execute(set_link_command(selection, target))?;
+            }
+            crate::EditorCommand::ToggleBulletedList => {
+                execute(EditorCommandKind::ToggleBlockFormat {
+                    range: selection,
+                    format: BlockFormatKind::BulletedList,
+                })?;
+            }
+            crate::EditorCommand::ToggleNumberedList => {
+                execute(EditorCommandKind::ToggleBlockFormat {
+                    range: selection,
+                    format: BlockFormatKind::NumberedList,
+                })?;
+            }
+            crate::EditorCommand::ToggleBlockQuote => {
+                execute(EditorCommandKind::ToggleBlockFormat {
+                    range: selection,
+                    format: BlockFormatKind::BlockQuote,
+                })?;
+            }
+            crate::EditorCommand::InsertSceneBreak => {
+                execute(EditorCommandKind::InsertAtomicBlock {
+                    selection,
+                    kind: AtomicBlockKind::SceneBreak,
+                })?;
+            }
+            crate::EditorCommand::InsertPageBreak => {
+                execute(EditorCommandKind::InsertAtomicBlock {
+                    selection,
+                    kind: AtomicBlockKind::PageBreak,
+                })?;
+            }
             crate::EditorCommand::Undo => execute(EditorCommandKind::Undo)?,
             crate::EditorCommand::Redo => execute(EditorCommandKind::Redo)?,
             crate::EditorCommand::NavigateFindMatch { range } => {
@@ -1824,20 +2172,6 @@ impl NativeDesktop {
                         text: replacement.clone(),
                     })?;
                 }
-            }
-            crate::EditorCommand::ToggleBold
-            | crate::EditorCommand::ToggleItalic
-            | crate::EditorCommand::ToggleUnderline
-            | crate::EditorCommand::ToggleStrikethrough
-            | crate::EditorCommand::ToggleBulletedList
-            | crate::EditorCommand::ToggleNumberedList
-            | crate::EditorCommand::ToggleBlockQuote
-            | crate::EditorCommand::EditLink
-            | crate::EditorCommand::InsertSceneBreak
-            | crate::EditorCommand::InsertPageBreak => {
-                return Err(
-                    "the current editor engine does not expose this rich-text command".into(),
-                );
             }
         }
         binding.refresh().map_err(|error| error.to_string())?;
@@ -2280,6 +2614,132 @@ impl NativeDesktop {
     }
 }
 
+struct ClipboardMutation {
+    session: SharedEditorSession,
+    revision: EditorRevision,
+    presentation_error: Option<String>,
+}
+
+fn clipboard_target<'a>(
+    state: &'a NativeProjectState,
+    request: &NativeClipboardRequest,
+) -> Result<&'a MountedEditorBinding, String> {
+    let binding = state
+        .editor_bindings
+        .get(&request.pane)
+        .ok_or_else(|| "clipboard completion targets an unmounted editor".to_owned())?;
+    validate_clipboard_identity(
+        state.project.window,
+        state.project.session,
+        binding,
+        request,
+    )?;
+    Ok(binding)
+}
+
+fn validate_clipboard_identity(
+    live_window: WindowCapability,
+    live_project_session: ProjectSessionCapability,
+    binding: &MountedEditorBinding,
+    request: &NativeClipboardRequest,
+) -> Result<(), String> {
+    if live_window != request.capability {
+        return Err("clipboard completion targets a stale window capability".to_owned());
+    }
+    if live_project_session != request.project_session {
+        return Err("clipboard completion targets a stale project session".to_owned());
+    }
+    if binding.view() != request.view || binding.session() != request.editor_session {
+        return Err("clipboard completion targets a stale editor session".to_owned());
+    }
+    Ok(())
+}
+
+fn apply_completed_cut(
+    adapter: &EditorIcedAdapter,
+    binding: &MountedEditorBinding,
+    request: &NativeClipboardRequest,
+    write_result: Result<(), String>,
+) -> Result<Option<ClipboardMutation>, String> {
+    if let Err(error) = write_result {
+        let _ = binding.restore_focus();
+        return Err(error);
+    }
+    if let Err(error) = adapter.execute(
+        request.editor_session.clone(),
+        EditorCommandOrigin::new(request.view),
+        AdapterEditorCommand::new(
+            request.revision,
+            EditorCommandKind::DeleteRange {
+                range: request.selection,
+            },
+        ),
+    ) {
+        let _ = binding.restore_focus();
+        return Err(error.to_string());
+    }
+    let revision = adapter
+        .revision(request.editor_session.clone())
+        .map_err(|error| error.to_string())?;
+    let presentation_error = binding
+        .refresh()
+        .and_then(|_| binding.restore_focus())
+        .err()
+        .map(|error| error.to_string());
+    Ok(Some(ClipboardMutation {
+        session: request.editor_session.clone(),
+        revision,
+        presentation_error,
+    }))
+}
+
+fn apply_completed_paste(
+    adapter: &EditorIcedAdapter,
+    binding: &MountedEditorBinding,
+    request: &NativeClipboardRequest,
+    source: &UntrustedClipboardContent,
+) -> Result<Option<ClipboardMutation>, String> {
+    let before = adapter
+        .revision(request.editor_session.clone())
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = adapter.paste_untrusted_at(
+        request.editor_session.clone(),
+        request.view,
+        request.selection,
+        request.revision,
+        source,
+    ) {
+        let _ = binding.restore_focus();
+        return Err(error.to_string());
+    }
+    let revision = adapter
+        .revision(request.editor_session.clone())
+        .map_err(|error| error.to_string())?;
+    let presentation_error = binding
+        .refresh()
+        .and_then(|_| binding.restore_focus())
+        .err()
+        .map(|error| error.to_string());
+    if revision == before {
+        if let Some(error) = presentation_error {
+            return Err(error);
+        }
+        return Ok(None);
+    }
+    Ok(Some(ClipboardMutation {
+        session: request.editor_session.clone(),
+        revision,
+        presentation_error,
+    }))
+}
+
+fn set_link_command(selection: EditorSelection, target: Option<String>) -> EditorCommandKind {
+    EditorCommandKind::SetLink {
+        range: selection,
+        target,
+    }
+}
+
 fn local_find_matches(
     text: &str,
     query: &str,
@@ -2643,6 +3103,8 @@ fn window_settings(size: (f32, f32), minimum: (u32, u32)) -> window::Settings {
 mod tests {
     use std::sync::Mutex;
 
+    use iced::futures::executor::block_on;
+
     use super::*;
 
     struct RecordingCallbacks {
@@ -2734,6 +3196,213 @@ mod tests {
             vec![crate::FindMatch::new(6, 12)]
         );
         assert!(local_find_matches("Harbor", "harbor", true, false).is_empty());
+    }
+
+    #[test]
+    fn link_editor_command_routes_the_current_selection_and_target() {
+        let selection = EditorSelection::new(4.into(), 11.into());
+        assert_eq!(
+            set_link_command(selection, Some("https://example.com".to_owned())),
+            EditorCommandKind::SetLink {
+                range: selection,
+                target: Some("https://example.com".to_owned()),
+            }
+        );
+        assert_eq!(
+            set_link_command(selection, None),
+            EditorCommandKind::SetLink {
+                range: selection,
+                target: None,
+            }
+        );
+    }
+
+    fn clipboard_fixture(
+        body: &str,
+        selection: EditorSelection,
+        intent: MountedEditorClipboardIntent,
+    ) -> (
+        Arc<EditorIcedAdapter>,
+        MountedEditorBinding,
+        NativeClipboardRequest,
+    ) {
+        let adapter = Arc::new(
+            EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default())
+                .expect("clipboard adapter"),
+        );
+        let window = WindowCapability::new(51, 3);
+        let view = ViewId::from_bytes([52; 16]);
+        let binding = MountedEditorBinding::mount(
+            adapter.as_ref(),
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    parchmint_editor_api::DocumentId::from_bytes([53; 16]),
+                    body,
+                )),
+                window,
+                view,
+                EditorViewport::new(320.0, 240.0).expect("clipboard viewport"),
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("mounted clipboard binding");
+        let session = binding.session();
+        adapter
+            .execute(
+                session.clone(),
+                EditorCommandOrigin::new(view),
+                AdapterEditorCommand::new(
+                    EditorRevision::default(),
+                    EditorCommandKind::SetSelection { selection },
+                ),
+            )
+            .expect("clipboard selection");
+        let project_session = parchmint_ui_api::ProjectSessionRegistry::new().register(51);
+        let request = NativeClipboardRequest {
+            capability: window,
+            project_session,
+            pane: EditorPane::Primary,
+            view,
+            editor_session: session,
+            revision: EditorRevision::default(),
+            selection,
+            intent,
+        };
+        (adapter, binding, request)
+    }
+
+    #[test]
+    fn successful_cut_deletes_only_after_write_and_returns_persistence_revision() {
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p>Hello <strong>world</strong></p>",
+            EditorSelection::new(6.into(), 11.into()),
+            MountedEditorClipboardIntent::Cut,
+        );
+        assert_eq!(
+            block_on(adapter.project(request.editor_session.clone(), 0.into()))
+                .expect("pre-write projection")
+                .body(),
+            "<p>Hello <strong>world</strong></p>"
+        );
+
+        let mutation = apply_completed_cut(adapter.as_ref(), &binding, &request, Ok(()))
+            .expect("successful clipboard write permits cut")
+            .expect("cut mutation signal");
+
+        assert_eq!(mutation.revision, EditorRevision::from(1));
+        assert_eq!(
+            block_on(adapter.project(request.editor_session.clone(), mutation.revision))
+                .expect("cut projection")
+                .body(),
+            "<p>Hello </p>"
+        );
+    }
+
+    #[test]
+    fn failed_cut_write_leaves_document_and_revision_unchanged() {
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p>Hello world</p>",
+            EditorSelection::new(6.into(), 11.into()),
+            MountedEditorClipboardIntent::Cut,
+        );
+
+        assert!(
+            apply_completed_cut(
+                adapter.as_ref(),
+                &binding,
+                &request,
+                Err("clipboard unavailable".into()),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            adapter
+                .revision(request.editor_session.clone())
+                .expect("unchanged revision"),
+            EditorRevision::default()
+        );
+        assert_eq!(
+            block_on(adapter.project(request.editor_session.clone(), 0.into()))
+                .expect("unchanged projection")
+                .body(),
+            "<p>Hello world</p>"
+        );
+    }
+
+    #[test]
+    fn untrusted_rich_paste_is_sanitized_and_applied_as_bounded_plain_text() {
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p></p>",
+            EditorSelection::default(),
+            MountedEditorClipboardIntent::Paste,
+        );
+        let source = UntrustedClipboardContent::empty()
+            .with_html("<p><strong>Keep</strong><script>drop()</script><img src=x></p>");
+
+        let mutation = apply_completed_paste(adapter.as_ref(), &binding, &request, &source)
+            .expect("sanitized paste")
+            .expect("paste mutation signal");
+        let projection =
+            block_on(adapter.project(request.editor_session.clone(), mutation.revision))
+                .expect("pasted projection");
+        assert_eq!(projection.body(), "<p>Keep</p>");
+        assert_eq!(projection.semantic().plain_text(), "Keep");
+        assert!(projection.semantic().blocks()[0].marks().is_empty());
+    }
+
+    #[test]
+    fn clipboard_completion_rejects_stale_window_session_and_editor_revision() {
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p>base</p>",
+            EditorSelection::default(),
+            MountedEditorClipboardIntent::Paste,
+        );
+        assert!(
+            validate_clipboard_identity(
+                request.capability,
+                request.project_session,
+                &binding,
+                &request,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_clipboard_identity(
+                WindowCapability::new(request.capability.window_id(), 99),
+                request.project_session,
+                &binding,
+                &request,
+            )
+            .is_err()
+        );
+        let stale_project = parchmint_ui_api::ProjectSessionRegistry::new().register(99);
+        assert!(
+            validate_clipboard_identity(request.capability, stale_project, &binding, &request,)
+                .is_err()
+        );
+
+        adapter
+            .input_en_us(request.editor_session.clone(), request.view, "new ")
+            .expect("intervening editor mutation");
+        let before = block_on(adapter.project(request.editor_session.clone(), 1.into()))
+            .expect("intervening projection")
+            .body()
+            .to_owned();
+        assert!(
+            apply_completed_paste(
+                adapter.as_ref(),
+                &binding,
+                &request,
+                &UntrustedClipboardContent::empty().with_plain_text("stale"),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            block_on(adapter.project(request.editor_session.clone(), 1.into()))
+                .expect("unchanged stale projection")
+                .body(),
+            before
+        );
     }
 
     #[test]

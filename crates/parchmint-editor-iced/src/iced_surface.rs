@@ -3,8 +3,9 @@ use iced::mouse;
 use iced::widget::canvas::{self, Action, Canvas, Frame, Path, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 use parchmint_editor_api::{
-    BlockId, DocumentPosition, EditorAdapter, EditorCommand, EditorCommandKind,
-    EditorCommandOrigin, EditorError, EditorRevision, EditorSelection, SharedEditorSession, ViewId,
+    AtomicBlockKind, BlockFormatKind, BlockId, DocumentPosition, EditorAdapter, EditorCommand,
+    EditorCommandKind, EditorCommandOrigin, EditorError, EditorRevision, EditorSelection,
+    InlineMarkKind, SharedEditorSession, StyleId, ViewId,
 };
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +71,7 @@ pub struct EditorSurfaceTheme {
     text: EditorSurfaceColor,
     selection: EditorSurfaceColor,
     caret: EditorSurfaceColor,
+    link: EditorSurfaceColor,
 }
 
 impl EditorSurfaceTheme {
@@ -84,6 +86,7 @@ impl EditorSurfaceTheme {
             text,
             selection,
             caret,
+            link: caret,
         }
     }
 
@@ -122,6 +125,10 @@ impl EditorSurfaceTheme {
     pub const fn caret(self) -> EditorSurfaceColor {
         self.caret
     }
+
+    pub const fn link(self) -> EditorSurfaceColor {
+        self.link
+    }
 }
 
 impl Default for EditorSurfaceTheme {
@@ -139,12 +146,27 @@ pub enum MountedEditorKeyCommand {
     MoveRight,
 }
 
+/// Clipboard operation requested by a focused mounted editor. Platform I/O is
+/// deliberately left to the native window that owns the live capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountedEditorClipboardIntent {
+    Copy,
+    Cut,
+    Paste,
+}
+
 /// A ParchMint-owned interaction emitted by a mounted editor surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MountedEditorMessage {
     Focus(DocumentPosition),
     InsertText(String),
     KeyCommand(MountedEditorKeyCommand),
+    Clipboard(MountedEditorClipboardIntent),
+    ToggleInlineMark(InlineMarkKind),
+    SetLink(Option<String>),
+    ToggleBlockFormat(BlockFormatKind),
+    InsertAtomicBlock(AtomicBlockKind),
+    ApplyParagraphStyle(StyleId),
 }
 
 /// The session-local identity and semantic appearance of one mounted surface.
@@ -244,6 +266,17 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 self.set_focus(true);
                 Some(Action::publish(MountedEditorMessage::Focus(document)).and_capture())
             }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                if state.focused && clipboard_shortcut(key.as_ref(), *modifiers).is_some() =>
+            {
+                Some(
+                    Action::publish(MountedEditorMessage::Clipboard(
+                        clipboard_shortcut(key.as_ref(), *modifiers)
+                            .expect("guard resolved a clipboard shortcut"),
+                    ))
+                    .and_capture(),
+                )
+            }
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
                 text: Some(text), ..
             }) if state.focused && is_supported_en_us(text) => Some(
@@ -292,13 +325,78 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             if scalar.character == '\n' {
                 continue;
             }
+            if let Some(kind) = scalar.atomic {
+                let line = EditorRectangle {
+                    x: scalar.bounds.x - scalar.bounds.width * 1.5,
+                    y: scalar.bounds.y + scalar.bounds.height * 0.5,
+                    width: scalar.bounds.width * 4.0,
+                    height: 1.0,
+                };
+                fill_rectangle(&mut frame, line, content.theme.text().iced());
+                if kind == AtomicBlockKind::PageBreak {
+                    fill_rectangle(
+                        &mut frame,
+                        EditorRectangle {
+                            y: line.y + 3.0,
+                            ..line
+                        },
+                        content.theme.text().iced(),
+                    );
+                }
+                continue;
+            }
             frame.fill_text(Text {
                 content: scalar.character.to_string(),
                 position: Point::new(scalar.bounds.x, scalar.bounds.y),
-                color: content.theme.text().iced(),
+                color: if scalar.link {
+                    content.theme.link().iced()
+                } else {
+                    content.theme.text().iced()
+                },
                 size: iced::Pixels::from(16.0),
+                font: iced::Font {
+                    weight: if scalar.bold {
+                        iced::font::Weight::Bold
+                    } else {
+                        iced::font::Weight::Normal
+                    },
+                    style: if scalar.italic {
+                        iced::font::Style::Italic
+                    } else {
+                        iced::font::Style::Normal
+                    },
+                    ..iced::Font::default()
+                },
                 ..Text::default()
             });
+            if scalar.underline || scalar.link {
+                fill_rectangle(
+                    &mut frame,
+                    EditorRectangle {
+                        x: scalar.bounds.x,
+                        y: scalar.bounds.y + scalar.bounds.height - 2.0,
+                        width: scalar.bounds.width,
+                        height: 1.0,
+                    },
+                    if scalar.link {
+                        content.theme.link().iced()
+                    } else {
+                        content.theme.text().iced()
+                    },
+                );
+            }
+            if scalar.strikethrough {
+                fill_rectangle(
+                    &mut frame,
+                    EditorRectangle {
+                        x: scalar.bounds.x,
+                        y: scalar.bounds.y + scalar.bounds.height * 0.5,
+                        width: scalar.bounds.width,
+                        height: 1.0,
+                    },
+                    content.theme.text().iced(),
+                );
+            }
         }
 
         if self.draws_focused_caret(state, &content)
@@ -487,6 +585,64 @@ fn apply_surface_message(
             })?;
             apply_key_command(adapter, session, view, surface, command)
         }
+        MountedEditorMessage::Clipboard(_) => Ok(()),
+        MountedEditorMessage::ToggleInlineMark(mark) => {
+            let range = adapter.selection(session.clone(), view)?;
+            let revision = adapter.revision(session.clone())?;
+            adapter.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(
+                    revision,
+                    EditorCommandKind::ToggleInlineMark { range, mark },
+                ),
+            )
+        }
+        MountedEditorMessage::SetLink(target) => {
+            let range = adapter.selection(session.clone(), view)?;
+            let revision = adapter.revision(session.clone())?;
+            adapter.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(revision, EditorCommandKind::SetLink { range, target }),
+            )
+        }
+        MountedEditorMessage::ToggleBlockFormat(format) => {
+            let range = adapter.selection(session.clone(), view)?;
+            let revision = adapter.revision(session.clone())?;
+            adapter.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(
+                    revision,
+                    EditorCommandKind::ToggleBlockFormat { range, format },
+                ),
+            )
+        }
+        MountedEditorMessage::InsertAtomicBlock(kind) => {
+            let selection = adapter.selection(session.clone(), view)?;
+            let revision = adapter.revision(session.clone())?;
+            adapter.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(
+                    revision,
+                    EditorCommandKind::InsertAtomicBlock { selection, kind },
+                ),
+            )
+        }
+        MountedEditorMessage::ApplyParagraphStyle(style) => {
+            let range = adapter.selection(session.clone(), view)?;
+            let revision = adapter.revision(session.clone())?;
+            adapter.execute(
+                session,
+                EditorCommandOrigin::new(view),
+                EditorCommand::new(
+                    revision,
+                    EditorCommandKind::ApplyParagraphStyle { range, style },
+                ),
+            )
+        }
     }
 }
 
@@ -544,6 +700,27 @@ fn is_supported_en_us(text: &str) -> bool {
         && text
             .chars()
             .all(|character| character.is_ascii_graphic() || matches!(character, ' ' | '\n' | '\t'))
+}
+
+fn clipboard_shortcut(
+    key: keyboard::Key<&str>,
+    modifiers: keyboard::Modifiers,
+) -> Option<MountedEditorClipboardIntent> {
+    if modifiers != keyboard::Modifiers::COMMAND {
+        return None;
+    }
+    match key {
+        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("c") => {
+            Some(MountedEditorClipboardIntent::Copy)
+        }
+        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("x") => {
+            Some(MountedEditorClipboardIntent::Cut)
+        }
+        keyboard::Key::Character(value) if value.eq_ignore_ascii_case("v") => {
+            Some(MountedEditorClipboardIntent::Paste)
+        }
+        _ => None,
+    }
 }
 
 /// A retained, ParchMint-owned host for one adapter-mounted Iced manuscript.
@@ -626,6 +803,27 @@ impl MountedEditorHost {
         )
     }
 
+    /// Restores logical editor focus without moving the caret or selection.
+    pub fn restore_focus(&self) -> Result<(), EditorError> {
+        let snapshot = self
+            .adapter
+            .view_snapshot(self.config.session(), self.config.view())?;
+        self.adapter.set_view_presentation(
+            self.config.session(),
+            self.config.view(),
+            crate::MountedViewPresentation {
+                focused: true,
+                ..snapshot.presentation
+            },
+        )?;
+        self.surface.refresh_from_adapter(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            self.config.block(),
+        )
+    }
+
     /// Rebinds only the semantic colors; the shared session is unaffected.
     pub fn set_theme(&mut self, theme: EditorSurfaceTheme) {
         self.config.theme = theme;
@@ -652,6 +850,35 @@ mod tests {
     use super::*;
     use crate::layout::{EditorViewport, VisibleEditorBlock};
     use crate::{EditorIcedConfig, EditorResourceLimits};
+
+    #[test]
+    fn primary_modifier_maps_only_copy_cut_and_paste_shortcuts() {
+        for (key, expected) in [
+            ("c", MountedEditorClipboardIntent::Copy),
+            ("X", MountedEditorClipboardIntent::Cut),
+            ("v", MountedEditorClipboardIntent::Paste),
+        ] {
+            assert_eq!(
+                clipboard_shortcut(keyboard::Key::Character(key), keyboard::Modifiers::COMMAND,),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            clipboard_shortcut(keyboard::Key::Character("c"), keyboard::Modifiers::NONE),
+            None
+        );
+        assert_eq!(
+            clipboard_shortcut(
+                keyboard::Key::Character("c"),
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
+            ),
+            None
+        );
+        assert_eq!(
+            clipboard_shortcut(keyboard::Key::Character("b"), keyboard::Modifiers::COMMAND,),
+            None
+        );
+    }
 
     fn assert_tiny_skia_golden(snapshot: &Snapshot, stem: &str) {
         let renderer = format!("{snapshot:?}");

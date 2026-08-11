@@ -6,8 +6,11 @@
 
 use std::collections::BTreeMap;
 
-use iced::widget::{Space, button, column, container, row, text, text_input};
-use iced::{Element, Font, Length};
+use iced::widget::{Space, button, column, container, row, stack, text, text_input};
+use iced::{
+    Element, Font, Length,
+    alignment::{Horizontal, Vertical},
+};
 use parchmint_editor_api::{EditorError, ViewId};
 use parchmint_editor_iced::{MountedEditorHost, MountedEditorMessage, MountedEditorUpdate};
 
@@ -185,12 +188,27 @@ pub(crate) fn editor_center_surface(
         container(primary).width(Length::Fill).into()
     };
 
-    container(column![toolbar, panes].spacing(0))
+    let center = container(column![toolbar, panes].spacing(0))
         .width(Length::Fill)
         .height(Length::Fill)
         .padding([6, 12])
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest));
+    if workspace.link_editor().is_open() {
+        stack![
+            center,
+            container(link_editor_popover(workspace, theme))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([52, 12])
+                .align_x(Horizontal::Center)
+                .align_y(Vertical::Top),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
+    } else {
+        center.into()
+    }
 }
 
 fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMessage> {
@@ -206,7 +224,7 @@ fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMes
         ("☷", FormattingCommand::BulletedList),
         ("⇣", FormattingCommand::NumberedList),
         ("❞", FormattingCommand::BlockQuote),
-        ("⌁", FormattingCommand::Link),
+        ("Link", FormattingCommand::Link),
         ("Scene Break", FormattingCommand::SceneBreak),
         ("Page Break", FormattingCommand::PageBreak),
     ];
@@ -234,6 +252,63 @@ fn formatting_toolbar(theme: ParchMintTheme) -> Element<'static, EditorCenterMes
         .width(Length::Fill)
         .height(40)
         .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+        .into()
+}
+
+fn link_editor_popover(
+    workspace: &EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    let link_editor = workspace.link_editor();
+    let target = link_editor.target().to_owned();
+    let url_input = text_input("https://example.com", &target)
+        .on_input(|target| EditorCenterMessage::Workspace(EditorMessage::SetLinkTarget(target)))
+        .padding([6, 8])
+        .style(move |_, status| components::field_style(theme, field_interaction(status)));
+    let mut content = column![
+        text("Link destination").size(14),
+        text("URL").size(12),
+        url_input,
+    ]
+    .spacing(6);
+    if let Some(error) = link_editor.validation_error() {
+        content = content.push(text(error.to_owned()).size(12));
+    }
+    content = content.push(
+        row![
+            button(text("Apply Link").size(12))
+                .padding([5, 7])
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::ApplyLink))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Primary,
+                    button_interaction(status, false),
+                )),
+            button(text("Remove Link").size(12))
+                .padding([5, 7])
+                .on_press(EditorCenterMessage::Workspace(EditorMessage::RemoveLink))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Secondary,
+                    button_interaction(status, false),
+                )),
+            button(text("Cancel").size(12))
+                .padding([5, 7])
+                .on_press(EditorCenterMessage::Workspace(
+                    EditorMessage::CancelLinkEditor
+                ))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )),
+        ]
+        .spacing(4),
+    );
+    container(content)
+        .padding(12)
+        .width(360)
+        .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
         .into()
 }
 
@@ -624,6 +699,33 @@ mod tests {
             EditorPaneSlot::state(EditorCenterPaneState::Error(
                 "Editor failed to load.".to_owned(),
             )),
+        );
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let mut simulator = Simulator::with_size(
+                Settings::default(),
+                Size::new(960.0, 600.0),
+                editor_center_surface(&workspace, theme, &slots),
+            );
+            let snapshot = simulator
+                .snapshot(&theme.iced_theme())
+                .expect("headless center snapshot");
+            assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
+        }
+    }
+
+    #[test]
+    fn link_editor_popover_renders_in_both_appearances() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::OpenLinkEditor);
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        slots.insert(
+            EditorPane::Companion,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
         );
         for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
             let theme = ParchMintTheme::new(appearance);
