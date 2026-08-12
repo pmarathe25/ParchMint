@@ -27,12 +27,12 @@ use parchmint_preferences::{
     AppearanceService, PreferenceCommand, PreferenceError, PreferenceService, RecentProject,
     ResolvedAppearance, ThemeSnapshot,
 };
-use parchmint_ui_iced::NativeCaptureRequest;
 pub use parchmint_ui_api::{ExitCode, RequestedProjectPath, UiError as DesktopUiError};
 use parchmint_ui_api::{
     ProjectQueryError, ProjectSessionAuthority, ProjectSessionCapability, ProjectSessionRegistry,
     ProjectUiPorts, ProjectUiProject, ProjectUiServices,
 };
+use parchmint_ui_iced::NativeCaptureRequest;
 
 /// The intent parsed from a process launch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -708,6 +708,25 @@ impl DesktopRuntime {
             return Err(DesktopError::Project(error));
         }
         Ok(request)
+    }
+
+    /// Releases a project that the UI has already established is clean.
+    /// This deliberately avoids materializing a revision/checkpoint merely to
+    /// close an untouched window.
+    pub fn close_clean_project(&self, project: &Path) -> Result<(), DesktopError> {
+        let (window, session) = {
+            let state = self.state.lock().expect("desktop state mutex poisoned");
+            let live = state
+                .projects
+                .get(project)
+                .ok_or_else(|| DesktopError::MissingProject(project.to_path_buf()))?;
+            if live.final_save_pending {
+                return Err(DesktopError::FinalSaveAlreadyPending(project.to_path_buf()));
+            }
+            (live.window, live.session)
+        };
+        self.unregister(project, session);
+        self.ui.project_closed(window).map_err(DesktopError::Ui)
     }
 
     /// Applies a background final-save result only if both generations are

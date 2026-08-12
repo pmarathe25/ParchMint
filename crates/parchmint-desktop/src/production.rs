@@ -87,8 +87,7 @@ use parchmint_ui_api::{
 };
 use parchmint_ui_iced::{
     NativeCaptureRequest, NativeDesktopCallbacks, NativeDesktopError, NativeDesktopStartup,
-    NativeMenuAttachment, NativeNewProjectRequest, NativeProjectOpenResult, NativeProjectWindow,
-    NativeWindowAttachment, run_native_desktop,
+    NativeNewProjectRequest, NativeProjectOpenResult, NativeProjectWindow, run_native_desktop,
 };
 use parchmint_workspace_state::FileWorkspaceStateStore;
 use sha2::{Digest, Sha256};
@@ -2583,6 +2582,12 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
         }
     }
 
+    fn close_clean_project(&self, project: PathBuf) -> Result<(), String> {
+        self.runtime
+            .close_clean_project(&project)
+            .map_err(|error| error.to_string())
+    }
+
     fn create_project(
         &self,
         request: NativeNewProjectRequest,
@@ -2660,48 +2665,6 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
 
     fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
         self.platform.system_appearance_events.clone()
-    }
-
-    fn menu_service(&self) -> Option<Arc<dyn parchmint_platform_api::MenuService>> {
-        Some(self.platform.menus.clone())
-    }
-
-    fn menu_activations(&self) -> Option<Arc<dyn parchmint_platform_api::MenuActivationService>> {
-        self.platform.menu_activations.clone()
-    }
-
-    fn attach_menu(
-        &self,
-        window: WindowCapability,
-        binding: u64,
-        attachment: NativeWindowAttachment,
-    ) -> Result<NativeMenuAttachment, String> {
-        self.registry
-            .attach_menu(
-                window,
-                binding,
-                attachment.raw_window,
-                attachment.raw_display,
-            )
-            .map(|attachment| match attachment {
-                parchmint_platform_native::iced_adapter::IcedMenuAttachment::Native => {
-                    NativeMenuAttachment::Native
-                }
-                parchmint_platform_native::iced_adapter::IcedMenuAttachment::InWindow => {
-                    NativeMenuAttachment::InWindow
-                }
-            })
-            .map_err(|error| error.to_string())
-    }
-
-    fn detach_menu(
-        &self,
-        window: WindowCapability,
-        attachment: NativeWindowAttachment,
-    ) -> Result<(), String> {
-        self.registry
-            .detach_menu(window, attachment.raw_window, attachment.raw_display)
-            .map_err(|error| error.to_string())
     }
 
     fn project_window_created(&self, window: WindowCapability) {

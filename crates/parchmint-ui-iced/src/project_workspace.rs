@@ -25,8 +25,8 @@ use parchmint_workspace_state::{
 };
 
 use crate::{
-    EditorFixture, EditorMessage, EditorPane, EditorWorkspace, InspectorContext, RibbonDestination,
-    TabSpec,
+    EditorFixture, EditorMessage, EditorPane, EditorWorkspace, InspectorContext, Point,
+    RibbonDestination, TabSpec,
 };
 
 /// Requirement-linked project fixture families.
@@ -90,6 +90,12 @@ struct TreeClipboard {
 struct HierarchyPointerDrag {
     source_id: String,
     destination: Option<DragDestination>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HierarchyRename {
+    node_id: String,
+    title: String,
 }
 
 /// Deterministic validation for one drag operation.
@@ -3143,6 +3149,10 @@ pub enum ProjectMessage {
         node_id: String,
         title: String,
     },
+    BeginHierarchyRename(String),
+    SetHierarchyRenameDraft(String),
+    CommitHierarchyRename,
+    CancelHierarchyRename,
     SetSynopsis {
         node_id: String,
         synopsis: String,
@@ -3212,7 +3222,10 @@ pub enum ProjectMessage {
     SetDragDestination(Option<DragDestination>),
     CommitHierarchyDrag,
     CancelHierarchyDrag,
-    OpenHierarchyContextMenu(String),
+    OpenHierarchyContextMenu {
+        node_id: String,
+        point: Point,
+    },
     CloseHierarchyContextMenu,
     DropHierarchy {
         source_id: String,
@@ -3405,6 +3418,8 @@ pub struct ProjectWorkspace {
     cards_drag_destination: Option<DragDestination>,
     pointer_drag: Option<HierarchyPointerDrag>,
     hierarchy_context_menu: Option<String>,
+    hierarchy_context_point: Point,
+    hierarchy_rename: Option<HierarchyRename>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
     metadata_values: BTreeMap<(String, String), String>,
@@ -3488,6 +3503,8 @@ impl ProjectWorkspace {
             )),
             pointer_drag: None,
             hierarchy_context_menu: None,
+            hierarchy_context_point: Point::default(),
+            hierarchy_rename: None,
             last_activated_document: None,
             synopsis_editors,
             metadata_values: BTreeMap::from([(
@@ -3542,6 +3559,8 @@ impl ProjectWorkspace {
             cards_drag_destination: None,
             pointer_drag: None,
             hierarchy_context_menu: None,
+            hierarchy_context_point: Point::default(),
+            hierarchy_rename: None,
             last_activated_document: None,
             synopsis_editors,
             metadata_values,
@@ -3631,6 +3650,10 @@ impl ProjectWorkspace {
             .hierarchy_context_menu
             .take()
             .filter(|node| self.explorer.nodes.contains_key(node));
+        self.hierarchy_rename = self
+            .hierarchy_rename
+            .take()
+            .filter(|rename| self.explorer.nodes.contains_key(&rename.node_id));
         if self
             .last_activated_document
             .as_deref()
@@ -3784,6 +3807,16 @@ impl ProjectWorkspace {
 
     pub fn hierarchy_context_menu(&self) -> Option<&str> {
         self.hierarchy_context_menu.as_deref()
+    }
+
+    pub const fn hierarchy_context_point(&self) -> Point {
+        self.hierarchy_context_point
+    }
+
+    pub fn hierarchy_rename(&self) -> Option<(&str, &str)> {
+        self.hierarchy_rename
+            .as_ref()
+            .map(|rename| (rename.node_id.as_str(), rename.title.as_str()))
     }
 
     /// Clears a cut payload only after the runtime reports a durable move and
@@ -4180,7 +4213,7 @@ impl ProjectWorkspace {
     pub fn update(&mut self, message: ProjectMessage) -> Vec<ProjectEffect> {
         if !matches!(
             &message,
-            ProjectMessage::OpenHierarchyContextMenu(_)
+            ProjectMessage::OpenHierarchyContextMenu { .. }
                 | ProjectMessage::CloseHierarchyContextMenu
                 | ProjectMessage::RenameNode { .. }
         ) {
@@ -4257,6 +4290,50 @@ impl ProjectWorkspace {
             ProjectMessage::RenameNode { node_id, title } => {
                 self.explorer.rename(&node_id, title.clone());
                 vec![ProjectEffect::CommitNodeTitle { node_id, title }]
+            }
+            ProjectMessage::BeginHierarchyRename(node_id) => {
+                let Some(node) = self.explorer.nodes.get(&node_id) else {
+                    return Vec::new();
+                };
+                if node.kind == HierarchyNodeKind::Root {
+                    return Vec::new();
+                }
+                self.hierarchy_context_menu = None;
+                self.hierarchy_rename = Some(HierarchyRename {
+                    node_id,
+                    title: node.title.clone(),
+                });
+                Vec::new()
+            }
+            ProjectMessage::SetHierarchyRenameDraft(title) => {
+                if let Some(rename) = self.hierarchy_rename.as_mut() {
+                    rename.title = title;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CommitHierarchyRename => {
+                let Some(rename) = self.hierarchy_rename.take() else {
+                    return Vec::new();
+                };
+                let title = rename.title.trim().to_owned();
+                if title.is_empty()
+                    || self
+                        .explorer
+                        .nodes
+                        .get(&rename.node_id)
+                        .is_none_or(|node| node.title == title)
+                {
+                    return Vec::new();
+                }
+                self.explorer.rename(&rename.node_id, title.clone());
+                vec![ProjectEffect::CommitNodeTitle {
+                    node_id: rename.node_id,
+                    title,
+                }]
+            }
+            ProjectMessage::CancelHierarchyRename => {
+                self.hierarchy_rename = None;
+                Vec::new()
             }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
                 self.explorer.set_synopsis(&node_id, synopsis.clone());
@@ -4619,10 +4696,11 @@ impl ProjectWorkspace {
                 self.cards_drag_destination = None;
                 Vec::new()
             }
-            ProjectMessage::OpenHierarchyContextMenu(node_id) => {
+            ProjectMessage::OpenHierarchyContextMenu { node_id, point } => {
                 if self.explorer.nodes.contains_key(&node_id) {
                     self.explorer.select(&node_id, SelectionGesture::Replace);
                     self.hierarchy_context_menu = Some(node_id);
+                    self.hierarchy_context_point = point;
                     self.pointer_drag = None;
                     self.cards_drag_destination = None;
                 }
@@ -6470,13 +6548,58 @@ mod tests {
         );
         assert_eq!(workspace.hierarchy_drag_source(), None);
 
-        workspace.update(ProjectMessage::OpenHierarchyContextMenu(
-            "chapter-two".to_owned(),
-        ));
+        workspace.update(ProjectMessage::OpenHierarchyContextMenu {
+            node_id: "chapter-two".to_owned(),
+            point: Point::new(84.0, 12.0),
+        });
         assert_eq!(workspace.hierarchy_context_menu(), Some("chapter-two"));
+        assert_eq!(workspace.hierarchy_context_point(), Point::new(84.0, 12.0));
         assert_eq!(workspace.explorer().selected_ids(), ["chapter-two"]);
         workspace.update(ProjectMessage::CopySelection);
         assert_eq!(workspace.hierarchy_context_menu(), None);
+    }
+
+    #[test]
+    fn hierarchy_rename_edits_inline_and_commits_only_when_submitted() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        assert!(
+            workspace
+                .update(ProjectMessage::BeginHierarchyRename(
+                    "chapter-one".to_owned()
+                ))
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.hierarchy_rename(),
+            Some(("chapter-one", "Chapter One"))
+        );
+        workspace.update(ProjectMessage::SetHierarchyRenameDraft(
+            "Opening Scene".to_owned(),
+        ));
+        assert_eq!(
+            workspace
+                .explorer()
+                .row("chapter-one")
+                .map(|node| node.title),
+            Some("Chapter One")
+        );
+
+        assert_eq!(
+            workspace.update(ProjectMessage::CommitHierarchyRename),
+            vec![ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "Opening Scene".to_owned(),
+            }]
+        );
+        assert_eq!(workspace.hierarchy_rename(), None);
+        assert_eq!(
+            workspace
+                .explorer()
+                .row("chapter-one")
+                .map(|node| node.title),
+            Some("Opening Scene")
+        );
     }
 
     #[test]

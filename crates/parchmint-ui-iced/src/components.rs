@@ -63,7 +63,10 @@ pub fn surface(
         shadow: Shadow::default(),
         snap: true,
     };
-    if matches!(surface, Surface::Dialog | Surface::Elevated) {
+    // Penpot panels and menus use borders and contrast for separation. Keep
+    // elevation reserved for modal dialogs so pointer hover cannot trigger a
+    // broad shadow repaint behind ordinary controls or context menus.
+    if matches!(surface, Surface::Dialog) {
         style.shadow = shadow(palette, surface);
     }
     match interaction {

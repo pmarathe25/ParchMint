@@ -96,6 +96,10 @@ fn navigation_focus_dialog_and_menu_states_are_consistent() {
     let window = WindowCapability::new(3, 1);
     let mut shell = Shell::new(window);
 
+    assert!(shell.inspector_section_is_expanded(InspectorSection::Synopsis));
+    assert!(shell.inspector_section_is_expanded(InspectorSection::Metadata));
+    assert!(shell.inspector_section_is_expanded(InspectorSection::Comments));
+
     assert!(shell.accept(ShellMessage::OpenMenu {
         window,
         menu: MenuKind::Project,
@@ -113,7 +117,7 @@ fn navigation_focus_dialog_and_menu_states_are_consistent() {
 
     shell.toggle_inspector_section(InspectorSection::Synopsis);
     shell.focus(FocusTarget::EditorDocument("chapter-1".into()));
-    assert!(shell.inspector_section_is_expanded(InspectorSection::Synopsis));
+    assert!(!shell.inspector_section_is_expanded(InspectorSection::Synopsis));
     assert!(shell.comments_are_available());
 
     shell.focus_next_region();

@@ -7,12 +7,13 @@
 use std::collections::BTreeMap;
 
 use iced::widget::{
-    button, column, container, mouse_area, pick_list, row, sensor, stack, text, text_input,
-    tooltip, Space,
+    Space, button, column, container, mouse_area, opaque, pick_list, row, sensor, stack, text,
+    text_input,
 };
 use iced::{
+    Background, Element, Font, Length,
     alignment::{Horizontal, Vertical},
-    font, Background, Element, Font, Length,
+    font,
 };
 use parchmint_editor_api::{EditorError, ViewId};
 use parchmint_editor_iced::{
@@ -20,12 +21,13 @@ use parchmint_editor_iced::{
 };
 
 use crate::{
-    components::{self, ButtonKind, Interaction, Surface},
-    design_tokens::{ParchMintTheme, COMPACT_CONTROL_HEIGHT},
-    focus,
-    icons::{icon_sized, Icon},
     EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, F6Region, FindDirection,
     FormattingCommand, LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
+    components::{self, ButtonKind, Interaction, Surface},
+    design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
+    focus,
+    icons::{Icon, icon_sized},
+    stationary_tooltip,
 };
 
 const EDITOR_TOOLBAR_CONTROL_HEIGHT: u16 = COMPACT_CONTROL_HEIGHT + 4;
@@ -215,9 +217,19 @@ pub(crate) fn editor_center_surface_with_chrome(
     spelling_menu: Option<&SpellingMenu>,
     chrome: EditorCenterChrome,
 ) -> Element<'static, EditorCenterMessage> {
-    let primary = editor_pane_surface(workspace, EditorPane::Primary, theme, slots, chrome);
-    let companion_visible = workspace.pane(EditorPane::Companion).is_populated()
-        || slots.slot(EditorPane::Companion).is_some();
+    let primary = editor_pane_surface(
+        workspace,
+        EditorPane::Primary,
+        theme,
+        slots,
+        spelling_menu,
+        chrome,
+    );
+    // A slot may outlive its mounted Canvas for the remainder of the current
+    // Iced event cycle. It must not keep an otherwise empty companion pane
+    // visible: closing its last tab is the explicit signal to collapse the
+    // split and give the primary pane the full editor width.
+    let companion_visible = workspace.pane(EditorPane::Companion).is_populated();
     let panes: Element<'static, EditorCenterMessage> = if companion_visible {
         let primary_portion = (workspace.split_ratio() * 1000.0).round() as u16;
         let companion_portion = 1000_u16.saturating_sub(primary_portion);
@@ -240,6 +252,7 @@ pub(crate) fn editor_center_surface_with_chrome(
                 EditorPane::Companion,
                 theme,
                 slots,
+                spelling_menu,
                 chrome,
             ))
             .width(Length::FillPortion(companion_portion)),
@@ -279,17 +292,32 @@ pub(crate) fn editor_center_surface_with_chrome(
                 .align_y(Vertical::Top),
         );
     }
-    if let Some(menu) = spelling_menu {
-        layers = layers.push(
-            container(spelling_menu_popover(menu, theme))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding([82, 24])
-                .align_x(Horizontal::Center)
-                .align_y(Vertical::Top),
-        );
-    }
     layers.into()
+}
+
+fn spelling_menu_overlay(
+    content: Element<'static, EditorCenterMessage>,
+    menu: &SpellingMenu,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    let bounds = menu.bounds();
+    stack![
+        content,
+        mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+            .on_press(EditorCenterMessage::DismissSpellingMenu),
+        container(opaque(spelling_menu_popover(menu, theme)))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: bounds.top(),
+                right: 0.0,
+                bottom: 0.0,
+                left: bounds.left(),
+            })
+            .align_x(Horizontal::Left)
+            .align_y(Vertical::Top),
+    ]
+    .into()
 }
 
 fn spelling_menu_popover(
@@ -332,26 +360,11 @@ fn spelling_menu_popover(
             )
         },
     );
-    container(
-        actions
-            .push(
-                button(text("Dismiss").size(12))
-                    .padding([5, 8])
-                    .on_press(EditorCenterMessage::DismissSpellingMenu)
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            button_interaction(status, false),
-                        )
-                    }),
-            )
-            .spacing(3),
-    )
-    .padding(10)
-    .width(280)
-    .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
-    .into()
+    container(actions.spacing(3))
+        .padding(6)
+        .width(menu.bounds().width())
+        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+        .into()
 }
 
 fn formatting_toolbar(
@@ -359,7 +372,7 @@ fn formatting_toolbar(
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
     // Keep this ordered like the production editor ribbon. Less-frequent
-    // commands remain available through the existing keyboard/menu routing;
+    // commands remain available through the existing keyboard routing;
     // putting every command in this narrow row previously made the controls
     // wrap over the pane at desktop widths.
     let text_commands = [
@@ -422,7 +435,6 @@ fn formatting_toolbar(
         ))
         .push(formatting_text_button(
             "1.",
-            "Numbered list",
             FormattingCommand::NumberedList,
             theme,
         ))
@@ -440,12 +452,10 @@ fn formatting_toolbar(
         ))
         .push(formatting_text_button(
             "Scene Break",
-            "Scene Break",
             FormattingCommand::SceneBreak,
             theme,
         ))
         .push(formatting_text_button(
-            "Page Break",
             "Page Break",
             FormattingCommand::PageBreak,
             theme,
@@ -453,34 +463,28 @@ fn formatting_toolbar(
     container(controls)
         .padding([6, 8])
         .width(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+        // The Penpot toolbar is a flat panel. An elevated surface adds a
+        // large scrim shadow that is repeatedly repainted while its controls
+        // hover, causing the visible dark flicker across the whole bar.
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
         .into()
 }
 
 fn formatting_text_button(
     label: &'static str,
-    tooltip_label: &'static str,
     command: FormattingCommand,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
-    tooltip(
-        button(text(label).size(14))
-            .padding([4, 7])
-            .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
-            .on_press(EditorCenterMessage::Workspace(EditorMessage::Format(
-                command,
-            )))
-            .style(move |_, status| {
-                components::button_style(
-                    theme,
-                    ButtonKind::Quiet,
-                    button_interaction(status, false),
-                )
-            }),
-        container(text(tooltip_label).size(12)).padding([4, 6]),
-        tooltip::Position::Bottom,
-    )
-    .into()
+    button(text(label).size(14))
+        .padding([4, 7])
+        .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
+        .on_press(EditorCenterMessage::Workspace(EditorMessage::Format(
+            command,
+        )))
+        .style(move |_, status| {
+            components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+        })
+        .into()
 }
 
 fn formatting_icon_button(
@@ -489,7 +493,7 @@ fn formatting_icon_button(
     command: FormattingCommand,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
-    tooltip(
+    stationary_tooltip::tooltip(
         button(icon_sized(icon, 16))
             .padding([4, 7])
             .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
@@ -504,7 +508,7 @@ fn formatting_icon_button(
                 )
             }),
         container(text(tooltip_label).size(12)).padding([4, 6]),
-        tooltip::Position::Bottom,
+        components::surface(theme, Surface::Panel, Interaction::Rest),
     )
     .into()
 }
@@ -571,6 +575,7 @@ fn editor_pane_surface(
     pane: EditorPane,
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
+    spelling_menu: Option<&SpellingMenu>,
     chrome: EditorCenterChrome,
 ) -> Element<'static, EditorCenterMessage> {
     let state = workspace.pane(pane);
@@ -601,6 +606,11 @@ fn editor_pane_surface(
         .on_show(viewport_message)
         .on_resize(viewport_message)
         .into();
+    let body = if let Some(menu) = spelling_menu.filter(|menu| menu.pane() == pane) {
+        spelling_menu_overlay(body, menu, theme)
+    } else {
+        body
+    };
     let body = if workspace.focused_pane() == pane {
         focus::f6_region(F6Region::FocusedEditor, body)
     } else {
@@ -718,16 +728,7 @@ fn tab_button(
     }))
     .style(move |_, status| flat_tab_button_style(theme, tab_interaction(status, active, focused)))
     .into();
-    let activate = if let Some(full_title) = presentation.tooltip() {
-        tooltip(
-            activate,
-            container(text(full_title.to_owned()).size(12)).padding([4, 6]),
-            tooltip::Position::Bottom,
-        )
-        .into()
-    } else {
-        activate
-    };
+    let activate = activate;
     let close = button(text("×").size(14))
         .padding([6, 6])
         .width(presentation.close_bounds().width())
@@ -738,10 +739,10 @@ fn tab_button(
         .style(move |_, status| {
             components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
         });
-    let close: Element<'static, EditorCenterMessage> = tooltip(
+    let close: Element<'static, EditorCenterMessage> = stationary_tooltip::tooltip(
         close,
         container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
-        tooltip::Position::Bottom,
+        components::surface(theme, Surface::Panel, Interaction::Rest),
     )
     .into();
     mouse_area(
@@ -1066,7 +1067,7 @@ mod tests {
     use parchmint_preferences::ResolvedAppearance;
 
     use super::*;
-    use crate::{design_tokens::ParchMintTheme, EditorFixture};
+    use crate::{EditorFixture, design_tokens::ParchMintTheme};
 
     #[test]
     fn pane_local_messages_focus_before_reaching_workspace_reducer() {

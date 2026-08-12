@@ -161,7 +161,10 @@ impl MountedEditorBinding {
         &self,
         message: MountedEditorMessage,
     ) -> Result<MountedEditorUpdate, EditorError> {
-        let update = self.host.update(message)?;
+        // Advance the shared adapter frame before refreshing the retained
+        // Canvas once. Calling `MountedEditorHost::update` here would refresh
+        // the old geometry first, then refresh again after this frame.
+        let update = self.host.update_without_refresh(message)?;
         self.refresh()?;
         Ok(update)
     }
@@ -171,6 +174,13 @@ impl MountedEditorBinding {
         let frame = self.adapter.next_frame(self.session.clone())?;
         self.host.refresh()?;
         Ok(frame)
+    }
+
+    /// Refreshes this host after another binding has already advanced the
+    /// shared session frame. This avoids a second shared-layout pass when the
+    /// same document is open in both editor panes.
+    pub fn refresh_after_shared_frame(&self) -> Result<(), EditorError> {
+        self.host.refresh()
     }
 
     /// Restores editor focus after a native task without changing selection.

@@ -204,6 +204,7 @@ pub enum MountedEditorMessage {
     OpenSpellingMenu {
         comment_range: EditorSelection,
         spelling_range: Option<EditorSelection>,
+        invocation_point: (f32, f32),
     },
 }
 
@@ -374,6 +375,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     Action::publish(MountedEditorMessage::OpenSpellingMenu {
                         comment_range,
                         spelling_range: spelling_range_at(&content, position.x, position.y),
+                        invocation_point: (position.x, position.y),
                     })
                     .and_capture(),
                 )
@@ -1217,6 +1219,20 @@ impl MountedEditorHost {
         &self,
         message: MountedEditorMessage,
     ) -> Result<MountedEditorUpdate, EditorError> {
+        let update = self.update_without_refresh(message)?;
+        self.surface.refresh_from_adapter(
+            &self.adapter,
+            self.config.session(),
+            self.config.view(),
+            self.config.block(),
+        )?;
+        Ok(update)
+    }
+
+    pub(crate) fn update_without_refresh(
+        &self,
+        message: MountedEditorMessage,
+    ) -> Result<MountedEditorUpdate, EditorError> {
         let before = self.adapter.revision(self.config.session())?;
         apply_surface_message(
             &self.adapter,
@@ -1229,12 +1245,6 @@ impl MountedEditorHost {
         let active_style = self
             .adapter
             .active_style(self.config.session(), self.config.view())?;
-        self.surface.refresh_from_adapter(
-            &self.adapter,
-            self.config.session(),
-            self.config.view(),
-            self.config.block(),
-        )?;
         Ok(MountedEditorUpdate {
             revision,
             document_changed: revision != before,

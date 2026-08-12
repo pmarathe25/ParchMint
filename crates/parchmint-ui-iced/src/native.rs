@@ -36,10 +36,9 @@ use parchmint_editor_iced::{
 use parchmint_export_api::{ExportNumbering, ExportProgress, ExportProgressSink, ExportRunOptions};
 use parchmint_history_api::HistoryCursor;
 use parchmint_platform_api::{
-    ClipboardContent, ClipboardFormats, MenuActivation, MenuActivationService, MenuCommand,
-    MenuService, PathDialog, PathDialogKind, SemanticMenu, SemanticMenuEntry, SystemAppearance,
+    ClipboardContent, ClipboardFormats, PathDialog, PathDialogKind, SystemAppearance,
     SystemAppearanceEvent, SystemAppearanceEventService, UntrustedClipboardContent,
-    WindowCapability, WindowResult,
+    WindowCapability,
 };
 use parchmint_preferences::{
     AppearanceMode, RecentProject as PreferenceRecentProject, ResolvedAppearance,
@@ -54,7 +53,7 @@ use parchmint_workspace_state::{ProjectIdentity, WorkspaceSnapshot};
 
 use crate::{
     DragDestination, EditorEffect, EditorPane, HistoryCurrentDocument, LauncherState,
-    NewProjectDraft, ProjectEffect, ProjectMessage, ProjectTask, ProjectTaskCompletion,
+    NewProjectDraft, Point, ProjectEffect, ProjectMessage, ProjectTask, ProjectTaskCompletion,
     ProjectTaskPayload, ProjectTaskTicket, ProjectWorkspace, RecentProject, RibbonDestination,
     SelectionGesture, Shell, ShellLayout, SpellingDecoration, SpellingMenu, SpellingMenuAction,
     SpellingMenuRequest,
@@ -92,10 +91,21 @@ fn runtime_event(event: Event, status: event::Status, window: window::Id) -> Opt
     matches!(
         event,
         Event::Keyboard(_)
-            | Event::Mouse(mouse::Event::CursorMoved { .. })
-            | Event::Mouse(mouse::Event::ButtonReleased(_))
+            | Event::Mouse(mouse::Event::ButtonPressed(_))
             | Event::Window(window::Event::Resized(_))
-            | Event::Window(window::Event::Focused)
+    )
+    .then_some(Message::RuntimeEvent {
+        window,
+        event,
+        accelerator_fallback: status == event::Status::Ignored,
+    })
+}
+
+fn resize_event(event: Event, status: event::Status, window: window::Id) -> Option<Message> {
+    matches!(
+        event,
+        Event::Mouse(mouse::Event::CursorMoved { .. })
+            | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
     )
     .then_some(Message::RuntimeEvent {
         window,
@@ -335,27 +345,17 @@ pub enum NativeProjectOpenResult {
     Locked,
 }
 
-/// Raw window values copied only inside Iced's event-loop-owned
-/// [`window::run`] callback and consumed synchronously by the native adapter.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy)]
-pub struct NativeWindowAttachment {
-    pub raw_window: window::raw_window_handle::RawWindowHandle,
-    pub raw_display: window::raw_window_handle::RawDisplayHandle,
-}
-
-/// How an installed semantic menu is presented on the current target.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeMenuAttachment {
-    Native,
-    InWindow,
-}
-
 /// Desktop lifecycle callbacks invoked by native window interactions.
 pub trait NativeDesktopCallbacks: Send + Sync {
     fn open_project(&self, project: PathBuf) -> Result<NativeProjectOpenResult, String>;
     fn close_project(&self, project: PathBuf) -> Result<(), String>;
+
+    /// Releases a project that has no unsaved editor revision without creating
+    /// a needless final checkpoint. Implementations may fall back to their
+    /// full close path when they cannot distinguish a clean project.
+    fn close_clean_project(&self, project: PathBuf) -> Result<(), String> {
+        self.close_project(project)
+    }
 
     fn create_project(
         &self,
@@ -388,35 +388,6 @@ pub trait NativeDesktopCallbacks: Send + Sync {
     /// Supplies the optional platform event stream to the native driver.
     fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
         None
-    }
-
-    /// Supplies semantic menu installation without exposing a native handle.
-    fn menu_service(&self) -> Option<Arc<dyn MenuService>> {
-        None
-    }
-
-    /// Supplies the typed activation source fed by native menu callbacks.
-    fn menu_activations(&self) -> Option<Arc<dyn MenuActivationService>> {
-        None
-    }
-
-    /// Attaches an installed binding while Iced owns a live window callback.
-    fn attach_menu(
-        &self,
-        _window: WindowCapability,
-        _binding: u64,
-        _attachment: NativeWindowAttachment,
-    ) -> Result<NativeMenuAttachment, String> {
-        Err("native menu attachment is unavailable".to_owned())
-    }
-
-    /// Removes native menu state while Iced still owns the live window.
-    fn detach_menu(
-        &self,
-        _window: WindowCapability,
-        _attachment: NativeWindowAttachment,
-    ) -> Result<(), String> {
-        Ok(())
     }
 
     /// Records the platform capability when this driver creates its native
@@ -536,23 +507,9 @@ enum Message {
         event: Event,
         accelerator_fallback: bool,
     },
-    MenuInstalled {
-        capability: WindowCapability,
-        result: Result<u64, String>,
+    DismissContextMenus {
+        window: window::Id,
     },
-    MenuAttached {
-        capability: WindowCapability,
-        binding: u64,
-        result: Result<NativeMenuAttachment, String>,
-    },
-    MenuDetached(Result<(), String>),
-    ToggleInWindowMenu {
-        capability: WindowCapability,
-        label: String,
-    },
-    InWindowMenuActivation(MenuActivation),
-    MenuActivation(MenuActivation),
-    MenuActivationStreamFailed(String),
     WorkspaceLoaded {
         window: window::Id,
         result: Result<Option<WorkspaceSnapshot>, String>,
@@ -562,6 +519,7 @@ enum Message {
     },
     CloseRequested(window::Id),
     ShowNewProject,
+    CancelNewProject,
     NewProjectTitleChanged(String),
     NewProjectDestinationChanged(String),
     NewProjectAuthorChanged(String),
@@ -571,7 +529,7 @@ enum Message {
         create: bool,
         result: Result<Option<PathBuf>, String>,
     },
-    OpenProject(PathBuf),
+    OpenRecentProject(PathBuf),
     CreateProject,
     ProjectOpenFinished {
         project: PathBuf,
@@ -745,52 +703,6 @@ impl ExportProgressSink for NativeExportProgressSink {
 #[derive(Clone)]
 struct AppearanceEventSubscription(Arc<dyn SystemAppearanceEventService>);
 
-#[derive(Clone)]
-struct MenuActivationSubscription(Arc<dyn MenuActivationService>);
-
-impl Hash for MenuActivationSubscription {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).cast::<()>().hash(state);
-    }
-}
-
-fn menu_activation_subscription(
-    subscription: &MenuActivationSubscription,
-) -> iced::futures::stream::BoxStream<'static, Message> {
-    let service = Arc::clone(&subscription.0);
-    Box::pin(iced::stream::channel(1, async move |mut output| {
-        let stream = match service.subscribe() {
-            Ok(stream) => stream,
-            Err(error) => {
-                let _ = output
-                    .send(Message::MenuActivationStreamFailed(error.to_string()))
-                    .await;
-                return;
-            }
-        };
-        loop {
-            match stream.next_timeout(Duration::from_secs(1)) {
-                Ok(Some(activation)) => {
-                    if output
-                        .send(Message::MenuActivation(activation))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = output
-                        .send(Message::MenuActivationStreamFailed(error.to_string()))
-                        .await;
-                    break;
-                }
-            }
-        }
-    }))
-}
-
 impl Hash for AppearanceEventSubscription {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.0).cast::<()>().hash(state);
@@ -841,117 +753,6 @@ fn resolved_system_appearance(appearance: SystemAppearance) -> ResolvedAppearanc
     }
 }
 
-fn semantic_desktop_menu(
-    project_window: bool,
-    save_enabled: bool,
-    edit_enabled: bool,
-) -> SemanticMenu {
-    let command = |id, label, enabled| {
-        SemanticMenuEntry::Command(if enabled {
-            MenuCommand::new(id, label)
-        } else {
-            MenuCommand::disabled(id, label)
-        })
-    };
-    SemanticMenu::new(vec![
-        SemanticMenuEntry::Submenu {
-            label: "File".to_owned(),
-            entries: vec![
-                command("file.new", "New Project", true),
-                command("file.open", "Open Project…", true),
-                SemanticMenuEntry::Separator,
-                command("file.save", "Save", project_window && save_enabled),
-                command("file.close", "Close", project_window),
-            ],
-        },
-        SemanticMenuEntry::Submenu {
-            label: "Edit".to_owned(),
-            entries: vec![
-                command("edit.undo", "Undo", edit_enabled),
-                command("edit.redo", "Redo", edit_enabled),
-                SemanticMenuEntry::Separator,
-                command("edit.copy", "Copy", edit_enabled),
-                command("edit.cut", "Cut", edit_enabled),
-                command("edit.paste", "Paste", edit_enabled),
-            ],
-        },
-    ])
-}
-
-#[cfg(target_os = "linux")]
-fn linux_menu_bar(
-    capability: WindowCapability,
-    binding: u64,
-    menu: &SemanticMenu,
-    open: Option<&str>,
-) -> Element<'static, Message> {
-    let mut roots = row![].spacing(2).height(28);
-    let mut open_entries = None;
-    for entry in menu.entries() {
-        let SemanticMenuEntry::Submenu { label, entries } = entry else {
-            continue;
-        };
-        roots = roots.push(
-            button(text(label.clone()).size(13))
-                .padding([4, 10])
-                .height(28)
-                .on_press(Message::ToggleInWindowMenu {
-                    capability,
-                    label: label.clone(),
-                }),
-        );
-        if open == Some(label.as_str()) {
-            open_entries = Some(entries);
-        }
-    }
-
-    let mut bar = column![container(roots).padding([0, 6]).width(Length::Fill)].spacing(0);
-    if let Some(entries) = open_entries {
-        let mut commands = row![].spacing(2).height(30);
-        for entry in entries {
-            match entry {
-                SemanticMenuEntry::Command(command) => {
-                    let accelerator = menu_accelerator(command.id())
-                        .map_or_else(String::new, |value| format!("  {value}"));
-                    let item = button(text(format!("{}{}", command.label(), accelerator)).size(12))
-                        .padding([4, 10])
-                        .height(28);
-                    commands = commands.push(if command.enabled() {
-                        item.on_press(Message::InWindowMenuActivation(MenuActivation {
-                            binding: WindowResult::new(capability, binding),
-                            command_id: command.id().to_owned(),
-                        }))
-                    } else {
-                        item
-                    });
-                }
-                SemanticMenuEntry::Separator => {
-                    commands = commands.push(text("│").size(16));
-                }
-                SemanticMenuEntry::Submenu { .. } => {}
-            }
-        }
-        bar = bar.push(container(commands).padding([1, 8]).width(Length::Fill));
-    }
-    container(bar).width(Length::Fill).into()
-}
-
-#[cfg(target_os = "linux")]
-fn menu_accelerator(command: &str) -> Option<&'static str> {
-    match command {
-        "file.open" => Some("Ctrl+O"),
-        "file.save" => Some("Ctrl+S"),
-        "file.new" => Some("Ctrl+N"),
-        "file.close" => Some("Ctrl+W"),
-        "edit.copy" => Some("Ctrl+C"),
-        "edit.cut" => Some("Ctrl+X"),
-        "edit.paste" => Some("Ctrl+V"),
-        "edit.undo" => Some("Ctrl+Z"),
-        "edit.redo" => Some("Ctrl+Y"),
-        _ => None,
-    }
-}
-
 fn keyboard_accelerator(key: &str, modifiers: keyboard::Modifiers) -> Option<&'static str> {
     let key = key.to_ascii_lowercase();
     if modifiers == keyboard::Modifiers::COMMAND {
@@ -999,11 +800,6 @@ pub(crate) struct NativeDesktop {
     creating_project: bool,
     status: Option<String>,
     callbacks: Arc<dyn NativeDesktopCallbacks>,
-    menu_service: Option<Arc<dyn MenuService>>,
-    menu_activations: Option<Arc<dyn MenuActivationService>>,
-    menu_bindings: BTreeMap<WindowCapability, u64>,
-    in_window_menus: BTreeMap<WindowCapability, u64>,
-    open_in_window_menu: Option<(WindowCapability, String)>,
     appearance_events: Option<Arc<dyn SystemAppearanceEventService>>,
     last_appearance_generation: u64,
     capture: Option<NativeCaptureState>,
@@ -1040,9 +836,14 @@ struct NativeProjectState {
     autosave: AutosaveState,
     next_spellcheck_generation: u64,
     spellcheck_generation: BTreeMap<ViewId, u64>,
+    pending_spellchecks: BTreeMap<ViewId, Instant>,
     spelling_issues: BTreeMap<ViewId, Vec<NativeSpellingIssue>>,
     pending_spelling_menu: Option<NativeSpellingMenuContext>,
     spelling_menu: Option<SpellingMenu>,
+    /// The native event subscription receives the same button press that a
+    /// widget uses to open a context menu. Consume precisely that follow-up
+    /// dismissal, then let every later press close the menu normally.
+    suppress_next_context_menu_dismissal: bool,
     refresh_spellcheck_view: Option<ViewId>,
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
@@ -1104,12 +905,13 @@ struct AutosaveState {
     first_dirty: Option<Instant>,
     last_edit: Option<Instant>,
     through_revision: u64,
+    saved_through_revision: u64,
     save_in_flight: bool,
 }
 
 impl AutosaveState {
-    const IDLE_DELAY: Duration = Duration::from_millis(1_500);
-    const CONTINUOUS_LIMIT: Duration = Duration::from_secs(30);
+    const IDLE_DELAY: Duration = Duration::from_secs(60);
+    const CONTINUOUS_LIMIT: Duration = Duration::from_secs(300);
 
     fn mark_dirty(&mut self, revision: u64, now: Instant) {
         self.first_dirty.get_or_insert(now);
@@ -1118,7 +920,8 @@ impl AutosaveState {
     }
 
     fn should_save(&self, now: Instant) -> bool {
-        !self.save_in_flight
+        self.through_revision > self.saved_through_revision
+            && !self.save_in_flight
             && self.first_dirty.is_some_and(|first| {
                 now.saturating_duration_since(first) >= Self::CONTINUOUS_LIMIT
                     || self
@@ -1126,13 +929,42 @@ impl AutosaveState {
                         .is_some_and(|last| now.saturating_duration_since(last) >= Self::IDLE_DELAY)
             })
     }
+
+    fn finish(&mut self, revision: u64) {
+        self.save_in_flight = false;
+        self.saved_through_revision = self.saved_through_revision.max(revision);
+        if revision >= self.through_revision {
+            self.first_dirty = None;
+            self.last_edit = None;
+        }
+    }
+
+    fn is_clean(&self) -> bool {
+        !self.save_in_flight && self.through_revision <= self.saved_through_revision
+    }
+}
+
+/// A spellcheck result is only useful once a word has a stable boundary.
+/// Checking while the user is still extending the same word repeatedly walks
+/// and decorates the entire visible block, which makes normal typing lag.
+fn completes_spellcheck_word(message: &parchmint_editor_iced::MountedEditorMessage) -> bool {
+    match message {
+        parchmint_editor_iced::MountedEditorMessage::InsertText(text) => {
+            text.chars().last().is_some_and(|character| {
+                !character.is_alphanumeric() && character != '\'' && character != '’'
+            })
+        }
+        parchmint_editor_iced::MountedEditorMessage::KeyCommand(
+            parchmint_editor_iced::MountedEditorKeyCommand::SplitBlock
+            | parchmint_editor_iced::MountedEditorKeyCommand::InsertSoftBreak,
+        ) => true,
+        _ => false,
+    }
 }
 
 impl NativeDesktop {
     fn boot(startup: NativeDesktopStartup) -> (Self, Task<Message>) {
         let appearance_events = startup.callbacks.system_appearance_events();
-        let menu_service = startup.callbacks.menu_service();
-        let menu_activations = startup.callbacks.menu_activations();
         let capture_error = startup
             .capture
             .as_ref()
@@ -1153,11 +985,6 @@ impl NativeDesktop {
                     .map(|path| format!("Project is already open: {}", path.display()))
             }),
             callbacks: startup.callbacks,
-            menu_service,
-            menu_activations,
-            menu_bindings: BTreeMap::new(),
-            in_window_menus: BTreeMap::new(),
-            open_in_window_menu: None,
             appearance_events,
             last_appearance_generation: 0,
             capture: capture_valid
@@ -1212,74 +1039,7 @@ impl NativeDesktop {
                 event,
                 accelerator_fallback,
             } => self.runtime_event(window, event, accelerator_fallback),
-            Message::MenuInstalled { capability, result } => {
-                match result {
-                    Ok(binding)
-                        if self.project_windows.contains_key(&capability)
-                            || capability == LAUNCHER_CAPABILITY =>
-                    {
-                        if self
-                            .menu_bindings
-                            .get(&capability)
-                            .is_none_or(|current| *current < binding)
-                        {
-                            self.menu_bindings.insert(capability, binding);
-                            self.in_window_menus.remove(&capability);
-                            if self
-                                .open_in_window_menu
-                                .as_ref()
-                                .is_some_and(|(window, _)| *window == capability)
-                            {
-                                self.open_in_window_menu = None;
-                            }
-                            return self.attach_menu(capability, binding);
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => self.status = Some(error),
-                }
-                Task::none()
-            }
-            Message::MenuAttached {
-                capability,
-                binding,
-                result,
-            } => {
-                if self.menu_bindings.get(&capability) != Some(&binding) {
-                    return Task::none();
-                }
-                match result {
-                    Ok(NativeMenuAttachment::Native) => {
-                        self.in_window_menus.remove(&capability);
-                    }
-                    Ok(NativeMenuAttachment::InWindow) => {
-                        self.in_window_menus.insert(capability, binding);
-                    }
-                    Err(error) => self.status = Some(error),
-                }
-                Task::none()
-            }
-            Message::MenuDetached(result) => {
-                if let Err(error) = result {
-                    self.status = Some(error);
-                }
-                Task::none()
-            }
-            Message::ToggleInWindowMenu { capability, label } => {
-                let requested = (capability, label);
-                self.open_in_window_menu =
-                    (self.open_in_window_menu.as_ref() != Some(&requested)).then_some(requested);
-                Task::none()
-            }
-            Message::InWindowMenuActivation(activation) => {
-                self.open_in_window_menu = None;
-                self.activate_menu(activation)
-            }
-            Message::MenuActivation(activation) => self.activate_menu(activation),
-            Message::MenuActivationStreamFailed(error) => {
-                self.status = Some(error);
-                Task::none()
-            }
+            Message::DismissContextMenus { window } => self.dismiss_context_menus(window),
             Message::WorkspaceLoaded { window, result } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
@@ -1326,6 +1086,11 @@ impl NativeDesktop {
                 self.creating_project = true;
                 Task::none()
             }
+            Message::CancelNewProject => {
+                self.creating_project = false;
+                self.status = None;
+                Task::none()
+            }
             Message::NewProjectTitleChanged(title) => {
                 self.launcher.new_project_mut().set_title(title);
                 Task::none()
@@ -1345,7 +1110,7 @@ impl NativeDesktop {
             Message::DirectoryChosen { create, result } => {
                 self.finish_directory_choice(create, result)
             }
-            Message::OpenProject(project) => self.route_project_open(project),
+            Message::OpenRecentProject(project) => self.route_recent_project_open(project),
             Message::CreateProject => self.route_project_create(),
             Message::ProjectOpenFinished { project, result } => {
                 self.opening_project = false;
@@ -1359,36 +1124,42 @@ impl NativeDesktop {
                 revision,
                 result,
             } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                    return Task::none();
+                };
+                let stale = revision < state.autosave.through_revision;
+                state.autosave.finish(revision);
+                // Do not rebuild the workspace from an autosave that was
+                // overtaken while its worker was running.
+                if stale {
+                    return Task::none();
+                }
                 match result {
                     Ok(snapshot) => {
-                        self.status = Some(format!(
-                            "Recovery is durable through editor revision {revision}."
-                        ));
-                        if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
-                            let snapshot = Arc::new(snapshot);
-                            if let Some(project_ui) = state.project.project_ui.as_mut() {
-                                project_ui.snapshot = Arc::clone(&snapshot);
-                                state.effect_executor = state
-                                    .effect_executor
-                                    .as_ref()
-                                    .map(|executor| executor.refreshed(Arc::clone(&snapshot)))
-                                    .or_else(|| {
-                                        Some(NativeProjectEffectExecutor::new(
-                                            project_ui.ports.clone(),
-                                            Arc::clone(&snapshot),
-                                        ))
-                                    });
-                            }
-                            if let Some(workspace) = state.workspace.as_mut() {
-                                workspace.reconcile_snapshot(&snapshot);
-                            }
+                        let snapshot = Arc::new(snapshot);
+                        if let Some(project_ui) = state.project.project_ui.as_mut() {
+                            project_ui.snapshot = Arc::clone(&snapshot);
+                            state.effect_executor = state
+                                .effect_executor
+                                .as_ref()
+                                .map(|executor| executor.refreshed(Arc::clone(&snapshot)))
+                                .or_else(|| {
+                                    Some(NativeProjectEffectExecutor::new(
+                                        project_ui.ports.clone(),
+                                        Arc::clone(&snapshot),
+                                    ))
+                                });
+                        }
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            workspace.reconcile_snapshot(&snapshot);
+                            workspace.update(ProjectMessage::SaveCompleted(
+                                snapshot.project.revision.value(),
+                            ));
                         }
                     }
                     Err(error) => {
                         self.status = Some(error.clone());
-                        if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
-                            && let Some(workspace) = state.workspace.as_mut()
-                        {
+                        if let Some(workspace) = state.workspace.as_mut() {
                             workspace.update(ProjectMessage::SaveFailed(error));
                         }
                     }
@@ -1447,7 +1218,7 @@ impl NativeDesktop {
                         }
                     }
                 }
-                self.refresh_menu(window)
+                Task::none()
             }
             Message::ProjectEffectFinished {
                 window,
@@ -1993,14 +1764,19 @@ impl NativeDesktop {
             Message::RetryClose(window) => self.close_window(window),
             Message::CancelClose(window) => {
                 self.closing_windows.remove(&window);
+                self.status = None;
                 if let Some(NativeWindow::Project(state)) = self.windows.get(&window) {
                     self.close_failures.remove(&state.project.window);
                 }
                 Task::none()
             }
             Message::ProjectCloseFinished { window, result } => match result {
-                Ok(()) => self.finish_close(window),
+                Ok(()) => {
+                    self.status = None;
+                    self.finish_close(window)
+                }
                 Err(error) => {
+                    self.status = None;
                     self.closing_windows.remove(&window);
                     if let Some(NativeWindow::Project(state)) = self.windows.get(&window) {
                         self.close_failures.insert(state.project.window, error);
@@ -2055,43 +1831,6 @@ impl NativeDesktop {
                 .center(Length::Fill)
                 .into(),
         };
-        self.with_in_window_menu(id, content)
-    }
-
-    fn with_in_window_menu<'a>(
-        &self,
-        id: window::Id,
-        content: Element<'a, Message>,
-    ) -> Element<'a, Message> {
-        #[cfg(target_os = "linux")]
-        {
-            let Some(capability) = self.capability_for_window(id) else {
-                return content;
-            };
-            let Some(binding) = self.in_window_menus.get(&capability).copied() else {
-                return content;
-            };
-            let menu = match self.windows.get(&id) {
-                Some(NativeWindow::Launcher) => semantic_desktop_menu(false, false, false),
-                Some(NativeWindow::Project(state)) => semantic_desktop_menu(
-                    true,
-                    !state.autosave.save_in_flight,
-                    !state.editor_bindings.is_empty(),
-                ),
-                None => return content,
-            };
-            let open = self
-                .open_in_window_menu
-                .as_ref()
-                .filter(|(window, _)| *window == capability)
-                .map(|(_, label)| label.as_str());
-            column![linux_menu_bar(capability, binding, &menu, open), content]
-                .spacing(0)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        }
-        #[cfg(not(target_os = "linux"))]
         content
     }
 
@@ -2120,6 +1859,13 @@ impl NativeDesktop {
             iced::time::every(Duration::from_millis(250)).map(Message::AutosaveTick),
             event::listen_with(runtime_event),
         ];
+        // A global cursor subscription rebuilds the complete editor surface for
+        // every pointer move. Subscribe only while a splitter drag needs it.
+        if self.windows.values().any(
+            |window| matches!(window, NativeWindow::Project(state) if state.resizing.is_some()),
+        ) {
+            subscriptions.push(event::listen_with(resize_event));
+        }
         if self.capture.is_some() {
             subscriptions.push(
                 iced::time::every(Duration::from_millis(16)).map(|_| Message::CaptureFrameTick),
@@ -2129,12 +1875,6 @@ impl NativeDesktop {
             subscriptions.push(Subscription::run_with(
                 AppearanceEventSubscription(Arc::clone(events)),
                 appearance_event_subscription,
-            ));
-        }
-        if let Some(activations) = &self.menu_activations {
-            subscriptions.push(Subscription::run_with(
-                MenuActivationSubscription(Arc::clone(activations)),
-                menu_activation_subscription,
             ));
         }
         Subscription::batch(subscriptions)
@@ -2227,117 +1967,7 @@ impl NativeDesktop {
         }
     }
 
-    fn refresh_menu(&self, id: window::Id) -> Task<Message> {
-        let Some(service) = self.menu_service.as_ref().cloned() else {
-            return Task::none();
-        };
-        let Some(capability) = self.capability_for_window(id) else {
-            return Task::none();
-        };
-        let menu = match self.windows.get(&id) {
-            Some(NativeWindow::Launcher) => semantic_desktop_menu(false, false, false),
-            Some(NativeWindow::Project(state)) => semantic_desktop_menu(
-                true,
-                !state.autosave.save_in_flight,
-                !state.editor_bindings.is_empty(),
-            ),
-            None => return Task::none(),
-        };
-        Task::perform(
-            async move {
-                let binding = service
-                    .install(capability, menu)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if binding.window() != capability {
-                    return Err("menu install returned for a stale window".to_owned());
-                }
-                Ok(binding.into_value())
-            },
-            move |result| Message::MenuInstalled { capability, result },
-        )
-    }
-
-    fn attach_menu(&self, capability: WindowCapability, binding: u64) -> Task<Message> {
-        let id = if capability == LAUNCHER_CAPABILITY {
-            self.windows
-                .iter()
-                .find_map(|(id, window)| matches!(window, NativeWindow::Launcher).then_some(*id))
-        } else {
-            self.project_windows.get(&capability).copied()
-        };
-        let Some(id) = id else {
-            return Task::none();
-        };
-        let callbacks = Arc::clone(&self.callbacks);
-        window::run(id, move |window| {
-            let raw_window = window
-                .window_handle()
-                .map_err(|error| format!("native window handle is unavailable: {error}"))?
-                .as_raw();
-            let raw_display = window
-                .display_handle()
-                .map_err(|error| format!("native display handle is unavailable: {error}"))?
-                .as_raw();
-            callbacks.attach_menu(
-                capability,
-                binding,
-                NativeWindowAttachment {
-                    raw_window,
-                    raw_display,
-                },
-            )
-        })
-        .map(move |result| Message::MenuAttached {
-            capability,
-            binding,
-            result,
-        })
-    }
-
-    fn detach_menu(&self, id: window::Id, capability: WindowCapability) -> Task<Message> {
-        let callbacks = Arc::clone(&self.callbacks);
-        window::run(id, move |window| {
-            let raw_window = window
-                .window_handle()
-                .map_err(|error| format!("native window handle is unavailable: {error}"))?
-                .as_raw();
-            let raw_display = window
-                .display_handle()
-                .map_err(|error| format!("native display handle is unavailable: {error}"))?
-                .as_raw();
-            callbacks.detach_menu(
-                capability,
-                NativeWindowAttachment {
-                    raw_window,
-                    raw_display,
-                },
-            )
-        })
-        .map(Message::MenuDetached)
-    }
-
-    fn activate_menu(&mut self, activation: MenuActivation) -> Task<Message> {
-        let capability = activation.binding.window();
-        if self.menu_bindings.get(&capability) != Some(activation.binding.value()) {
-            self.status = Some("Ignored a stale menu activation.".to_owned());
-            return Task::none();
-        }
-        let id = if capability == LAUNCHER_CAPABILITY {
-            self.windows
-                .iter()
-                .find_map(|(id, window)| matches!(window, NativeWindow::Launcher).then_some(*id))
-        } else {
-            self.project_windows.get(&capability).copied()
-        };
-        let Some(id) = id else {
-            self.status = Some("Ignored a menu activation for a closed window.".to_owned());
-            return Task::none();
-        };
-        self.activate_menu_command(id, &activation.command_id)
-    }
-
-    fn activate_menu_command(&mut self, id: window::Id, command: &str) -> Task<Message> {
+    fn activate_shortcut(&mut self, id: window::Id, command: &str) -> Task<Message> {
         let capability = self.capability_for_window(id);
         let task = match command {
             "file.new" => {
@@ -2395,11 +2025,11 @@ impl NativeDesktop {
                 )),
             ),
             _ => {
-                self.status = Some(format!("Unknown menu command: {command}"));
+                self.status = Some(format!("Unknown keyboard shortcut command: {command}"));
                 Task::none()
             }
         };
-        Task::batch([task, self.refresh_menu(id)])
+        task
     }
 
     fn runtime_event(
@@ -2408,6 +2038,29 @@ impl NativeDesktop {
         event: Event,
         accelerator_fallback: bool,
     ) -> Task<Message> {
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        ) && self.windows.get(&id).is_some_and(|window| {
+            matches!(window, NativeWindow::Project(state) if state
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.hierarchy_context_menu().is_some()))
+        }) {
+            // The Explorer menu is composed over the entire project surface.
+            // Its backdrop receives outside left clicks, while its buttons
+            // receive action clicks. Scheduling a second window-wide dismissal
+            // here races those buttons and can discard their action.
+            return Task::none();
+        }
+        if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
+            // Let the widget tree consume this press first: a context-menu
+            // action or a new secondary-click must not be preempted by the
+            // window-wide dismissal. The follow-up message runs afterwards.
+            return Task::perform(async {}, move |_| Message::DismissContextMenus {
+                window: id,
+            });
+        }
         if let Event::Keyboard(keyboard::Event::KeyPressed {
             key,
             modifiers,
@@ -2515,10 +2168,7 @@ impl NativeDesktop {
             }) = &event
             && let Some(command) = keyboard_accelerator(key, *modifiers)
         {
-            return self.activate_menu_command(id, command);
-        }
-        if matches!(event, Event::Window(window::Event::Focused)) {
-            return self.refresh_menu(id);
+            return self.activate_shortcut(id, command);
         }
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
             return Task::none();
@@ -2599,7 +2249,9 @@ impl NativeDesktop {
                 None => {}
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                state.resizing = None;
+                if state.resizing.take().is_some() {
+                    return Self::workspace_persist_task(id, state);
+                }
             }
             Event::Window(window::Event::Resized(size)) => {
                 state
@@ -2608,6 +2260,26 @@ impl NativeDesktop {
                     .resize_window(size.width as u32, size.height as u32);
             }
             _ => {}
+        }
+        Task::none()
+    }
+
+    fn dismiss_context_menus(&mut self, window: window::Id) -> Task<Message> {
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            return Task::none();
+        };
+        // Do not compare timestamps here: Iced may dispatch the native event
+        // subscription before or after the widget message for one click. A
+        // one-shot flag has no ordering dependency and therefore preserves a
+        // newly opened Explorer or editor menu until the next button press.
+        if state.suppress_next_context_menu_dismissal {
+            state.suppress_next_context_menu_dismissal = false;
+            return Task::none();
+        }
+        state.pending_spelling_menu = None;
+        state.spelling_menu = None;
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.update(ProjectMessage::CloseHierarchyContextMenu);
         }
         Task::none()
     }
@@ -2907,34 +2579,6 @@ impl NativeDesktop {
                 state.resizing = Some(panel);
                 Task::none()
             }
-            ProjectSurfaceMessage::ResizePointer(x) => {
-                match state.resizing {
-                    Some(SidebarPanel::Explorer) => {
-                        state.shell.layout_mut().resize_explorer(x.max(0.0) as u32);
-                    }
-                    Some(SidebarPanel::Inspector) => {
-                        let width = state
-                            .shell
-                            .layout()
-                            .requested_width()
-                            .saturating_sub(x.max(0.0) as u32);
-                        state.shell.layout_mut().resize_inspector(width);
-                    }
-                    Some(SidebarPanel::Editor) => {
-                        let center = state.shell.layout().center();
-                        if center.width() > 0 {
-                            let ratio = (x - center.x() as f32) / center.width() as f32;
-                            workspace.editor_mut().set_split_ratio(f64::from(ratio));
-                        }
-                    }
-                    None => {}
-                }
-                Task::none()
-            }
-            ProjectSurfaceMessage::EndResize => {
-                state.resizing = None;
-                Self::workspace_persist_task(id, state)
-            }
             ProjectSurfaceMessage::LoadMoreHistory => {
                 let Some(cursor) = workspace.history().next_cursor().map(str::to_owned) else {
                     return Task::none();
@@ -2978,6 +2622,12 @@ impl NativeDesktop {
                     };
                 }
                 let modal_before = workspace.modal().is_some();
+                let opens_hierarchy_context =
+                    matches!(&message, ProjectMessage::OpenHierarchyContextMenu { .. });
+                let hierarchy_rename_target = match &message {
+                    ProjectMessage::BeginHierarchyRename(node_id) => Some(node_id.clone()),
+                    _ => None,
+                };
                 let appearance = match &message {
                     ProjectMessage::SetAppearance(mode) => Some(*mode),
                     _ => None,
@@ -2999,6 +2649,9 @@ impl NativeDesktop {
                     state.shell.close_global_search();
                 }
                 let effects = workspace.update(message);
+                if opens_hierarchy_context {
+                    state.suppress_next_context_menu_dismissal = true;
+                }
                 let modal_after = workspace.modal().is_some();
                 let focus_modal_initial = !modal_before && modal_after;
                 if !modal_before && modal_after {
@@ -3026,6 +2679,11 @@ impl NativeDesktop {
                 if focus_modal_initial {
                     tasks.push(iced::widget::operation::focus(
                         crate::focus::modal_cancel_id(),
+                    ));
+                }
+                if let Some(node_id) = hierarchy_rename_target {
+                    tasks.push(iced::widget::operation::focus(
+                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
                     ));
                 }
                 if let Some(document) = history_filter {
@@ -3559,6 +3217,43 @@ impl NativeDesktop {
                 for workspace_message in message.workspace_messages() {
                     effects.extend(workspace.editor_mut().update(workspace_message));
                 }
+                // An empty pane must stop rendering its mounted host in the
+                // same update as the final tab close. Waiting for the
+                // asynchronous effect executor leaves stale manuscript text
+                // on screen for at least one frame (and indefinitely if that
+                // task is superseded during shutdown).
+                let mut immediate_effects = Vec::new();
+                effects.retain(|effect| {
+                    if let EditorEffect::UnmountView { pane, view } = effect {
+                        immediate_effects.push((*pane, *view));
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for (pane, view) in immediate_effects {
+                    if let Some(binding) = state.editor_bindings.remove(&pane) {
+                        if binding.view() == view {
+                            if let Err(error) = binding.detach() {
+                                self.status = Some(error.to_string());
+                            }
+                        } else {
+                            self.status =
+                                Some("editor unmount view does not match the mounted pane".into());
+                        }
+                    }
+                    state.mounted_documents.remove(&pane);
+                    if pane == EditorPane::Primary {
+                        state.editor_hosts.insert(
+                            pane,
+                            crate::iced_editor_surface::EditorPaneSlot::state(
+                                crate::iced_editor_surface::EditorCenterPaneState::Empty,
+                            ),
+                        );
+                    } else {
+                        state.editor_hosts.remove(pane);
+                    }
+                }
                 if refresh_local_search {
                     let pane = workspace.editor().focused_pane();
                     let view = workspace.editor().pane(pane).view();
@@ -3607,6 +3302,7 @@ impl NativeDesktop {
                         parchmint_editor_iced::MountedEditorMessage::OpenSpellingMenu {
                             comment_range,
                             spelling_range,
+                            invocation_point,
                         },
                 } = message
                 {
@@ -3617,6 +3313,7 @@ impl NativeDesktop {
                         view,
                         comment_range,
                         spelling_range,
+                        invocation_point,
                     );
                 }
 
@@ -3643,6 +3340,7 @@ impl NativeDesktop {
                         parchmint_editor_iced::MountedEditorMessage::Scroll { .. }
                             | parchmint_editor_iced::MountedEditorMessage::ViewportChanged(_)
                     );
+                    let completed_word = completes_spellcheck_word(&message);
                     let update = if let Some(binding) = state.editor_bindings.get(&pane) {
                         if binding.view() != view {
                             Err(parchmint_editor_api::EditorError::InvalidCommand {
@@ -3688,40 +3386,36 @@ impl NativeDesktop {
                                     Task::none()
                                 };
                             }
+                            if let Some(session) = state
+                                .editor_bindings
+                                .get(&pane)
+                                .map(MountedEditorBinding::session)
+                                && let Err(error) = Self::refresh_shared_editor_hosts(
+                                    &state.editor_bindings,
+                                    &session,
+                                )
+                            {
+                                self.status = Some(error);
+                            }
                             let revision = update.revision();
                             workspace.update(ProjectMessage::MarkDirty(revision.value()));
                             state.autosave.mark_dirty(revision.value(), Instant::now());
-                            let Some(binding) = state.editor_bindings.get(&pane) else {
-                                self.status = Some(
-                                    "The edited view is no longer mounted; recovery was not persisted."
-                                        .to_owned(),
-                                );
-                                return Task::none();
-                            };
-                            let Some(ports) = state.project.ports().cloned() else {
-                                self.status = Some(
-                                    "This project session has no persistence port.".to_owned(),
-                                );
-                                return Task::none();
-                            };
-                            let Some(adapter) = state.project.editor_adapter().cloned() else {
-                                self.status =
-                                    Some("This project session has no editor adapter.".to_owned());
-                                return Task::none();
-                            };
-                            let persistence = Self::persist_projection_task(
-                                id,
-                                ports,
-                                adapter,
-                                binding.session(),
-                                revision,
-                            );
-                            let spellcheck =
-                                Self::spellcheck_task(id, state, view).unwrap_or_else(|error| {
-                                    self.status = Some(error);
-                                    Task::none()
-                                });
-                            return Task::batch([persistence, spellcheck]);
+                            let delay = if completed_word { 150 } else { 400 };
+                            state
+                                .pending_spellchecks
+                                .insert(view, Instant::now() + Duration::from_millis(delay));
+                            return Task::none();
+                        }
+                        Err(parchmint_editor_api::EditorError::InvalidCommand { reason })
+                            if reason == "mounted editor message has no host slot"
+                                || reason
+                                    == "mounted editor message view does not match host slot" =>
+                        {
+                            // The host was intentionally removed while Iced
+                            // was dispatching its final event. A stale Canvas
+                            // message is harmless and must not surface as an
+                            // application error.
+                            return Task::none();
                         }
                         Err(error) => self.status = Some(error.to_string()),
                     }
@@ -3788,6 +3482,7 @@ impl NativeDesktop {
         view: ViewId,
         comment_range: EditorSelection,
         spelling_range: Option<EditorSelection>,
+        invocation_point: (f32, f32),
     ) -> Task<Message> {
         let issue = spelling_range.and_then(|range| {
             state
@@ -3865,6 +3560,7 @@ impl NativeDesktop {
             word_bounds,
             crate::Rect::new(0.0, 0.0, viewport.width, viewport.height),
         )
+        .with_invocation_point(Point::new(invocation_point.0, invocation_point.1))
         .with_suggestions(
             issue
                 .as_ref()
@@ -3928,35 +3624,43 @@ impl NativeDesktop {
             return Task::none();
         }
         if action == SpellingMenuAction::Ignore {
-            let remaining = state
+            let mut remaining_issues = state
                 .spelling_issues
-                .get_mut(&context.view)
-                .map(|issues| {
-                    issues.retain(|issue| issue.range != context.range);
-                    issues
-                        .iter()
-                        .map(|issue| {
-                            SpellingDecoration::new(
-                                issue.word.clone(),
-                                crate::FindMatch::new(
-                                    issue.range.start().value(),
-                                    issue.range.end().value(),
-                                ),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
+                .get(&context.view)
+                .cloned()
                 .unwrap_or_default();
+            remaining_issues.retain(|issue| issue.range != context.range);
+            let remaining = remaining_issues
+                .iter()
+                .map(|issue| {
+                    SpellingDecoration::new(
+                        issue.word.clone(),
+                        crate::FindMatch::new(
+                            issue.range.start().value(),
+                            issue.range.end().value(),
+                        ),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let shared_views = state
+                .editor_bindings
+                .values()
+                .filter(|binding| binding.session() == context.editor_session)
+                .map(MountedEditorBinding::view)
+                .collect::<Vec<_>>();
             let Some(workspace) = state.workspace.as_mut() else {
                 return Task::none();
             };
-            let effects =
-                workspace
-                    .editor_mut()
-                    .update(crate::EditorMessage::SetSpellingDecorations {
-                        view: context.view,
-                        decorations: remaining,
-                    });
+            let mut effects = Vec::new();
+            for view in shared_views {
+                state.spelling_issues.insert(view, remaining_issues.clone());
+                effects.extend(workspace.editor_mut().update(
+                    crate::EditorMessage::SetSpellingDecorations {
+                        view,
+                        decorations: remaining.clone(),
+                    },
+                ));
+            }
             return Self::editor_effect_tasks(window, state.effect_executor.clone(), effects);
         }
         if let Err(_error) = adapter.execute(
@@ -4231,16 +3935,8 @@ impl NativeDesktop {
         state
             .autosave
             .mark_dirty(mutation.revision.value(), Instant::now());
-        let Some(ports) = state.project.ports().cloned() else {
-            self.status = Some("This project session has no persistence port.".into());
-            return Task::none();
-        };
-        let Some(adapter) = state.project.editor_adapter().cloned() else {
-            self.status = Some("This project session has no editor adapter.".into());
-            return Task::none();
-        };
         self.status = mutation.presentation_error.or(mutation.feedback);
-        Self::persist_projection_task(window, ports, adapter, mutation.session, mutation.revision)
+        Task::none()
     }
 
     fn editor_effect_tasks(
@@ -4627,25 +4323,12 @@ impl NativeDesktop {
                 }
                 let spellcheck_view = editor_intent_view(&intent);
                 match Self::apply_editor_intent(state, intent, self.appearance) {
-                    Ok(Some((session, revision))) => {
+                    Ok(Some((_session, revision))) => {
                         let Some(workspace) = state.workspace.as_mut() else {
                             return Task::none();
                         };
                         workspace.update(ProjectMessage::MarkDirty(revision.value()));
                         state.autosave.mark_dirty(revision.value(), Instant::now());
-                        let Some(ports) = state.project.ports().cloned() else {
-                            self.status =
-                                Some("This project session has no persistence port.".into());
-                            return Task::none();
-                        };
-                        let Some(adapter) = state.project.editor_adapter().cloned() else {
-                            self.status =
-                                Some("This project session has no editor adapter.".into());
-                            return Task::none();
-                        };
-                        let persistence = Self::persist_projection_task(
-                            window, ports, adapter, session, revision,
-                        );
                         let spellcheck = spellcheck_view
                             .map(|view| Self::spellcheck_task(window, state, view))
                             .transpose()
@@ -4654,7 +4337,7 @@ impl NativeDesktop {
                                 None
                             })
                             .unwrap_or_else(Task::none);
-                        return Task::batch([persistence, spellcheck]);
+                        return spellcheck;
                     }
                     Ok(None) => {}
                     Err(error) => self.status = Some(error),
@@ -4681,6 +4364,23 @@ impl NativeDesktop {
             .pane(document.pane)
             .view();
         Self::mount_editor_load(state, document.pane, view, document.load, appearance)
+    }
+
+    /// Refreshes every retained Canvas sharing `session` after its adapter
+    /// frame has already been advanced. A document shown in split panes now
+    /// redraws in both places without running the expensive layout step twice.
+    fn refresh_shared_editor_hosts(
+        bindings: &BTreeMap<EditorPane, MountedEditorBinding>,
+        session: &parchmint_editor_api::SharedEditorSession,
+    ) -> Result<(), String> {
+        for binding in bindings.values() {
+            if binding.session() == *session {
+                binding
+                    .refresh_after_shared_frame()
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(())
     }
 
     fn restored_workspace_effects(
@@ -4808,12 +4508,16 @@ impl NativeDesktop {
                     binding.detach().map_err(|error| error.to_string())?;
                 }
                 state.mounted_documents.remove(&pane);
-                state.editor_hosts.insert(
-                    pane,
-                    crate::iced_editor_surface::EditorPaneSlot::state(
-                        crate::iced_editor_surface::EditorCenterPaneState::Empty,
-                    ),
-                );
+                if pane == EditorPane::Primary {
+                    state.editor_hosts.insert(
+                        pane,
+                        crate::iced_editor_surface::EditorPaneSlot::state(
+                            crate::iced_editor_surface::EditorCenterPaneState::Empty,
+                        ),
+                    );
+                } else {
+                    state.editor_hosts.remove(pane);
+                }
                 Ok(None)
             }
             EditorRuntimeIntent::SetSearchDecorations {
@@ -4890,6 +4594,7 @@ impl NativeDesktop {
                     return Err("spelling menu has no live word anchor".to_owned());
                 }
                 state.spelling_menu = Some(menu);
+                state.suppress_next_context_menu_dismissal = true;
                 Ok(None)
             }
             EditorRuntimeIntent::RestoreFocus { view } => {
@@ -5190,11 +4895,10 @@ impl NativeDesktop {
         revision: EditorRevision,
     ) -> Task<Message> {
         Task::perform(
-            async move {
-                let projection = adapter
-                    .project(session, revision)
-                    .await
-                    .map_err(|error| error.to_string())?;
+            Self::run_blocking_operation("persist editor projection", move || {
+                let projection =
+                    iced::futures::executor::block_on(adapter.project(session, revision))
+                        .map_err(|error| error.to_string())?;
                 let access = ports.access().map_err(|error| error.to_string())?;
                 access
                     .persistence(|persistence| persistence.persist_editor_projection(projection))
@@ -5204,7 +4908,7 @@ impl NativeDesktop {
                     .snapshot(|query| query.snapshot())
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())
-            },
+            }),
             move |result| Message::EditorProjectionPersisted {
                 window,
                 revision: revision.value(),
@@ -5456,7 +5160,7 @@ impl NativeDesktop {
             })
             .collect::<Vec<_>>();
         issues.sort_by_key(|issue| issue.range.start());
-        let decorations = issues
+        let decorations: Vec<SpellingDecoration> = issues
             .iter()
             .map(|issue| {
                 SpellingDecoration::new(
@@ -5465,16 +5169,29 @@ impl NativeDesktop {
                 )
             })
             .collect();
-        state.spelling_issues.insert(ticket.view, issues);
+        // Spellcheck ranges belong to the shared document session, while the
+        // adapter retains decorations per visible view. Mirror one accepted
+        // result into every pane showing that document so the companion never
+        // displays stale or unrelated underlines.
+        let shared_views = state
+            .editor_bindings
+            .values()
+            .filter(|binding| binding.session() == ticket.editor_session)
+            .map(MountedEditorBinding::view)
+            .collect::<Vec<_>>();
         let Some(workspace) = state.workspace.as_mut() else {
             return Task::none();
         };
-        let effects = workspace
-            .editor_mut()
-            .update(crate::EditorMessage::SetSpellingDecorations {
-                view: ticket.view,
-                decorations,
-            });
+        let mut effects = Vec::new();
+        for view in shared_views {
+            state.spelling_issues.insert(view, issues.clone());
+            effects.extend(workspace.editor_mut().update(
+                crate::EditorMessage::SetSpellingDecorations {
+                    view,
+                    decorations: decorations.clone(),
+                },
+            ));
+        }
         self.status = None;
         Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
     }
@@ -5631,6 +5348,17 @@ impl NativeDesktop {
             let NativeWindow::Project(state) = native else {
                 continue;
             };
+            let due_spellchecks = state
+                .pending_spellchecks
+                .iter()
+                .filter_map(|(view, due)| (*due <= now).then_some(*view))
+                .collect::<Vec<_>>();
+            for view in due_spellchecks {
+                state.pending_spellchecks.remove(&view);
+                if let Ok(task) = Self::spellcheck_task(*window, state, view) {
+                    tasks.push(task);
+                }
+            }
             let Some(workspace) = state.workspace.as_mut() else {
                 continue;
             };
@@ -5640,26 +5368,23 @@ impl NativeDesktop {
             let Some(ports) = state.project.ports().cloned() else {
                 continue;
             };
+            let Some(adapter) = state.project.editor_adapter().cloned() else {
+                continue;
+            };
+            let pane = workspace.editor().focused_pane();
+            let Some(binding) = state.editor_bindings.get(&pane) else {
+                continue;
+            };
+            let session = binding.session();
+            let Ok(revision) = adapter.revision(session.clone()) else {
+                continue;
+            };
             let through_revision = state.autosave.through_revision;
             state.autosave.save_in_flight = true;
             workspace.update(ProjectMessage::StartSave(through_revision));
             let window = *window;
-            tasks.push(Task::perform(
-                Self::run_blocking_operation("autosave project", move || {
-                    let access = ports.access().map_err(|error| error.to_string())?;
-                    let (handle, _) = access
-                        .persistence(|persistence| {
-                            persistence.request_save(ProjectSaveKind::Autosave)
-                        })
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())?;
-                    let saved = access
-                        .persistence(|persistence| persistence.await_save(handle))
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())?;
-                    Ok(saved.written.project_revision.value())
-                }),
-                move |result| Message::SaveFinished { window, result },
+            tasks.push(Self::persist_projection_task(
+                window, ports, adapter, session, revision,
             ));
         }
         Task::batch(tasks)
@@ -5682,7 +5407,7 @@ impl NativeDesktop {
                 .expect("capture state was checked above")
                 .window = Some(id);
         }
-        Task::batch([task.map(Message::WindowOpened), self.refresh_menu(id)])
+        task.map(Message::WindowOpened)
     }
 
     fn mount_initial_editor(
@@ -5785,6 +5510,7 @@ impl NativeDesktop {
         state.editor_hosts = EditorHostSlots::default();
         state.mounted_documents.clear();
         state.spellcheck_generation.clear();
+        state.pending_spellchecks.clear();
         state.spelling_issues.clear();
         state.pending_spelling_menu = None;
         state.spelling_menu = None;
@@ -5854,7 +5580,7 @@ impl NativeDesktop {
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        Task::batch([Task::batch(spellcheck_tasks), self.refresh_menu(window)])
+        Task::batch(spellcheck_tasks)
     }
 
     fn open_project_window(&mut self, project: NativeProjectWindow) -> Task<Message> {
@@ -5925,9 +5651,11 @@ impl NativeDesktop {
                 autosave: AutosaveState::default(),
                 next_spellcheck_generation: 0,
                 spellcheck_generation: BTreeMap::new(),
+                pending_spellchecks: BTreeMap::new(),
                 spelling_issues: BTreeMap::new(),
                 pending_spelling_menu: None,
                 spelling_menu: None,
+                suppress_next_context_menu_dismissal: false,
                 refresh_spellcheck_view: None,
                 modifiers: keyboard::Modifiers::default(),
                 resizing: None,
@@ -5974,7 +5702,6 @@ impl NativeDesktop {
         };
         Task::batch([
             task.map(Message::WindowOpened),
-            self.refresh_menu(id),
             workspace_load,
             recovery_task,
         ])
@@ -6023,6 +5750,17 @@ impl NativeDesktop {
                 Task::none()
             }
         }
+    }
+
+    fn route_recent_project_open(&mut self, project: PathBuf) -> Task<Message> {
+        if !project.exists() {
+            self.status = Some(format!(
+                "The project at {} is no longer available. It may have been moved or deleted.",
+                project.display()
+            ));
+            return Task::none();
+        }
+        self.route_project_open(project)
     }
 
     fn route_project_open(&mut self, project: PathBuf) -> Task<Message> {
@@ -6106,7 +5844,15 @@ impl NativeDesktop {
                     window.project.display().to_string(),
                     "Opened just now",
                 );
-                self.open_project_window(window)
+                let open_project = self.open_project_window(window);
+                let close_launcher = self
+                    .windows
+                    .iter()
+                    .find_map(|(id, window)| {
+                        matches!(window, NativeWindow::Launcher).then_some(*id)
+                    })
+                    .map_or_else(Task::none, |id| self.finish_close(id));
+                Task::batch([open_project, close_launcher])
             }
             Ok(NativeProjectOpenResult::Focused(capability)) => {
                 self.status = None;
@@ -6137,10 +5883,22 @@ impl NativeDesktop {
             return Task::none();
         }
         let project = state.project.project.clone();
+        let is_clean = state.autosave.is_clean();
         let callbacks = Arc::clone(&self.callbacks);
         let persist = Self::workspace_persist_task(id, state);
+        self.status = Some(if is_clean {
+            "Closing project…".to_owned()
+        } else {
+            "Saving project before closing…".to_owned()
+        });
         let close = Task::perform(
-            Self::run_blocking_operation("close project", move || callbacks.close_project(project)),
+            Self::run_blocking_operation("close project", move || {
+                if is_clean {
+                    callbacks.close_clean_project(project)
+                } else {
+                    callbacks.close_project(project)
+                }
+            }),
             move |result| Message::ProjectCloseFinished { window: id, result },
         );
         Task::batch([persist, close])
@@ -6149,40 +5907,24 @@ impl NativeDesktop {
     fn finish_close(&mut self, id: window::Id) -> Task<Message> {
         self.closing_windows.remove(&id);
         let removed = self.windows.remove(&id);
-        let capability = match removed {
+        match removed {
             Some(NativeWindow::Project(state)) => {
                 self.project_windows.remove(&state.project.window);
-                self.menu_bindings.remove(&state.project.window);
-                self.in_window_menus.remove(&state.project.window);
                 self.close_failures.remove(&state.project.window);
                 self.callbacks
                     .project_window_destroyed(state.project.window);
-                Some(state.project.window)
             }
             Some(NativeWindow::Launcher) => {
-                self.menu_bindings.remove(&LAUNCHER_CAPABILITY);
-                self.in_window_menus.remove(&LAUNCHER_CAPABILITY);
                 self.callbacks.project_window_destroyed(LAUNCHER_CAPABILITY);
-                Some(LAUNCHER_CAPABILITY)
             }
-            None => None,
+            None => {}
         };
-        if self
-            .open_in_window_menu
-            .as_ref()
-            .is_some_and(|(open, _)| Some(*open) == capability)
-        {
-            self.open_in_window_menu = None;
-        }
         let close = if self.windows.is_empty() {
             Task::batch([window::close(id), iced::exit()])
         } else {
             window::close(id)
         };
-        match capability {
-            Some(capability) => self.detach_menu(id, capability).chain(close),
-            None => close,
-        }
+        close
     }
 }
 
@@ -6194,7 +5936,6 @@ fn restored_document_effect(pane: EditorPane, document: String) -> ProjectEffect
 }
 
 struct ClipboardMutation {
-    session: SharedEditorSession,
     revision: EditorRevision,
     active_style: parchmint_domain::StyleId,
     presentation_error: Option<String>,
@@ -6268,7 +6009,6 @@ fn apply_completed_cut(
         .err()
         .map(|error| error.to_string());
     Ok(Some(ClipboardMutation {
-        session: request.editor_session.clone(),
         revision,
         active_style: adapter
             .active_style(request.editor_session.clone(), request.view)
@@ -6323,7 +6063,6 @@ fn apply_completed_paste(
         return Ok(None);
     }
     Ok(Some(ClipboardMutation {
-        session: request.editor_session.clone(),
         revision,
         active_style: adapter
             .active_style(request.editor_session.clone(), request.view)
@@ -6548,89 +6287,123 @@ fn launcher_surface(
     opening_project: bool,
     status: Option<String>,
 ) -> Element<'static, Message> {
-    let create_action = if creating_project {
-        launcher_button("New Project", ButtonKind::Primary)
-            .width(144)
-            .height(36)
-    } else {
-        launcher_button("Create Project", ButtonKind::Primary)
-            .width(144)
-            .height(36)
-            .on_press(Message::ShowNewProject)
-    };
-    let mut content = column![
-        launcher_text(
-            "ParchMint",
-            LAUNCHER_WORDMARK_SIZE,
-            LauncherTextKind::Wordmark
-        ),
-        launcher_text(
-            "Recent projects",
-            LAUNCHER_TITLE_SIZE,
-            LauncherTextKind::Primary
-        ),
-        launcher_text(
-            "Open a recent project, create a new one, or choose another project folder.",
-            LAUNCHER_SUBTITLE_SIZE,
-            LauncherTextKind::Secondary,
-        ),
-        row![
-            create_action,
-            if opening_project {
-                launcher_button("Opening Project…", ButtonKind::Secondary)
-                    .width(128)
-                    .height(36)
-            } else {
-                launcher_button("Open Project", ButtonKind::Secondary)
-                    .width(128)
-                    .height(36)
-                    .on_press(Message::ChooseOpenProject)
-            }
-        ]
-        .spacing(12)
-        .height(f32::from(LAUNCHER_ACTION_ROW_HEIGHT)),
-    ]
+    let mut content = column![launcher_text(
+        "ParchMint",
+        LAUNCHER_WORDMARK_SIZE,
+        LauncherTextKind::Wordmark
+    )]
     .spacing(f32::from(LAUNCHER_RHYTHM));
-    if creating_project {
-        content = content.push(
-            column![
-                text_input("Project title", new_project.title())
-                    .on_input(Message::NewProjectTitleChanged)
-                    .padding(10),
-                text_input("Project destination", new_project.destination())
-                    .on_input(Message::NewProjectDestinationChanged)
-                    .padding(10),
-                button("Choose Destination…").on_press(Message::ChooseNewProjectDestination),
-                text_input(
-                    "Author (optional)",
-                    new_project.author().unwrap_or_default()
-                )
-                .on_input(Message::NewProjectAuthorChanged)
-                .padding(10),
-                button("Create and Open").on_press(Message::CreateProject),
-            ]
-            .spacing(10),
-        );
-    }
-    if recent_projects.is_empty() {
-        content = content.push(launcher_text(
-            "No recent projects yet.",
-            LAUNCHER_SUBTITLE_SIZE,
-            LauncherTextKind::Secondary,
-        ));
-    } else {
-        let cards = recent_projects.iter().fold(
-            column!().spacing(f32::from(LAUNCHER_PROJECT_CARD_GAP)),
-            |cards, project| cards.push(launcher_project_card(project)),
-        );
-        content = content.push(cards);
-    }
     if let Some(status) = status {
         content = content.push(launcher_text(
             status,
             LAUNCHER_SUBTITLE_SIZE,
             LauncherTextKind::Secondary,
         ));
+    }
+    if creating_project {
+        let choose_destination = if opening_project {
+            launcher_button("Choosing Location…", ButtonKind::Secondary)
+                .height(36)
+                .width(184)
+        } else {
+            launcher_button("Choose Destination…", ButtonKind::Secondary)
+                .height(36)
+                .width(184)
+                .on_press(Message::ChooseNewProjectDestination)
+        };
+        let create = if opening_project {
+            launcher_button("Creating Project…", ButtonKind::Primary)
+                .height(36)
+                .width(160)
+        } else {
+            launcher_button("Create and Open", ButtonKind::Primary)
+                .height(36)
+                .width(160)
+                .on_press(Message::CreateProject)
+        };
+        content = content.push(column![
+            launcher_text(
+                "Create project",
+                LAUNCHER_TITLE_SIZE,
+                LauncherTextKind::Primary
+            ),
+            launcher_text(
+                "Set a project name, location, and optional author.",
+                LAUNCHER_SUBTITLE_SIZE,
+                LauncherTextKind::Secondary,
+            ),
+            column![
+                text_input("Project title", new_project.title())
+                    .on_input(Message::NewProjectTitleChanged)
+                    .padding(10)
+                    .width(520),
+                text_input("Project destination", new_project.destination())
+                    .on_input(Message::NewProjectDestinationChanged)
+                    .padding(10)
+                    .width(520),
+                choose_destination,
+                text_input(
+                    "Author (optional)",
+                    new_project.author().unwrap_or_default()
+                )
+                .on_input(Message::NewProjectAuthorChanged)
+                .padding(10)
+                .width(520),
+                row![
+                    launcher_button("Cancel", ButtonKind::Secondary)
+                        .height(36)
+                        .width(100)
+                        .on_press_maybe((!opening_project).then_some(Message::CancelNewProject)),
+                    create,
+                ]
+                .spacing(12),
+            ]
+            .spacing(10),
+        ]);
+    } else {
+        content = content.push(launcher_text(
+            "Recent projects",
+            LAUNCHER_TITLE_SIZE,
+            LauncherTextKind::Primary,
+        ));
+        content = content.push(launcher_text(
+            "Open a recent project, create a new one, or choose another project folder.",
+            LAUNCHER_SUBTITLE_SIZE,
+            LauncherTextKind::Secondary,
+        ));
+        content = content.push(
+            row![
+                launcher_button("Create Project", ButtonKind::Primary)
+                    .width(144)
+                    .height(36)
+                    .on_press(Message::ShowNewProject),
+                if opening_project {
+                    launcher_button("Opening Project…", ButtonKind::Secondary)
+                        .width(128)
+                        .height(36)
+                } else {
+                    launcher_button("Open Project", ButtonKind::Secondary)
+                        .width(128)
+                        .height(36)
+                        .on_press(Message::ChooseOpenProject)
+                }
+            ]
+            .spacing(12)
+            .height(f32::from(LAUNCHER_ACTION_ROW_HEIGHT)),
+        );
+        if recent_projects.is_empty() {
+            content = content.push(launcher_text(
+                "No recent projects yet.",
+                LAUNCHER_SUBTITLE_SIZE,
+                LauncherTextKind::Secondary,
+            ));
+        } else {
+            let cards = recent_projects.iter().fold(
+                column!().spacing(f32::from(LAUNCHER_PROJECT_CARD_GAP)),
+                |cards, project| cards.push(launcher_project_card(project)),
+            );
+            content = content.push(cards);
+        }
     }
     container(content)
         .padding(iced::Padding {
@@ -6759,7 +6532,7 @@ fn launcher_project_card(project: &RecentProject) -> iced::widget::Button<'stati
     ])
     .width(f32::from(LAUNCHER_PROJECT_CARD_WIDTH))
     .height(f32::from(LAUNCHER_PROJECT_CARD_HEIGHT))
-    .on_press(Message::OpenProject(PathBuf::from(path)))
+    .on_press(Message::OpenRecentProject(PathBuf::from(path)))
     .style(move |theme, status| {
         components::button_style(
             launcher_theme(theme),
@@ -7070,6 +6843,8 @@ mod tests {
     use std::sync::Mutex;
 
     use iced::futures::executor::block_on;
+    use iced::{Settings, Size};
+    use iced_test::Simulator;
 
     use super::*;
 
@@ -7149,6 +6924,23 @@ mod tests {
             ),
             "/Projects/a-recent-project-with-a-deli…"
         );
+    }
+
+    #[test]
+    fn project_creation_view_keeps_submit_and_cancel_actions_available() {
+        let mut draft = NewProjectDraft::default();
+        draft.set_title("Northbound");
+        draft.set_destination("/Projects/Northbound");
+        draft.set_author(Some("A. Writer".to_owned()));
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            launcher_surface(&[], &draft, true, false, None),
+        );
+
+        assert!(simulator.find("Choose Destination…").is_ok());
+        assert!(simulator.find("Cancel").is_ok());
+        assert!(simulator.find("Create and Open").is_ok());
     }
 
     #[test]
@@ -7300,37 +7092,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_menu_preserves_submenu_order_labels_and_enabled_state() {
-        let menu = semantic_desktop_menu(true, false, true);
-        let [
-            SemanticMenuEntry::Submenu {
-                label: file_label,
-                entries: file_entries,
-            },
-            SemanticMenuEntry::Submenu {
-                label: edit_label,
-                entries: edit_entries,
-            },
-        ] = menu.entries()
-        else {
-            panic!("desktop menu must retain File and Edit submenus");
-        };
-
-        assert_eq!(file_label, "File");
-        assert_eq!(edit_label, "Edit");
-        let SemanticMenuEntry::Command(save) = &file_entries[3] else {
-            panic!("save command order changed");
-        };
-        assert_eq!(save.id(), "file.save");
-        assert!(!save.enabled());
-        let SemanticMenuEntry::Command(copy) = &edit_entries[3] else {
-            panic!("copy command order changed");
-        };
-        assert_eq!(copy.id(), "edit.copy");
-        assert!(copy.enabled());
-    }
-
-    #[test]
     fn keyboard_accelerators_use_the_platform_command_modifier() {
         assert_eq!(
             keyboard_accelerator("n", keyboard::Modifiers::COMMAND),
@@ -7357,6 +7118,27 @@ mod tests {
     }
 
     #[test]
+    fn spellcheck_waits_for_a_completed_word_boundary() {
+        use parchmint_editor_iced::{MountedEditorKeyCommand, MountedEditorMessage};
+
+        assert!(!completes_spellcheck_word(
+            &MountedEditorMessage::InsertText("unfinished".to_owned(),)
+        ));
+        assert!(completes_spellcheck_word(
+            &MountedEditorMessage::InsertText("finished ".to_owned(),)
+        ));
+        assert!(completes_spellcheck_word(
+            &MountedEditorMessage::InsertText("finished,".to_owned(),)
+        ));
+        assert!(completes_spellcheck_word(
+            &MountedEditorMessage::KeyCommand(MountedEditorKeyCommand::SplitBlock,)
+        ));
+        assert!(!completes_spellcheck_word(
+            &MountedEditorMessage::KeyCommand(MountedEditorKeyCommand::Backspace,)
+        ));
+    }
+
+    #[test]
     fn blocking_callback_helper_leaves_the_event_loop_thread() {
         let event_loop_thread = std::thread::current().id();
         let worker_thread = block_on(NativeDesktop::run_blocking_operation(
@@ -7369,17 +7151,21 @@ mod tests {
     }
 
     #[test]
-    fn autosave_waits_for_idle_but_caps_continuous_input() {
+    fn autosave_waits_a_minute_for_idle_and_caps_continuous_input() {
         let start = Instant::now();
         let mut autosave = AutosaveState::default();
         autosave.mark_dirty(1, start);
 
-        assert!(!autosave.should_save(start + Duration::from_millis(1_499)));
-        assert!(autosave.should_save(start + Duration::from_millis(1_500)));
+        assert!(!autosave.should_save(start + Duration::from_secs(59)));
+        assert!(autosave.should_save(start + Duration::from_secs(60)));
 
-        autosave.save_in_flight = false;
-        autosave.mark_dirty(2, start + Duration::from_secs(29));
-        assert!(autosave.should_save(start + Duration::from_secs(30)));
+        autosave.save_in_flight = true;
+        autosave.finish(1);
+        assert!(!autosave.should_save(start + Duration::from_secs(3_600)));
+
+        autosave.mark_dirty(2, start + Duration::from_secs(299));
+        assert!(!autosave.should_save(start + Duration::from_secs(358)));
+        assert!(autosave.should_save(start + Duration::from_secs(359)));
         assert_eq!(autosave.through_revision, 2);
     }
 
@@ -7721,96 +7507,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_menu_binding_cannot_activate_a_live_project_window() {
-        let project = NativeProjectWindow {
-            project: PathBuf::from("/tmp/menu.parchmint"),
-            window: WindowCapability::new(44, 3),
-            session: parchmint_ui_api::ProjectSessionRegistry::new().register(44),
-            project_ui: None,
-            editor: None,
-        };
-        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
-        let (mut desktop, _tasks) = NativeDesktop::boot(NativeDesktopStartup {
-            appearance: ResolvedAppearance::Light,
-            recent_projects: Vec::new(),
-            projects: vec![project.clone()],
-            locked_project: None,
-            capture: None,
-            callbacks,
-        });
-        let _ = desktop.update(Message::MenuInstalled {
-            capability: project.window,
-            result: Ok(9),
-        });
-        let windows_before = desktop.windows.len();
-
-        let _ = desktop.update(Message::MenuActivation(MenuActivation {
-            binding: parchmint_platform_api::WindowResult::new(project.window, 8),
-            command_id: "file.close".to_owned(),
-        }));
-
-        assert_eq!(desktop.windows.len(), windows_before);
-        assert_eq!(desktop.menu_bindings.get(&project.window), Some(&9));
-        assert_eq!(
-            desktop.status.as_deref(),
-            Some("Ignored a stale menu activation.")
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn linux_in_window_menu_tracks_rebind_and_routes_through_menu_activation() {
-        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
-        let (mut desktop, _tasks) = NativeDesktop::boot(NativeDesktopStartup {
-            appearance: ResolvedAppearance::Light,
-            recent_projects: Vec::new(),
-            projects: Vec::new(),
-            locked_project: None,
-            capture: None,
-            callbacks,
-        });
-
-        let _ = desktop.update(Message::MenuInstalled {
-            capability: LAUNCHER_CAPABILITY,
-            result: Ok(7),
-        });
-        let _ = desktop.update(Message::MenuAttached {
-            capability: LAUNCHER_CAPABILITY,
-            binding: 7,
-            result: Ok(NativeMenuAttachment::InWindow),
-        });
-        assert_eq!(desktop.in_window_menus.get(&LAUNCHER_CAPABILITY), Some(&7));
-
-        let _ = desktop.update(Message::ToggleInWindowMenu {
-            capability: LAUNCHER_CAPABILITY,
-            label: "File".to_owned(),
-        });
-        assert_eq!(
-            desktop.open_in_window_menu.as_ref(),
-            Some(&(LAUNCHER_CAPABILITY, "File".to_owned()))
-        );
-
-        let _ = desktop.update(Message::InWindowMenuActivation(MenuActivation {
-            binding: WindowResult::new(LAUNCHER_CAPABILITY, 7),
-            command_id: "file.new".to_owned(),
-        }));
-        assert!(desktop.creating_project);
-        assert!(desktop.open_in_window_menu.is_none());
-
-        let _ = desktop.update(Message::MenuInstalled {
-            capability: LAUNCHER_CAPABILITY,
-            result: Ok(8),
-        });
-        let _ = desktop.update(Message::MenuAttached {
-            capability: LAUNCHER_CAPABILITY,
-            binding: 7,
-            result: Ok(NativeMenuAttachment::InWindow),
-        });
-        assert_eq!(desktop.menu_bindings.get(&LAUNCHER_CAPABILITY), Some(&8));
-        assert_eq!(desktop.in_window_menus.get(&LAUNCHER_CAPABILITY), None);
-    }
-
-    #[test]
     fn launcher_project_open_uses_the_desktop_callback_and_adds_the_native_window() {
         let project = NativeProjectWindow {
             project: PathBuf::from("/tmp/routed.parchmint"),
@@ -7839,9 +7535,54 @@ mod tests {
         });
 
         assert!(desktop.project_windows.contains_key(&project.window));
-        assert_eq!(desktop.windows.len(), 2);
+        assert_eq!(desktop.windows.len(), 1);
+        assert!(
+            desktop
+                .windows
+                .values()
+                .all(|window| matches!(window, NativeWindow::Project(_)))
+        );
         assert!(desktop.status.is_none());
         assert!(!desktop.opening_project);
+    }
+
+    #[test]
+    fn missing_recent_project_shows_an_error_without_starting_an_open_operation() {
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let missing = std::env::temp_dir().join(format!(
+            "parchmint-missing-recent-project-{}",
+            std::process::id()
+        ));
+        assert!(!missing.exists());
+        let expected = format!(
+            "The project at {} is no longer available. It may have been moved or deleted.",
+            missing.display()
+        );
+
+        let _task = desktop.update(Message::OpenRecentProject(missing.clone()));
+
+        assert!(!desktop.opening_project);
+        assert_eq!(desktop.status.as_deref(), Some(expected.as_str()));
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            launcher_surface(
+                &[],
+                desktop.launcher.new_project(),
+                false,
+                false,
+                Some(expected.clone()),
+            ),
+        );
+        assert!(simulator.find(expected.as_str()).is_ok());
     }
 
     #[test]

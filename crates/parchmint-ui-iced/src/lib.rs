@@ -19,6 +19,8 @@ mod icons;
 mod native;
 mod project_runtime;
 mod project_workspace;
+mod right_click;
+mod stationary_tooltip;
 mod visual_verification;
 
 pub use editor_workspace::*;
@@ -651,7 +653,11 @@ impl Shell {
             launcher: LauncherState::default(),
             destination: RibbonDestination::Editor,
             global_search_open: false,
-            expanded_inspector_sections: BTreeSet::new(),
+            expanded_inspector_sections: BTreeSet::from([
+                InspectorSection::Synopsis,
+                InspectorSection::Metadata,
+                InspectorSection::Comments,
+            ]),
             inspector_has_document_context: false,
             layout: ShellLayout::for_window(
                 ShellLayout::MIN_WINDOW_SIZE.0,

@@ -12,7 +12,7 @@ const TAB_MIN_WIDTH: f32 = 64.0;
 const TAB_CLOSE_WIDTH: f32 = 24.0;
 const TAB_TITLE_INSET: f32 = 16.0;
 const APPROXIMATE_TITLE_SCALAR_WIDTH: f32 = 8.0;
-const SPELLING_MENU_WIDTH: f32 = 224.0;
+const SPELLING_MENU_WIDTH: f32 = 180.0;
 const SPELLING_MENU_MIN_HEIGHT: f32 = 128.0;
 
 /// The two editor hosts available in the workspace.
@@ -528,6 +528,7 @@ pub struct SpellingMenuRequest {
     word: String,
     word_bounds: Rect,
     pane_bounds: Rect,
+    invocation_point: Option<Point>,
     suggestions: Vec<String>,
     in_project_dictionary: bool,
     in_global_dictionary: bool,
@@ -546,6 +547,7 @@ impl SpellingMenuRequest {
             word: word.into(),
             word_bounds,
             pane_bounds,
+            invocation_point: None,
             suggestions: Vec::new(),
             in_project_dictionary: false,
             in_global_dictionary: false,
@@ -570,6 +572,13 @@ impl SpellingMenuRequest {
 
     pub const fn with_spelling_actions(mut self, include: bool) -> Self {
         self.include_spelling_actions = include;
+        self
+    }
+
+    /// Anchors the menu to the exact secondary-button hit rather than the
+    /// center of the selected word.
+    pub const fn with_invocation_point(mut self, point: Point) -> Self {
+        self.invocation_point = Some(point);
         self
     }
 }
@@ -605,21 +614,21 @@ pub struct SpellingMenu {
 
 impl SpellingMenu {
     fn layout(request: SpellingMenuRequest) -> Self {
-        let invocation_point = request.word_bounds.center();
+        let invocation_point = request
+            .invocation_point
+            .unwrap_or_else(|| request.word_bounds.center());
         let width = SPELLING_MENU_WIDTH.min(request.pane_bounds.width.max(0.0));
         let requested_height = SPELLING_MENU_MIN_HEIGHT
             + request.suggestions.len().saturating_sub(1) as f32 * TAB_HEIGHT;
         let height = requested_height.min(request.pane_bounds.height.max(0.0));
-        let preferred_x = invocation_point.x - width / 2.0;
+        let preferred_x = if invocation_point.x + width <= request.pane_bounds.right() {
+            invocation_point.x
+        } else {
+            invocation_point.x - width
+        };
         let maximum_x = (request.pane_bounds.right() - width).max(request.pane_bounds.left());
         let x = preferred_x.clamp(request.pane_bounds.left(), maximum_x);
-        let below = request.word_bounds.bottom();
-        let above = request.word_bounds.top() - height;
-        let preferred_y = if below + height <= request.pane_bounds.bottom() {
-            below
-        } else {
-            above
-        };
+        let preferred_y = invocation_point.y;
         let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
         let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
         let mut actions = vec![SpellingMenuAction::AddComment];
@@ -3002,6 +3011,38 @@ mod tests {
                 SpellingMenuAction::Ignore,
             ]
         );
+    }
+
+    #[test]
+    fn spelling_menu_aligns_to_the_secondary_click_and_flips_at_the_right_edge() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let request = SpellingMenuRequest::new(
+            EditorPane::Primary,
+            "teh",
+            Rect::new(100.0, 100.0, 24.0, 18.0),
+            Rect::new(0.0, 0.0, 500.0, 400.0),
+        )
+        .with_invocation_point(Point::new(140.0, 120.0));
+        let effects = workspace.update(EditorMessage::OpenSpellingMenu(request));
+        let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
+            panic!("expected the spelling menu")
+        };
+        assert_eq!(menu.bounds(), Rect::new(140.0, 120.0, 180.0, 128.0));
+
+        let request = SpellingMenuRequest::new(
+            EditorPane::Primary,
+            "teh",
+            Rect::new(100.0, 100.0, 24.0, 18.0),
+            Rect::new(0.0, 0.0, 500.0, 400.0),
+        )
+        .with_invocation_point(Point::new(420.0, 140.0));
+        let effects = workspace.update(EditorMessage::OpenSpellingMenu(request));
+        let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
+            panic!("expected the spelling menu")
+        };
+
+        assert_eq!(menu.invocation_point(), Point::new(420.0, 140.0));
+        assert_eq!(menu.bounds(), Rect::new(240.0, 140.0, 180.0, 128.0));
     }
 
     #[test]
