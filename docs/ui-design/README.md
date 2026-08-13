@@ -12,23 +12,23 @@ and interaction presentation where those authorities do not conflict.
 Shared rules:
 
 - [Foundations](foundations.md)
-- [Workspace shell](workspace-shell.md)
 - [Platform conventions](platform-conventions.md)
 - [Shared interaction patterns](shared-interaction-patterns.md)
-- [Empty, loading, error, and recovery states](empty-loading-error-recovery.md)
 
-Feature rules:
+Surfaces:
 
-- [Launcher and project creation](launcher-and-project-creation.md)
-- [Editor and tabs](editor-and-tabs.md)
-- [Explorer, Inspector, and comments](explorer-inspector-and-comments.md)
-- [Cards](cards.md)
-- [Search and replace](search-and-replace.md)
-- [History and Recently Deleted](history-and-recently-deleted.md)
-- [Settings and appearance](settings-and-appearance.md)
-- [Spellcheck](spellcheck.md)
-- [Word counts](word-counts.md)
-- [Export and save states](export-and-save-states.md)
+- [Workspace shell](surfaces/workspace-shell.md)
+- [Empty, loading, error, and recovery states](surfaces/empty-loading-error-recovery.md)
+- [Launcher and project creation](surfaces/launcher-and-project-creation.md)
+- [Editor and tabs](surfaces/editor-and-tabs.md)
+- [Explorer, Inspector, and comments](surfaces/explorer-inspector-and-comments.md)
+- [Cards](surfaces/cards.md)
+- [Search and replace](surfaces/search-and-replace.md)
+- [History and Recently Deleted](surfaces/history-and-recently-deleted.md)
+- [Settings and appearance](surfaces/settings-and-appearance.md)
+- [Spellcheck](surfaces/spellcheck.md)
+- [Word counts](surfaces/word-counts.md)
+- [Export and save states](surfaces/export-and-save-states.md)
 
 The [screen catalog](screen-catalog.md) contains stable component IDs, screen IDs, fixtures, and Penpot mappings. The native source is [parchmint-ui.penpot](parchmint-ui.penpot).
 

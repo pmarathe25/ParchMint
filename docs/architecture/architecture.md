@@ -55,82 +55,82 @@ one another in the workspace.
 
 ### Core writing model
 
-- [`parchmint-domain`](crates/parchmint-domain.md) defines projects, documents,
+- [`parchmint-domain`](../../crates/parchmint-domain/README.md) defines projects, documents,
   metadata, styles, comments, and commands.
-- [`parchmint-application`](crates/parchmint-application.md) runs user actions
+- [`parchmint-application`](../../crates/parchmint-application/README.md) runs user actions
   and coordinates the other crates.
-- [`parchmint-contracts`](crates/parchmint-contracts.md) defines durable JSON
+- [`parchmint-contracts`](../../crates/parchmint-contracts/README.md) defines durable JSON
   schemas for annotation sidecars, recovery records, and CLI machine output.
 
 ### Project files
 
-- [`parchmint-project-format`](crates/parchmint-project-format.md) converts
+- [`parchmint-project-format`](../../crates/parchmint-project-format/README.md) converts
   project values to and from deterministic files.
-- [`parchmint-project-repository`](crates/parchmint-project-repository.md)
+- [`parchmint-project-repository`](../../crates/parchmint-project-repository/README.md)
   defines how the application opens and reads a project.
-  - [`parchmint-project-fs`](crates/parchmint-project-fs.md) implements that
+  - [`parchmint-project-fs`](../../crates/parchmint-project-fs/README.md) implements that
     contract for a normal directory and replaces files safely.
-- [`parchmint-save`](crates/parchmint-save.md) turns an in-memory snapshot into
+- [`parchmint-save`](../../crates/parchmint-save/README.md) turns an in-memory snapshot into
   one completed save and History checkpoint.
-- [`parchmint-recovery-api`](crates/parchmint-recovery-api.md) defines crash
+- [`parchmint-recovery-api`](../../crates/parchmint-recovery-api/README.md) defines crash
   recovery storage.
-  - [`parchmint-recovery-fs`](crates/parchmint-recovery-fs.md) stores recovery
+  - [`parchmint-recovery-fs`](../../crates/parchmint-recovery-fs/README.md) stores recovery
     records on disk.
 
 ### Project services
 
-- [`parchmint-history-api`](crates/parchmint-history-api.md) defines complete
+- [`parchmint-history-api`](../../crates/parchmint-history-api/README.md) defines complete
   project checkpoints.
-  - [`parchmint-history-git2`](crates/parchmint-history-git2.md) stores
+  - [`parchmint-history-git2`](../../crates/parchmint-history-git2/README.md) stores
     checkpoints with libgit2.
-- [`parchmint-search-api`](crates/parchmint-search-api.md) defines project-wide
+- [`parchmint-search-api`](../../crates/parchmint-search-api/README.md) defines project-wide
   search.
-  - [`parchmint-search-sqlite`](crates/parchmint-search-sqlite.md) stores the
+  - [`parchmint-search-sqlite`](../../crates/parchmint-search-sqlite/README.md) stores the
     search index in SQLite FTS5. ParchMint rebuilds this database from project
     files.
-- [`parchmint-export-api`](crates/parchmint-export-api.md) defines whole-
+- [`parchmint-export-api`](../../crates/parchmint-export-api/README.md) defines whole-
   manuscript export.
-  - [`parchmint-export-html`](crates/parchmint-export-html.md) creates the HTML
+  - [`parchmint-export-html`](../../crates/parchmint-export-html/README.md) creates the HTML
     export.
-- [`parchmint-spellcheck-api`](crates/parchmint-spellcheck-api.md) defines
+- [`parchmint-spellcheck-api`](../../crates/parchmint-spellcheck-api/README.md) defines
   offline en-US spellcheck.
-  - [`parchmint-spellcheck-en-us`](crates/parchmint-spellcheck-en-us.md)
+  - [`parchmint-spellcheck-en-us`](../../crates/parchmint-spellcheck-en-us/README.md)
     implements that contract with a bundled offline dictionary and a private
     spelling engine.
 
 ### Desktop application
 
-- [`parchmint-desktop`](crates/parchmint-desktop.md) starts the process and
+- [`parchmint-desktop`](../../crates/parchmint-desktop/README.md) starts the process and
   connects the crates.
-- [`parchmint-ui-api`](crates/parchmint-ui-api.md) defines the contract for a
+- [`parchmint-ui-api`](../../crates/parchmint-ui-api/README.md) defines the contract for a
   desktop UI.
-  - [`parchmint-ui-iced`](crates/parchmint-ui-iced.md) implements the desktop
+  - [`parchmint-ui-iced`](../../crates/parchmint-ui-iced/README.md) implements the desktop
     UI and owns the `iced` event loop and windows.
-- [`parchmint-editor-api`](crates/parchmint-editor-api.md) defines what a
+- [`parchmint-editor-api`](../../crates/parchmint-editor-api/README.md) defines what a
   rich-text editor provides.
-  - [`parchmint-editor-iced`](crates/parchmint-editor-iced.md) implements that
+  - [`parchmint-editor-iced`](../../crates/parchmint-editor-iced/README.md) implements that
     contract as a custom virtualized `iced` widget.
-- [`parchmint-editor-core`](crates/parchmint-editor-core.md) supplies the
+- [`parchmint-editor-core`](../../crates/parchmint-editor-core/README.md) supplies the
   framework-independent shared session used by the `iced` editor. It owns
   editor transactions, comments, undo, revisions, and canonical projection.
-- [`parchmint-platform-api`](crates/parchmint-platform-api.md) defines the
+- [`parchmint-platform-api`](../../crates/parchmint-platform-api/README.md) defines the
   operating-system features ParchMint uses.
-  - [`parchmint-platform-native`](crates/parchmint-platform-native.md)
+  - [`parchmint-platform-native`](../../crates/parchmint-platform-native/README.md)
     implements those features on Windows, macOS, and Linux.
-- [`parchmint-design-system`](crates/parchmint-design-system.md) turns the
+- [`parchmint-design-system`](../../crates/parchmint-design-system/README.md) turns the
   Penpot design source into typed UI tokens and icons.
-- [`parchmint-preferences`](crates/parchmint-preferences.md) stores application
+- [`parchmint-preferences`](../../crates/parchmint-preferences/README.md) stores application
   preferences and sends appearance changes to every window.
-- [`parchmint-workspace-state`](crates/parchmint-workspace-state.md) restores
+- [`parchmint-workspace-state`](../../crates/parchmint-workspace-state/README.md) restores
   the tabs, panes, scroll positions, and other workspace state for each project.
 
 ### Tools for development
 
-- [`parchmint-core-cli`](crates/parchmint-core-cli.md) runs the real core
+- [`parchmint-core-cli`](../../crates/parchmint-core-cli/README.md) runs the real core
   without starting the desktop UI.
-- [`parchmint-test-support`](crates/parchmint-test-support.md) provides shared
+- [`parchmint-test-support`](../../tests/parchmint-test-support/README.md) provides shared
   fixtures, controlled tasks, and failure injection.
-- [`parchmint-ui-verification`](crates/parchmint-ui-verification.md) decodes,
+- [`parchmint-ui-verification`](../../tests/parchmint-ui-verification/README.md) decodes,
   compares, and reports framework-neutral PNG visual artifacts.
 
 ## Data and ownership

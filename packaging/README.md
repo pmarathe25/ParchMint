@@ -8,7 +8,7 @@ owners have not approved.
 explicit `missing` input with a reason. The release verifier requires every
 input to be available, binds those artifact paths and signing-input package
 digests to the candidate manifest, and then requires real, hash-bound evidence.
-See `docs/release/README.md` for the release flow.
+See [release.md](release.md) for the release flow.
 
 The package source executable is `target/release/parchmint` on macOS and Linux
 and `target/release/parchmint.exe` on Windows. Build it from the locked source
