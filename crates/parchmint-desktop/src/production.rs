@@ -38,9 +38,7 @@ use parchmint_export_api::{
 use parchmint_export_html::HtmlExporter;
 use parchmint_history_api::{self as history, HistoryStore, ProjectRootCapability as HistoryRoot};
 use parchmint_history_git2::Git2HistoryStore;
-use parchmint_platform_api::{
-    PathDialog, PathDialogKind, SystemAppearanceEventService, WindowCapability,
-};
+use parchmint_platform_api::{PathDialog, PathDialogKind, WindowCapability};
 use parchmint_platform_native::{NativePlatform, iced_adapter::IcedWindowRegistry};
 use parchmint_preferences::{
     AppearanceController, AppearanceMode, AppearanceService, FilePreferenceStore,
@@ -1938,6 +1936,24 @@ impl ProductionProjectSession {
             );
             return Err(injected_failure("save", kind));
         }
+        if !self
+            .project_persistence
+            .has_unsaved_changes()
+            .map_err(|error| {
+                ProjectFilesystemError::failed("inspect final save", error.to_string())
+            })?
+        {
+            self.controls
+                .observe(ProductionObservation::FinalSaveReconciled {
+                    path: self.path.clone(),
+                });
+            self.controls.service_operation(
+                ProductionFaultPoint::FinalSave,
+                "reconcile final save",
+                true,
+            );
+            return Ok(());
+        }
         let (handle, _) = match self
             .project_persistence
             .request_save(PersistenceSaveKind::Final)
@@ -1963,18 +1979,6 @@ impl ProductionProjectSession {
             );
             return Err(ProjectFilesystemError::failed("save", error.to_string()));
         }
-        if let Err(error) = self.save.reconcile_open() {
-            self.controls.service_operation(
-                ProductionFaultPoint::FinalSave,
-                "reconcile final save",
-                false,
-            );
-            return Err(ProjectFilesystemError::failed(
-                "reconcile save",
-                error.to_string(),
-            ));
-        }
-        let _ = self.search.refresh_live();
         self.controls
             .observe(ProductionObservation::FinalSaveReconciled {
                 path: self.path.clone(),
@@ -2501,15 +2505,23 @@ impl ProductionDesktopUi {
                 state.locked_project.clone(),
             )
         };
-        let recent_projects = block_on(self.preferences.load())
-            .map_err(|error| DesktopUiError::new(error.to_string()))?
-            .values
-            .recent_projects;
+        let preferences = block_on(self.preferences.load())
+            .map_err(|error| DesktopUiError::new(error.to_string()))?;
+        let recent_projects = preferences.values.recent_projects;
+        let appearance_mode = capture
+            .as_ref()
+            .map_or(preferences.values.appearance, |capture| {
+                match capture.appearance {
+                    ResolvedAppearance::Light => AppearanceMode::Light,
+                    ResolvedAppearance::Dark => AppearanceMode::Dark,
+                }
+            });
         self.driver
             .run(NativeDesktopStartup {
                 appearance: capture
                     .as_ref()
                     .map_or(appearance, |capture| capture.appearance),
+                appearance_mode,
                 recent_projects,
                 projects,
                 locked_project,
@@ -2641,12 +2653,14 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
     }
 
     fn set_appearance(&self, mode: AppearanceMode) -> Result<ResolvedAppearance, String> {
-        let system = block_on(self.platform.system_appearance.current_appearance())
-            .map(resolved_appearance)
-            .map_err(|error| error.to_string())?;
-        self.appearance
-            .system_appearance_changed(system)
-            .map_err(|error| error.to_string())?;
+        if mode == AppearanceMode::System {
+            let system = block_on(self.platform.system_appearance.current_appearance())
+                .map(resolved_appearance)
+                .map_err(|error| error.to_string())?;
+            self.appearance
+                .system_appearance_changed(system)
+                .map_err(|error| error.to_string())?;
+        }
         let current = block_on(self.preferences.load()).map_err(|error| error.to_string())?;
         block_on(self.appearance.set_mode(current.revision, mode))
             .map(|snapshot| snapshot.appearance)
@@ -2661,10 +2675,6 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
             .system_appearance_changed(appearance)
             .map(|snapshot| snapshot.map(|snapshot| snapshot.appearance))
             .map_err(|error| error.to_string())
-    }
-
-    fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
-        self.platform.system_appearance_events.clone()
     }
 
     fn project_window_created(&self, window: WindowCapability) {
@@ -2714,8 +2724,7 @@ pub(crate) fn assemble_with_controls(
         platform.application_paths.clone(),
         platform.appearance.clone(),
     )
-    .with_menu_activations(platform.menu_activations.clone())
-    .with_system_appearance_events(platform.appearance_events.clone());
+    .with_menu_activations(platform.menu_activations.clone());
     let shared = Arc::new(SharedServices {
         editor,
         spellcheck,

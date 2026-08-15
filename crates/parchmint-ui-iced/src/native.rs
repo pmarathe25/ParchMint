@@ -1,11 +1,10 @@
 //! Native Iced event-loop integration for the desktop executable.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     fs::File,
-    hash::{Hash, Hasher},
     io::BufWriter,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -37,8 +36,7 @@ use parchmint_export_api::{ExportNumbering, ExportProgress, ExportProgressSink, 
 use parchmint_history_api::HistoryCursor;
 use parchmint_platform_api::{
     ClipboardContent, ClipboardFormats, PathDialog, PathDialogKind, SystemAppearance,
-    SystemAppearanceEvent, SystemAppearanceEventService, UntrustedClipboardContent,
-    WindowCapability,
+    UntrustedClipboardContent, WindowCapability,
 };
 use parchmint_preferences::{
     AppearanceMode, RecentProject as PreferenceRecentProject, ResolvedAppearance,
@@ -92,6 +90,7 @@ fn runtime_event(event: Event, status: event::Status, window: window::Id) -> Opt
         event,
         Event::Keyboard(_)
             | Event::Mouse(mouse::Event::ButtonPressed(_))
+            | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
             | Event::Window(window::Event::Resized(_))
     )
     .then_some(Message::RuntimeEvent {
@@ -376,18 +375,13 @@ pub trait NativeDesktopCallbacks: Send + Sync {
         Err("appearance settings are unavailable".to_owned())
     }
 
-    /// Accepts a platform-delivered OS appearance event after the native
-    /// subscription has preserved its source ordering.
+    /// Accepts an operating-system appearance event after the native driver
+    /// has preserved its source ordering.
     fn system_appearance_changed(
         &self,
         _appearance: ResolvedAppearance,
     ) -> Result<Option<ResolvedAppearance>, String> {
         Ok(None)
-    }
-
-    /// Supplies the optional platform event stream to the native driver.
-    fn system_appearance_events(&self) -> Option<Arc<dyn SystemAppearanceEventService>> {
-        None
     }
 
     /// Records the platform capability when this driver creates its native
@@ -402,6 +396,7 @@ pub trait NativeDesktopCallbacks: Send + Sync {
 /// ParchMint-owned values supplied to the native Iced driver.
 pub struct NativeDesktopStartup {
     pub appearance: ResolvedAppearance,
+    pub appearance_mode: AppearanceMode,
     pub recent_projects: Vec<PreferenceRecentProject>,
     pub projects: Vec<NativeProjectWindow>,
     pub locked_project: Option<PathBuf>,
@@ -510,6 +505,9 @@ enum Message {
     DismissContextMenus {
         window: window::Id,
     },
+    CancelUncommittedHierarchyDrag {
+        window: window::Id,
+    },
     WorkspaceLoaded {
         window: window::Id,
         result: Result<Option<WorkspaceSnapshot>, String>,
@@ -541,8 +539,8 @@ enum Message {
     },
     EditorProjectionPersisted {
         window: window::Id,
-        revision: u64,
-        result: Result<ProjectSnapshot, String>,
+        ticket: AutosaveTicket,
+        result: Result<ProjectionRun<AutosaveCompletion>, String>,
     },
     ClipboardWriteFinished {
         window: window::Id,
@@ -555,7 +553,9 @@ enum Message {
         result: Result<UntrustedClipboardContent, String>,
     },
     AutosaveTick(Instant),
-    SystemAppearanceEvent(SystemAppearanceEvent),
+    SystemAppearanceObserved(SystemAppearance),
+    #[cfg(not(target_os = "linux"))]
+    SystemThemeMode(iced::theme::Mode),
     SystemAppearanceChangedFinished {
         generation: u64,
         result: Result<Option<ResolvedAppearance>, String>,
@@ -563,15 +563,17 @@ enum Message {
     SystemAppearanceStreamFailed(String),
     SaveFinished {
         window: window::Id,
+        purpose: SavePurpose,
         result: Result<u64, String>,
     },
     ProjectEffectFinished {
         window: window::Id,
-        history_action: Option<HistoryWorkflowAction>,
+        mutation: Option<ProjectMutationTicket>,
         result: Result<ProjectEffectCompletion, ProjectRuntimeError>,
     },
     EditorEffectFinished {
         window: window::Id,
+        mutation: Option<OpaqueMutationToken>,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     },
     SpellcheckFinished {
@@ -601,6 +603,7 @@ enum Message {
     },
     HistoryReinitialized {
         window: window::Id,
+        mutation: Option<OpaqueMutationToken>,
         result: Result<String, String>,
     },
     ExportDestinationChosen {
@@ -620,6 +623,7 @@ enum Message {
     ReplacementApplyFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
+        mutation: OpaqueMutationToken,
         result: Box<Result<parchmint_ui_api::ProjectSnapshot, String>>,
     },
     ExportOperationStarted {
@@ -655,12 +659,14 @@ enum Message {
         window: window::Id,
         session: ProjectSessionCapability,
         ticket: ProjectTaskTicket,
+        mutation: Option<OpaqueMutationToken>,
         result: Result<RecoveryAcceptedResult, String>,
     },
     RecoveryDiscarded {
         window: window::Id,
         session: ProjectSessionCapability,
         ticket: ProjectTaskTicket,
+        mutation: Option<OpaqueMutationToken>,
         result: Result<RecoveryDiscardedResult, String>,
     },
     SelectDestination {
@@ -668,12 +674,15 @@ enum Message {
         destination: RibbonDestination,
     },
     AppearanceSelected(AppearanceMode),
-    AppearanceFinished(Result<ResolvedAppearance, String>),
+    AppearanceFinished {
+        mode: AppearanceMode,
+        result: Result<ResolvedAppearance, String>,
+    },
     RetryClose(window::Id),
     CancelClose(window::Id),
     ProjectCloseFinished {
         window: window::Id,
-        result: Result<(), String>,
+        result: Result<ProjectionRun<CloseCompletion>, String>,
     },
 }
 
@@ -700,47 +709,58 @@ impl ExportProgressSink for NativeExportProgressSink {
     }
 }
 
-#[derive(Clone)]
-struct AppearanceEventSubscription(Arc<dyn SystemAppearanceEventService>);
-
-impl Hash for AppearanceEventSubscription {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).cast::<()>().hash(state);
+#[cfg(any(test, target_os = "linux"))]
+fn streamed_appearance_subscription(
+    mode: AppearanceMode,
+    stream: fn() -> iced::futures::stream::BoxStream<'static, Message>,
+) -> Subscription<Message> {
+    if mode == AppearanceMode::System {
+        Subscription::run(stream)
+    } else {
+        Subscription::none()
     }
 }
 
-fn appearance_event_subscription(
-    subscription: &AppearanceEventSubscription,
-) -> iced::futures::stream::BoxStream<'static, Message> {
-    let service = Arc::clone(&subscription.0);
+#[cfg(target_os = "linux")]
+fn linux_portal_appearance_events() -> iced::futures::stream::BoxStream<'static, Message> {
+    use ashpd::desktop::settings::{ColorScheme, Settings};
+
     Box::pin(iced::stream::channel(1, async move |mut output| {
-        let stream = match service.subscribe() {
-            Ok(stream) => stream,
+        let settings = match Settings::new().await {
+            Ok(settings) => settings,
             Err(error) => {
                 let _ = output
-                    .send(Message::SystemAppearanceStreamFailed(error.to_string()))
+                    .send(Message::SystemAppearanceStreamFailed(format!(
+                        "System appearance updates are unavailable: {error}"
+                    )))
                     .await;
                 return;
             }
         };
-        loop {
-            match stream.next_timeout(Duration::from_secs(1)) {
-                Ok(Some(event)) => {
-                    if output
-                        .send(Message::SystemAppearanceEvent(event))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    let _ = output
-                        .send(Message::SystemAppearanceStreamFailed(error.to_string()))
-                        .await;
-                    break;
-                }
+        let mut changes = match settings.receive_color_scheme_changed().await {
+            Ok(changes) => changes,
+            Err(error) => {
+                let _ = output
+                    .send(Message::SystemAppearanceStreamFailed(format!(
+                        "System appearance updates are unavailable: {error}"
+                    )))
+                    .await;
+                return;
+            }
+        };
+        while let Some(scheme) = changes.next().await {
+            let appearance = match scheme {
+                ColorScheme::PreferDark => Some(SystemAppearance::Dark),
+                ColorScheme::PreferLight => Some(SystemAppearance::Light),
+                ColorScheme::NoPreference => None,
+            };
+            if let Some(appearance) = appearance
+                && output
+                    .send(Message::SystemAppearanceObserved(appearance))
+                    .await
+                    .is_err()
+            {
+                break;
             }
         }
     }))
@@ -777,6 +797,10 @@ fn keyboard_accelerator(key: &str, modifiers: keyboard::Modifiers) -> Option<&'s
     None
 }
 
+fn should_activate_shortcut(command: &str, accelerator_fallback: bool) -> bool {
+    command.starts_with("file.") || accelerator_fallback
+}
+
 #[derive(Debug, Clone)]
 struct NativeClipboardRequest {
     capability: WindowCapability,
@@ -791,6 +815,7 @@ struct NativeClipboardRequest {
 
 pub(crate) struct NativeDesktop {
     appearance: ResolvedAppearance,
+    appearance_mode: AppearanceMode,
     launcher: LauncherState,
     windows: BTreeMap<window::Id, NativeWindow>,
     project_windows: BTreeMap<WindowCapability, window::Id>,
@@ -800,7 +825,6 @@ pub(crate) struct NativeDesktop {
     creating_project: bool,
     status: Option<String>,
     callbacks: Arc<dyn NativeDesktopCallbacks>,
-    appearance_events: Option<Arc<dyn SystemAppearanceEventService>>,
     last_appearance_generation: u64,
     capture: Option<NativeCaptureState>,
 }
@@ -828,7 +852,14 @@ struct NativeProjectState {
     editor_hosts: EditorHostSlots,
     editor_bindings: BTreeMap<EditorPane, MountedEditorBinding>,
     mounted_documents: BTreeMap<EditorPane, parchmint_domain::DocumentId>,
+    /// Detached tabs retain their process-local adapter session. Reopening a
+    /// tab must never replace edits which have not reached project persistence
+    /// with the stale document snapshot carried by a mount effect.
+    retained_editor_sessions: BTreeMap<parchmint_domain::DocumentId, SharedEditorSession>,
     effect_executor: Option<NativeProjectEffectExecutor>,
+    synopsis_commits: SynopsisCommitQueue,
+    project_mutations: ProjectMutationState,
+    opaque_mutations: OpaqueMutationState,
     service_feeds: Option<AsyncServiceFeeds>,
     recovery_acceptance: Option<RecoveryAcceptanceTicket>,
     active_export: Option<ExportOperationToken>,
@@ -848,6 +879,294 @@ struct NativeProjectState {
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
     modal_focus: ModalFocus,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ProjectMutationTicket {
+    effect: ProjectEffect,
+    history_action: Option<HistoryWorkflowAction>,
+    synopsis_commit: Option<SynopsisCommit>,
+}
+
+#[derive(Debug, Default)]
+struct ProjectMutationState {
+    active: Option<ProjectMutationTicket>,
+    queued: VecDeque<ProjectMutationTicket>,
+    failed_effect: Option<ProjectMutationTicket>,
+    failed_save: Option<ProjectMutationTicket>,
+}
+
+impl ProjectMutationState {
+    fn enqueue(&mut self, ticket: ProjectMutationTicket) -> Option<ProjectMutationTicket> {
+        self.queued.push_back(ticket);
+        None
+    }
+
+    fn succeed(&mut self, ticket: &ProjectMutationTicket) -> Option<ProjectMutationTicket> {
+        if self.active.as_ref() != Some(ticket) {
+            return None;
+        }
+        self.active = None;
+        None
+    }
+
+    fn fail_effect(&mut self, ticket: ProjectMutationTicket) {
+        if self.active.as_ref() == Some(&ticket) {
+            self.active = None;
+        }
+        self.failed_effect = Some(ticket);
+    }
+
+    fn fail_save(&mut self, ticket: ProjectMutationTicket) {
+        if self.active.as_ref() == Some(&ticket) {
+            self.active = None;
+        }
+        self.failed_save = Some(ticket);
+    }
+
+    fn retry_failed_effect(&mut self) -> Option<ProjectMutationTicket> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.active = self.failed_effect.take();
+        self.active.clone()
+    }
+
+    fn retry_failed_save(&mut self) -> Option<ProjectMutationTicket> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.active = self.failed_save.take();
+        self.active.clone()
+    }
+
+    fn start_next(&mut self) -> Option<ProjectMutationTicket> {
+        if self.active.is_some() {
+            return None;
+        }
+        self.active = self.queued.pop_front();
+        self.active.clone()
+    }
+
+    fn blocks_close(&self) -> bool {
+        self.active.is_some()
+            || self.failed_effect.is_some()
+            || self.failed_save.is_some()
+            || !self.queued.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OpaqueMutationKind {
+    Replacement,
+    ProjectDictionary,
+    HistoryReinitialize,
+    RecoveryAccept,
+    RecoveryDiscard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct OpaqueMutationToken {
+    sequence: u64,
+    kind: OpaqueMutationKind,
+}
+
+struct PendingOpaqueMutation {
+    token: OpaqueMutationToken,
+    prior_projects: usize,
+    launch: Arc<dyn Fn(&NativeProjectState) -> Task<Message>>,
+}
+
+#[derive(Default)]
+struct OpaqueMutationState {
+    next: u64,
+    active: Option<PendingOpaqueMutation>,
+    queued: VecDeque<PendingOpaqueMutation>,
+    failed_effect: Option<PendingOpaqueMutation>,
+    failed_save: Option<OpaqueMutationToken>,
+}
+
+impl OpaqueMutationState {
+    fn begin(&mut self, kind: OpaqueMutationKind) -> OpaqueMutationToken {
+        self.next = self.next.saturating_add(1);
+        OpaqueMutationToken {
+            sequence: self.next,
+            kind,
+        }
+    }
+
+    fn enqueue(
+        &mut self,
+        token: OpaqueMutationToken,
+        prior_projects: usize,
+        launch: impl Fn(&NativeProjectState) -> Task<Message> + 'static,
+    ) {
+        self.queued.push_back(PendingOpaqueMutation {
+            token,
+            prior_projects,
+            launch: Arc::new(launch),
+        });
+    }
+
+    fn finish(&mut self, token: OpaqueMutationToken) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.token == token)
+        {
+            self.active.take();
+        }
+        if self
+            .failed_effect
+            .as_ref()
+            .is_some_and(|failed| failed.token == token)
+        {
+            self.failed_effect.take();
+        }
+        if self.failed_save == Some(token) {
+            self.failed_save = None;
+        }
+    }
+
+    fn fail_save(&mut self, token: OpaqueMutationToken) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.token == token)
+        {
+            self.active.take();
+            self.failed_save = Some(token);
+        }
+    }
+
+    fn fail_effect(&mut self, token: OpaqueMutationToken) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.token == token)
+        {
+            self.failed_effect = self.active.take();
+        }
+    }
+
+    fn blocks_close(&self) -> bool {
+        self.active.is_some()
+            || !self.queued.is_empty()
+            || self.failed_effect.is_some()
+            || self.failed_save.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PersistentMutationLane {
+    Project,
+    Opaque(OpaqueMutationKind),
+}
+
+fn next_persistent_mutation_lane(
+    projects: &ProjectMutationState,
+    opaque: &OpaqueMutationState,
+) -> Option<PersistentMutationLane> {
+    if projects.active.is_some()
+        || projects.failed_effect.is_some()
+        || projects.failed_save.is_some()
+        || opaque.active.is_some()
+        || opaque.failed_effect.is_some()
+        || opaque.failed_save.is_some()
+    {
+        return None;
+    }
+    if opaque
+        .queued
+        .front()
+        .is_some_and(|pending| pending.prior_projects == 0)
+    {
+        return opaque
+            .queued
+            .front()
+            .map(|pending| PersistentMutationLane::Opaque(pending.token.kind));
+    }
+    if !projects.queued.is_empty() {
+        return Some(PersistentMutationLane::Project);
+    }
+    opaque
+        .queued
+        .front()
+        .map(|pending| PersistentMutationLane::Opaque(pending.token.kind))
+}
+
+#[derive(Debug, Clone)]
+enum PersistentMutationTerminal {
+    ProjectSucceeded(ProjectMutationTicket),
+    ProjectEffectFailed(ProjectMutationTicket),
+    ProjectSaveFailed(ProjectMutationTicket),
+    OpaqueSucceeded(OpaqueMutationToken),
+    OpaqueSaveFailed(OpaqueMutationToken),
+    OpaqueFailed(OpaqueMutationToken),
+}
+
+/// One user-visible Synopsis revision waiting for the native persistence lane.
+///
+/// Project commands are revisioned, so launching these independently lets two
+/// keypresses race on the same captured snapshot. Keep one in flight and
+/// coalesce a later draft for the same node until the snapshot is refreshed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SynopsisCommit {
+    node_id: String,
+    synopsis: String,
+}
+
+#[derive(Debug, Default)]
+struct SynopsisCommitQueue {
+    in_flight: Option<SynopsisCommit>,
+    queued: VecDeque<SynopsisCommit>,
+}
+
+impl SynopsisCommitQueue {
+    fn enqueue(&mut self, commit: SynopsisCommit) -> Option<SynopsisCommit> {
+        if let Some(queued) = self
+            .queued
+            .iter_mut()
+            .find(|queued| queued.node_id == commit.node_id)
+        {
+            queued.synopsis = commit.synopsis;
+        } else {
+            self.queued.push_back(commit);
+        }
+        (self.in_flight.is_none())
+            .then(|| self.start_next())
+            .flatten()
+    }
+
+    fn finish(&mut self, completed: &SynopsisCommit, succeeded: bool) -> Option<SynopsisCommit> {
+        if self.in_flight.as_ref() != Some(completed) {
+            return None;
+        }
+        self.in_flight = None;
+        if !succeeded {
+            return None;
+        }
+        self.start_next()
+    }
+
+    fn retain_latest_failed(&mut self, failed: &SynopsisCommit) -> SynopsisCommit {
+        let latest = self
+            .queued
+            .iter()
+            .rev()
+            .find(|queued| queued.node_id == failed.node_id)
+            .cloned()
+            .unwrap_or_else(|| failed.clone());
+        self.queued
+            .retain(|queued| queued.node_id != failed.node_id);
+        latest
+    }
+
+    fn start_next(&mut self) -> Option<SynopsisCommit> {
+        debug_assert!(self.in_flight.is_none());
+        self.in_flight = self.queued.pop_front();
+        self.in_flight.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -904,23 +1223,28 @@ struct NativeSpellingMenuContext {
 struct AutosaveState {
     first_dirty: Option<Instant>,
     last_edit: Option<Instant>,
-    through_revision: u64,
-    saved_through_revision: u64,
+    dirty_sessions: BTreeMap<SharedEditorSession, EditorRevision>,
+    projected_sessions: BTreeMap<SharedEditorSession, EditorRevision>,
     save_in_flight: bool,
+    close_after_save: bool,
+    explicit_save_waiting: bool,
 }
 
 impl AutosaveState {
     const IDLE_DELAY: Duration = Duration::from_secs(60);
     const CONTINUOUS_LIMIT: Duration = Duration::from_secs(300);
 
-    fn mark_dirty(&mut self, revision: u64, now: Instant) {
+    fn mark_dirty(&mut self, session: SharedEditorSession, revision: EditorRevision, now: Instant) {
         self.first_dirty.get_or_insert(now);
         self.last_edit = Some(now);
-        self.through_revision = self.through_revision.max(revision);
+        self.dirty_sessions
+            .entry(session)
+            .and_modify(|current| *current = (*current).max(revision))
+            .or_insert(revision);
     }
 
     fn should_save(&self, now: Instant) -> bool {
-        self.through_revision > self.saved_through_revision
+        !self.dirty_sessions.is_empty()
             && !self.save_in_flight
             && self.first_dirty.is_some_and(|first| {
                 now.saturating_duration_since(first) >= Self::CONTINUOUS_LIMIT
@@ -930,18 +1254,188 @@ impl AutosaveState {
             })
     }
 
-    fn finish(&mut self, revision: u64) {
+    fn record_projected(
+        &mut self,
+        projected: impl IntoIterator<Item = (SharedEditorSession, EditorRevision)>,
+    ) {
+        for (session, revision) in projected {
+            self.projected_sessions
+                .entry(session)
+                .and_modify(|current| *current = (*current).max(revision))
+                .or_insert(revision);
+        }
+    }
+
+    fn finish_save(&mut self, ticket: &AutosaveTicket) {
         self.save_in_flight = false;
-        self.saved_through_revision = self.saved_through_revision.max(revision);
-        if revision >= self.through_revision {
+        self.dirty_sessions.retain(|session, current| {
+            ticket
+                .dirty_sessions
+                .get(session)
+                .is_none_or(|saved| *current > *saved)
+        });
+        if self.dirty_sessions.is_empty() {
             self.first_dirty = None;
             self.last_edit = None;
+        } else {
+            self.first_dirty = Some(Instant::now());
         }
     }
 
     fn is_clean(&self) -> bool {
-        !self.save_in_flight && self.through_revision <= self.saved_through_revision
+        !self.save_in_flight && self.dirty_sessions.is_empty()
     }
+
+    fn requires_projection_save(&self, has_projection_plans: bool) -> bool {
+        has_projection_plans || !self.is_clean()
+    }
+
+    fn reset_sessions(&mut self) {
+        self.dirty_sessions.clear();
+        self.projected_sessions.clear();
+        self.first_dirty = None;
+        self.last_edit = None;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorProjectionPlan {
+    session: SharedEditorSession,
+    revision: EditorRevision,
+}
+
+#[derive(Debug, Clone)]
+struct AutosaveTicket {
+    dirty_sessions: BTreeMap<SharedEditorSession, EditorRevision>,
+}
+
+#[derive(Debug, Clone)]
+enum SavePurpose {
+    Untracked,
+    ProjectMutation(ProjectMutationTicket),
+    OpaqueMutation(OpaqueMutationToken),
+}
+
+#[derive(Debug, Clone)]
+struct AutosaveCompletion {
+    saved_revision: u64,
+    snapshot: ProjectSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct CloseCompletion {
+    snapshot: Option<ProjectSnapshot>,
+    result: Result<(), String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProjectionRun<T> {
+    projected: BTreeMap<SharedEditorSession, EditorRevision>,
+    result: Result<T, String>,
+}
+
+fn deduplicated_editor_sessions(
+    mounted: impl IntoIterator<Item = SharedEditorSession>,
+    retained: impl IntoIterator<Item = SharedEditorSession>,
+) -> Vec<SharedEditorSession> {
+    mounted
+        .into_iter()
+        .chain(retained)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn editor_projection_plans(
+    adapter: &EditorIcedAdapter,
+    sessions: impl IntoIterator<Item = SharedEditorSession>,
+    projected: &BTreeMap<SharedEditorSession, EditorRevision>,
+) -> Result<Vec<EditorProjectionPlan>, String> {
+    sessions
+        .into_iter()
+        .map(|session| {
+            let revision = adapter
+                .revision(session.clone())
+                .map_err(|error| error.to_string())?;
+            Ok((projected.get(&session).copied() < Some(revision))
+                .then_some(EditorProjectionPlan { session, revision }))
+        })
+        .filter_map(Result::transpose)
+        .collect()
+}
+
+fn run_projection_sequence<T>(
+    plans: &[EditorProjectionPlan],
+    mut project: impl FnMut(&EditorProjectionPlan) -> Result<(), String>,
+    finish: impl FnOnce() -> Result<T, String>,
+) -> ProjectionRun<T> {
+    let mut projected = BTreeMap::new();
+    for plan in plans {
+        if let Err(error) = project(plan) {
+            return ProjectionRun {
+                projected,
+                result: Err(error),
+            };
+        }
+        projected.insert(plan.session.clone(), plan.revision);
+    }
+    ProjectionRun {
+        projected,
+        result: finish(),
+    }
+}
+
+fn snapshot_covers(candidate: &ProjectSnapshot, current: &ProjectSnapshot) -> bool {
+    candidate.project.revision >= current.project.revision
+        && current.document_summaries.iter().all(|document| {
+            candidate
+                .document_summaries
+                .iter()
+                .find(|candidate| candidate.document_id == document.document_id)
+                .is_some_and(|candidate| candidate.revision >= document.revision)
+        })
+}
+
+fn project_effect_requires_durability(effect: &ProjectEffect) -> bool {
+    matches!(
+        effect,
+        ProjectEffect::CreateHierarchy { .. }
+            | ProjectEffect::DeleteHierarchy(_)
+            | ProjectEffect::MoveHierarchy { .. }
+            | ProjectEffect::PasteCopiedSubtrees { .. }
+            | ProjectEffect::PasteCutSubtrees { .. }
+            | ProjectEffect::CommitNodeTitle { .. }
+            | ProjectEffect::CommitSynopsis { .. }
+            | ProjectEffect::CommitMetadataValue { .. }
+            | ProjectEffect::UpsertMetadataField(_)
+            | ProjectEffect::ReorderMetadataField { .. }
+            | ProjectEffect::DeleteMetadataField(_)
+            | ProjectEffect::UpsertStyle(_)
+            | ProjectEffect::DeleteStyle(_)
+            | ProjectEffect::ApplyGlobalReplacement { .. }
+            | ProjectEffect::CreateNamedSnapshot(_)
+            | ProjectEffect::RestoreHistory { .. }
+            | ProjectEffect::RestoreDeletedSubtree { .. }
+            | ProjectEffect::SetProjectExportSettings(_)
+    )
+}
+
+fn should_reconcile_refreshed_presentation(
+    mutation: Option<&ProjectMutationTicket>,
+    opaque_mutation: Option<OpaqueMutationToken>,
+    has_later_mutations: bool,
+) -> bool {
+    (mutation.is_none() && opaque_mutation.is_none()) || !has_later_mutations
+}
+
+fn editor_effect_requires_durability(effect: &EditorEffect) -> bool {
+    matches!(
+        effect,
+        EditorEffect::SpellingDictionaryAction {
+            scope: crate::SpellingDictionaryScope::Project,
+            ..
+        }
+    )
 }
 
 /// A spellcheck result is only useful once a word has a stable boundary.
@@ -964,7 +1458,6 @@ fn completes_spellcheck_word(message: &parchmint_editor_iced::MountedEditorMessa
 
 impl NativeDesktop {
     fn boot(startup: NativeDesktopStartup) -> (Self, Task<Message>) {
-        let appearance_events = startup.callbacks.system_appearance_events();
         let capture_error = startup
             .capture
             .as_ref()
@@ -972,6 +1465,7 @@ impl NativeDesktop {
         let capture_valid = capture_error.is_none();
         let mut desktop = Self {
             appearance: startup.appearance,
+            appearance_mode: startup.appearance_mode,
             launcher: LauncherState::default(),
             windows: BTreeMap::new(),
             project_windows: BTreeMap::new(),
@@ -985,7 +1479,6 @@ impl NativeDesktop {
                     .map(|path| format!("Project is already open: {}", path.display()))
             }),
             callbacks: startup.callbacks,
-            appearance_events,
             last_appearance_generation: 0,
             capture: capture_valid
                 .then(|| {
@@ -1040,6 +1533,15 @@ impl NativeDesktop {
                 accelerator_fallback,
             } => self.runtime_event(window, event, accelerator_fallback),
             Message::DismissContextMenus { window } => self.dismiss_context_menus(window),
+            Message::CancelUncommittedHierarchyDrag { window } => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                    && let Some(workspace) = state.workspace.as_mut()
+                    && workspace.hierarchy_drag_source().is_some()
+                {
+                    workspace.update(ProjectMessage::CancelHierarchyDrag);
+                }
+                Task::none()
+            }
             Message::WorkspaceLoaded { window, result } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
@@ -1121,46 +1623,61 @@ impl NativeDesktop {
             }
             Message::EditorProjectionPersisted {
                 window,
-                revision,
+                ticket,
                 result,
             } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
-                let stale = revision < state.autosave.through_revision;
-                state.autosave.finish(revision);
-                // Do not rebuild the workspace from an autosave that was
-                // overtaken while its worker was running.
-                if stale {
-                    return Task::none();
-                }
-                match result {
-                    Ok(snapshot) => {
-                        let snapshot = Arc::new(snapshot);
-                        if let Some(project_ui) = state.project.project_ui.as_mut() {
-                            project_ui.snapshot = Arc::clone(&snapshot);
-                            state.effect_executor = state
-                                .effect_executor
-                                .as_ref()
-                                .map(|executor| executor.refreshed(Arc::clone(&snapshot)))
-                                .or_else(|| {
-                                    Some(NativeProjectEffectExecutor::new(
-                                        project_ui.ports.clone(),
-                                        Arc::clone(&snapshot),
-                                    ))
-                                });
-                        }
+                let run = match result {
+                    Ok(run) => run,
+                    Err(error) => ProjectionRun {
+                        projected: BTreeMap::new(),
+                        result: Err(error),
+                    },
+                };
+                state.autosave.record_projected(run.projected);
+                state.autosave.save_in_flight = false;
+                let close_after_save = state.autosave.close_after_save;
+                state.autosave.close_after_save = false;
+                match run.result {
+                    Ok(completion) => {
+                        state.autosave.finish_save(&ticket);
+                        Self::accept_persistence_snapshot(state, completion.snapshot);
+                        Self::prune_durable_unmounted_sessions(state);
                         if let Some(workspace) = state.workspace.as_mut() {
-                            workspace.reconcile_snapshot(&snapshot);
-                            workspace.update(ProjectMessage::SaveCompleted(
-                                snapshot.project.revision.value(),
-                            ));
+                            workspace
+                                .update(ProjectMessage::SaveCompleted(completion.saved_revision));
+                        }
+                        self.status = None;
+                        if close_after_save
+                            && !state.project_mutations.blocks_close()
+                            && !state.opaque_mutations.blocks_close()
+                        {
+                            return self.continue_close_window(window);
+                        } else if close_after_save {
+                            state.autosave.close_after_save = true;
+                        } else if state.autosave.explicit_save_waiting
+                            && !state.project_mutations.blocks_close()
+                            && !state.opaque_mutations.blocks_close()
+                        {
+                            return self.start_projection_save(window, ProjectSaveKind::Explicit);
                         }
                     }
                     Err(error) => {
                         self.status = Some(error.clone());
                         if let Some(workspace) = state.workspace.as_mut() {
-                            workspace.update(ProjectMessage::SaveFailed(error));
+                            workspace.update(ProjectMessage::SaveFailed(error.clone()));
+                        }
+                        if close_after_save {
+                            self.status = None;
+                            self.closing_windows.remove(&window);
+                            self.close_failures.insert(state.project.window, error);
+                        } else if state.autosave.explicit_save_waiting
+                            && !state.project_mutations.blocks_close()
+                            && !state.opaque_mutations.blocks_close()
+                        {
+                            return self.start_projection_save(window, ProjectSaveKind::Explicit);
                         }
                     }
                 }
@@ -1177,9 +1694,19 @@ impl NativeDesktop {
                 result,
             } => self.finish_clipboard_read(window, request, result),
             Message::AutosaveTick(now) => self.autosave_tick(now),
-            Message::SystemAppearanceEvent(event) => self.system_appearance_event(event),
+            Message::SystemAppearanceObserved(appearance) => {
+                self.system_appearance_event(appearance)
+            }
+            #[cfg(not(target_os = "linux"))]
+            Message::SystemThemeMode(mode) => match mode {
+                iced::theme::Mode::Light => self.system_appearance_event(SystemAppearance::Light),
+                iced::theme::Mode::Dark => self.system_appearance_event(SystemAppearance::Dark),
+                iced::theme::Mode::None => Task::none(),
+            },
             Message::SystemAppearanceChangedFinished { generation, result } => {
-                if generation != self.last_appearance_generation {
+                if self.appearance_mode != AppearanceMode::System
+                    || generation != self.last_appearance_generation
+                {
                     return Task::none();
                 }
                 match result {
@@ -1196,7 +1723,13 @@ impl NativeDesktop {
                 self.status = Some(error);
                 Task::none()
             }
-            Message::SaveFinished { window, result } => {
+            Message::SaveFinished {
+                window,
+                purpose,
+                result,
+            } => {
+                let mut terminal = None;
+                let mut terminal_error = None;
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
                     && let Some(workspace) = state.workspace.as_mut()
                 {
@@ -1204,30 +1737,60 @@ impl NativeDesktop {
                     match result {
                         Ok(revision) => {
                             workspace.update(ProjectMessage::SaveCompleted(revision));
-                            if revision >= state.autosave.through_revision {
-                                state.autosave.first_dirty = None;
-                                state.autosave.last_edit = None;
-                            } else {
-                                state.autosave.first_dirty = Some(Instant::now());
-                            }
                             self.status = None;
+                            terminal = match purpose {
+                                SavePurpose::ProjectMutation(ticket) => {
+                                    Some(PersistentMutationTerminal::ProjectSucceeded(ticket))
+                                }
+                                SavePurpose::OpaqueMutation(token) => {
+                                    Some(PersistentMutationTerminal::OpaqueSucceeded(token))
+                                }
+                                SavePurpose::Untracked => None,
+                            };
                         }
                         Err(error) => {
                             workspace.update(ProjectMessage::SaveFailed(error.clone()));
-                            self.status = Some(error);
+                            self.status = Some(error.clone());
+                            terminal = match purpose {
+                                SavePurpose::ProjectMutation(ticket) => {
+                                    Some(PersistentMutationTerminal::ProjectSaveFailed(ticket))
+                                }
+                                SavePurpose::OpaqueMutation(token) => {
+                                    Some(PersistentMutationTerminal::OpaqueSaveFailed(token))
+                                }
+                                SavePurpose::Untracked => None,
+                            };
+                            terminal_error = Some(error);
                         }
                     }
                 }
-                Task::none()
+                if let Some(terminal) = terminal {
+                    self.after_persistent_mutation_terminal(window, terminal, terminal_error)
+                } else if terminal_error.is_some() {
+                    Task::none()
+                } else if self
+                    .windows
+                    .get(&window)
+                    .is_some_and(|native| match native {
+                        NativeWindow::Project(state) => state.autosave.close_after_save,
+                        NativeWindow::Launcher => false,
+                    })
+                {
+                    self.continue_close_window(window)
+                } else {
+                    Task::none()
+                }
             }
             Message::ProjectEffectFinished {
                 window,
-                history_action,
+                mutation,
                 result,
-            } => self.finish_project_effect(window, history_action, result),
-            Message::EditorEffectFinished { window, result } => {
-                self.finish_editor_effect(window, result)
-            }
+            } => self.finish_project_effect(window, mutation, None, result),
+            Message::EditorEffectFinished {
+                window,
+                mutation,
+                result,
+            } => self.finish_editor_effect(window, mutation, result),
             Message::SpellcheckFinished {
                 window,
                 ticket,
@@ -1333,18 +1896,35 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
-            Message::HistoryReinitialized { window, result } => {
+            Message::HistoryReinitialized {
+                window,
+                mutation,
+                result,
+            } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
                 let Some(workspace) = state.workspace.as_mut() else {
                     return Task::none();
                 };
+                let terminal_error = result.as_ref().err().cloned();
                 match result {
                     Ok(message) => {
                         workspace.update(ProjectMessage::HistoryReinitialized(message));
                     }
                     Err(error) => workspace.fail_history_workflow(error),
+                }
+                if let Some(token) = mutation {
+                    let terminal = if terminal_error.is_some() {
+                        PersistentMutationTerminal::OpaqueFailed(token)
+                    } else {
+                        PersistentMutationTerminal::OpaqueSucceeded(token)
+                    };
+                    return self.after_persistent_mutation_terminal(
+                        window,
+                        terminal,
+                        terminal_error,
+                    );
                 }
                 Task::none()
             }
@@ -1406,6 +1986,7 @@ impl NativeDesktop {
             Message::ReplacementApplyFinished {
                 window,
                 ticket,
+                mutation,
                 result,
             } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
@@ -1427,12 +2008,27 @@ impl NativeDesktop {
                                 ticket,
                                 ProjectTaskPayload::ReplacementApplied { revision },
                             ));
-                            workspace.reconcile_snapshot(&snapshot);
                         }
                         let Some(ports) = state.project.ports().cloned() else {
-                            return Task::none();
+                            return self.after_persistent_mutation_terminal(
+                                window,
+                                PersistentMutationTerminal::OpaqueFailed(mutation),
+                                Some(
+                                    "Project replacement completed without a persistence port."
+                                        .to_owned(),
+                                ),
+                            );
                         };
-                        Self::save_task(window, ports, ProjectSaveKind::Structural)
+                        state.autosave.save_in_flight = true;
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            workspace.update(ProjectMessage::StartSave(revision));
+                        }
+                        Self::save_task(
+                            window,
+                            ports,
+                            ProjectSaveKind::Structural,
+                            SavePurpose::OpaqueMutation(mutation),
+                        )
                     }
                     Err(error) => {
                         let accepted = state.workspace.as_mut().is_some_and(|workspace| {
@@ -1442,9 +2038,13 @@ impl NativeDesktop {
                             ))
                         });
                         if accepted {
-                            self.status = Some(error);
+                            self.status = Some(error.clone());
                         }
-                        Task::none()
+                        self.after_persistent_mutation_terminal(
+                            window,
+                            PersistentMutationTerminal::OpaqueFailed(mutation),
+                            Some(error),
+                        )
                     }
                 }
             }
@@ -1604,10 +2204,12 @@ impl NativeDesktop {
                 window,
                 session,
                 ticket,
+                mutation,
                 result,
             } => {
                 let mut recovered_document = None;
                 let mut activate = false;
+                let mut failed = None;
                 {
                     let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                         return Task::none();
@@ -1650,6 +2252,7 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(error) => {
+                            failed = Some(error.clone());
                             let completion_accepted =
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
@@ -1661,20 +2264,35 @@ impl NativeDesktop {
                         }
                     }
                 }
-                if activate {
-                    self.status = None;
-                    self.activate_reconciled_project(window, recovered_document)
+                let continuation = if let Some(token) = mutation {
+                    let terminal = if failed.is_some() {
+                        PersistentMutationTerminal::OpaqueFailed(token)
+                    } else {
+                        PersistentMutationTerminal::OpaqueSucceeded(token)
+                    };
+                    self.after_persistent_mutation_terminal(window, terminal, failed)
                 } else {
                     Task::none()
+                };
+                if activate {
+                    self.status = None;
+                    Task::batch([
+                        continuation,
+                        self.activate_reconciled_project(window, recovered_document),
+                    ])
+                } else {
+                    continuation
                 }
             }
             Message::RecoveryDiscarded {
                 window,
                 session,
                 ticket,
+                mutation,
                 result,
             } => {
                 let mut activate = false;
+                let mut failed = None;
                 {
                     let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                         return Task::none();
@@ -1715,6 +2333,7 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(error) => {
+                            failed = Some(error.clone());
                             let completion_accepted =
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
@@ -1726,11 +2345,21 @@ impl NativeDesktop {
                         }
                     }
                 }
-                if activate {
-                    self.status = None;
-                    self.activate_reconciled_project(window, None)
+                let continuation = if let Some(token) = mutation {
+                    let terminal = if failed.is_some() {
+                        PersistentMutationTerminal::OpaqueFailed(token)
+                    } else {
+                        PersistentMutationTerminal::OpaqueSucceeded(token)
+                    };
+                    self.after_persistent_mutation_terminal(window, terminal, failed)
                 } else {
                     Task::none()
+                };
+                if activate {
+                    self.status = None;
+                    Task::batch([continuation, self.activate_reconciled_project(window, None)])
+                } else {
+                    continuation
                 }
             }
             Message::SelectDestination {
@@ -1748,12 +2377,15 @@ impl NativeDesktop {
                     Self::run_blocking_operation("set appearance", move || {
                         callbacks.set_appearance(mode)
                     }),
-                    Message::AppearanceFinished,
+                    move |result| Message::AppearanceFinished { mode, result },
                 )
             }
-            Message::AppearanceFinished(result) => {
+            Message::AppearanceFinished { mode, result } => {
                 match result {
                     Ok(appearance) => {
+                        self.appearance_mode = mode;
+                        self.last_appearance_generation =
+                            self.last_appearance_generation.saturating_add(1);
                         self.apply_appearance(appearance);
                         self.status = None;
                     }
@@ -1765,25 +2397,58 @@ impl NativeDesktop {
             Message::CancelClose(window) => {
                 self.closing_windows.remove(&window);
                 self.status = None;
-                if let Some(NativeWindow::Project(state)) = self.windows.get(&window) {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    state.autosave.close_after_save = false;
                     self.close_failures.remove(&state.project.window);
                 }
                 Task::none()
             }
-            Message::ProjectCloseFinished { window, result } => match result {
-                Ok(()) => {
-                    self.status = None;
-                    self.finish_close(window)
+            Message::ProjectCloseFinished { window, result } => {
+                let run = match result {
+                    Ok(run) => run,
+                    Err(error) => ProjectionRun {
+                        projected: BTreeMap::new(),
+                        result: Err(error),
+                    },
+                };
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    state.autosave.record_projected(run.projected);
                 }
-                Err(error) => {
-                    self.status = None;
-                    self.closing_windows.remove(&window);
-                    if let Some(NativeWindow::Project(state)) = self.windows.get(&window) {
-                        self.close_failures.insert(state.project.window, error);
+                match run.result {
+                    Ok(completion) => {
+                        if let Some(snapshot) = completion.snapshot
+                            && let Some(NativeWindow::Project(state)) =
+                                self.windows.get_mut(&window)
+                        {
+                            Self::accept_persistence_snapshot(state, snapshot);
+                        }
+                        match completion.result {
+                            Ok(()) => {
+                                self.status = None;
+                                self.finish_close(window)
+                            }
+                            Err(error) => {
+                                self.status = None;
+                                self.closing_windows.remove(&window);
+                                if let Some(NativeWindow::Project(state)) =
+                                    self.windows.get(&window)
+                                {
+                                    self.close_failures.insert(state.project.window, error);
+                                }
+                                Task::none()
+                            }
+                        }
                     }
-                    Task::none()
+                    Err(error) => {
+                        self.status = None;
+                        self.closing_windows.remove(&window);
+                        if let Some(NativeWindow::Project(state)) = self.windows.get(&window) {
+                            self.close_failures.insert(state.project.window, error);
+                        }
+                        Task::none()
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -1871,11 +2536,14 @@ impl NativeDesktop {
                 iced::time::every(Duration::from_millis(16)).map(|_| Message::CaptureFrameTick),
             );
         }
-        if let Some(events) = &self.appearance_events {
-            subscriptions.push(Subscription::run_with(
-                AppearanceEventSubscription(Arc::clone(events)),
-                appearance_event_subscription,
+        if self.appearance_mode == AppearanceMode::System {
+            #[cfg(target_os = "linux")]
+            subscriptions.push(streamed_appearance_subscription(
+                self.appearance_mode,
+                linux_portal_appearance_events,
             ));
+            #[cfg(not(target_os = "linux"))]
+            subscriptions.push(iced::system::theme_changes().map(Message::SystemThemeMode));
         }
         Subscription::batch(subscriptions)
     }
@@ -2061,6 +2729,14 @@ impl NativeDesktop {
                 window: id,
             });
         }
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+        ) {
+            return Task::perform(async {}, move |_| Message::CancelUncommittedHierarchyDrag {
+                window: id,
+            });
+        }
         if let Event::Keyboard(keyboard::Event::KeyPressed {
             key,
             modifiers,
@@ -2159,14 +2835,14 @@ impl NativeDesktop {
                 );
             }
         }
-        if accelerator_fallback
-            && let Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Character(key),
-                modifiers,
-                repeat: false,
-                ..
-            }) = &event
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(key),
+            modifiers,
+            repeat: false,
+            ..
+        }) = &event
             && let Some(command) = keyboard_accelerator(key, *modifiers)
+            && should_activate_shortcut(command, accelerator_fallback)
         {
             return self.activate_shortcut(id, command);
         }
@@ -2284,21 +2960,19 @@ impl NativeDesktop {
         Task::none()
     }
 
-    fn system_appearance_event(&mut self, event: SystemAppearanceEvent) -> Task<Message> {
-        if event.generation <= self.last_appearance_generation {
+    fn system_appearance_event(&mut self, appearance: SystemAppearance) -> Task<Message> {
+        if self.appearance_mode != AppearanceMode::System {
             return Task::none();
         }
-        self.last_appearance_generation = event.generation;
-        let appearance = resolved_system_appearance(event.appearance);
+        self.last_appearance_generation = self.last_appearance_generation.saturating_add(1);
+        let generation = self.last_appearance_generation;
+        let appearance = resolved_system_appearance(appearance);
         let callbacks = Arc::clone(&self.callbacks);
         Task::perform(
             Self::run_blocking_operation("apply system appearance", move || {
                 callbacks.system_appearance_changed(appearance)
             }),
-            move |result| Message::SystemAppearanceChangedFinished {
-                generation: event.generation,
-                result,
-            },
+            move |result| Message::SystemAppearanceChangedFinished { generation, result },
         )
     }
 
@@ -2610,7 +3284,8 @@ impl NativeDesktop {
                 })
             }
             ProjectSurfaceMessage::Project(mut message) => {
-                if let ProjectMessage::SelectHierarchy { gesture, .. } = &mut message
+                if let ProjectMessage::SelectHierarchy { gesture, .. }
+                | ProjectMessage::BeginHierarchyDrag { gesture, .. } = &mut message
                     && *gesture == SelectionGesture::Replace
                 {
                     *gesture = if state.modifiers.shift() {
@@ -2671,7 +3346,7 @@ impl NativeDesktop {
                         Self::run_blocking_operation("set appearance", move || {
                             callbacks.set_appearance(mode)
                         }),
-                        Message::AppearanceFinished,
+                        move |result| Message::AppearanceFinished { mode, result },
                     );
                 }
                 let mut direct = Vec::new();
@@ -2713,6 +3388,14 @@ impl NativeDesktop {
                 }
                 for effect in effects {
                     match effect {
+                        ProjectEffect::CommitSynopsis { node_id, synopsis } => {
+                            tasks.push(Self::queue_synopsis_commit_task(
+                                &mut state.synopsis_commits,
+                                &mut state.project_mutations,
+                                node_id,
+                                synopsis,
+                            ));
+                        }
                         ProjectEffect::ChooseExportDestination { output_name } => {
                             let Some(ports) = state.project.ports().cloned() else {
                                 workspace.update(ProjectMessage::ExportFailed(
@@ -2759,17 +3442,37 @@ impl NativeDesktop {
                                 );
                                 continue;
                             };
-                            tasks.push(Task::perform(
-                                Self::run_blocking_operation("reinitialize History", move || {
-                                    let access =
-                                        ports.access().map_err(|error| error.to_string())?;
-                                    access
-                                        .history_maintenance(|history| history.reinitialize())
-                                        .map_err(|error| error.to_string())?
-                                        .map_err(|error| error.to_string())
-                                }),
-                                move |result| Message::HistoryReinitialized { window: id, result },
-                            ));
+                            let mutation = state
+                                .opaque_mutations
+                                .begin(OpaqueMutationKind::HistoryReinitialize);
+                            let launch = move |_: &NativeProjectState| {
+                                let ports = ports.clone();
+                                Task::perform(
+                                    Self::run_blocking_operation(
+                                        "reinitialize History",
+                                        move || {
+                                            let access = ports
+                                                .access()
+                                                .map_err(|error| error.to_string())?;
+                                            access
+                                                .history_maintenance(|history| {
+                                                    history.reinitialize()
+                                                })
+                                                .map_err(|error| error.to_string())?
+                                                .map_err(|error| error.to_string())
+                                        },
+                                    ),
+                                    move |result| Message::HistoryReinitialized {
+                                        window: id,
+                                        mutation: Some(mutation),
+                                        result,
+                                    },
+                                )
+                            };
+                            let prior_projects = state.project_mutations.queued.len();
+                            state
+                                .opaque_mutations
+                                .enqueue(mutation, prior_projects, launch);
                         }
                         ProjectEffect::SearchProject {
                             query,
@@ -2895,16 +3598,27 @@ impl NativeDesktop {
                             ) {
                                 let session = state.project.session;
                                 let ticket = workspace.begin_task(ProjectTask::AcceptRecovery);
-                                let job = feeds.accept_recovery(acceptance);
-                                tasks.push(Task::perform(
-                                    Self::run_service_job(job),
-                                    move |result| Message::RecoveryAccepted {
-                                        window: id,
-                                        session,
-                                        ticket,
-                                        result,
-                                    },
-                                ));
+                                let feeds = feeds.clone();
+                                let mutation = state
+                                    .opaque_mutations
+                                    .begin(OpaqueMutationKind::RecoveryAccept);
+                                let launch = move |_: &NativeProjectState| {
+                                    let job = feeds.accept_recovery(acceptance);
+                                    let ticket = ticket.clone();
+                                    Task::perform(Self::run_service_job(job), move |result| {
+                                        Message::RecoveryAccepted {
+                                            window: id,
+                                            session,
+                                            ticket,
+                                            mutation: Some(mutation),
+                                            result,
+                                        }
+                                    })
+                                };
+                                let prior_projects = state.project_mutations.queued.len();
+                                state
+                                    .opaque_mutations
+                                    .enqueue(mutation, prior_projects, launch);
                             } else {
                                 let ticket = workspace.begin_task(ProjectTask::AcceptRecovery);
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -2923,16 +3637,27 @@ impl NativeDesktop {
                             ) {
                                 let session = state.project.session;
                                 let ticket = workspace.begin_task(ProjectTask::DiscardRecovery);
-                                let job = feeds.discard_recovery(acceptance);
-                                tasks.push(Task::perform(
-                                    Self::run_service_job(job),
-                                    move |result| Message::RecoveryDiscarded {
-                                        window: id,
-                                        session,
-                                        ticket,
-                                        result,
-                                    },
-                                ));
+                                let feeds = feeds.clone();
+                                let mutation = state
+                                    .opaque_mutations
+                                    .begin(OpaqueMutationKind::RecoveryDiscard);
+                                let launch = move |_: &NativeProjectState| {
+                                    let job = feeds.discard_recovery(acceptance);
+                                    let ticket = ticket.clone();
+                                    Task::perform(Self::run_service_job(job), move |result| {
+                                        Message::RecoveryDiscarded {
+                                            window: id,
+                                            session,
+                                            ticket,
+                                            mutation: Some(mutation),
+                                            result,
+                                        }
+                                    })
+                                };
+                                let prior_projects = state.project_mutations.queued.len();
+                                state
+                                    .opaque_mutations
+                                    .enqueue(mutation, prior_projects, launch);
                             } else {
                                 let ticket = workspace.begin_task(ProjectTask::DiscardRecovery);
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -3047,36 +3772,55 @@ impl NativeDesktop {
                                 self.status = Some(error);
                                 continue;
                             }
-                            let preview_results = workspace.replacement_preview().results();
-                            let selection = replacement_selection(
-                                &project_ui.snapshot,
-                                &preview_results,
-                                &included_match_ids,
-                                &replacement,
-                            );
-                            let ports = project_ui.ports.clone();
-                            tasks.push(Task::perform(
-                                async move {
-                                    let selection = selection?;
-                                    let access =
-                                        ports.access().map_err(|error| error.to_string())?;
-                                    access
-                                        .replacements_service()
-                                        .map_err(|error| error.to_string())?
-                                        .apply(selection)
-                                        .await
-                                        .map_err(|error| error.to_string())?;
-                                    access
-                                        .snapshot(|query| query.snapshot())
-                                        .map_err(|error| error.to_string())?
-                                        .map_err(|error| error.to_string())
-                                },
-                                move |result| Message::ReplacementApplyFinished {
-                                    window: id,
-                                    ticket,
-                                    result: Box::new(result),
-                                },
-                            ));
+                            let mutation = state
+                                .opaque_mutations
+                                .begin(OpaqueMutationKind::Replacement);
+                            let launch = move |state: &NativeProjectState| {
+                                let ticket = ticket.clone();
+                                let setup = (|| {
+                                    let project_ui =
+                                        state.project.project_ui.as_ref().ok_or_else(|| {
+                                            "project snapshot is unavailable".to_owned()
+                                        })?;
+                                    let workspace = state.workspace.as_ref().ok_or_else(|| {
+                                        "project workspace is unavailable".to_owned()
+                                    })?;
+                                    let selection = replacement_selection(
+                                        &project_ui.snapshot,
+                                        &workspace.replacement_preview().results(),
+                                        &included_match_ids,
+                                        &replacement,
+                                    )?;
+                                    Ok::<_, String>((project_ui.ports.clone(), selection))
+                                })();
+                                Task::perform(
+                                    async move {
+                                        let (ports, selection) = setup?;
+                                        let access =
+                                            ports.access().map_err(|error| error.to_string())?;
+                                        access
+                                            .replacements_service()
+                                            .map_err(|error| error.to_string())?
+                                            .apply(selection)
+                                            .await
+                                            .map_err(|error| error.to_string())?;
+                                        access
+                                            .snapshot(|query| query.snapshot())
+                                            .map_err(|error| error.to_string())?
+                                            .map_err(|error| error.to_string())
+                                    },
+                                    move |result| Message::ReplacementApplyFinished {
+                                        window: id,
+                                        ticket,
+                                        mutation,
+                                        result: Box::new(result),
+                                    },
+                                )
+                            };
+                            let prior_projects = state.project_mutations.queued.len();
+                            state
+                                .opaque_mutations
+                                .enqueue(mutation, prior_projects, launch);
                         }
                         ProjectEffect::ExportEntireManuscript {
                             output_name: _,
@@ -3173,6 +3917,22 @@ impl NativeDesktop {
                                 Message::ExportArtifactActionFinished,
                             ));
                         }
+                        effect if project_effect_requires_durability(&effect) => {
+                            let history_action = match &effect {
+                                ProjectEffect::CreateNamedSnapshot(_) => {
+                                    Some(HistoryWorkflowAction::NamedSnapshot)
+                                }
+                                ProjectEffect::RestoreHistory { .. } => {
+                                    Some(HistoryWorkflowAction::Restore)
+                                }
+                                _ => None,
+                            };
+                            state.project_mutations.enqueue(ProjectMutationTicket {
+                                effect,
+                                history_action,
+                                synopsis_commit: None,
+                            });
+                        }
                         effect => direct.push(effect),
                     }
                 }
@@ -3181,6 +3941,7 @@ impl NativeDesktop {
                     state.effect_executor.clone(),
                     direct,
                 ));
+                tasks.push(Self::launch_next_persistent_mutation(id, state));
                 tasks.push(Self::workspace_persist_task(id, state));
                 Task::batch(tasks)
             }
@@ -3195,10 +3956,16 @@ impl NativeDesktop {
                     )));
                     return Task::none();
                 }
+                if let EditorCenterMessage::ClearHierarchyDropTarget(pane) = message {
+                    workspace.update(ProjectMessage::ClearDragDestination(
+                        DragDestination::EditorPane(pane),
+                    ));
+                    return Task::none();
+                }
                 if matches!(message, EditorCenterMessage::CommitHierarchyDrop) {
                     let effects = workspace.update(ProjectMessage::CommitHierarchyDrag);
                     return Task::batch([
-                        Self::project_effect_tasks(id, state.effect_executor.clone(), effects),
+                        Self::tracked_project_effect_tasks(id, state, effects),
                         Self::workspace_persist_task(id, state),
                     ]);
                 }
@@ -3234,6 +4001,11 @@ impl NativeDesktop {
                 for (pane, view) in immediate_effects {
                     if let Some(binding) = state.editor_bindings.remove(&pane) {
                         if binding.view() == view {
+                            if let Some(previous_document) = state.mounted_documents.remove(&pane) {
+                                state
+                                    .retained_editor_sessions
+                                    .insert(previous_document, binding.session());
+                            }
                             if let Err(error) = binding.detach() {
                                 self.status = Some(error.to_string());
                             }
@@ -3398,8 +4170,18 @@ impl NativeDesktop {
                                 self.status = Some(error);
                             }
                             let revision = update.revision();
+                            let Some(session) = state
+                                .editor_bindings
+                                .get(&pane)
+                                .map(MountedEditorBinding::session)
+                            else {
+                                self.status = Some(
+                                    "edited document has no mounted editor session".to_owned(),
+                                );
+                                return Task::none();
+                            };
                             workspace.update(ProjectMessage::MarkDirty(revision.value()));
-                            state.autosave.mark_dirty(revision.value(), Instant::now());
+                            state.autosave.mark_dirty(session, revision, Instant::now());
                             let delay = if completed_word { 150 } else { 400 };
                             state
                                 .pending_spellchecks
@@ -3424,22 +4206,84 @@ impl NativeDesktop {
                         .iter()
                         .any(|effect| matches!(effect, EditorEffect::RequestSave));
                     effects.retain(|effect| !matches!(effect, EditorEffect::RequestSave));
-                    let editor_tasks =
-                        Self::editor_effect_tasks(id, state.effect_executor.clone(), effects);
-                    if request_save && !state.autosave.save_in_flight {
+                    let editor_tasks = Self::editor_effect_tasks(
+                        id,
+                        state.effect_executor.clone(),
+                        &state.project_mutations,
+                        &mut state.opaque_mutations,
+                        effects,
+                    );
+                    if request_save {
+                        if state.project_mutations.blocks_close()
+                            || state.opaque_mutations.blocks_close()
+                        {
+                            state.autosave.explicit_save_waiting = true;
+                            let retry = Self::retry_pending_mutations(id, state);
+                            self.status =
+                                Some("Finishing project changes before saving…".to_owned());
+                            return Task::batch([editor_tasks, retry]);
+                        }
+                        if state.autosave.save_in_flight {
+                            // The active save captured an earlier immutable
+                            // frontier. Preserve this explicit request so its
+                            // projection/save runs after that frontier reaches
+                            // a terminal result.
+                            state.autosave.explicit_save_waiting = true;
+                            return Task::batch([
+                                editor_tasks,
+                                Self::workspace_persist_task(id, state),
+                            ]);
+                        }
                         let Some(ports) = state.project.ports().cloned() else {
                             self.status =
                                 Some("This project session has no persistence port.".into());
                             return editor_tasks;
                         };
+                        let Some(adapter) = state.project.editor_adapter().cloned() else {
+                            self.status = Some("project editor adapter is unavailable".into());
+                            return editor_tasks;
+                        };
+                        let sessions = deduplicated_editor_sessions(
+                            state
+                                .editor_bindings
+                                .values()
+                                .map(MountedEditorBinding::session),
+                            state.retained_editor_sessions.values().cloned(),
+                        );
+                        let plans = match editor_projection_plans(
+                            adapter.as_ref(),
+                            sessions,
+                            &state.autosave.projected_sessions,
+                        ) {
+                            Ok(plans) => plans,
+                            Err(error) => {
+                                self.status = Some(error);
+                                return editor_tasks;
+                            }
+                        };
+                        if !state.autosave.requires_projection_save(!plans.is_empty()) {
+                            state.autosave.explicit_save_waiting = false;
+                            return Task::batch([
+                                editor_tasks,
+                                Self::workspace_persist_task(id, state),
+                            ]);
+                        }
+                        let ticket = AutosaveTicket {
+                            dirty_sessions: state.autosave.dirty_sessions.clone(),
+                        };
                         let through_revision = workspace.project_revision();
-                        state.autosave.through_revision =
-                            state.autosave.through_revision.max(through_revision);
                         state.autosave.save_in_flight = true;
                         workspace.update(ProjectMessage::StartSave(through_revision));
                         return Task::batch([
                             editor_tasks,
-                            Self::save_task(id, ports, ProjectSaveKind::Explicit),
+                            Self::autosave_task(
+                                id,
+                                ports,
+                                adapter,
+                                plans,
+                                ticket,
+                                ProjectSaveKind::Explicit,
+                            ),
                             Self::workspace_persist_task(id, state),
                         ]);
                     }
@@ -3458,21 +4302,285 @@ impl NativeDesktop {
         let Some(executor) = executor else {
             return Task::none();
         };
-        Task::batch(effects.into_iter().map(|effect| {
-            let executor = executor.clone();
+        Task::batch(
+            effects
+                .into_iter()
+                .map(|effect| Self::project_effect_task(window, executor.clone(), None, effect)),
+        )
+    }
+
+    fn tracked_project_effect_tasks(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        effects: Vec<ProjectEffect>,
+    ) -> Task<Message> {
+        let mut tasks = Vec::new();
+        let mut untracked = Vec::new();
+        for effect in effects {
             let history_action = match &effect {
                 ProjectEffect::CreateNamedSnapshot(_) => Some(HistoryWorkflowAction::NamedSnapshot),
                 ProjectEffect::RestoreHistory { .. } => Some(HistoryWorkflowAction::Restore),
                 _ => None,
             };
-            Task::perform(executor.execute_project_effect(effect), move |result| {
-                Message::ProjectEffectFinished {
-                    window,
+            if project_effect_requires_durability(&effect) {
+                let ticket = ProjectMutationTicket {
+                    effect: effect.clone(),
                     history_action,
-                    result,
+                    synopsis_commit: None,
+                };
+                state.project_mutations.enqueue(ticket);
+            } else {
+                untracked.push(effect);
+            }
+        }
+        tasks.push(Self::project_effect_tasks(
+            window,
+            state.effect_executor.clone(),
+            untracked,
+        ));
+        tasks.push(Self::launch_next_persistent_mutation(window, state));
+        Task::batch(tasks)
+    }
+
+    fn launch_project_mutation(
+        window: window::Id,
+        state: &NativeProjectState,
+        ticket: ProjectMutationTicket,
+    ) -> Task<Message> {
+        let Some(executor) = state.effect_executor.clone() else {
+            return Task::perform(async {}, move |_| Message::ProjectEffectFinished {
+                window,
+                mutation: Some(ticket),
+                result: Err(ProjectRuntimeError::InvalidEffect(
+                    "project mutation executor is unavailable",
+                )),
+            });
+        };
+        Self::project_effect_task(
+            window,
+            executor,
+            Some(ticket.clone()),
+            ticket.effect.clone(),
+        )
+    }
+
+    fn launch_next_persistent_mutation(
+        window: window::Id,
+        state: &mut NativeProjectState,
+    ) -> Task<Message> {
+        match next_persistent_mutation_lane(&state.project_mutations, &state.opaque_mutations) {
+            Some(PersistentMutationLane::Opaque(_)) => {
+                let pending = state
+                    .opaque_mutations
+                    .queued
+                    .pop_front()
+                    .expect("front was checked");
+                let launch = Arc::clone(&pending.launch);
+                state.opaque_mutations.active = Some(pending);
+                launch(state)
+            }
+            Some(PersistentMutationLane::Project) => {
+                let ticket = state
+                    .project_mutations
+                    .start_next()
+                    .expect("project lane requires a queued ticket");
+                for pending in &mut state.opaque_mutations.queued {
+                    pending.prior_projects = pending.prior_projects.saturating_sub(1);
                 }
-            })
-        }))
+                Self::launch_project_mutation(window, state, ticket)
+            }
+            None => Task::none(),
+        }
+    }
+
+    fn after_persistent_mutation_terminal(
+        &mut self,
+        window: window::Id,
+        terminal: PersistentMutationTerminal,
+        error: Option<String>,
+    ) -> Task<Message> {
+        let mut resume_close = false;
+        let mut resume_explicit = false;
+        let had_error = error.is_some();
+        let next = {
+            let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                return Task::none();
+            };
+            match terminal {
+                PersistentMutationTerminal::ProjectSucceeded(ticket) => {
+                    let next_synopsis = ticket
+                        .synopsis_commit
+                        .as_ref()
+                        .and_then(|commit| state.synopsis_commits.finish(commit, true));
+                    state.project_mutations.succeed(&ticket);
+                    if let Some(commit) = next_synopsis {
+                        state.project_mutations.enqueue(ProjectMutationTicket {
+                            effect: ProjectEffect::CommitSynopsis {
+                                node_id: commit.node_id.clone(),
+                                synopsis: commit.synopsis.clone(),
+                            },
+                            history_action: None,
+                            synopsis_commit: Some(commit),
+                        });
+                    }
+                }
+                PersistentMutationTerminal::ProjectEffectFailed(ticket) => {
+                    Self::record_failed_project_mutation(state, ticket);
+                }
+                PersistentMutationTerminal::ProjectSaveFailed(ticket) => {
+                    state.project_mutations.fail_save(ticket);
+                }
+                PersistentMutationTerminal::OpaqueSucceeded(token) => {
+                    state.opaque_mutations.finish(token);
+                }
+                PersistentMutationTerminal::OpaqueFailed(token) => {
+                    state.opaque_mutations.fail_effect(token);
+                }
+                PersistentMutationTerminal::OpaqueSaveFailed(token) => {
+                    state.opaque_mutations.fail_save(token);
+                }
+            }
+            if let Some(error) = error {
+                self.status = Some(error.clone());
+                if state.autosave.close_after_save {
+                    state.autosave.close_after_save = false;
+                    self.closing_windows.remove(&window);
+                    self.close_failures.insert(state.project.window, error);
+                }
+            }
+            let next = if had_error {
+                Task::none()
+            } else {
+                Self::launch_next_persistent_mutation(window, state)
+            };
+            let drained = state.project_mutations.queued.is_empty()
+                && state.project_mutations.active.is_none()
+                && state.opaque_mutations.queued.is_empty()
+                && state.opaque_mutations.active.is_none();
+            if drained && !had_error {
+                resume_close = state.autosave.close_after_save
+                    && !state.project_mutations.blocks_close()
+                    && !state.opaque_mutations.blocks_close();
+                resume_explicit = state.autosave.explicit_save_waiting
+                    && !state.project_mutations.blocks_close()
+                    && !state.opaque_mutations.blocks_close();
+            }
+            next
+        };
+        if resume_close {
+            Task::batch([next, self.continue_close_window(window)])
+        } else if resume_explicit {
+            Task::batch([
+                next,
+                self.start_projection_save(window, ProjectSaveKind::Explicit),
+            ])
+        } else {
+            next
+        }
+    }
+
+    fn retry_project_mutation(window: window::Id, state: &mut NativeProjectState) -> Task<Message> {
+        if let Some(ticket) = state.project_mutations.retry_failed_save() {
+            let Some(ports) = state.project.ports().cloned() else {
+                state.project_mutations.fail_save(ticket);
+                return Task::none();
+            };
+            state.autosave.save_in_flight = true;
+            if let Some(workspace) = state.workspace.as_mut() {
+                workspace.update(ProjectMessage::StartSave(workspace.project_revision()));
+            }
+            return Self::save_task(
+                window,
+                ports,
+                ProjectSaveKind::Structural,
+                SavePurpose::ProjectMutation(ticket),
+            );
+        }
+        let Some(ticket) = state.project_mutations.retry_failed_effect() else {
+            return Task::none();
+        };
+        if let Some(commit) = ticket.synopsis_commit.as_ref() {
+            state.synopsis_commits.in_flight = Some(commit.clone());
+        }
+        Self::launch_project_mutation(window, state, ticket)
+    }
+
+    fn retry_pending_mutations(
+        window: window::Id,
+        state: &mut NativeProjectState,
+    ) -> Task<Message> {
+        if state.project_mutations.failed_save.is_some()
+            || state.project_mutations.failed_effect.is_some()
+        {
+            return Self::retry_project_mutation(window, state);
+        }
+        if let Some(failed) = state.opaque_mutations.failed_effect.take() {
+            let launch = Arc::clone(&failed.launch);
+            state.opaque_mutations.active = Some(failed);
+            return launch(state);
+        }
+        if let Some(token) = state.opaque_mutations.failed_save.take() {
+            let Some(ports) = state.project.ports().cloned() else {
+                state.opaque_mutations.failed_save = Some(token);
+                return Task::none();
+            };
+            state.opaque_mutations.active = Some(PendingOpaqueMutation {
+                token,
+                prior_projects: 0,
+                launch: Arc::new(|_| Task::none()),
+            });
+            state.autosave.save_in_flight = true;
+            let revision = state
+                .workspace
+                .as_ref()
+                .map_or(0, |workspace| workspace.project_revision());
+            if let Some(workspace) = state.workspace.as_mut() {
+                workspace.update(ProjectMessage::StartSave(revision));
+            }
+            return Self::save_task(
+                window,
+                ports,
+                ProjectSaveKind::Structural,
+                SavePurpose::OpaqueMutation(token),
+            );
+        }
+        Task::none()
+    }
+
+    fn project_effect_task(
+        window: window::Id,
+        executor: NativeProjectEffectExecutor,
+        mutation: Option<ProjectMutationTicket>,
+        effect: ProjectEffect,
+    ) -> Task<Message> {
+        Task::perform(executor.execute_project_effect(effect), move |result| {
+            Message::ProjectEffectFinished {
+                window,
+                mutation,
+                result,
+            }
+        })
+    }
+
+    fn queue_synopsis_commit_task(
+        queue: &mut SynopsisCommitQueue,
+        mutations: &mut ProjectMutationState,
+        node_id: String,
+        synopsis: String,
+    ) -> Task<Message> {
+        let Some(commit) = queue.enqueue(SynopsisCommit { node_id, synopsis }) else {
+            return Task::none();
+        };
+        let effect = ProjectEffect::CommitSynopsis {
+            node_id: commit.node_id.clone(),
+            synopsis: commit.synopsis.clone(),
+        };
+        mutations.enqueue(ProjectMutationTicket {
+            effect,
+            history_action: None,
+            synopsis_commit: Some(commit),
+        });
+        Task::none()
     }
 
     fn open_spelling_menu(
@@ -3575,7 +4683,13 @@ impl NativeDesktop {
         let effects = workspace
             .editor_mut()
             .update(crate::EditorMessage::OpenSpellingMenu(request));
-        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
+        Self::editor_effect_tasks(
+            window,
+            state.effect_executor.clone(),
+            &state.project_mutations,
+            &mut state.opaque_mutations,
+            effects,
+        )
     }
 
     fn choose_spelling_action(
@@ -3661,7 +4775,13 @@ impl NativeDesktop {
                     },
                 ));
             }
-            return Self::editor_effect_tasks(window, state.effect_executor.clone(), effects);
+            return Self::editor_effect_tasks(
+                window,
+                state.effect_executor.clone(),
+                &state.project_mutations,
+                &mut state.opaque_mutations,
+                effects,
+            );
         }
         if let Err(_error) = adapter.execute(
             binding.session(),
@@ -3688,7 +4808,13 @@ impl NativeDesktop {
                 word: context.word,
                 action,
             });
-        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
+        Self::editor_effect_tasks(
+            window,
+            state.effect_executor.clone(),
+            &state.project_mutations,
+            &mut state.opaque_mutations,
+            effects,
+        )
     }
 
     fn clipboard_task(
@@ -3934,7 +5060,7 @@ impl NativeDesktop {
         workspace.update(ProjectMessage::MarkDirty(mutation.revision.value()));
         state
             .autosave
-            .mark_dirty(mutation.revision.value(), Instant::now());
+            .mark_dirty(mutation.editor_session, mutation.revision, Instant::now());
         self.status = mutation.presentation_error.or(mutation.feedback);
         Task::none()
     }
@@ -3942,36 +5068,123 @@ impl NativeDesktop {
     fn editor_effect_tasks(
         window: window::Id,
         executor: Option<NativeProjectEffectExecutor>,
+        project_mutations: &ProjectMutationState,
+        opaque_mutations: &mut OpaqueMutationState,
         effects: Vec<EditorEffect>,
     ) -> Task<Message> {
         let Some(executor) = executor else {
             return Task::none();
         };
-        Task::batch(effects.into_iter().map(|effect| {
-            let executor = executor.clone();
-            Task::perform(executor.execute_editor_effect(effect), move |result| {
-                Message::EditorEffectFinished { window, result }
-            })
-        }))
+        let mut tasks = Vec::new();
+        for effect in effects {
+            let mutation = editor_effect_requires_durability(&effect)
+                .then(|| opaque_mutations.begin(OpaqueMutationKind::ProjectDictionary));
+            if let Some(token) = mutation {
+                let lane_is_idle =
+                    !project_mutations.blocks_close() && !opaque_mutations.blocks_close();
+                if lane_is_idle {
+                    let retry_effect = effect.clone();
+                    opaque_mutations.active = Some(PendingOpaqueMutation {
+                        token,
+                        prior_projects: 0,
+                        launch: Arc::new(move |state| {
+                            let Some(executor) = state.effect_executor.clone() else {
+                                return Task::perform(async {}, move |_| {
+                                    Message::EditorEffectFinished {
+                                        window,
+                                        mutation: Some(token),
+                                        result: Err(ProjectRuntimeError::InvalidEffect(
+                                            "project dictionary executor is unavailable",
+                                        )),
+                                    }
+                                });
+                            };
+                            Task::perform(
+                                executor.execute_editor_effect(retry_effect.clone()),
+                                move |result| Message::EditorEffectFinished {
+                                    window,
+                                    mutation: Some(token),
+                                    result,
+                                },
+                            )
+                        }),
+                    });
+                    let executor = executor.clone();
+                    tasks.push(Task::perform(
+                        executor.execute_editor_effect(effect),
+                        move |result| Message::EditorEffectFinished {
+                            window,
+                            mutation: Some(token),
+                            result,
+                        },
+                    ));
+                } else {
+                    let retry_effect = effect.clone();
+                    opaque_mutations.enqueue(token, project_mutations.queued.len(), move |state| {
+                        let Some(executor) = state.effect_executor.clone() else {
+                            return Task::perform(async {}, move |_| {
+                                Message::EditorEffectFinished {
+                                    window,
+                                    mutation: Some(token),
+                                    result: Err(ProjectRuntimeError::InvalidEffect(
+                                        "project dictionary executor is unavailable",
+                                    )),
+                                }
+                            });
+                        };
+                        Task::perform(
+                            executor.execute_editor_effect(retry_effect.clone()),
+                            move |result| Message::EditorEffectFinished {
+                                window,
+                                mutation: Some(token),
+                                result,
+                            },
+                        )
+                    });
+                }
+            } else {
+                let executor = executor.clone();
+                tasks.push(Task::perform(
+                    executor.execute_editor_effect(effect),
+                    move |result| Message::EditorEffectFinished {
+                        window,
+                        mutation: None,
+                        result,
+                    },
+                ));
+            }
+        }
+        Task::batch(tasks)
     }
 
     fn finish_project_effect(
         &mut self,
         window: window::Id,
-        history_action: Option<HistoryWorkflowAction>,
+        mutation: Option<ProjectMutationTicket>,
+        opaque_mutation: Option<OpaqueMutationToken>,
         result: Result<ProjectEffectCompletion, ProjectRuntimeError>,
     ) -> Task<Message> {
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
             return Task::none();
         };
+        let history_action = mutation.as_ref().and_then(|ticket| ticket.history_action);
         match result {
             Ok(ProjectEffectCompletion::WorkflowSnapshot(snapshot)) => {
+                Self::prune_deleted_document_sessions(state, snapshot.as_ref());
                 let snapshot = Arc::new(*snapshot);
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::clone(&snapshot);
                 }
                 if let Some(workspace) = state.workspace.as_mut() {
-                    workspace.reconcile_snapshot(&snapshot);
+                    let has_later_mutations = !state.project_mutations.queued.is_empty()
+                        || !state.opaque_mutations.queued.is_empty();
+                    if should_reconcile_refreshed_presentation(
+                        mutation.as_ref(),
+                        opaque_mutation,
+                        has_later_mutations,
+                    ) {
+                        workspace.reconcile_snapshot(&snapshot);
+                    }
                     workspace.update(ProjectMessage::SaveCompleted(
                         snapshot.project.revision.value(),
                     ));
@@ -4037,12 +5250,32 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
-                Task::batch([reopen, refresh])
+                let terminal = mutation.map_or_else(Task::none, |ticket| {
+                    self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::ProjectSucceeded(ticket),
+                        None,
+                    )
+                });
+                Task::batch([reopen, refresh, terminal])
             }
             Ok(ProjectEffectCompletion::RefreshedSnapshot(snapshot)) => {
                 let snapshot = *snapshot;
+                Self::prune_deleted_document_sessions(state, &snapshot);
                 if let Some(workspace) = state.workspace.as_mut() {
-                    workspace.reconcile_snapshot(&snapshot);
+                    // Project mutations are optimistically reduced before
+                    // their asynchronous command executes. Replacing the
+                    // whole presentation here would erase later queued edits
+                    // which have not reached the command lane yet.
+                    let has_later_mutations = !state.project_mutations.queued.is_empty()
+                        || !state.opaque_mutations.queued.is_empty();
+                    if should_reconcile_refreshed_presentation(
+                        mutation.as_ref(),
+                        opaque_mutation,
+                        has_later_mutations,
+                    ) {
+                        workspace.reconcile_snapshot(&snapshot);
+                    }
                     workspace.update(ProjectMessage::MarkDirty(snapshot.project.revision.value()));
                 }
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
@@ -4056,6 +5289,20 @@ impl NativeDesktop {
                     self.status = Some(format!("Could not refresh mounted styles: {error}"));
                 }
                 let Some(ports) = state.project.ports().cloned() else {
+                    let error = "Project mutation completed without a persistence port.".to_owned();
+                    let terminal = mutation
+                        .map(PersistentMutationTerminal::ProjectSaveFailed)
+                        .or_else(|| {
+                            opaque_mutation.map(PersistentMutationTerminal::OpaqueSaveFailed)
+                        });
+                    if let Some(terminal) = terminal {
+                        return self.after_persistent_mutation_terminal(
+                            window,
+                            terminal,
+                            Some(error),
+                        );
+                    }
+                    self.status = Some(error);
                     return Task::none();
                 };
                 let through_revision = snapshot.project.revision.value();
@@ -4063,19 +5310,32 @@ impl NativeDesktop {
                 if let Some(workspace) = state.workspace.as_mut() {
                     workspace.update(ProjectMessage::StartSave(through_revision));
                 }
-                Self::save_task(window, ports, ProjectSaveKind::Structural)
+                let purpose = mutation.map_or_else(
+                    || opaque_mutation.map_or(SavePurpose::Untracked, SavePurpose::OpaqueMutation),
+                    SavePurpose::ProjectMutation,
+                );
+                Self::save_task(window, ports, ProjectSaveKind::Structural, purpose)
             }
             Ok(ProjectEffectCompletion::TreePaste {
                 snapshot,
                 kind,
                 created_roots,
             }) => {
+                Self::prune_deleted_document_sessions(state, snapshot.as_ref());
                 let snapshot = Arc::new(*snapshot);
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::clone(&snapshot);
                 }
                 if let Some(workspace) = state.workspace.as_mut() {
-                    workspace.reconcile_snapshot(&snapshot);
+                    let has_later_mutations = !state.project_mutations.queued.is_empty()
+                        || !state.opaque_mutations.queued.is_empty();
+                    if should_reconcile_refreshed_presentation(
+                        mutation.as_ref(),
+                        opaque_mutation,
+                        has_later_mutations,
+                    ) {
+                        workspace.reconcile_snapshot(&snapshot);
+                    }
                     if !created_roots.is_empty() {
                         workspace.select_tree_roots(&created_roots);
                     }
@@ -4096,7 +5356,21 @@ impl NativeDesktop {
                     crate::TreeClipboardKind::Copy => "Project item pasted".to_owned(),
                     crate::TreeClipboardKind::Cut => "Project item moved".to_owned(),
                 });
-                Task::none()
+                let terminal = mutation.map_or_else(Task::none, |ticket| {
+                    self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::ProjectSucceeded(ticket),
+                        None,
+                    )
+                });
+                if let Some(token) = opaque_mutation {
+                    return self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::OpaqueSucceeded(token),
+                        None,
+                    );
+                }
+                terminal
             }
             Ok(ProjectEffectCompletion::OpenDocuments {
                 snapshot,
@@ -4204,10 +5478,33 @@ impl NativeDesktop {
                 {
                     workspace.fail_history_workflow(error.clone());
                 }
-                self.status = Some(error);
-                Task::none()
+                let terminal = mutation
+                    .map(PersistentMutationTerminal::ProjectEffectFailed)
+                    .or_else(|| opaque_mutation.map(PersistentMutationTerminal::OpaqueFailed));
+                if let Some(terminal) = terminal {
+                    self.after_persistent_mutation_terminal(window, terminal, Some(error))
+                } else {
+                    self.status = Some(error);
+                    Task::none()
+                }
             }
         }
+    }
+
+    fn record_failed_project_mutation(
+        state: &mut NativeProjectState,
+        mut ticket: ProjectMutationTicket,
+    ) {
+        if let Some(commit) = ticket.synopsis_commit.as_ref() {
+            state.synopsis_commits.finish(commit, false);
+            let latest = state.synopsis_commits.retain_latest_failed(commit);
+            ticket.effect = ProjectEffect::CommitSynopsis {
+                node_id: latest.node_id.clone(),
+                synopsis: latest.synopsis.clone(),
+            };
+            ticket.synopsis_commit = Some(latest);
+        }
+        state.project_mutations.fail_effect(ticket);
     }
 
     fn refresh_mounted_style_catalogs(state: &NativeProjectState) -> Result<(), String> {
@@ -4273,11 +5570,12 @@ impl NativeDesktop {
     fn finish_editor_effect(
         &mut self,
         window: window::Id,
+        mutation: Option<OpaqueMutationToken>,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     ) -> Task<Message> {
         match result {
             Ok(EditorEffectCompletion::ProjectMutation(completion)) => {
-                let project = self.finish_project_effect(window, None, Ok(completion));
+                let project = self.finish_project_effect(window, None, mutation, Ok(completion));
                 let refresh = self
                     .windows
                     .get_mut(&window)
@@ -4293,7 +5591,8 @@ impl NativeDesktop {
             }
             Ok(EditorEffectCompletion::GlobalDictionaryUpdated) => {
                 self.status = None;
-                self.windows
+                let refresh = self
+                    .windows
                     .get_mut(&window)
                     .and_then(|native| match native {
                         NativeWindow::Project(state) => state
@@ -4302,33 +5601,64 @@ impl NativeDesktop {
                             .and_then(|view| Self::spellcheck_task(window, state, view).ok()),
                         NativeWindow::Launcher => None,
                     })
-                    .unwrap_or_else(Task::none)
+                    .unwrap_or_else(Task::none);
+                let terminal = mutation.map_or_else(Task::none, |token| {
+                    self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::OpaqueSucceeded(token),
+                        None,
+                    )
+                });
+                Task::batch([refresh, terminal])
             }
             Ok(EditorEffectCompletion::SavedThrough(revision)) => {
+                let mut continue_close = false;
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
                     && let Some(workspace) = state.workspace.as_mut()
                 {
                     state.autosave.save_in_flight = false;
+                    continue_close = state.autosave.close_after_save;
+                    state.autosave.close_after_save = false;
                     workspace.update(ProjectMessage::SaveCompleted(revision));
                 }
                 self.status = None;
-                Task::none()
+                if continue_close {
+                    self.continue_close_window(window)
+                } else {
+                    Task::none()
+                }
             }
             Ok(EditorEffectCompletion::Intent(intent)) => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
-                if let EditorRuntimeIntent::Mount { snapshot, .. } = &intent {
+                if let EditorRuntimeIntent::Mount {
+                    pane,
+                    load,
+                    snapshot,
+                    ..
+                } = &intent
+                {
+                    let active_document = state
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.editor().pane(*pane).active_document());
+                    if !mount_matches_active_document(active_document, load.document_id) {
+                        // Mount work runs asynchronously. A later tab activation
+                        // may have superseded this completion, so it must not
+                        // hydrate its snapshot or replace the retained host.
+                        return Task::none();
+                    }
                     Self::accept_hydrated_snapshot(state, snapshot.as_ref().clone());
                 }
                 let spellcheck_view = editor_intent_view(&intent);
                 match Self::apply_editor_intent(state, intent, self.appearance) {
-                    Ok(Some((_session, revision))) => {
+                    Ok(Some((session, revision))) => {
                         let Some(workspace) = state.workspace.as_mut() else {
                             return Task::none();
                         };
                         workspace.update(ProjectMessage::MarkDirty(revision.value()));
-                        state.autosave.mark_dirty(revision.value(), Instant::now());
+                        state.autosave.mark_dirty(session, revision, Instant::now());
                         let spellcheck = spellcheck_view
                             .map(|view| Self::spellcheck_task(window, state, view))
                             .transpose()
@@ -4345,7 +5675,15 @@ impl NativeDesktop {
                 Task::none()
             }
             Err(error) => {
-                self.status = Some(format!("Editor action could not complete: {error}"));
+                let error = format!("Editor action could not complete: {error}");
+                if let Some(token) = mutation {
+                    return self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::OpaqueFailed(token),
+                        Some(error),
+                    );
+                }
+                self.status = Some(error);
                 Task::none()
             }
         }
@@ -4398,9 +5736,13 @@ impl NativeDesktop {
         for (pane, document) in targets {
             let Some(document) = document else {
                 if let Some(binding) = state.editor_bindings.remove(&pane) {
+                    if let Some(previous_document) = state.mounted_documents.remove(&pane) {
+                        state
+                            .retained_editor_sessions
+                            .insert(previous_document, binding.session());
+                    }
                     binding.detach().map_err(|error| error.to_string())?;
                 }
-                state.mounted_documents.remove(&pane);
                 state.editor_hosts.remove(pane);
                 continue;
             };
@@ -4440,12 +5782,15 @@ impl NativeDesktop {
             .and_then(|(mounted_pane, _)| state.editor_bindings.get(mounted_pane))
             .map(MountedEditorBinding::session);
         if let Some(binding) = state.editor_bindings.remove(&pane) {
+            if let Some(previous_document) = state.mounted_documents.remove(&pane) {
+                state
+                    .retained_editor_sessions
+                    .insert(previous_document, binding.session());
+            }
             binding.detach().map_err(|error| error.to_string())?;
         }
-        let session = shared.map_or(
-            MountedEditorSession::Open(load),
-            MountedEditorSession::Reuse,
-        );
+        let session =
+            mount_session_for_document(shared, &state.retained_editor_sessions, document_id, load);
         let viewport = EditorViewport::new(720.0, 520.0)
             .expect("native editor viewport constants must be positive");
         let theme = match appearance {
@@ -4465,6 +5810,15 @@ impl NativeDesktop {
             crate::iced_editor_surface::EditorPaneSlot::mounted(binding.host().clone()),
         );
         let active_style = binding.active_style().map_err(|error| error.to_string())?;
+        let mounted_session = binding.session();
+        let mounted_revision = adapter
+            .revision(mounted_session.clone())
+            .map_err(|error| error.to_string())?;
+        state
+            .autosave
+            .projected_sessions
+            .entry(mounted_session)
+            .or_insert(mounted_revision);
         state.editor_bindings.insert(pane, binding);
         state.mounted_documents.insert(pane, document_id);
         if let Some(style_name) = state
@@ -4479,6 +5833,7 @@ impl NativeDesktop {
                 .editor_mut()
                 .update(crate::EditorMessage::SetActiveParagraphStyle(style_name));
         }
+        Self::prune_durable_unmounted_sessions(state);
         Ok(())
     }
 
@@ -4505,9 +5860,13 @@ impl NativeDesktop {
                     if binding.view() != view {
                         return Err("editor unmount view does not match the mounted pane".into());
                     }
+                    if let Some(previous_document) = state.mounted_documents.remove(&pane) {
+                        state
+                            .retained_editor_sessions
+                            .insert(previous_document, binding.session());
+                    }
                     binding.detach().map_err(|error| error.to_string())?;
                 }
-                state.mounted_documents.remove(&pane);
                 if pane == EditorPane::Primary {
                     state.editor_hosts.insert(
                         pane,
@@ -4887,40 +6246,121 @@ impl NativeDesktop {
         Ok((revision != before).then_some((session, revision)))
     }
 
-    fn persist_projection_task(
+    fn project_state_sessions(
+        state: &NativeProjectState,
+    ) -> Result<Vec<SharedEditorSession>, String> {
+        Ok(deduplicated_editor_sessions(
+            state
+                .editor_bindings
+                .values()
+                .map(MountedEditorBinding::session),
+            state.retained_editor_sessions.values().cloned(),
+        ))
+    }
+
+    fn projection_plans(state: &NativeProjectState) -> Result<Vec<EditorProjectionPlan>, String> {
+        let sessions = Self::project_state_sessions(state)?;
+        if sessions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| "project editor adapter is unavailable".to_owned())?;
+        editor_projection_plans(adapter, sessions, &state.autosave.projected_sessions)
+    }
+
+    fn persist_projection(
+        ports: &ProjectUiPorts,
+        adapter: &EditorIcedAdapter,
+        plan: &EditorProjectionPlan,
+    ) -> Result<(), String> {
+        let projection =
+            iced::futures::executor::block_on(adapter.project(plan.session.clone(), plan.revision))
+                .map_err(|error| error.to_string())?;
+        let access = ports.access().map_err(|error| error.to_string())?;
+        access
+            .persistence(|persistence| persistence.persist_editor_projection(projection))
+            .map_err(|error| error.to_string())?
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    fn autosave_task(
         window: window::Id,
         ports: ProjectUiPorts,
         adapter: Arc<EditorIcedAdapter>,
-        session: parchmint_editor_api::SharedEditorSession,
-        revision: EditorRevision,
+        plans: Vec<EditorProjectionPlan>,
+        ticket: AutosaveTicket,
+        kind: ProjectSaveKind,
     ) -> Task<Message> {
         Task::perform(
-            Self::run_blocking_operation("persist editor projection", move || {
-                let projection =
-                    iced::futures::executor::block_on(adapter.project(session, revision))
-                        .map_err(|error| error.to_string())?;
-                let access = ports.access().map_err(|error| error.to_string())?;
-                access
-                    .persistence(|persistence| persistence.persist_editor_projection(projection))
-                    .map_err(|error| error.to_string())?
-                    .map_err(|error| error.to_string())?;
-                access
-                    .snapshot(|query| query.snapshot())
-                    .map_err(|error| error.to_string())?
-                    .map_err(|error| error.to_string())
+            Self::run_blocking_operation("autosave project", move || {
+                Ok(run_projection_sequence(
+                    &plans,
+                    |plan| Self::persist_projection(&ports, adapter.as_ref(), plan),
+                    || {
+                        let access = ports.access().map_err(|error| error.to_string())?;
+                        let (handle, _) = access
+                            .persistence(|persistence| persistence.request_save(kind))
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| error.to_string())?;
+                        let saved = access
+                            .persistence(|persistence| persistence.await_save(handle))
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| error.to_string())?;
+                        let snapshot = access
+                            .snapshot(|query| query.snapshot())
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| error.to_string())?;
+                        Ok(AutosaveCompletion {
+                            saved_revision: saved.written.project_revision.value(),
+                            snapshot,
+                        })
+                    },
+                ))
             }),
             move |result| Message::EditorProjectionPersisted {
                 window,
-                revision: revision.value(),
+                ticket: ticket.clone(),
                 result,
             },
         )
+    }
+
+    fn accept_persistence_snapshot(state: &mut NativeProjectState, snapshot: ProjectSnapshot) {
+        let is_current = state
+            .project
+            .project_ui
+            .as_ref()
+            .is_none_or(|project| snapshot_covers(&snapshot, project.snapshot.as_ref()));
+        if !is_current {
+            return;
+        }
+        let snapshot = Arc::new(snapshot);
+        if let Some(project_ui) = state.project.project_ui.as_mut() {
+            project_ui.snapshot = Arc::clone(&snapshot);
+            state.effect_executor = state
+                .effect_executor
+                .as_ref()
+                .map(|executor| executor.refreshed(Arc::clone(&snapshot)))
+                .or_else(|| {
+                    Some(NativeProjectEffectExecutor::new(
+                        project_ui.ports.clone(),
+                        Arc::clone(&snapshot),
+                    ))
+                });
+        }
+        // The workspace owns live editor and Synopsis drafts. Persistence
+        // refreshes the authoritative service snapshot only; reconciling the
+        // asynchronous result here could replace newer user presentation.
     }
 
     fn save_task(
         window: window::Id,
         ports: ProjectUiPorts,
         kind: ProjectSaveKind,
+        purpose: SavePurpose,
     ) -> Task<Message> {
         Task::perform(
             Self::run_blocking_operation("save project", move || {
@@ -4935,7 +6375,11 @@ impl NativeDesktop {
                     .map_err(|error| error.to_string())?;
                 Ok(saved.written.project_revision.value())
             }),
-            move |result| Message::SaveFinished { window, result },
+            move |result| Message::SaveFinished {
+                window,
+                purpose: purpose.clone(),
+                result,
+            },
         )
     }
 
@@ -5193,7 +6637,13 @@ impl NativeDesktop {
             ));
         }
         self.status = None;
-        Self::editor_effect_tasks(window, state.effect_executor.clone(), effects)
+        Self::editor_effect_tasks(
+            window,
+            state.effect_executor.clone(),
+            &state.project_mutations,
+            &mut state.opaque_mutations,
+            effects,
+        )
     }
 
     async fn run_service_job<T: Send + 'static>(job: BlockingServiceJob<T>) -> Result<T, String> {
@@ -5359,10 +6809,13 @@ impl NativeDesktop {
                     tasks.push(task);
                 }
             }
-            let Some(workspace) = state.workspace.as_mut() else {
+            if !state.autosave.should_save(now)
+                || state.project_mutations.blocks_close()
+                || state.opaque_mutations.blocks_close()
+            {
                 continue;
-            };
-            if !state.autosave.should_save(now) {
+            }
+            if state.workspace.is_none() {
                 continue;
             }
             let Some(ports) = state.project.ports().cloned() else {
@@ -5371,23 +6824,89 @@ impl NativeDesktop {
             let Some(adapter) = state.project.editor_adapter().cloned() else {
                 continue;
             };
-            let pane = workspace.editor().focused_pane();
-            let Some(binding) = state.editor_bindings.get(&pane) else {
-                continue;
+            let plans = match Self::projection_plans(state) {
+                Ok(plans) => plans,
+                Err(error) => {
+                    self.status = Some(error);
+                    continue;
+                }
             };
-            let session = binding.session();
-            let Ok(revision) = adapter.revision(session.clone()) else {
-                continue;
+            let through_revision = state
+                .workspace
+                .as_ref()
+                .expect("workspace presence was checked above")
+                .project_revision();
+            let ticket = AutosaveTicket {
+                dirty_sessions: state.autosave.dirty_sessions.clone(),
             };
-            let through_revision = state.autosave.through_revision;
             state.autosave.save_in_flight = true;
-            workspace.update(ProjectMessage::StartSave(through_revision));
+            state
+                .workspace
+                .as_mut()
+                .expect("workspace presence was checked above")
+                .update(ProjectMessage::StartSave(through_revision));
             let window = *window;
-            tasks.push(Self::persist_projection_task(
-                window, ports, adapter, session, revision,
+            tasks.push(Self::autosave_task(
+                window,
+                ports,
+                adapter,
+                plans,
+                ticket,
+                ProjectSaveKind::Autosave,
             ));
         }
         Task::batch(tasks)
+    }
+
+    fn start_projection_save(
+        &mut self,
+        window: window::Id,
+        kind: ProjectSaveKind,
+    ) -> Task<Message> {
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+            return Task::none();
+        };
+        if state.autosave.save_in_flight
+            || state.project_mutations.blocks_close()
+            || state.opaque_mutations.blocks_close()
+        {
+            if kind == ProjectSaveKind::Explicit {
+                state.autosave.explicit_save_waiting = true;
+            }
+            return Task::none();
+        }
+        let Some(ports) = state.project.ports().cloned() else {
+            self.status = Some("This project session has no persistence port.".into());
+            return Task::none();
+        };
+        let Some(adapter) = state.project.editor_adapter().cloned() else {
+            self.status = Some("project editor adapter is unavailable".into());
+            return Task::none();
+        };
+        let plans = match Self::projection_plans(state) {
+            Ok(plans) => plans,
+            Err(error) => {
+                self.status = Some(error);
+                return Task::none();
+            }
+        };
+        if !state.autosave.requires_projection_save(!plans.is_empty()) {
+            state.autosave.explicit_save_waiting = false;
+            return Task::none();
+        }
+        let ticket = AutosaveTicket {
+            dirty_sessions: state.autosave.dirty_sessions.clone(),
+        };
+        state.autosave.save_in_flight = true;
+        state.autosave.explicit_save_waiting = false;
+        let through_revision = state
+            .workspace
+            .as_ref()
+            .map_or(0, |workspace| workspace.project_revision());
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.update(ProjectMessage::StartSave(through_revision));
+        }
+        Self::autosave_task(window, ports, adapter, plans, ticket, kind)
     }
 
     fn open_launcher_window(&mut self) -> Task<Message> {
@@ -5502,6 +7021,11 @@ impl NativeDesktop {
                 sessions.push(session);
             }
         }
+        for session in state.retained_editor_sessions.values() {
+            if !sessions.contains(session) {
+                sessions.push(session.clone());
+            }
+        }
         if let Some(adapter) = state.project.editor_adapter() {
             for session in sessions {
                 iced::futures::executor::block_on(adapter.close(session));
@@ -5509,6 +7033,8 @@ impl NativeDesktop {
         }
         state.editor_hosts = EditorHostSlots::default();
         state.mounted_documents.clear();
+        state.retained_editor_sessions.clear();
+        state.autosave.reset_sessions();
         state.spellcheck_generation.clear();
         state.pending_spellchecks.clear();
         state.spelling_issues.clear();
@@ -5551,6 +7077,20 @@ impl NativeDesktop {
             state.editor_hosts = hosts;
             state.editor_bindings = bindings;
             state.mounted_documents = documents;
+            if let Some(adapter) = state.project.editor_adapter() {
+                let mounted = state
+                    .editor_bindings
+                    .values()
+                    .filter_map(|binding| {
+                        let session = binding.session();
+                        adapter
+                            .revision(session.clone())
+                            .ok()
+                            .map(|revision| (session, revision))
+                    })
+                    .collect::<Vec<_>>();
+                state.autosave.record_projected(mounted);
+            }
         }
         if let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) {
             let _ = binding.restore_focus();
@@ -5623,6 +7163,7 @@ impl NativeDesktop {
         let editor_hosts = EditorHostSlots::default();
         let editor_bindings = BTreeMap::new();
         let mounted_documents = BTreeMap::new();
+        let retained_editor_sessions = BTreeMap::new();
         let effect_executor = project.project_ui.as_ref().map(|project| {
             NativeProjectEffectExecutor::new(project.ports.clone(), Arc::clone(&project.snapshot))
         });
@@ -5643,7 +7184,11 @@ impl NativeDesktop {
                 editor_hosts,
                 editor_bindings,
                 mounted_documents,
+                retained_editor_sessions,
                 effect_executor,
+                synopsis_commits: SynopsisCommitQueue::default(),
+                project_mutations: ProjectMutationState::default(),
+                opaque_mutations: OpaqueMutationState::default(),
                 service_feeds,
                 recovery_acceptance: None,
                 active_export: None,
@@ -5882,10 +7427,68 @@ impl NativeDesktop {
         if !self.closing_windows.insert(id) {
             return Task::none();
         }
+        if state.project_mutations.blocks_close() || state.opaque_mutations.blocks_close() {
+            let NativeWindow::Project(state) = self
+                .windows
+                .get_mut(&id)
+                .expect("project window remains live while close waits")
+            else {
+                unreachable!("project window kind was checked above")
+            };
+            state.autosave.close_after_save = true;
+            let retry = Self::retry_pending_mutations(id, state);
+            self.status = Some("Finishing project changes before closing…".to_owned());
+            return retry;
+        }
+        if state.autosave.save_in_flight {
+            let NativeWindow::Project(state) = self
+                .windows
+                .get_mut(&id)
+                .expect("project window remains live while close waits")
+            else {
+                unreachable!("project window kind was checked above")
+            };
+            state.autosave.close_after_save = true;
+            self.status = Some("Finishing the current save before closing…".to_owned());
+            return Task::none();
+        }
+        self.continue_close_window(id)
+    }
+
+    fn continue_close_window(&mut self, id: window::Id) -> Task<Message> {
+        let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
+            return Task::none();
+        };
+        if state.project_mutations.blocks_close()
+            || state.opaque_mutations.blocks_close()
+            || state.autosave.save_in_flight
+        {
+            let NativeWindow::Project(state) = self
+                .windows
+                .get_mut(&id)
+                .expect("project window remains live while queued close waits")
+            else {
+                unreachable!("project window kind was checked above")
+            };
+            state.autosave.close_after_save = true;
+            return Task::none();
+        }
         let project = state.project.project.clone();
         let is_clean = state.autosave.is_clean();
         let callbacks = Arc::clone(&self.callbacks);
         let persist = Self::workspace_persist_task(id, state);
+        let plans = match Self::projection_plans(state) {
+            Ok(plans) => plans,
+            Err(error) => {
+                self.status = None;
+                self.closing_windows.remove(&id);
+                self.close_failures.insert(state.project.window, error);
+                return Task::none();
+            }
+        };
+        let ports = state.project.ports().cloned();
+        let adapter = state.project.editor_adapter().cloned();
+        let has_plans = !plans.is_empty();
         self.status = Some(if is_clean {
             "Closing project…".to_owned()
         } else {
@@ -5893,11 +7496,36 @@ impl NativeDesktop {
         });
         let close = Task::perform(
             Self::run_blocking_operation("close project", move || {
-                if is_clean {
-                    callbacks.close_clean_project(project)
-                } else {
-                    callbacks.close_project(project)
-                }
+                Ok(run_projection_sequence(
+                    &plans,
+                    |plan| {
+                        let ports = ports
+                            .as_ref()
+                            .ok_or_else(|| "project persistence port is unavailable".to_owned())?;
+                        let adapter = adapter
+                            .as_ref()
+                            .ok_or_else(|| "project editor adapter is unavailable".to_owned())?;
+                        Self::persist_projection(ports, adapter.as_ref(), plan)
+                    },
+                    || {
+                        let snapshot = ports
+                            .as_ref()
+                            .map(|ports| {
+                                let access = ports.access().map_err(|error| error.to_string())?;
+                                access
+                                    .snapshot(|query| query.snapshot())
+                                    .map_err(|error| error.to_string())?
+                                    .map_err(|error| error.to_string())
+                            })
+                            .transpose()?;
+                        let result = if is_clean && !has_plans {
+                            callbacks.close_clean_project(project)
+                        } else {
+                            callbacks.close_project(project)
+                        };
+                        Ok(CloseCompletion { snapshot, result })
+                    },
+                ))
             }),
             move |result| Message::ProjectCloseFinished { window: id, result },
         );
@@ -5908,7 +7536,8 @@ impl NativeDesktop {
         self.closing_windows.remove(&id);
         let removed = self.windows.remove(&id);
         match removed {
-            Some(NativeWindow::Project(state)) => {
+            Some(NativeWindow::Project(mut state)) => {
+                Self::teardown_editor_sessions(&mut state);
                 self.project_windows.remove(&state.project.window);
                 self.close_failures.remove(&state.project.window);
                 self.callbacks
@@ -5926,6 +7555,94 @@ impl NativeDesktop {
         };
         close
     }
+
+    fn teardown_editor_sessions(state: &mut NativeProjectState) {
+        let mut sessions = state
+            .retained_editor_sessions
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for (_, binding) in std::mem::take(&mut state.editor_bindings) {
+            sessions.insert(binding.session());
+            let _ = binding.detach();
+        }
+        if let Some(adapter) = state.project.editor_adapter() {
+            for session in sessions {
+                iced::futures::executor::block_on(adapter.close(session));
+            }
+        }
+        state.retained_editor_sessions.clear();
+        state.mounted_documents.clear();
+        state.autosave.reset_sessions();
+    }
+
+    fn prune_durable_unmounted_sessions(state: &mut NativeProjectState) {
+        let mounted = state
+            .editor_bindings
+            .values()
+            .map(MountedEditorBinding::session)
+            .collect::<BTreeSet<_>>();
+        let removable = state
+            .retained_editor_sessions
+            .iter()
+            .filter(|(_, session)| {
+                !mounted.contains(*session) && !state.autosave.dirty_sessions.contains_key(*session)
+            })
+            .map(|(document, session)| (*document, session.clone()))
+            .collect::<Vec<_>>();
+        for (document, session) in removable {
+            state.retained_editor_sessions.remove(&document);
+            state.autosave.projected_sessions.remove(&session);
+            if let Some(adapter) = state.project.editor_adapter() {
+                iced::futures::executor::block_on(adapter.close(session));
+            }
+        }
+    }
+
+    fn prune_deleted_document_sessions(state: &mut NativeProjectState, snapshot: &ProjectSnapshot) {
+        let live = snapshot
+            .project
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| match node.kind {
+                parchmint_domain::NodeKind::Document(document) => Some(document),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let deleted = state
+            .retained_editor_sessions
+            .keys()
+            .chain(state.mounted_documents.values())
+            .filter(|document| !live.contains(document))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for document in deleted {
+            let panes = state
+                .mounted_documents
+                .iter()
+                .filter_map(|(pane, mounted)| (*mounted == document).then_some(*pane))
+                .collect::<Vec<_>>();
+            let mut sessions = BTreeSet::new();
+            for pane in panes {
+                state.mounted_documents.remove(&pane);
+                if let Some(binding) = state.editor_bindings.remove(&pane) {
+                    sessions.insert(binding.session());
+                    let _ = binding.detach();
+                }
+                state.editor_hosts.remove(pane);
+            }
+            if let Some(session) = state.retained_editor_sessions.remove(&document) {
+                sessions.insert(session);
+            }
+            for session in sessions {
+                state.autosave.dirty_sessions.remove(&session);
+                state.autosave.projected_sessions.remove(&session);
+                if let Some(adapter) = state.project.editor_adapter() {
+                    iced::futures::executor::block_on(adapter.close(session));
+                }
+            }
+        }
+    }
 }
 
 fn restored_document_effect(pane: EditorPane, document: String) -> ProjectEffect {
@@ -5936,6 +7653,7 @@ fn restored_document_effect(pane: EditorPane, document: String) -> ProjectEffect
 }
 
 struct ClipboardMutation {
+    editor_session: SharedEditorSession,
     revision: EditorRevision,
     active_style: parchmint_domain::StyleId,
     presentation_error: Option<String>,
@@ -6009,6 +7727,7 @@ fn apply_completed_cut(
         .err()
         .map(|error| error.to_string());
     Ok(Some(ClipboardMutation {
+        editor_session: request.editor_session.clone(),
         revision,
         active_style: adapter
             .active_style(request.editor_session.clone(), request.view)
@@ -6063,6 +7782,7 @@ fn apply_completed_paste(
         return Ok(None);
     }
     Ok(Some(ClipboardMutation {
+        editor_session: request.editor_session.clone(),
         revision,
         active_style: adapter
             .active_style(request.editor_session.clone(), request.view)
@@ -6677,6 +8397,28 @@ fn stable_id_string(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn mount_matches_active_document(
+    active_document: Option<&str>,
+    document: parchmint_domain::DocumentId,
+) -> bool {
+    let document = stable_id_string(document.as_bytes());
+    active_document == Some(document.as_str())
+}
+
+fn mount_session_for_document(
+    shared: Option<SharedEditorSession>,
+    retained: &BTreeMap<parchmint_domain::DocumentId, SharedEditorSession>,
+    document: parchmint_domain::DocumentId,
+    load: CanonicalDocumentLoad,
+) -> MountedEditorSession {
+    shared
+        .or_else(|| retained.get(&document).cloned())
+        .map_or_else(
+            || MountedEditorSession::Open(load),
+            MountedEditorSession::Reuse,
+        )
+}
+
 fn stable_id_bytes(value: &str) -> Result<[u8; 16], String> {
     if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("stable identifier must contain 32 hexadecimal characters".to_owned());
@@ -6840,13 +8582,44 @@ fn strict_size_error(request: &NativeCaptureRequest, png: &NativeCapturePng) -> 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{
+        cell::RefCell,
+        pin::Pin,
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
+        task::{Context, Poll},
+    };
 
+    use iced::futures::StreamExt;
     use iced::futures::executor::block_on;
     use iced::{Settings, Size};
     use iced_test::Simulator;
 
     use super::*;
+
+    static APPEARANCE_STREAM_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    struct DropCountingAppearanceStream;
+
+    impl iced::futures::Stream for DropCountingAppearanceStream {
+        type Item = Message;
+
+        fn poll_next(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Message>> {
+            Poll::Pending
+        }
+    }
+
+    impl Drop for DropCountingAppearanceStream {
+        fn drop(&mut self) {
+            APPEARANCE_STREAM_DROPS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn drop_counting_appearance_stream() -> iced::futures::stream::BoxStream<'static, Message> {
+        Box::pin(DropCountingAppearanceStream)
+    }
 
     #[test]
     fn native_capture_request_requires_a_new_absolute_png_path() {
@@ -6997,7 +8770,9 @@ mod tests {
 
     struct RecordingCallbacks {
         open_result: Mutex<Option<NativeProjectOpenResult>>,
+        created_projects: Mutex<Vec<NativeNewProjectRequest>>,
         closed: Mutex<Vec<PathBuf>>,
+        close_results: Mutex<Vec<Result<(), String>>>,
         created: Mutex<Vec<WindowCapability>>,
         destroyed: Mutex<Vec<WindowCapability>>,
         system_appearances: Mutex<Vec<ResolvedAppearance>>,
@@ -7008,7 +8783,9 @@ mod tests {
         fn opening(result: NativeProjectOpenResult) -> Self {
             Self {
                 open_result: Mutex::new(Some(result)),
+                created_projects: Mutex::new(Vec::new()),
                 closed: Mutex::new(Vec::new()),
+                close_results: Mutex::new(vec![Ok(())]),
                 created: Mutex::new(Vec::new()),
                 destroyed: Mutex::new(Vec::new()),
                 system_appearances: Mutex::new(Vec::new()),
@@ -7031,7 +8808,26 @@ mod tests {
                 .lock()
                 .expect("closed projects mutex poisoned")
                 .push(project);
-            Ok(())
+            self.close_results
+                .lock()
+                .expect("close results mutex poisoned")
+                .pop()
+                .unwrap_or(Ok(()))
+        }
+
+        fn create_project(
+            &self,
+            request: NativeNewProjectRequest,
+        ) -> Result<NativeProjectOpenResult, String> {
+            self.created_projects
+                .lock()
+                .expect("created projects mutex poisoned")
+                .push(request);
+            self.open_result
+                .lock()
+                .expect("open result mutex poisoned")
+                .take()
+                .ok_or_else(|| "no create result configured".to_owned())
         }
 
         fn project_window_created(&self, window: WindowCapability) {
@@ -7063,6 +8859,324 @@ mod tests {
         }
     }
 
+    fn launcher_window(desktop: &NativeDesktop) -> window::Id {
+        desktop
+            .windows
+            .iter()
+            .find_map(|(id, native)| matches!(native, NativeWindow::Launcher).then_some(*id))
+            .expect("launcher window")
+    }
+
+    fn click_and_update(desktop: &mut NativeDesktop, window: window::Id, label: &str) {
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(window),
+        );
+        simulator.click(label).expect("rendered action");
+        for message in simulator.into_messages() {
+            let _ = desktop.update(message);
+        }
+    }
+
+    fn type_into_and_update(
+        desktop: &mut NativeDesktop,
+        window: window::Id,
+        placeholder: &str,
+        value: &str,
+    ) {
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(window),
+        );
+        simulator.click(placeholder).expect("rendered text input");
+        assert_ne!(simulator.typewrite(value), event::Status::Ignored);
+        for message in simulator.into_messages() {
+            let _ = desktop.update(message);
+        }
+    }
+
+    fn complete_task(desktop: &mut NativeDesktop, task: Task<Message>) {
+        let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+            return;
+        };
+        let actions = block_on(stream.collect::<Vec<_>>());
+        for action in actions {
+            if let iced_test::runtime::Action::Output(message) = action {
+                // Window-open actions wait for a platform acknowledgement that
+                // headless Iced deliberately does not synthesize. The output
+                // itself is the callback completion under test; route it into
+                // the real desktop and leave native window actions to the
+                // production event loop.
+                let _ = desktop.update(message);
+            }
+        }
+    }
+
+    fn native_close_actions(task: Task<Message>) -> (Vec<window::Id>, usize) {
+        let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+            return (Vec::new(), 0);
+        };
+        let mut closed = Vec::new();
+        let mut exits = 0;
+        for action in block_on(stream.collect::<Vec<_>>()) {
+            match action {
+                iced_test::runtime::Action::Window(iced_test::runtime::window::Action::Close(
+                    window,
+                )) => closed.push(window),
+                iced_test::runtime::Action::Exit => exits += 1,
+                _ => {}
+            }
+        }
+        (closed, exits)
+    }
+
+    fn legacy_project(path: PathBuf, window_id: u64) -> NativeProjectWindow {
+        NativeProjectWindow {
+            project: path,
+            window: WindowCapability::new(window_id, 1),
+            session: parchmint_ui_api::ProjectSessionRegistry::new().register(window_id),
+            project_ui: None,
+            editor: None,
+        }
+    }
+
+    #[test]
+    fn rendered_launcher_creation_flow_submits_callback_request_and_opens_project() {
+        let destination = std::env::temp_dir().join(format!(
+            "parchmint-native-flow-create-{}",
+            std::process::id()
+        ));
+        let project = legacy_project(destination.clone(), 41);
+        let callbacks = Arc::new(RecordingCallbacks::opening(
+            NativeProjectOpenResult::Opened(project.clone()),
+        ));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks: callbacks.clone(),
+        });
+        let launcher = launcher_window(&desktop);
+
+        click_and_update(&mut desktop, launcher, "Create Project");
+        type_into_and_update(&mut desktop, launcher, "Project title", "Flow Novel");
+        type_into_and_update(
+            &mut desktop,
+            launcher,
+            "Project destination",
+            destination.to_str().expect("temporary path is UTF-8"),
+        );
+        type_into_and_update(&mut desktop, launcher, "Author (optional)", "Flow Author");
+
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(launcher),
+        );
+        simulator
+            .click("Create and Open")
+            .expect("rendered creation submit");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        let create_task = desktop.update(messages.into_iter().next().expect("submit message"));
+        complete_task(&mut desktop, create_task);
+
+        assert_eq!(
+            callbacks
+                .created_projects
+                .lock()
+                .expect("created projects mutex poisoned")
+                .as_slice(),
+            [NativeNewProjectRequest {
+                title: "Flow Novel".to_owned(),
+                destination: destination.clone(),
+                author: Some("Flow Author".to_owned()),
+            }]
+        );
+        assert!(!desktop.creating_project);
+        assert!(desktop.project_windows.contains_key(&project.window));
+        let project_window = desktop.project_windows[&project.window];
+        let mut project_surface = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(project_window),
+        );
+        assert!(
+            project_surface
+                .find(destination.to_str().expect("UTF-8 path"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn rendered_recent_project_flow_shows_pending_then_locked_and_missing_feedback() {
+        let existing = std::env::temp_dir().join(format!(
+            "parchmint-native-flow-recent-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&existing).expect("temporary recent project directory");
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: vec![PreferenceRecentProject::new(
+                "Existing recent",
+                existing.to_string_lossy(),
+                0,
+            )],
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let launcher = launcher_window(&desktop);
+
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(launcher),
+        );
+        simulator
+            .click("Existing recent")
+            .expect("recent card action");
+        let open_task = desktop.update(
+            simulator
+                .into_messages()
+                .next()
+                .expect("recent card message"),
+        );
+        assert!(desktop.opening_project);
+        {
+            let mut pending_surface = Simulator::<Message>::with_size(
+                Settings::default(),
+                Size::new(900.0, 620.0),
+                desktop.view(launcher),
+            );
+            assert!(pending_surface.find("Opening Project…").is_ok());
+        }
+        complete_task(&mut desktop, open_task);
+        let expected_locked = format!("Project is already open: {}", existing.display());
+        {
+            let mut locked_surface = Simulator::<Message>::with_size(
+                Settings::default(),
+                Size::new(900.0, 620.0),
+                desktop.view(launcher),
+            );
+            assert!(locked_surface.find(expected_locked.as_str()).is_ok());
+        }
+
+        let missing = existing.with_file_name(format!(
+            "parchmint-native-flow-missing-{}",
+            std::process::id()
+        ));
+        desktop.launcher.add_recent_project(
+            "Missing recent",
+            missing.to_string_lossy(),
+            "at an unknown time",
+        );
+        click_and_update(&mut desktop, launcher, "Missing recent");
+        let expected_missing = format!(
+            "The project at {} is no longer available. It may have been moved or deleted.",
+            missing.display()
+        );
+        let mut missing_surface = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(launcher),
+        );
+        assert!(missing_surface.find(expected_missing.as_str()).is_ok());
+        std::fs::remove_dir(&existing).expect("remove temporary recent project directory");
+    }
+
+    #[test]
+    fn rendered_final_save_failure_can_cancel_then_retry_to_successful_close() {
+        let project = legacy_project(PathBuf::from("/tmp/native-flow-close.parchmint"), 42);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: callbacks.clone(),
+        });
+        let native_window = desktop.project_windows[&project.window];
+        *callbacks
+            .close_results
+            .lock()
+            .expect("close results mutex poisoned") = vec![
+            Ok(()),
+            Err("disk unavailable again".to_owned()),
+            Err("disk unavailable".to_owned()),
+        ];
+        let initial_close = desktop.update(Message::CloseRequested(native_window));
+        complete_task(&mut desktop, initial_close);
+        {
+            let mut failed_surface = Simulator::<Message>::with_size(
+                Settings::default(),
+                Size::new(900.0, 620.0),
+                desktop.view(native_window),
+            );
+            assert!(
+                failed_surface
+                    .find("Final save failed: disk unavailable")
+                    .is_ok()
+            );
+            assert!(failed_surface.find("Retry").is_ok());
+            assert!(failed_surface.find("Cancel Close").is_ok());
+        }
+
+        click_and_update(&mut desktop, native_window, "Cancel Close");
+        {
+            let mut cancelled_surface = Simulator::<Message>::with_size(
+                Settings::default(),
+                Size::new(900.0, 620.0),
+                desktop.view(native_window),
+            );
+            assert!(
+                cancelled_surface
+                    .find("Final save failed: disk unavailable")
+                    .is_err()
+            );
+        }
+
+        let failed_again = desktop.update(Message::CloseRequested(native_window));
+        complete_task(&mut desktop, failed_again);
+        let mut retry_simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(900.0, 620.0),
+            desktop.view(native_window),
+        );
+        retry_simulator
+            .click("Retry")
+            .expect("rendered retry action");
+        let retry_task = desktop.update(
+            retry_simulator
+                .into_messages()
+                .next()
+                .expect("retry message"),
+        );
+        assert!(desktop.closing_windows.contains(&native_window));
+        complete_task(&mut desktop, retry_task);
+
+        assert!(!desktop.windows.contains_key(&native_window));
+        assert!(!desktop.project_windows.contains_key(&project.window));
+        assert_eq!(
+            callbacks
+                .destroyed
+                .lock()
+                .expect("destroyed windows mutex poisoned")
+                .as_slice(),
+            [project.window]
+        );
+    }
+
     #[test]
     fn project_window_minimum_uses_the_shell_contract() {
         let settings = window_settings((1280.0, 720.0), ShellLayout::MIN_WINDOW_SIZE);
@@ -7092,6 +9206,55 @@ mod tests {
     }
 
     #[test]
+    fn rapid_synopsis_edits_use_one_native_persistence_lane_and_ignore_reversed_completion() {
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        let node_id = "chapter-one".to_owned();
+        assert!(
+            workspace
+                .update(ProjectMessage::EditSynopsis {
+                    node_id: node_id.clone(),
+                    action: iced::widget::text_editor::Action::Move(
+                        iced::widget::text_editor::Motion::End,
+                    ),
+                })
+                .is_empty()
+        );
+
+        let first = workspace.update(ProjectMessage::EditSynopsis {
+            node_id: node_id.clone(),
+            action: iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('a'),
+            ),
+        });
+        let second = workspace.update(ProjectMessage::EditSynopsis {
+            node_id,
+            action: iced::widget::text_editor::Action::Edit(
+                iced::widget::text_editor::Edit::Insert('b'),
+            ),
+        });
+        let commit = |effects: Vec<ProjectEffect>| match effects.as_slice() {
+            [ProjectEffect::CommitSynopsis { node_id, synopsis }] => SynopsisCommit {
+                node_id: node_id.clone(),
+                synopsis: synopsis.clone(),
+            },
+            _ => panic!("every Synopsis keystroke emits one persistence intent"),
+        };
+        let first = commit(first);
+        let second = commit(second);
+        assert_ne!(first.synopsis, second.synopsis);
+
+        let mut queue = SynopsisCommitQueue::default();
+        assert_eq!(queue.enqueue(first.clone()), Some(first.clone()));
+        assert_eq!(queue.enqueue(second.clone()), None);
+
+        // The old Task::batch path could complete this newer request before
+        // the older one. It was never started here, so that completion cannot
+        // advance or corrupt the persistence lane.
+        assert_eq!(queue.finish(&second, true), None);
+        assert_eq!(queue.finish(&first, true), Some(second));
+    }
+
+    #[test]
     fn keyboard_accelerators_use_the_platform_command_modifier() {
         assert_eq!(
             keyboard_accelerator("n", keyboard::Modifiers::COMMAND),
@@ -7115,6 +9278,123 @@ mod tests {
             keyboard_accelerator("y", keyboard::Modifiers::COMMAND),
             Some("edit.redo")
         );
+    }
+
+    #[test]
+    fn late_mount_completion_cannot_replace_the_newly_active_tab() {
+        let first = parchmint_domain::DocumentId::from_bytes([71; 16]);
+        let second = parchmint_domain::DocumentId::from_bytes([72; 16]);
+        let active = stable_id_string(second.as_bytes());
+
+        assert!(!mount_matches_active_document(Some(&active), first));
+        assert!(mount_matches_active_document(Some(&active), second));
+        assert!(!mount_matches_active_document(None, second));
+    }
+
+    #[test]
+    fn captured_editor_shortcuts_do_not_duplicate_clipboard_or_text_input_actions() {
+        assert!(should_activate_shortcut("file.save", false));
+        assert!(should_activate_shortcut("file.close", false));
+        assert!(should_activate_shortcut("edit.undo", true));
+        assert!(should_activate_shortcut("edit.redo", true));
+        assert!(!should_activate_shortcut("edit.undo", false));
+        assert!(!should_activate_shortcut("edit.copy", false));
+        assert!(!should_activate_shortcut("edit.paste", false));
+    }
+
+    #[test]
+    fn runtime_event_only_marks_ignored_keyboard_input_as_accelerator_fallback() {
+        let event = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("s".into()),
+            modified_key: keyboard::Key::Character("s".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyS),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: Some("s".into()),
+            repeat: false,
+        });
+        let window = window::Id::unique();
+        let Some(Message::RuntimeEvent {
+            accelerator_fallback,
+            ..
+        }) = runtime_event(event.clone(), event::Status::Captured, window)
+        else {
+            panic!("captured keyboard event reaches the runtime router");
+        };
+        assert!(!accelerator_fallback);
+        let Some(Message::RuntimeEvent {
+            accelerator_fallback,
+            ..
+        }) = runtime_event(event, event::Status::Ignored, window)
+        else {
+            panic!("ignored keyboard event reaches the runtime router");
+        };
+        assert!(accelerator_fallback);
+    }
+
+    #[test]
+    fn window_wide_left_release_schedules_uncommitted_hierarchy_drag_cleanup() {
+        let window = window::Id::unique();
+        let Some(Message::RuntimeEvent { event, .. }) = runtime_event(
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            event::Status::Ignored,
+            window,
+        ) else {
+            panic!("left release reaches the native fallback router");
+        };
+        let project = legacy_project(PathBuf::from("/tmp/release-drag.parchmint"), 66);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let native_window = desktop.project_windows[&project.window];
+        let task = desktop.runtime_event(native_window, event, true);
+        let Some(stream) = iced_test::runtime::task::into_stream(task) else {
+            panic!("release fallback schedules a cleanup message");
+        };
+        let actions = block_on(stream.collect::<Vec<_>>());
+        assert!(actions.into_iter().any(|action| matches!(
+            action,
+            iced_test::runtime::Action::Output(
+                Message::CancelUncommittedHierarchyDrag { window }
+            ) if window == native_window
+        )));
+    }
+
+    #[test]
+    fn captured_file_close_still_routes_through_runtime_event() {
+        let project = legacy_project(PathBuf::from("/tmp/runtime-close.parchmint"), 65);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let event = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("w".into()),
+            modified_key: keyboard::Key::Character("w".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyW),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: Some("w".into()),
+            repeat: false,
+        });
+        let message = runtime_event(event, event::Status::Captured, window)
+            .expect("captured key reaches native runtime routing");
+        let _close = desktop.update(message);
+
+        assert!(desktop.closing_windows.contains(&window));
     }
 
     #[test]
@@ -7151,22 +9431,764 @@ mod tests {
     }
 
     #[test]
+    fn remounting_a_detached_tab_reuses_its_live_editor_session() {
+        let adapter = EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default())
+            .expect("editor adapter");
+        let document = parchmint_editor_api::DocumentId::from_bytes([61; 16]);
+        let first_view = ViewId::from_bytes([62; 16]);
+        let viewport = EditorViewport::new(320.0, 240.0).expect("editor viewport");
+        let first = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(document, "draft")),
+                WindowCapability::new(61, 1),
+                first_view,
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("first tab mount");
+        let session = first.session();
+        adapter
+            .input_en_us(session.clone(), first_view, " retained")
+            .expect("mounted edit");
+        first.detach().expect("tab switch detaches its view");
+
+        let retained = BTreeMap::from([(document, session.clone())]);
+        let remounted = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                mount_session_for_document(
+                    None,
+                    &retained,
+                    document,
+                    CanonicalDocumentLoad::new(document, "stale persisted snapshot"),
+                ),
+                WindowCapability::new(61, 1),
+                ViewId::from_bytes([63; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("returning tab remounts retained session");
+
+        assert_eq!(
+            adapter
+                .primary_visible_block(session)
+                .expect("live retained text")
+                .text(),
+            " retaineddraft"
+        );
+        remounted.detach().expect("remounted tab detaches");
+    }
+
+    #[test]
     fn autosave_waits_a_minute_for_idle_and_caps_continuous_input() {
         let start = Instant::now();
         let mut autosave = AutosaveState::default();
-        autosave.mark_dirty(1, start);
+        let session = SharedEditorSession::new(1);
+        autosave.mark_dirty(session.clone(), 1.into(), start);
 
         assert!(!autosave.should_save(start + Duration::from_secs(59)));
         assert!(autosave.should_save(start + Duration::from_secs(60)));
 
         autosave.save_in_flight = true;
-        autosave.finish(1);
+        autosave.finish_save(&AutosaveTicket {
+            dirty_sessions: BTreeMap::from([(session.clone(), 1.into())]),
+        });
         assert!(!autosave.should_save(start + Duration::from_secs(3_600)));
 
-        autosave.mark_dirty(2, start + Duration::from_secs(299));
+        autosave.mark_dirty(session, 2.into(), start + Duration::from_secs(299));
         assert!(!autosave.should_save(start + Duration::from_secs(358)));
         assert!(autosave.should_save(start + Duration::from_secs(359)));
-        assert_eq!(autosave.through_revision, 2);
+    }
+
+    #[test]
+    fn autosave_plans_an_unfocused_retained_dirty_session() {
+        let adapter = EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default())
+            .expect("editor adapter");
+        let viewport = EditorViewport::new(320.0, 240.0).expect("editor viewport");
+        let retained_binding = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    parchmint_editor_api::DocumentId::from_bytes([81; 16]),
+                    "retained",
+                )),
+                WindowCapability::new(81, 1),
+                ViewId::from_bytes([82; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("retained editor mount");
+        let retained_session = retained_binding.session();
+        adapter
+            .input_en_us(retained_session.clone(), retained_binding.view(), "dirty ")
+            .expect("retained edit");
+        retained_binding.detach().expect("retained view detaches");
+        let focused_binding = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    parchmint_editor_api::DocumentId::from_bytes([83; 16]),
+                    "focused",
+                )),
+                WindowCapability::new(81, 1),
+                ViewId::from_bytes([84; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("focused editor mount");
+        let focused_session = focused_binding.session();
+        let sessions =
+            deduplicated_editor_sessions([focused_session.clone()], [retained_session.clone()]);
+        let projected = BTreeMap::from([
+            (retained_session.clone(), EditorRevision::default()),
+            (focused_session.clone(), EditorRevision::default()),
+        ]);
+
+        let plans = editor_projection_plans(&adapter, sessions, &projected)
+            .expect("autosave projection plans");
+
+        assert_eq!(
+            plans,
+            vec![EditorProjectionPlan {
+                session: retained_session,
+                revision: 1.into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn final_close_continuation_runs_only_after_every_projection() {
+        let first = SharedEditorSession::new(91);
+        let second = SharedEditorSession::new(92);
+        let plans = vec![
+            EditorProjectionPlan {
+                session: first,
+                revision: 3.into(),
+            },
+            EditorProjectionPlan {
+                session: second,
+                revision: 7.into(),
+            },
+        ];
+        let events = RefCell::new(Vec::new());
+
+        let run = run_projection_sequence(
+            &plans,
+            |plan| {
+                events
+                    .borrow_mut()
+                    .push(format!("project-{}", plan.revision.value()));
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("close".to_owned());
+                Ok(())
+            },
+        );
+
+        assert!(run.result.is_ok());
+        assert_eq!(events.into_inner(), ["project-3", "project-7", "close"]);
+    }
+
+    #[test]
+    fn projection_failure_blocks_close_and_retry_keeps_completed_frontier() {
+        let first = SharedEditorSession::new(101);
+        let second = SharedEditorSession::new(102);
+        let plans = vec![
+            EditorProjectionPlan {
+                session: first.clone(),
+                revision: 4.into(),
+            },
+            EditorProjectionPlan {
+                session: second.clone(),
+                revision: 6.into(),
+            },
+        ];
+        let close_calls = RefCell::new(0_u8);
+        let failed = run_projection_sequence(
+            &plans,
+            |plan| {
+                if plan.session == second {
+                    Err("injected projection failure".to_owned())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                *close_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(failed.result, Err("injected projection failure".to_owned()));
+        assert_eq!(*close_calls.borrow(), 0);
+        assert_eq!(
+            failed.projected,
+            BTreeMap::from([(first.clone(), 4.into())])
+        );
+
+        let retry = plans
+            .iter()
+            .filter(|plan| failed.projected.get(&plan.session) < Some(&plan.revision))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(retry, vec![plans[1].clone()]);
+        let succeeded = run_projection_sequence(
+            &retry,
+            |_| Ok(()),
+            || {
+                *close_calls.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+        assert!(succeeded.result.is_ok());
+        assert_eq!(*close_calls.borrow(), 1);
+        assert_eq!(failed.projected.get(&first), Some(&4.into()));
+    }
+
+    #[test]
+    fn one_shared_session_mounted_twice_is_projected_once() {
+        let adapter = EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default())
+            .expect("editor adapter");
+        let viewport = EditorViewport::new(320.0, 240.0).expect("editor viewport");
+        let first = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    parchmint_editor_api::DocumentId::from_bytes([111; 16]),
+                    "shared",
+                )),
+                WindowCapability::new(111, 1),
+                ViewId::from_bytes([112; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("first shared mount");
+        let session = first.session();
+        let second = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Reuse(session.clone()),
+                WindowCapability::new(111, 1),
+                ViewId::from_bytes([113; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("second shared mount");
+        adapter
+            .input_en_us(session.clone(), first.view(), "dirty ")
+            .expect("shared edit");
+        let sessions =
+            deduplicated_editor_sessions([first.session(), second.session()], std::iter::empty());
+
+        let plans = editor_projection_plans(
+            &adapter,
+            sessions,
+            &BTreeMap::from([(session.clone(), EditorRevision::default())]),
+        )
+        .expect("shared projection plan");
+
+        assert_eq!(
+            plans,
+            vec![EditorProjectionPlan {
+                session,
+                revision: 1.into(),
+            }]
+        );
+    }
+
+    fn synopsis_ticket(node: &str, synopsis: &str) -> ProjectMutationTicket {
+        let commit = SynopsisCommit {
+            node_id: node.to_owned(),
+            synopsis: synopsis.to_owned(),
+        };
+        ProjectMutationTicket {
+            effect: ProjectEffect::CommitSynopsis {
+                node_id: commit.node_id.clone(),
+                synopsis: commit.synopsis.clone(),
+            },
+            history_action: None,
+            synopsis_commit: Some(commit),
+        }
+    }
+
+    #[test]
+    fn project_mutation_barrier_serializes_saves_and_blocks_close_through_retry() {
+        let first = synopsis_ticket("chapter", "first");
+        let second = synopsis_ticket("chapter", "second");
+        let mut mutations = ProjectMutationState::default();
+
+        assert_eq!(mutations.enqueue(first.clone()), None);
+        assert_eq!(mutations.start_next(), Some(first.clone()));
+        assert_eq!(mutations.enqueue(second.clone()), None);
+        assert!(mutations.blocks_close());
+        assert_eq!(mutations.succeed(&first), None);
+        assert_eq!(mutations.start_next(), Some(second.clone()));
+        assert!(mutations.blocks_close(), "save one cannot clear save two");
+
+        mutations.fail_effect(second.clone());
+        assert!(
+            mutations.blocks_close(),
+            "failure remains a durability barrier"
+        );
+        assert_eq!(mutations.retry_failed_effect(), Some(second.clone()));
+        assert!(mutations.blocks_close());
+        assert_eq!(mutations.succeed(&second), None);
+        assert!(!mutations.blocks_close());
+    }
+
+    #[test]
+    fn rapid_structural_effects_launch_only_after_the_prior_effect_is_durable() {
+        let rename = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".to_owned(),
+                title: "Renamed".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let settings = ProjectMutationTicket {
+            effect: ProjectEffect::SetProjectExportSettings(
+                parchmint_domain::ProjectExportSettings::default(),
+            ),
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let mut mutations = ProjectMutationState::default();
+
+        assert_eq!(mutations.enqueue(rename.clone()), None);
+        assert_eq!(mutations.start_next(), Some(rename.clone()));
+        assert_eq!(mutations.enqueue(settings.clone()), None);
+        assert_eq!(mutations.active, Some(rename.clone()));
+        assert_eq!(mutations.succeed(&rename), None);
+        assert_eq!(mutations.start_next(), Some(settings.clone()));
+        assert_eq!(mutations.active, Some(settings.clone()));
+        assert_eq!(mutations.succeed(&settings), None);
+        assert!(!mutations.blocks_close());
+    }
+
+    #[test]
+    fn applied_non_idempotent_effect_retries_only_its_failed_save() {
+        let create = ProjectMutationTicket {
+            effect: ProjectEffect::CreateHierarchy {
+                parent_id: "manuscript".to_owned(),
+                kind: crate::HierarchyItemKind::Document,
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let mut mutations = ProjectMutationState::default();
+        let mut effect_executions = 0;
+
+        mutations.enqueue(create.clone());
+        let launched = mutations.start_next().expect("effect launches once");
+        effect_executions += 1;
+        mutations.fail_save(launched);
+
+        assert_eq!(mutations.retry_failed_save(), Some(create.clone()));
+        assert_eq!(effect_executions, 1, "save retry must not replay create");
+        assert_eq!(mutations.succeed(&create), None);
+        assert!(!mutations.blocks_close());
+    }
+
+    #[test]
+    fn opaque_replacement_and_project_dictionary_mutations_block_close_through_save() {
+        let mut mutations = OpaqueMutationState::default();
+        let replacement = mutations.begin(OpaqueMutationKind::Replacement);
+        let dictionary = mutations.begin(OpaqueMutationKind::ProjectDictionary);
+        mutations.enqueue(replacement, 0, |_| Task::none());
+        mutations.enqueue(dictionary, 0, |_| Task::none());
+        let first = mutations.queued.pop_front().expect("replacement queued");
+        mutations.active = Some(first);
+        assert!(mutations.blocks_close());
+
+        mutations.finish(replacement);
+        let second = mutations.queued.pop_front().expect("dictionary queued");
+        mutations.active = Some(second);
+        assert!(
+            mutations.blocks_close(),
+            "dictionary save is still outstanding"
+        );
+        mutations.fail_save(dictionary);
+        assert!(
+            mutations.blocks_close(),
+            "failed save remains a close barrier"
+        );
+        assert_eq!(mutations.failed_save.take(), Some(dictionary));
+        mutations.active = Some(PendingOpaqueMutation {
+            token: dictionary,
+            prior_projects: 0,
+            launch: Arc::new(|_| Task::none()),
+        });
+        mutations.fail_save(dictionary);
+        assert_eq!(mutations.failed_save, Some(dictionary));
+        assert!(mutations.active.is_none());
+        mutations.finish(dictionary);
+        assert!(!mutations.blocks_close());
+
+        assert!(editor_effect_requires_durability(
+            &EditorEffect::SpellingDictionaryAction {
+                view: ViewId::from_bytes([131; 16]),
+                word: "parchmint".to_owned(),
+                scope: crate::SpellingDictionaryScope::Project,
+                add: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn first_mutation_completion_preserves_the_next_optimistic_edit() {
+        let first = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "First rename".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let second = ProjectMutationTicket {
+            effect: ProjectEffect::CommitMetadataValue {
+                node_id: "chapter-two".to_owned(),
+                field_id: "status".to_owned(),
+                value: "Revised locally".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let mut mutations = ProjectMutationState::default();
+        assert_eq!(mutations.enqueue(first.clone()), None);
+        assert_eq!(mutations.start_next(), Some(first.clone()));
+        assert_eq!(mutations.enqueue(second.clone()), None);
+
+        assert!(!should_reconcile_refreshed_presentation(
+            Some(&first),
+            None,
+            true
+        ));
+        assert_eq!(mutations.succeed(&first), None);
+        assert_eq!(mutations.start_next(), Some(second.clone()));
+        assert_eq!(mutations.active, Some(second));
+    }
+
+    #[test]
+    fn queued_explicit_save_intent_survives_an_active_save_failure() {
+        let mut autosave = AutosaveState::default();
+        autosave.save_in_flight = true;
+        autosave.explicit_save_waiting = true;
+
+        autosave.save_in_flight = false;
+
+        assert!(
+            autosave.explicit_save_waiting,
+            "failure must leave the queued explicit request retryable"
+        );
+    }
+
+    #[test]
+    fn clean_explicit_save_does_not_request_an_empty_persistence_write() {
+        let now = Instant::now();
+        let session = SharedEditorSession::new(123);
+        let mut autosave = AutosaveState::default();
+
+        assert!(!autosave.requires_projection_save(false));
+        assert!(autosave.requires_projection_save(true));
+
+        autosave.mark_dirty(session, EditorRevision::from(1), now);
+        assert!(autosave.requires_projection_save(false));
+    }
+
+    #[test]
+    fn persistent_scheduler_orders_project_replacement_dictionary_and_later_project_work() {
+        let rename = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".to_owned(),
+                title: "Renamed".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let metadata = ProjectMutationTicket {
+            effect: ProjectEffect::CommitMetadataValue {
+                node_id: "chapter".to_owned(),
+                field_id: "status".to_owned(),
+                value: "Done".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let mut projects = ProjectMutationState::default();
+        let mut opaque = OpaqueMutationState::default();
+        projects.enqueue(rename.clone());
+        let replacement = opaque.begin(OpaqueMutationKind::Replacement);
+        opaque.enqueue(replacement, projects.queued.len(), |_| Task::none());
+        let dictionary = opaque.begin(OpaqueMutationKind::ProjectDictionary);
+        opaque.enqueue(dictionary, projects.queued.len(), |_| Task::none());
+        projects.enqueue(metadata.clone());
+
+        assert_eq!(
+            next_persistent_mutation_lane(&projects, &opaque),
+            Some(PersistentMutationLane::Project)
+        );
+        assert_eq!(projects.start_next(), Some(rename.clone()));
+        for pending in &mut opaque.queued {
+            pending.prior_projects -= 1;
+        }
+        projects.succeed(&rename);
+        assert_eq!(
+            next_persistent_mutation_lane(&projects, &opaque),
+            Some(PersistentMutationLane::Opaque(
+                OpaqueMutationKind::Replacement
+            ))
+        );
+        let first = opaque.queued.pop_front().expect("replacement queued");
+        opaque.active = Some(first);
+        assert!(next_persistent_mutation_lane(&projects, &opaque).is_none());
+        opaque.finish(replacement);
+        assert_eq!(
+            next_persistent_mutation_lane(&projects, &opaque),
+            Some(PersistentMutationLane::Opaque(
+                OpaqueMutationKind::ProjectDictionary
+            ))
+        );
+        let second = opaque.queued.pop_front().expect("dictionary queued");
+        opaque.active = Some(second);
+        opaque.finish(dictionary);
+        assert_eq!(
+            next_persistent_mutation_lane(&projects, &opaque),
+            Some(PersistentMutationLane::Project)
+        );
+        assert_eq!(projects.start_next(), Some(metadata));
+        assert!(projects.blocks_close());
+    }
+
+    #[test]
+    fn recovery_and_history_workflows_are_typed_persistent_close_barriers() {
+        let mut mutations = OpaqueMutationState::default();
+        for kind in [
+            OpaqueMutationKind::RecoveryAccept,
+            OpaqueMutationKind::RecoveryDiscard,
+            OpaqueMutationKind::HistoryReinitialize,
+        ] {
+            let token = mutations.begin(kind);
+            mutations.enqueue(token, 0, |_| Task::none());
+        }
+        assert!(mutations.blocks_close());
+        assert_eq!(
+            next_persistent_mutation_lane(&ProjectMutationState::default(), &mutations),
+            Some(PersistentMutationLane::Opaque(
+                OpaqueMutationKind::RecoveryAccept
+            ))
+        );
+    }
+
+    #[test]
+    fn first_persistent_failure_stops_queue_until_exact_retry_succeeds() {
+        let project = legacy_project(PathBuf::from("/tmp/failure-lane.parchmint"), 141);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let first = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "one".to_owned(),
+                title: "First".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let second = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "two".to_owned(),
+                title: "Second".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        state.project_mutations.active = Some(first.clone());
+        state.project_mutations.queued.push_back(second.clone());
+        state.autosave.close_after_save = true;
+
+        let _failed = desktop.after_persistent_mutation_terminal(
+            window,
+            PersistentMutationTerminal::ProjectEffectFailed(first.clone()),
+            Some("injected failure".to_owned()),
+        );
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert_eq!(state.project_mutations.failed_effect, Some(first.clone()));
+        assert_eq!(state.project_mutations.queued.front(), Some(&second));
+        assert!(state.project_mutations.active.is_none());
+        assert!(desktop.close_failures.contains_key(&project.window));
+
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        assert_eq!(
+            state.project_mutations.retry_failed_effect(),
+            Some(first.clone())
+        );
+        let _succeeded = desktop.after_persistent_mutation_terminal(
+            window,
+            PersistentMutationTerminal::ProjectSucceeded(first),
+            None,
+        );
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert_eq!(state.project_mutations.active, Some(second));
+    }
+
+    #[test]
+    fn explicit_save_projects_every_dirty_session_before_becoming_clean() {
+        let first = SharedEditorSession::new(121);
+        let second = SharedEditorSession::new(122);
+        let plans = vec![
+            EditorProjectionPlan {
+                session: first.clone(),
+                revision: 2.into(),
+            },
+            EditorProjectionPlan {
+                session: second.clone(),
+                revision: 5.into(),
+            },
+        ];
+        let events = RefCell::new(Vec::new());
+        let run = run_projection_sequence(
+            &plans,
+            |plan| {
+                events
+                    .borrow_mut()
+                    .push(format!("project-{}", plan.revision.value()));
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("explicit-save".to_owned());
+                Ok(9_u64)
+            },
+        );
+        let mut autosave = AutosaveState::default();
+        autosave.mark_dirty(first.clone(), 2.into(), Instant::now());
+        autosave.mark_dirty(second.clone(), 5.into(), Instant::now());
+        let ticket = AutosaveTicket {
+            dirty_sessions: autosave.dirty_sessions.clone(),
+        };
+        autosave.record_projected(run.projected);
+        assert!(!autosave.is_clean());
+        assert_eq!(run.result, Ok(9));
+        autosave.finish_save(&ticket);
+
+        assert_eq!(
+            events.into_inner(),
+            ["project-2", "project-5", "explicit-save"]
+        );
+        assert!(autosave.is_clean());
+    }
+
+    #[test]
+    fn failed_synopsis_keeps_the_latest_visible_draft_for_retry() {
+        let first = SynopsisCommit {
+            node_id: "chapter".to_owned(),
+            synopsis: "first".to_owned(),
+        };
+        let latest = SynopsisCommit {
+            node_id: "chapter".to_owned(),
+            synopsis: "latest local draft".to_owned(),
+        };
+        let mut queue = SynopsisCommitQueue::default();
+        assert_eq!(queue.enqueue(first.clone()), Some(first.clone()));
+        assert_eq!(queue.enqueue(latest.clone()), None);
+        assert_eq!(queue.finish(&first, false), None);
+
+        assert_eq!(queue.retain_latest_failed(&first), latest);
+    }
+
+    #[test]
+    fn successful_project_teardown_closes_unique_mounted_and_retained_sessions() {
+        let project = legacy_project(PathBuf::from("/tmp/session-teardown.parchmint"), 123);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let adapter = Arc::new(
+            EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default())
+                .expect("editor adapter"),
+        );
+        let viewport = EditorViewport::new(320.0, 240.0).expect("editor viewport");
+        let mounted_document = parchmint_domain::DocumentId::from_bytes([123; 16]);
+        let retained_document = parchmint_domain::DocumentId::from_bytes([124; 16]);
+        let first = MountedEditorBinding::mount(
+            adapter.as_ref(),
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(mounted_document, "one")),
+                project.window,
+                ViewId::from_bytes([125; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("first mount");
+        let mounted_session = first.session();
+        let second = MountedEditorBinding::mount(
+            adapter.as_ref(),
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Reuse(mounted_session.clone()),
+                project.window,
+                ViewId::from_bytes([126; 16]),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("shared second mount");
+        let retained = block_on(adapter.open(CanonicalDocumentLoad::new(retained_document, "two")));
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window");
+        };
+        state.project.editor = Some(adapter.clone());
+        state.editor_bindings.insert(EditorPane::Primary, first);
+        state.editor_bindings.insert(EditorPane::Companion, second);
+        state
+            .mounted_documents
+            .insert(EditorPane::Primary, mounted_document);
+        state
+            .mounted_documents
+            .insert(EditorPane::Companion, mounted_document);
+        state
+            .retained_editor_sessions
+            .insert(retained_document, retained.clone());
+
+        NativeDesktop::teardown_editor_sessions(state);
+
+        assert!(adapter.revision(mounted_session).is_err());
+        assert!(adapter.revision(retained).is_err());
+        assert!(state.editor_bindings.is_empty());
+        assert!(state.retained_editor_sessions.is_empty());
     }
 
     #[test]
@@ -7485,6 +10507,7 @@ mod tests {
 
         let (desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Dark,
+            appearance_mode: AppearanceMode::Dark,
             recent_projects: Vec::new(),
             projects: vec![project.clone()],
             locked_project: None,
@@ -7520,6 +10543,7 @@ mod tests {
         ));
         let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
             recent_projects: Vec::new(),
             projects: Vec::new(),
             locked_project: None,
@@ -7551,6 +10575,7 @@ mod tests {
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
             recent_projects: Vec::new(),
             projects: Vec::new(),
             locked_project: None,
@@ -7586,6 +10611,77 @@ mod tests {
     }
 
     #[test]
+    fn system_appearance_stream_is_conditional_and_dropped_when_mode_becomes_fixed() {
+        let system = streamed_appearance_subscription(
+            AppearanceMode::System,
+            drop_counting_appearance_stream,
+        );
+        let fixed =
+            streamed_appearance_subscription(AppearanceMode::Dark, drop_counting_appearance_stream);
+        assert_eq!(
+            iced_test::runtime::futures::subscription::into_recipes(system).len(),
+            1
+        );
+        assert!(iced_test::runtime::futures::subscription::into_recipes(fixed).is_empty());
+
+        APPEARANCE_STREAM_DROPS.store(0, Ordering::Relaxed);
+        let mut tracker = iced_test::runtime::futures::subscription::Tracker::new();
+        let (sender, _receiver) = iced::futures::channel::mpsc::channel(1);
+        let running = tracker.update(
+            iced_test::runtime::futures::subscription::into_recipes(
+                streamed_appearance_subscription(
+                    AppearanceMode::System,
+                    drop_counting_appearance_stream,
+                ),
+            )
+            .into_iter(),
+            sender.clone(),
+        );
+        assert_eq!(running.len(), 1);
+        assert_eq!(APPEARANCE_STREAM_DROPS.load(Ordering::Relaxed), 0);
+
+        let canceled = tracker.update(
+            iced_test::runtime::futures::subscription::into_recipes(
+                streamed_appearance_subscription(
+                    AppearanceMode::Light,
+                    drop_counting_appearance_stream,
+                ),
+            )
+            .into_iter(),
+            sender,
+        );
+        assert!(canceled.is_empty());
+        block_on(running.into_iter().next().expect("appearance execution"));
+        assert_eq!(APPEARANCE_STREAM_DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn fixed_mode_ignores_system_events_without_starting_callback_work() {
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Dark,
+            appearance_mode: AppearanceMode::Dark,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks: callbacks.clone(),
+        });
+
+        let task = desktop.update(Message::SystemAppearanceObserved(SystemAppearance::Light));
+
+        assert!(iced_test::runtime::task::into_stream(task).is_none());
+        assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
+        assert!(
+            callbacks
+                .system_appearances
+                .lock()
+                .expect("system appearances mutex poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn one_appearance_result_rethemes_launcher_and_every_project_window() {
         let mut registry = parchmint_ui_api::ProjectSessionRegistry::new();
         let projects = vec![
@@ -7607,6 +10703,7 @@ mod tests {
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
             recent_projects: Vec::new(),
             projects,
             locked_project: None,
@@ -7614,7 +10711,10 @@ mod tests {
             callbacks,
         });
 
-        let _appearance = desktop.update(Message::AppearanceFinished(Ok(ResolvedAppearance::Dark)));
+        let _appearance = desktop.update(Message::AppearanceFinished {
+            mode: AppearanceMode::Dark,
+            result: Ok(ResolvedAppearance::Dark),
+        });
 
         assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
         let expected = ParchMintTheme::new(ResolvedAppearance::Dark).iced_theme();
@@ -7645,6 +10745,7 @@ mod tests {
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
             recent_projects: Vec::new(),
             projects,
             locked_project: None,
@@ -7656,10 +10757,7 @@ mod tests {
             .lock()
             .expect("system appearance result mutex poisoned") = Ok(Some(ResolvedAppearance::Dark));
 
-        let _event = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
-            generation: 1,
-            appearance: SystemAppearance::Dark,
-        }));
+        let _event = desktop.update(Message::SystemAppearanceObserved(SystemAppearance::Dark));
         let _completion = desktop.update(Message::SystemAppearanceChangedFinished {
             generation: 1,
             result: Ok(Some(ResolvedAppearance::Dark)),
@@ -7674,21 +10772,54 @@ mod tests {
             .system_appearance_result
             .lock()
             .expect("system appearance result mutex poisoned") = Ok(None);
-        let _system_only = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
-            generation: 2,
-            appearance: SystemAppearance::Light,
-        }));
+        let _system_only =
+            desktop.update(Message::SystemAppearanceObserved(SystemAppearance::Light));
         let _completion = desktop.update(Message::SystemAppearanceChangedFinished {
             generation: 2,
             result: Ok(None),
         });
-        let _duplicate = desktop.update(Message::SystemAppearanceEvent(SystemAppearanceEvent {
-            generation: 2,
-            appearance: SystemAppearance::Dark,
-        }));
+        let _duplicate = desktop.update(Message::SystemAppearanceObserved(SystemAppearance::Dark));
 
         assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
-        assert_eq!(desktop.last_appearance_generation, 2);
+        assert_eq!(desktop.last_appearance_generation, 3);
+    }
+
+    #[test]
+    fn closing_last_project_then_launcher_emits_native_close_and_final_exit_actions() {
+        let project = NativeProjectWindow {
+            project: PathBuf::from("/tmp/shutdown-actions.parchmint"),
+            window: WindowCapability::new(71, 1),
+            session: parchmint_ui_api::ProjectSessionRegistry::new().register(71),
+            project_ui: None,
+            editor: None,
+        };
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let project_window = desktop.project_windows[&project.window];
+        let launcher_window = desktop
+            .windows
+            .iter()
+            .find_map(|(id, window)| matches!(window, NativeWindow::Launcher).then_some(*id))
+            .expect("launcher window");
+
+        let (closed, exits) = native_close_actions(desktop.finish_close(project_window));
+        assert_eq!(closed, vec![project_window]);
+        assert_eq!(exits, 0);
+        assert_eq!(desktop.windows.len(), 1);
+
+        let (closed, exits) =
+            native_close_actions(desktop.update(Message::CloseRequested(launcher_window)));
+        assert_eq!(closed, vec![launcher_window]);
+        assert_eq!(exits, 1);
+        assert!(desktop.windows.is_empty());
     }
 
     #[test]
@@ -7710,6 +10841,7 @@ mod tests {
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _open_tasks) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
             recent_projects: Vec::new(),
             projects: vec![project.clone(), other.clone()],
             locked_project: None,
@@ -7752,7 +10884,13 @@ mod tests {
         desktop.closing_windows.insert(native_window);
         let _successful_close = desktop.update(Message::ProjectCloseFinished {
             window: native_window,
-            result: Ok(()),
+            result: Ok(ProjectionRun {
+                projected: BTreeMap::new(),
+                result: Ok(CloseCompletion {
+                    snapshot: None,
+                    result: Ok(()),
+                }),
+            }),
         });
         assert!(!desktop.windows.contains_key(&native_window));
         assert!(!desktop.project_windows.contains_key(&project.window));

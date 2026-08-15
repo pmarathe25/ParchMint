@@ -2344,6 +2344,40 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_synopsis_executors_leave_the_later_captured_snapshot_stale() {
+        let (snapshot, node, _, _) = fixture();
+        let (executor, _) = executor(snapshot);
+        let node_id = stable_id_string(node.as_bytes());
+
+        let first = block_on(executor.clone().execute_project_effect(
+            ProjectEffect::CommitSynopsis {
+                node_id: node_id.clone(),
+                synopsis: "a".to_owned(),
+            },
+        ));
+        assert!(matches!(
+            first,
+            Ok(ProjectEffectCompletion::RefreshedSnapshot(_))
+        ));
+
+        // This is the completion shape produced when native Task::batch
+        // launches two keystrokes from one executor snapshot. The second
+        // clone cannot safely write after the first mutation advances the
+        // project revision; native must serialize it through a refreshed
+        // executor instead.
+        let second = block_on(
+            executor.execute_project_effect(ProjectEffect::CommitSynopsis {
+                node_id,
+                synopsis: "ab".to_owned(),
+            }),
+        );
+        assert!(matches!(
+            second,
+            Err(ProjectRuntimeError::StaleSnapshot { .. })
+        ));
+    }
+
+    #[test]
     fn generated_node_ids_are_deterministic_and_skip_snapshot_collisions() {
         let (snapshot, _, _, _) = fixture();
         let first = generated_node_id(&snapshot, 4);

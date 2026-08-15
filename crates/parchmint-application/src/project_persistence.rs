@@ -21,9 +21,10 @@ use parchmint_history_api::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, RestorePlan, SnapshotName,
 };
 use parchmint_project_format::{
-    CanonicalAnnotations, CanonicalCodec, CanonicalPersistenceFrontier, CanonicalProjectEncoding,
-    CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource, ContentHash, FormatError,
-    ProjectFormatCodec,
+    CanonicalAnnotations, CanonicalCodec, CanonicalDocumentUpdate, CanonicalDomainUpdate,
+    CanonicalPersistenceFrontier, CanonicalProjectEncoding, CanonicalProjectPatch,
+    CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource, CanonicalResourceMetadata,
+    ContentHash, FormatError, ProjectFormatCodec,
 };
 use parchmint_project_repository::{AtomicWritePlan, StagedResource};
 use parchmint_recovery_api::{
@@ -241,13 +242,15 @@ impl From<SaveError> for ProjectPersistenceError {
 
 struct CanonicalState {
     resources: BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    complete_resources: BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
     paths: CanonicalProjectPathMap,
+    frontier: CanonicalPersistenceFrontier,
 }
 
 struct PendingSave {
     ticket: SaveTicket,
     capture: RevisionedSaveRequest,
-    encoding: CanonicalProjectEncoding,
+    patch: CanonicalProjectPatch,
 }
 
 #[derive(Clone)]
@@ -276,12 +279,19 @@ impl ProjectPersistenceCoordinator {
         resources: BTreeMap<CanonicalRelativePath, Vec<u8>>,
         paths: CanonicalProjectPathMap,
     ) -> Self {
+        let frontier = canonical_frontier(&resources).unwrap_or_default();
+        let complete_resources = canonical_resource_metadata(&resources, &paths, &frontier);
         Self {
             commands,
             documents,
             editor,
             recovery_base: Mutex::new(recovery_base),
-            canonical: Mutex::new(CanonicalState { resources, paths }),
+            canonical: Mutex::new(CanonicalState {
+                resources,
+                complete_resources,
+                paths,
+                frontier,
+            }),
             pending_saves: Mutex::new(BTreeMap::new()),
             pending_recovery: Mutex::new(BTreeMap::new()),
             next_handle: Mutex::new(1),
@@ -397,6 +407,10 @@ impl ProjectPersistenceCoordinator {
         self.request_save_inner(kind, None)
     }
 
+    pub fn has_unsaved_changes(&self) -> Result<bool, ProjectPersistenceError> {
+        self.commands.has_unsaved_changes().map_err(Into::into)
+    }
+
     fn request_save_inner(
         &self,
         kind: PersistenceSaveKind,
@@ -404,12 +418,12 @@ impl ProjectPersistenceCoordinator {
     ) -> Result<(PersistenceSaveHandle, PersistenceRevision), ProjectPersistenceError> {
         let capture = self.commands.capture_save_request()?;
         let project = self.commands.project()?;
-        let documents = project
-            .nodes
+        let dirty_documents = capture
+            .dirty_resources
             .iter()
-            .filter_map(|(_, node)| match node.kind {
-                NodeKind::Document(document) => Some(document),
-                NodeKind::Root(_) | NodeKind::Group => None,
+            .filter_map(|resource| match resource {
+                Resource::Document(document) => Some(*document),
+                Resource::Manifest | Resource::Styles | Resource::Dictionary => None,
             })
             .map(|document| {
                 self.documents
@@ -417,18 +431,28 @@ impl ProjectPersistenceCoordinator {
                     .map(|snapshot| (document, snapshot))
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let bodies = documents
+        let update = CanonicalDomainUpdate {
+            manifest: capture.dirty_resources.contains(Resource::Manifest),
+            styles: capture.dirty_resources.contains(Resource::Styles),
+            dictionary: capture.dirty_resources.contains(Resource::Dictionary),
+            documents: dirty_documents
+                .iter()
+                .map(|(document, snapshot)| {
+                    (
+                        *document,
+                        CanonicalDocumentUpdate {
+                            body: snapshot.body.clone(),
+                            annotations: snapshot.comments.iter().map(contract_thread).collect(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let document_revisions = capture
+            .open_documents
             .iter()
-            .map(|(document, snapshot)| (*document, snapshot.body.clone()))
-            .collect();
-        let annotations = documents
-            .iter()
-            .map(|(document, snapshot)| {
-                (
-                    *document,
-                    snapshot.comments.iter().map(contract_thread).collect(),
-                )
-            })
+            .chain(capture.closed_documents.iter())
+            .map(|(document, revision)| (*document, revision.value()))
             .collect();
         let canonical = self
             .canonical
@@ -441,27 +465,71 @@ impl ProjectPersistenceCoordinator {
                 .ok_or(ProjectPersistenceError::StateUnavailable)?
                 .project_revision
                 .value(),
-            document_revisions: documents
-                .iter()
-                .map(|(document, snapshot)| (*document, snapshot.revision.value()))
-                .collect(),
+            document_revisions,
             ..Default::default()
         };
-        let encoding = ProjectFormatCodec::default().encode_domain_project_with_annotations(
+        let codec = ProjectFormatCodec::default();
+        let patch = codec.encode_domain_project_patch(
             &project,
-            &bodies,
-            &annotations,
+            &update,
             &canonical.resources,
+            &canonical.complete_resources,
             &canonical.paths,
+            &canonical.frontier,
             &persistence_frontier,
-        )?;
+        );
+        let patch = match patch {
+            Ok(patch) => patch,
+            Err(FormatError::InvalidDocument(_)) => {
+                let documents = project
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, node)| match node.kind {
+                        NodeKind::Document(document) => Some(document),
+                        NodeKind::Root(_) | NodeKind::Group => None,
+                    })
+                    .map(|document| {
+                        self.documents
+                            .snapshot(document)
+                            .map(|snapshot| (document, snapshot))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                let encoding = codec.encode_domain_project_with_annotations(
+                    &project,
+                    &documents
+                        .iter()
+                        .map(|(document, snapshot)| (*document, snapshot.body.clone()))
+                        .collect(),
+                    &documents
+                        .iter()
+                        .map(|(document, snapshot)| {
+                            (
+                                *document,
+                                snapshot.comments.iter().map(contract_thread).collect(),
+                            )
+                        })
+                        .collect(),
+                    &canonical.resources,
+                    &canonical.paths,
+                    &persistence_frontier,
+                )?;
+                patch_from_encoding(encoding)
+            }
+            Err(error) => return Err(error.into()),
+        };
         drop(canonical);
-        let mut revisions = save_revisions(&capture, Some(&encoding));
-        let projection = documents
+        let revisions = save_revisions_from_patch(&capture, &patch);
+        let projection = dirty_documents
             .values()
             .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
-            .or_else(|| documents.values().next())
+            .or_else(|| dirty_documents.values().next())
             .cloned()
+            .or_else(|| {
+                project.nodes.iter().find_map(|(_, node)| match node.kind {
+                    NodeKind::Document(document) => self.documents.snapshot(document).ok(),
+                    NodeKind::Root(_) | NodeKind::Group => None,
+                })
+            })
             .or_else(|| self.documents.snapshots().ok()?.into_iter().next())
             .ok_or_else(|| {
                 ProjectPersistenceError::Application(
@@ -476,18 +544,8 @@ impl ProjectPersistenceCoordinator {
             Vec::new(),
             0,
         );
-        for snapshot in documents.values() {
-            revisions.open_documents.insert(
-                snapshot.document_id,
-                parchmint_recovery_api::DocumentRevision::from(snapshot.revision.value()),
-            );
-            revisions.closed_resources.remove(
-                &parchmint_project_format::ResourceId::DocumentById {
-                    document_id: stable_id_text(snapshot.document_id.as_bytes()),
-                },
-            );
-        }
-        let request = materialize_save_request(kind, name, &capture, revisions.clone(), &encoding);
+        let request =
+            materialize_patch_save_request(kind, name, &capture, revisions.clone(), &patch);
         let ticket = self.editor.submit_save(&projection, request)?;
         let handle = {
             let mut next = self
@@ -506,7 +564,7 @@ impl ProjectPersistenceCoordinator {
                 PendingSave {
                     ticket,
                     capture,
-                    encoding,
+                    patch,
                 },
             );
         Ok((handle, persistence_revision(&revisions)))
@@ -530,7 +588,14 @@ impl ProjectPersistenceCoordinator {
                 return Err(error.into());
             }
         };
-        let recovery_base = recovery_base_from_encoding(&pending.encoding);
+        let recovery_base = recovery_base_from_patch(
+            &self
+                .recovery_base
+                .lock()
+                .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+                .clone(),
+            &pending.patch,
+        );
         self.editor.retire_recovery_through(&recovery_base)?;
         self.editor.acknowledge_save(&acknowledgement)?;
         self.commands.acknowledge_save(&pending.capture)?;
@@ -538,13 +603,17 @@ impl ProjectPersistenceCoordinator {
             .canonical
             .lock()
             .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
-        canonical.resources = pending
-            .encoding
-            .resources
-            .iter()
-            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
-            .collect();
-        canonical.paths = pending.encoding.paths;
+        for path in &pending.patch.deletions {
+            canonical.resources.remove(path);
+        }
+        for (path, resource) in &pending.patch.resources {
+            canonical
+                .resources
+                .insert(path.clone(), resource.bytes.clone());
+        }
+        canonical.complete_resources = pending.patch.complete_resources;
+        canonical.paths = pending.patch.paths;
+        canonical.frontier = pending.patch.persistence_frontier;
         *self
             .recovery_base
             .lock()
@@ -801,6 +870,20 @@ impl ProjectPersistenceCoordinator {
                 .iter()
                 .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
                 .collect();
+            canonical.complete_resources = encoding
+                .resources
+                .iter()
+                .map(|(path, resource)| {
+                    (
+                        path.clone(),
+                        CanonicalResourceMetadata {
+                            resource: resource.resource.clone(),
+                            hash: resource.hash,
+                        },
+                    )
+                })
+                .collect();
+            canonical.frontier = encoding.persistence_frontier.clone();
             canonical.paths = encoding.paths;
         }
         *self
@@ -1009,6 +1092,20 @@ impl ProjectPersistenceCoordinator {
                 .iter()
                 .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
                 .collect();
+            canonical.complete_resources = encoding
+                .resources
+                .iter()
+                .map(|(path, resource)| {
+                    (
+                        path.clone(),
+                        CanonicalResourceMetadata {
+                            resource: resource.resource.clone(),
+                            hash: resource.hash,
+                        },
+                    )
+                })
+                .collect();
+            canonical.frontier = encoding.persistence_frontier.clone();
             canonical.paths = encoding.paths;
         }
         *self
@@ -1626,6 +1723,90 @@ fn decode_restored_project(
     Ok((project, paths, frontier, bodies, comments))
 }
 
+fn canonical_frontier(
+    resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+) -> Result<CanonicalPersistenceFrontier, ProjectPersistenceError> {
+    let path = CanonicalRelativePath::parse("project.toml")?;
+    let Some(manifest) = resources.get(&path) else {
+        return Ok(CanonicalPersistenceFrontier::default());
+    };
+    let codec = ProjectFormatCodec::default();
+    let manifest = codec.decode_manifest(manifest)?;
+    codec
+        .decode_persistence_frontier(&manifest)
+        .map_err(Into::into)
+}
+
+fn canonical_resource_metadata(
+    resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    paths: &CanonicalProjectPathMap,
+    frontier: &CanonicalPersistenceFrontier,
+) -> BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata> {
+    let mut metadata = resources
+        .iter()
+        .map(|(path, bytes)| {
+            let resource = match path.as_str() {
+                ".parchmint/format-version" => parchmint_project_format::ResourceId::FormatControl,
+                "project.toml" => parchmint_project_format::ResourceId::Manifest,
+                "styles.css" => parchmint_project_format::ResourceId::Styles,
+                "dictionary.txt" => parchmint_project_format::ResourceId::Dictionary,
+                path if path.starts_with("annotations/") && path.ends_with(".json") => {
+                    parchmint_project_format::ResourceId::Annotations {
+                        document_id: path
+                            .trim_start_matches("annotations/")
+                            .trim_end_matches(".json")
+                            .to_owned(),
+                    }
+                }
+                _ => parchmint_project_format::ResourceId::Document,
+            };
+            (
+                path.clone(),
+                CanonicalResourceMetadata {
+                    resource,
+                    hash: ContentHash::from_bytes(Sha256::digest(bytes).into()),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (document, path) in &paths.documents {
+        if let Some(summary) = frontier.document_summaries.get(document) {
+            metadata.insert(
+                path.clone(),
+                CanonicalResourceMetadata {
+                    resource: parchmint_project_format::ResourceId::DocumentById {
+                        document_id: stable_id_text(document.as_bytes()),
+                    },
+                    hash: summary.content_hash,
+                },
+            );
+        }
+    }
+    metadata
+}
+
+fn patch_from_encoding(encoding: CanonicalProjectEncoding) -> CanonicalProjectPatch {
+    CanonicalProjectPatch {
+        complete_resources: encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| {
+                (
+                    path.clone(),
+                    CanonicalResourceMetadata {
+                        resource: resource.resource.clone(),
+                        hash: resource.hash,
+                    },
+                )
+            })
+            .collect(),
+        resources: encoding.resources,
+        paths: encoding.paths,
+        persistence_frontier: encoding.persistence_frontier,
+        deletions: encoding.deletions,
+    }
+}
+
 fn recovery_base_from_encoding(encoding: &CanonicalProjectEncoding) -> RecoveryBaseSnapshot {
     let mut hashes = encoding
         .resources
@@ -1655,6 +1836,63 @@ fn recovery_base_from_encoding(encoding: &CanonicalProjectEncoding) -> RecoveryB
         revisions: parchmint_recovery_api::RecoveryRevisionVector::new(
             ProjectRevision::from(encoding.persistence_frontier.recovery_project_revision),
             encoding
+                .persistence_frontier
+                .document_revisions
+                .iter()
+                .map(|(document, revision)| {
+                    (
+                        *document,
+                        parchmint_recovery_api::DocumentRevision::from(*revision),
+                    )
+                })
+                .collect(),
+        ),
+        hashes,
+    }
+}
+
+fn recovery_base_from_patch(
+    previous: &RecoveryBaseSnapshot,
+    patch: &CanonicalProjectPatch,
+) -> RecoveryBaseSnapshot {
+    let retained = patch
+        .complete_resources
+        .values()
+        .map(|resource| resource.resource.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut hashes = previous.hashes.clone();
+    hashes.retain(|resource, _| retained.contains(resource));
+    for resource in patch.resources.values() {
+        if !matches!(
+            resource.resource,
+            parchmint_project_format::ResourceId::DocumentById { .. }
+        ) {
+            hashes.insert(resource.resource.clone(), resource.hash);
+        }
+    }
+    for document in patch.resources.values() {
+        let parchmint_project_format::ResourceId::DocumentById { document_id } = &document.resource
+        else {
+            continue;
+        };
+        let annotations = patch.resources.values().find_map(|resource| {
+            matches!(
+                &resource.resource,
+                parchmint_project_format::ResourceId::Annotations {
+                    document_id: candidate
+                } if candidate == document_id
+            )
+            .then_some(resource.bytes.as_slice())
+        });
+        hashes.insert(
+            document.resource.clone(),
+            recovery_document_content_hash(&document.bytes, annotations),
+        );
+    }
+    RecoveryBaseSnapshot {
+        revisions: parchmint_recovery_api::RecoveryRevisionVector::new(
+            ProjectRevision::from(patch.persistence_frontier.recovery_project_revision),
+            patch
                 .persistence_frontier
                 .document_revisions
                 .iter()
@@ -1748,6 +1986,111 @@ fn save_revisions(
         canonical_hashes,
         generation: SaveGeneration::from(capture.generation),
     }
+}
+
+fn save_revisions_from_patch(
+    capture: &RevisionedSaveRequest,
+    patch: &CanonicalProjectPatch,
+) -> SaveRevisionVector {
+    let mut revisions = save_revisions(capture, None);
+    revisions.canonical_hashes = patch
+        .complete_resources
+        .values()
+        .map(|resource| (resource.resource.clone(), resource.hash))
+        .collect();
+    revisions
+}
+
+fn materialize_patch_save_request(
+    kind: PersistenceSaveKind,
+    name: Option<SnapshotName>,
+    capture: &RevisionedSaveRequest,
+    revisions: SaveRevisionVector,
+    patch: &CanonicalProjectPatch,
+) -> SaveRequest {
+    let writes = AtomicWritePlan::with_deletions(
+        patch
+            .resources
+            .values()
+            .map(|resource| StagedResource {
+                path: resource.path.as_str().to_owned(),
+                bytes: resource.bytes.clone(),
+            })
+            .collect(),
+        patch
+            .deletions
+            .iter()
+            .map(|path| path.as_str().to_owned())
+            .collect(),
+    );
+    let resources = patch
+        .complete_resources
+        .iter()
+        .map(|(path, resource)| (path.clone(), resource.hash))
+        .collect();
+    let category = match kind {
+        PersistenceSaveKind::Autosave => CheckpointCategory::Autosave,
+        PersistenceSaveKind::Structural => CheckpointCategory::StructuralChange,
+        PersistenceSaveKind::Restoration => CheckpointCategory::Restoration,
+        PersistenceSaveKind::NamedSnapshot => CheckpointCategory::NamedSnapshot,
+        PersistenceSaveKind::Explicit | PersistenceSaveKind::Final => {
+            CheckpointCategory::ExplicitSave
+        }
+    };
+    let priority = match kind {
+        PersistenceSaveKind::Autosave => SavePriority::Autosave,
+        PersistenceSaveKind::Structural => SavePriority::Structural,
+        PersistenceSaveKind::Explicit => SavePriority::Explicit,
+        PersistenceSaveKind::Final => SavePriority::Close,
+        PersistenceSaveKind::Restoration | PersistenceSaveKind::NamedSnapshot => {
+            SavePriority::Explicit
+        }
+    };
+    let affected_documents = if kind == PersistenceSaveKind::Restoration {
+        patch
+            .persistence_frontier
+            .document_revisions
+            .keys()
+            .copied()
+            .collect()
+    } else {
+        capture
+            .dirty_resources
+            .iter()
+            .filter_map(|resource| match resource {
+                Resource::Document(document) => Some(*document),
+                Resource::Manifest | Resource::Styles | Resource::Dictionary => None,
+            })
+            .collect()
+    };
+    let checkpoint = CheckpointInput {
+        intent_hash: checkpoint_patch_intent_hash(kind, capture, patch),
+        resources,
+        category,
+        affected_documents,
+        name,
+    };
+    SaveRequest::new(revisions, writes, checkpoint, priority)
+}
+
+fn checkpoint_patch_intent_hash(
+    kind: PersistenceSaveKind,
+    capture: &RevisionedSaveRequest,
+    patch: &CanonicalProjectPatch,
+) -> CheckpointIntentHash {
+    let mut digest = Sha256::new();
+    digest.update(capture.project_id.as_bytes());
+    digest.update(capture.generation.to_be_bytes());
+    digest.update([kind as u8]);
+    for (path, resource) in &patch.complete_resources {
+        digest.update(path.as_str().as_bytes());
+        digest.update(resource.hash.as_bytes());
+    }
+    for path in &patch.deletions {
+        digest.update(b"delete\0");
+        digest.update(path.as_str().as_bytes());
+    }
+    CheckpointIntentHash::from_bytes(digest.finalize().into())
 }
 
 fn materialize_save_request(

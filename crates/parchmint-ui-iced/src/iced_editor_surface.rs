@@ -25,7 +25,7 @@ use crate::{
     FormattingCommand, LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
-    focus,
+    focus, hierarchy_drag,
     icons::{Icon, icon_sized},
     stationary_tooltip,
 };
@@ -149,6 +149,7 @@ impl EditorHostSlots {
 pub(crate) enum EditorCenterMessage {
     BeginSplitResize,
     HierarchyDropTarget(EditorPane),
+    ClearHierarchyDropTarget(EditorPane),
     CommitHierarchyDrop,
     Workspace(EditorMessage),
     PaneWorkspace {
@@ -174,9 +175,10 @@ impl EditorCenterMessage {
     /// local search state; mounted messages also establish that focus.
     pub(crate) fn workspace_messages(&self) -> Vec<EditorMessage> {
         match self {
-            Self::BeginSplitResize | Self::HierarchyDropTarget(_) | Self::CommitHierarchyDrop => {
-                Vec::new()
-            }
+            Self::BeginSplitResize
+            | Self::HierarchyDropTarget(_)
+            | Self::ClearHierarchyDropTarget(_)
+            | Self::CommitHierarchyDrop => Vec::new(),
             Self::Workspace(message) => vec![message.clone()],
             Self::PaneWorkspace { pane, message } => {
                 vec![EditorMessage::FocusPane(*pane), message.clone()]
@@ -630,15 +632,16 @@ fn editor_pane_surface(
         }
         EditorCenterChrome::ManuscriptOnly => body,
     };
-    mouse_area(
+    hierarchy_drag::target(
         container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
+        None,
+        |bounds, point| bounds.contains(point).then_some(()),
+        move |_| EditorCenterMessage::HierarchyDropTarget(pane),
+        move |_| EditorCenterMessage::ClearHierarchyDropTarget(pane),
     )
-    .on_enter(EditorCenterMessage::HierarchyDropTarget(pane))
-    .on_release(EditorCenterMessage::CommitHierarchyDrop)
-    .into()
 }
 
 fn tab_strip(
@@ -670,15 +673,12 @@ fn tab_strip(
             ))
         },
     );
-    let strip: Element<'static, EditorCenterMessage> = mouse_area(
-        container(tabs)
-            .padding([0, 2])
-            .width(Length::Fill)
-            .height(36)
-            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
-    )
-    .on_release(EditorCenterMessage::Workspace(EditorMessage::CommitTabDrag))
-    .into();
+    let strip: Element<'static, EditorCenterMessage> = container(tabs)
+        .padding([0, 2])
+        .width(Length::Fill)
+        .height(36)
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+        .into();
     if focused {
         focus::f6_region(F6Region::ActiveTab, strip)
     } else {
@@ -1062,12 +1062,116 @@ fn field_interaction(status: iced::widget::text_input::Status) -> Interaction {
 
 #[cfg(test)]
 mod tests {
-    use iced::{Settings, Size};
+    use iced::{Point, Settings, Size};
     use iced_test::Simulator;
+    use parchmint_domain::DocumentId;
+    use parchmint_editor_api::{
+        CanonicalDocumentLoad, EditorAdapter as _, EditorCommand as AdapterEditorCommand,
+        EditorCommandKind, EditorCommandOrigin,
+    };
+    use parchmint_editor_iced::{
+        EditorIcedAdapter, EditorIcedConfig, EditorSurfaceTheme, MountedEditorBinding,
+        MountedEditorBindingConfig, MountedEditorSession,
+    };
+    use parchmint_platform_api::WindowCapability;
     use parchmint_preferences::ResolvedAppearance;
 
     use super::*;
-    use crate::{EditorFixture, design_tokens::ParchMintTheme};
+    use crate::{EditorFixture, FindMatch, design_tokens::ParchMintTheme};
+
+    fn apply_surface_messages(
+        workspace: &mut EditorWorkspace,
+        slots: &mut EditorHostSlots,
+        messages: impl IntoIterator<Item = EditorCenterMessage>,
+    ) -> Vec<crate::EditorEffect> {
+        let mut effects = Vec::new();
+        for message in messages {
+            match message {
+                EditorCenterMessage::Workspace(message) => {
+                    effects.extend(workspace.update(message))
+                }
+                EditorCenterMessage::PaneWorkspace { pane, message } => {
+                    effects.extend(workspace.update(EditorMessage::FocusPane(pane)));
+                    effects.extend(workspace.update(message));
+                }
+                EditorCenterMessage::Mounted {
+                    pane,
+                    view,
+                    message,
+                } => {
+                    if !matches!(message, MountedEditorMessage::ViewportChanged(_)) {
+                        effects.extend(workspace.update(EditorMessage::FocusPane(pane)));
+                    }
+                    slots
+                        .update_mounted(pane, view, message)
+                        .expect("rendered mounted message reaches its retained host");
+                }
+                EditorCenterMessage::SetReplaceDraft { pane, value } => {
+                    slots.set_replace_draft(pane, value);
+                }
+                // The project shell owns hierarchy drag state. Pointer entry
+                // and release during these editor flows legitimately publish
+                // these surface-level signals without changing editor state.
+                EditorCenterMessage::HierarchyDropTarget(_)
+                | EditorCenterMessage::ClearHierarchyDropTarget(_)
+                | EditorCenterMessage::CommitHierarchyDrop => {}
+                unsupported @ (EditorCenterMessage::BeginSplitResize
+                | EditorCenterMessage::ChooseSpellingAction(_)
+                | EditorCenterMessage::DismissSpellingMenu) => {
+                    panic!(
+                        "the editor flow fixture does not model this center message: {unsupported:?}"
+                    );
+                }
+            }
+        }
+        effects
+    }
+
+    fn shared_document_slots(
+        workspace: &EditorWorkspace,
+    ) -> (
+        EditorIcedAdapter,
+        parchmint_editor_api::SharedEditorSession,
+        EditorHostSlots,
+    ) {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig::default()).expect("test adapter");
+        let document = DocumentId::from_bytes([88; 16]);
+        let viewport = EditorViewport::new(460.0, 480.0).expect("test viewport");
+        let primary_view = workspace.pane(EditorPane::Primary).view();
+        let primary = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(document, "river river")),
+                WindowCapability::new(81, 1),
+                primary_view,
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("primary host mounts");
+        let session = primary.session();
+        let companion = MountedEditorBinding::mount(
+            &adapter,
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Reuse(session.clone()),
+                WindowCapability::new(81, 1),
+                workspace.pane(EditorPane::Companion).view(),
+                viewport,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .expect("companion host joins the document session");
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::mounted(primary.host().clone()),
+        );
+        slots.insert(
+            EditorPane::Companion,
+            EditorPaneSlot::mounted(companion.host().clone()),
+        );
+        (adapter, session, slots)
+    }
 
     #[test]
     fn pane_local_messages_focus_before_reaching_workspace_reducer() {
@@ -1208,8 +1312,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_close_target_remains_independently_accessible_from_the_title() {
-        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+    fn clicking_a_rendered_tab_close_removes_it_without_committing_a_drag() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let mut slots = EditorHostSlots::default();
         slots.insert(
             EditorPane::Primary,
@@ -1227,13 +1331,248 @@ mod tests {
         );
 
         simulator.click("×").expect("primary tab close target");
-
-        assert!(simulator.into_messages().any(|message| matches!(
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
             message,
             EditorCenterMessage::Workspace(EditorMessage::CloseTab {
                 pane: EditorPane::Primary,
                 document_id,
             }) if document_id == "chapter-one"
         )));
+        assert!(!messages.iter().any(|message| matches!(
+            message,
+            EditorCenterMessage::Workspace(EditorMessage::CommitTabDrag)
+        )));
+        apply_surface_messages(&mut workspace, &mut slots, messages);
+        assert!(
+            workspace
+                .pane(EditorPane::Primary)
+                .tabs()
+                .iter()
+                .all(|tab| tab.id() != "chapter-one")
+        );
+    }
+
+    #[test]
+    fn rendered_panes_switch_toolbar_and_inspector_targets_with_focus() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let (_, _, mut slots) = shared_document_slots(&workspace);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator
+            .click("Chapter Two")
+            .expect("rendered companion tab");
+        assert!(
+            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages(),)
+                .is_empty()
+        );
+        assert_eq!(workspace.focused_pane(), EditorPane::Companion);
+        assert_eq!(
+            workspace.inspector_context(),
+            &crate::InspectorContext::Document {
+                document_id: "chapter-two".to_owned(),
+            }
+        );
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator.click("B").expect("rendered bold toolbar button");
+        assert!(matches!(
+            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages()).as_slice(),
+            [crate::EditorEffect::Command {
+                view,
+                command: crate::EditorCommand::ToggleBold,
+            }] if *view == workspace.pane(EditorPane::Companion).view()
+        ));
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator
+            .click("Chapter One")
+            .expect("rendered primary tab");
+        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert_eq!(
+            workspace.inspector_context(),
+            &crate::InspectorContext::Document {
+                document_id: "chapter-one".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn rendered_shared_document_edit_and_undo_preserve_view_local_state() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::SameDocumentTwoViews);
+        let (adapter, session, mut slots) = shared_document_slots(&workspace);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let primary_view = workspace.pane(EditorPane::Primary).view();
+        let companion_view = workspace.pane(EditorPane::Companion).view();
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator.point_at(Point::new(120.0, 140.0));
+        let click_statuses = simulator.simulate(iced_test::simulator::click());
+        assert!(click_statuses.contains(&iced::event::Status::Captured));
+        assert_eq!(simulator.typewrite("X"), iced::event::Status::Captured);
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            EditorCenterMessage::Mounted {
+                pane: EditorPane::Primary,
+                message: MountedEditorMessage::InsertText(value),
+                ..
+            } if value == "X"
+        )));
+        apply_surface_messages(&mut workspace, &mut slots, messages);
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert_eq!(
+            adapter
+                .revision(session.clone())
+                .expect("shared revision")
+                .value(),
+            1
+        );
+        assert_ne!(
+            adapter
+                .selection(session.clone(), primary_view)
+                .expect("primary selection"),
+            adapter
+                .selection(session.clone(), companion_view)
+                .expect("companion selection")
+        );
+
+        workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+        workspace.update(EditorMessage::OpenLocalFind);
+        workspace.update(EditorMessage::SetFindQuery("river".to_owned()));
+        workspace.update(EditorMessage::SetFindMatches(vec![FindMatch::new(0, 5)]));
+        workspace.update(EditorMessage::SetSelectionWordCount {
+            pane: EditorPane::Companion,
+            words: Some(2),
+        });
+        assert!(!workspace.local_search(primary_view).is_open());
+        assert_eq!(workspace.local_search(companion_view).query(), "river");
+        assert_eq!(
+            workspace.status_bar().current_count(),
+            crate::StatusCount::Selection(2)
+        );
+
+        workspace.update(EditorMessage::FocusPane(EditorPane::Primary));
+        let undo = workspace.update(EditorMessage::Undo);
+        let [
+            crate::EditorEffect::Command {
+                view,
+                command: crate::EditorCommand::Undo,
+            },
+        ] = undo.as_slice()
+        else {
+            panic!("focused primary undo must reach the shared editor session");
+        };
+        adapter
+            .execute(
+                session.clone(),
+                EditorCommandOrigin::new(*view),
+                AdapterEditorCommand::new(
+                    adapter
+                        .revision(session.clone())
+                        .expect("revision before undo"),
+                    EditorCommandKind::Undo,
+                ),
+            )
+            .expect("undo applies to the shared session");
+        assert_eq!(
+            adapter
+                .primary_visible_block(session)
+                .expect("shared primary block")
+                .text(),
+            "river river"
+        );
+    }
+
+    #[test]
+    fn rendered_local_replace_controls_stay_scoped_to_the_focused_view() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let (_, _, mut slots) = shared_document_slots(&workspace);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let primary_view = workspace.pane(EditorPane::Primary).view();
+        let companion_view = workspace.pane(EditorPane::Companion).view();
+        workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+        workspace.update(EditorMessage::OpenLocalFind);
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator.click("Find").expect("visible local Find input");
+        assert_eq!(simulator.typewrite("river"), iced::event::Status::Captured);
+        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        assert_eq!(workspace.local_search(companion_view).query(), "river");
+        assert!(workspace.local_search(primary_view).query().is_empty());
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator.click("Replace").expect("visible replace toggle");
+        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        assert!(workspace.local_search(companion_view).replace_visible());
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator
+            .click("Replace with")
+            .expect("visible replacement input");
+        assert_eq!(simulator.typewrite("scene"), iced::event::Status::Captured);
+        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        assert_eq!(
+            slots
+                .slot(EditorPane::Companion)
+                .expect("companion slot")
+                .replace_draft(),
+            "scene"
+        );
+        assert!(
+            slots
+                .slot(EditorPane::Primary)
+                .expect("primary slot")
+                .replace_draft()
+                .is_empty()
+        );
+
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+        simulator
+            .click("Replace all")
+            .expect("visible replace-all control");
+        assert!(matches!(
+            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages()).as_slice(),
+            [crate::EditorEffect::Command {
+                view,
+                command: crate::EditorCommand::ReplaceAllFindMatches { replacement },
+            }] if *view == companion_view && replacement == "scene"
+        ));
+        assert_eq!(workspace.focused_pane(), EditorPane::Companion);
+        assert!(!workspace.local_search(primary_view).is_open());
     }
 }

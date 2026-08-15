@@ -156,6 +156,40 @@ impl AtomicWriter for RecordingWriter {
     }
 }
 
+#[derive(Debug)]
+struct PanickingWriter {
+    pause: Arc<CommitPause>,
+}
+
+impl PanickingWriter {
+    fn new(pause: Arc<CommitPause>) -> Self {
+        Self { pause }
+    }
+}
+
+impl AtomicWriter for PanickingWriter {
+    fn stage(&self, _plan: AtomicWritePlan) -> Result<StagedWrite, WriteError> {
+        self.pause.pause_first();
+        panic!("injected production dependency panic")
+    }
+
+    fn validate_staged(&self, _staged: &StagedWrite) -> ValidationReport {
+        unreachable!("the injected panic stops the worker during staging")
+    }
+
+    fn commit(&self, _staged: StagedWrite) -> Result<CommitReceipt, WriteError> {
+        unreachable!("the injected panic stops the worker during staging")
+    }
+
+    fn reconcile(&self, _record: SaveTransactionRecord) -> Result<Reconciliation, WriteError> {
+        unreachable!("the injected panic stops the worker during staging")
+    }
+
+    fn abandon(&self, _staged: StagedWrite) -> Result<Abandonment, WriteError> {
+        unreachable!("the injected panic stops the worker during staging")
+    }
+}
+
 #[derive(Debug, Default)]
 struct HistoryStateForTest {
     failures: BTreeSet<CheckpointIntentHash>,
@@ -479,6 +513,42 @@ fn close_save_overtakes_lower_priority_pending_work_without_blocking_request() {
     close.wait_timeout(WAIT).unwrap();
     later_explicit.wait_timeout(WAIT).unwrap();
     assert_eq!(harness.writer.committed_generations(), vec![1, 3, 4]);
+}
+
+#[test]
+fn worker_unwind_completes_every_accepted_ticket_instead_of_stranding_waiters() {
+    let pause = Arc::new(CommitPause::blocked());
+    let coordinator = ProjectSaveCoordinator::new(
+        project_id(11),
+        Arc::new(PanickingWriter::new(pause.clone())),
+        Arc::new(RecordingHistory::default()),
+        Arc::new(InMemoryCheckpointIntentStore::new()),
+    )
+    .expect("start coordinator");
+    let active = coordinator
+        .request(request(11, 11, &[(1, 11)], SavePriority::Close))
+        .expect("the worker accepts the close save before its dependency unwinds");
+    pause.wait_until_first_commit();
+    let queued = coordinator
+        .request(request(12, 12, &[(1, 12)], SavePriority::Close))
+        .expect("the worker accepts a second close save while the first is active");
+    let (reported, received) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = reported.send([active.wait(), queued.wait()]);
+    });
+    pause.resume();
+
+    assert_eq!(
+        received.recv_timeout(WAIT),
+        Ok([Err(SaveError::WorkerStopped), Err(SaveError::WorkerStopped)]),
+        "worker loss must be observable through the accepted ticket"
+    );
+    assert_eq!(coordinator.status().state, SaveState::Error);
+    assert_eq!(coordinator.status().error, Some(SaveError::WorkerStopped));
+    assert!(matches!(
+        coordinator.request(request(13, 13, &[(1, 13)], SavePriority::Close)),
+        Err(SaveError::WorkerStopped)
+    ));
 }
 
 #[test]

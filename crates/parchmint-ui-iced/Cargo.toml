@@ -33,5 +33,8 @@ parchmint-search-api = { path = "../parchmint-search-api" }
 parchmint-ui-api = { path = "../parchmint-ui-api" }
 parchmint-workspace-state = { path = "../parchmint-workspace-state" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.13.13", default-features = false, features = ["settings", "tokio"] }
+
 [dev-dependencies]
 iced_test = "=0.14.0"

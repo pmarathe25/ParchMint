@@ -274,7 +274,7 @@ fn injectable_appearance_stream_preserves_ordered_generations() {
 }
 
 #[test]
-fn appearance_watcher_publishes_only_changes_in_order() {
+fn silent_system_changes_do_not_create_events_or_background_reads() {
     let native = fixture();
     let stream = native
         .appearance_events()
@@ -282,38 +282,14 @@ fn appearance_watcher_publishes_only_changes_in_order() {
         .expect("appearance subscription");
 
     native.set_system_appearance_silently(SystemAppearance::Dark);
-    native.poll_system_appearance();
-    native.poll_system_appearance();
-    native.set_system_appearance_silently(SystemAppearance::Light);
-    native.poll_system_appearance();
-
-    assert_eq!(
-        stream.try_next().unwrap().expect("dark event"),
-        parchmint_platform_api::SystemAppearanceEvent {
-            generation: 1,
-            appearance: SystemAppearance::Dark,
-        }
-    );
-    assert_eq!(
-        stream.try_next().unwrap().expect("light event"),
-        parchmint_platform_api::SystemAppearanceEvent {
-            generation: 2,
-            appearance: SystemAppearance::Light,
-        }
-    );
     assert_eq!(stream.try_next(), Ok(None));
-}
+    assert_eq!(native.system_appearance_reads(), 0);
 
-#[test]
-fn appearance_watcher_starts_once_and_stops_cleanly() {
-    let native = fixture();
-
-    assert!(native.has_system_appearance_watcher());
-    assert_eq!(native.system_appearance_watcher_starts(), 1);
-    native.ensure_system_appearance_watcher();
-    assert_eq!(native.system_appearance_watcher_starts(), 1);
-    native.stop_system_appearance_watcher();
-    assert!(!native.has_system_appearance_watcher());
+    assert_eq!(
+        block_on(native.appearance().current_appearance()).expect("appearance"),
+        SystemAppearance::Dark
+    );
+    assert_eq!(native.system_appearance_reads(), 1);
 }
 
 #[test]

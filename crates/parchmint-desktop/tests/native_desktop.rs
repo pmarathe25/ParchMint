@@ -3,6 +3,7 @@
 mod fixtures;
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use fixtures::desktop::{
     Event, FakeProjectFilesystem, block_on, final_save_request, fixture, fixture_with_filesystem,
@@ -71,12 +72,22 @@ fn startup_injects_services_resolves_initial_appearance_and_routes_launch_intent
         Event::Opened { project: path, .. } if path == Path::new(project)
     )));
     assert!(desktop.filesystem.is_locked(Path::new(project)));
+    assert_eq!(desktop.system_appearance_reads.load(Ordering::Relaxed), 0);
     assert!(
         runtime
             .route_launch(LaunchRequest::launcher())
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn system_startup_reads_the_current_appearance_once() {
+    let desktop = fixture(AppearanceMode::System, SystemAppearance::Dark);
+
+    let _runtime = block_on(desktop.bootstrap.start(LaunchRequest::launcher())).unwrap();
+
+    assert_eq!(desktop.system_appearance_reads.load(Ordering::Relaxed), 1);
 }
 
 #[test]

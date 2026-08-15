@@ -1,7 +1,7 @@
 # Save, recovery, and closing
 
 - **SAVE-001:** Autosave never blocks the UI thread.
-- **SAVE-002:** Request autosave 1.5 seconds after editing becomes idle and at least every 30 seconds during continuous editing.
+- **SAVE-002:** Request autosave 60 seconds after editing becomes idle and at least every 5 minutes during continuous editing.
 - **SAVE-003:** Structural changes request immediate asynchronous save/checkpoint.
 - **SAVE-004:** Closing a tab, switching projects, or closing a window requests a high-priority save.
 - **SAVE-005:** `Save` queues a high-priority save through the current revision but remains nonblocking.

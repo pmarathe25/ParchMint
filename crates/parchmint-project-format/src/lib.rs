@@ -357,6 +357,40 @@ pub struct CanonicalProjectEncoding {
     pub deletions: Vec<CanonicalRelativePath>,
 }
 
+/// One document body and annotation sidecar that changed since the durable
+/// canonical baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalDocumentUpdate {
+    pub body: String,
+    pub annotations: Vec<AnnotationThread>,
+}
+
+/// Domain-owned canonical resources that need re-encoding for one save.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CanonicalDomainUpdate {
+    pub manifest: bool,
+    pub styles: bool,
+    pub dictionary: bool,
+    pub documents: BTreeMap<DomainDocumentId, CanonicalDocumentUpdate>,
+}
+
+/// Identity and hash of one resource in a complete durable canonical baseline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalResourceMetadata {
+    pub resource: ResourceId,
+    pub hash: ContentHash,
+}
+
+/// Changed bytes plus complete metadata for one incrementally encoded project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalProjectPatch {
+    pub resources: BTreeMap<CanonicalRelativePath, CanonicalBytes>,
+    pub complete_resources: BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
+    pub paths: CanonicalProjectPathMap,
+    pub persistence_frontier: CanonicalPersistenceFrontier,
+    pub deletions: Vec<CanonicalRelativePath>,
+}
+
 /// An in-memory snapshot used as migration input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceFormatSnapshot {
@@ -514,16 +548,7 @@ impl ProjectFormatCodec {
                 )
             })
             .collect();
-        let mut identity = Sha256::new();
-        identity.update(frontier.recovery_project_revision.to_be_bytes());
-        identity.update(project.revision.value().to_be_bytes());
-        for (document, summary) in &frontier.document_summaries {
-            identity.update(document.as_bytes());
-            identity.update(summary.revision.to_be_bytes());
-            identity.update(summary.content_hash.as_bytes());
-            identity.update((summary.word_count as u64).to_be_bytes());
-        }
-        frontier.save_identity = Some(ContentHash::from_bytes(identity.finalize().into()));
+        finalize_save_identity(project, &mut frontier);
         let (manifest, paths) = domain_manifest(project, &frontier)?;
         let mut resources = BTreeMap::new();
         let control = self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?;
@@ -617,6 +642,207 @@ impl ProjectFormatCodec {
         })
     }
 
+    /// Encodes only changed domain resources while retaining a complete,
+    /// hash-addressed view of the resulting canonical project.
+    ///
+    /// `existing` may omit document bodies so callers can keep closed
+    /// documents lazy. `baseline` and `previous_frontier` must still describe
+    /// every durable document; an incomplete baseline fails instead of
+    /// silently producing a partial checkpoint.
+    pub fn encode_domain_project_patch(
+        &self,
+        project: &Project,
+        update: &CanonicalDomainUpdate,
+        existing: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+        baseline: &BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
+        previous_paths: &CanonicalProjectPathMap,
+        previous_frontier: &CanonicalPersistenceFrontier,
+        frontier: &CanonicalPersistenceFrontier,
+    ) -> Result<CanonicalProjectPatch, FormatError> {
+        project
+            .validate()
+            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
+        let mut frontier = frontier.clone();
+        let current_documents = project
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| match node.kind {
+                NodeKind::Document(document) => Some(document),
+                NodeKind::Root(_) | NodeKind::Group => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if let Some(document) = update
+            .documents
+            .keys()
+            .find(|document| !current_documents.contains(document))
+        {
+            return Err(FormatError::InvalidDocument(format!(
+                "updated document {} is not in the project",
+                stable_id_text(document.as_bytes())
+            )));
+        }
+        frontier.document_summaries.clear();
+        for document in &current_documents {
+            let revision = frontier
+                .document_revisions
+                .get(document)
+                .copied()
+                .unwrap_or_default();
+            let summary = if let Some(update) = update.documents.get(document) {
+                CanonicalDocumentSummary {
+                    revision,
+                    content_hash: ContentHash::from_bytes(
+                        Sha256::digest(update.body.as_bytes()).into(),
+                    ),
+                    word_count: update.body.split_whitespace().count(),
+                }
+            } else {
+                let summary = previous_frontier
+                    .document_summaries
+                    .get(document)
+                    .ok_or_else(|| {
+                        FormatError::InvalidDocument(format!(
+                            "durable baseline is missing summary for unchanged document {}",
+                            stable_id_text(document.as_bytes())
+                        ))
+                    })?
+                    .clone();
+                if summary.revision != revision {
+                    return Err(FormatError::InvalidDocument(format!(
+                        "unchanged document {} advanced beyond its durable summary",
+                        stable_id_text(document.as_bytes())
+                    )));
+                }
+                summary
+            };
+            frontier.document_summaries.insert(*document, summary);
+        }
+        finalize_save_identity(project, &mut frontier);
+        let (manifest, paths) = domain_manifest(project, &frontier)?;
+
+        let mut complete_resources = baseline.clone();
+        let mut resources = BTreeMap::new();
+
+        let control_path = CanonicalRelativePath::parse(".parchmint/format-version")?;
+        if !complete_resources.contains_key(&control_path) {
+            record_patch_resource(
+                self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
+        let manifest_path = CanonicalRelativePath::parse("project.toml")?;
+        if update.manifest
+            || update.styles
+            || update.dictionary
+            || !update.documents.is_empty()
+            || !complete_resources.contains_key(&manifest_path)
+        {
+            record_patch_resource(
+                self.encode(&CanonicalResource::Manifest(CanonicalManifest(manifest)))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
+        let dictionary_path = CanonicalRelativePath::parse("dictionary.txt")?;
+        if update.dictionary || !complete_resources.contains_key(&dictionary_path) {
+            let dictionary_text = project.dictionary.iter().collect::<Vec<_>>().join("\n");
+            let dictionary_text = if dictionary_text.is_empty() {
+                String::new()
+            } else {
+                format!("{dictionary_text}\n")
+            };
+            let dictionary = self.decode_dictionary(dictionary_text.as_bytes())?;
+            record_patch_resource(
+                self.encode(&CanonicalResource::Dictionary(dictionary))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
+        let styles_path = CanonicalRelativePath::parse("styles.css")?;
+        if update.styles || !complete_resources.contains_key(&styles_path) {
+            let existing_styles = existing
+                .get(&styles_path)
+                .map(|bytes| self.decode_styles(bytes))
+                .transpose()?
+                .unwrap_or(CanonicalStyles { rules: Vec::new() });
+            let styles = merge_managed_styles(&project.styles, &existing_styles)?;
+            record_patch_resource(
+                self.encode(&CanonicalResource::Styles(styles))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
+        for (document, update) in &update.documents {
+            let path = paths.documents.get(document).ok_or_else(|| {
+                FormatError::InvalidDocument(format!(
+                    "updated document {} has no canonical path",
+                    stable_id_text(document.as_bytes())
+                ))
+            })?;
+            let decoded = self.decode_document(update.body.as_bytes())?;
+            let mut encoded = self.encode(&CanonicalResource::Document(decoded))?;
+            encoded.path = path.clone();
+            encoded.resource = ResourceId::DocumentById {
+                document_id: stable_id_text(document.as_bytes()),
+            };
+            record_patch_resource(encoded, &mut resources, &mut complete_resources);
+            let document_id = stable_id_text(document.as_bytes());
+            let sidecar = CanonicalAnnotations::from_typed(document_id, &update.annotations)?;
+            record_patch_resource(
+                self.encode(&CanonicalResource::Annotations(sidecar))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
+        let current_paths = paths.documents.values().cloned().collect::<BTreeSet<_>>();
+        let mut deletions = previous_paths
+            .documents
+            .iter()
+            .filter(|(document, path)| {
+                !current_documents.contains(document) || !current_paths.contains(*path)
+            })
+            .map(|(_, path)| path.clone())
+            .collect::<Vec<_>>();
+        for (document, path) in &paths.documents {
+            if !complete_resources.contains_key(path) {
+                return Err(FormatError::InvalidDocument(format!(
+                    "durable baseline is missing unchanged document {}",
+                    stable_id_text(document.as_bytes())
+                )));
+            }
+        }
+        for document in previous_paths
+            .documents
+            .keys()
+            .filter(|document| !current_documents.contains(document))
+        {
+            let annotation = annotation_path(&stable_id_text(document.as_bytes()))?;
+            if complete_resources.contains_key(&annotation) {
+                deletions.push(annotation);
+            }
+        }
+        deletions.sort();
+        deletions.dedup();
+        for path in &deletions {
+            complete_resources.remove(path);
+            resources.remove(path);
+        }
+
+        Ok(CanonicalProjectPatch {
+            resources,
+            complete_resources,
+            paths,
+            persistence_frontier: frontier,
+            deletions,
+        })
+    }
+
     /// Decodes the structure extension written by [`Self::encode_domain_project`].
     /// Legacy manifests without this extension return `Ok(None)`.
     pub fn decode_domain_project(
@@ -652,6 +878,34 @@ impl ProjectFormatCodec {
     ) -> Result<CanonicalPersistenceFrontier, FormatError> {
         decode_persistence_frontier(manifest.value())
     }
+}
+
+fn record_patch_resource(
+    encoded: CanonicalBytes,
+    resources: &mut BTreeMap<CanonicalRelativePath, CanonicalBytes>,
+    complete_resources: &mut BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
+) {
+    complete_resources.insert(
+        encoded.path.clone(),
+        CanonicalResourceMetadata {
+            resource: encoded.resource.clone(),
+            hash: encoded.hash,
+        },
+    );
+    resources.insert(encoded.path.clone(), encoded);
+}
+
+fn finalize_save_identity(project: &Project, frontier: &mut CanonicalPersistenceFrontier) {
+    let mut identity = Sha256::new();
+    identity.update(frontier.recovery_project_revision.to_be_bytes());
+    identity.update(project.revision.value().to_be_bytes());
+    for (document, summary) in &frontier.document_summaries {
+        identity.update(document.as_bytes());
+        identity.update(summary.revision.to_be_bytes());
+        identity.update(summary.content_hash.as_bytes());
+        identity.update((summary.word_count as u64).to_be_bytes());
+    }
+    frontier.save_identity = Some(ContentHash::from_bytes(identity.finalize().into()));
 }
 
 fn domain_manifest(
@@ -3499,5 +3753,220 @@ mod tests {
         assert_eq!(tombstone.deleted_at_unix_millis, 1_725_000);
         assert_eq!(tombstone.subtree[0].node.title, "Research Note");
         assert_eq!(tombstone.subtree[0].node.kind, NodeKind::Document(document));
+    }
+
+    #[test]
+    fn incremental_domain_encoding_reuses_unchanged_documents_and_deletes_removed_resources() {
+        use parchmint_domain::{ProjectCommand, apply_project_command};
+
+        let project_id = ProjectId::from_bytes([31; 16]);
+        let group = NodeId::from_bytes([32; 16]);
+        let first_node = NodeId::from_bytes([33; 16]);
+        let second_node = NodeId::from_bytes([34; 16]);
+        let first = DomainDocumentId::from_bytes([35; 16]);
+        let second = DomainDocumentId::from_bytes([36; 16]);
+        let mut project = Project::new(project_id);
+        for command in [
+            ProjectCommand::create_group(group, NodeId::manuscript_root(), 0, "Draft"),
+            ProjectCommand::create_document(first_node, first, group, 0, "First"),
+            ProjectCommand::create_document(second_node, second, group, 1, "Second"),
+        ] {
+            project = apply_project_command(&project, project.revision, command)
+                .unwrap()
+                .project;
+        }
+        let documents = BTreeMap::from([
+            (first, "<p>first</p>".to_owned()),
+            (second, "<p>second</p>".to_owned()),
+        ]);
+        let annotations = BTreeMap::from([(first, Vec::new()), (second, Vec::new())]);
+        let frontier = CanonicalPersistenceFrontier {
+            recovery_project_revision: 1,
+            document_revisions: BTreeMap::from([(first, 1), (second, 1)]),
+            ..Default::default()
+        };
+        let baseline = codec()
+            .encode_domain_project_with_annotations(
+                &project,
+                &documents,
+                &annotations,
+                &BTreeMap::new(),
+                &CanonicalProjectPathMap::default(),
+                &frontier,
+            )
+            .unwrap();
+        let existing = baseline
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let metadata = baseline
+            .resources
+            .iter()
+            .map(|(path, resource)| {
+                (
+                    path.clone(),
+                    CanonicalResourceMetadata {
+                        resource: resource.resource.clone(),
+                        hash: resource.hash,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let next_frontier = CanonicalPersistenceFrontier {
+            recovery_project_revision: 2,
+            document_revisions: BTreeMap::from([(first, 2), (second, 1)]),
+            ..Default::default()
+        };
+        let patch = codec()
+            .encode_domain_project_patch(
+                &project,
+                &CanonicalDomainUpdate {
+                    documents: BTreeMap::from([(
+                        first,
+                        CanonicalDocumentUpdate {
+                            body: "<p>changed</p>".to_owned(),
+                            annotations: Vec::new(),
+                        },
+                    )]),
+                    ..Default::default()
+                },
+                &existing,
+                &metadata,
+                &baseline.paths,
+                &baseline.persistence_frontier,
+                &next_frontier,
+            )
+            .unwrap();
+        let first_path = &baseline.paths.documents[&first];
+        let second_path = &baseline.paths.documents[&second];
+        assert!(patch.resources.contains_key(first_path));
+        assert!(!patch.resources.contains_key(second_path));
+        assert!(
+            patch
+                .resources
+                .keys()
+                .any(|path| path.as_str() == "project.toml")
+        );
+        assert_eq!(patch.complete_resources[second_path], metadata[second_path]);
+
+        let mut incomplete = metadata.clone();
+        incomplete.remove(second_path);
+        assert!(
+            codec()
+                .encode_domain_project_patch(
+                    &project,
+                    &CanonicalDomainUpdate {
+                        documents: BTreeMap::from([(
+                            first,
+                            CanonicalDocumentUpdate {
+                                body: "<p>changed</p>".to_owned(),
+                                annotations: Vec::new(),
+                            },
+                        )]),
+                        ..Default::default()
+                    },
+                    &existing,
+                    &incomplete,
+                    &baseline.paths,
+                    &baseline.persistence_frontier,
+                    &next_frontier,
+                )
+                .is_err()
+        );
+
+        let dictionary_project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::add_dictionary_word("ParchMint"),
+        )
+        .unwrap()
+        .project;
+        let dictionary_patch = codec()
+            .encode_domain_project_patch(
+                &dictionary_project,
+                &CanonicalDomainUpdate {
+                    dictionary: true,
+                    ..Default::default()
+                },
+                &existing,
+                &metadata,
+                &baseline.paths,
+                &baseline.persistence_frontier,
+                &CanonicalPersistenceFrontier {
+                    recovery_project_revision: 2,
+                    document_revisions: BTreeMap::from([(first, 1), (second, 1)]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            dictionary_patch
+                .resources
+                .keys()
+                .map(CanonicalRelativePath::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["dictionary.txt", "project.toml"])
+        );
+        let full_dictionary = codec()
+            .encode_domain_project_with_annotations(
+                &dictionary_project,
+                &documents,
+                &annotations,
+                &existing,
+                &baseline.paths,
+                &CanonicalPersistenceFrontier {
+                    recovery_project_revision: 2,
+                    document_revisions: BTreeMap::from([(first, 1), (second, 1)]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let mut assembled = existing.clone();
+        for path in &dictionary_patch.deletions {
+            assembled.remove(path);
+        }
+        for (path, resource) in &dictionary_patch.resources {
+            assembled.insert(path.clone(), resource.bytes.clone());
+        }
+        assert_eq!(
+            assembled,
+            full_dictionary
+                .resources
+                .iter()
+                .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+                .collect()
+        );
+
+        let project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::delete_node(second_node),
+        )
+        .unwrap()
+        .project;
+        let deletion = codec()
+            .encode_domain_project_patch(
+                &project,
+                &CanonicalDomainUpdate {
+                    manifest: true,
+                    ..Default::default()
+                },
+                &existing,
+                &metadata,
+                &baseline.paths,
+                &baseline.persistence_frontier,
+                &CanonicalPersistenceFrontier {
+                    recovery_project_revision: 2,
+                    document_revisions: BTreeMap::from([(first, 1)]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(deletion.deletions.contains(second_path));
+        assert!(deletion.deletions.iter().any(|path| {
+            path.as_str() == format!("annotations/{}.json", stable_id_text(second.as_bytes()))
+        }));
+        assert!(!deletion.complete_resources.contains_key(second_path));
     }
 }

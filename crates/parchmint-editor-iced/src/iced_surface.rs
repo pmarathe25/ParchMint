@@ -399,8 +399,10 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 Some(Action::publish(MountedEditorMessage::KeyCommand(command)).and_capture())
             }
             iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                text: Some(text), ..
-            }) if state.focused && is_supported_en_us(text) => Some(
+                text: Some(text),
+                modifiers,
+                ..
+            }) if state.focused && is_text_input(text, *modifiers) => Some(
                 Action::publish(MountedEditorMessage::InsertText(text.to_string())).and_capture(),
             ),
             _ => None,
@@ -1087,6 +1089,13 @@ fn is_supported_en_us(text: &str) -> bool {
             .all(|character| character.is_ascii_graphic() || matches!(character, ' ' | '\n' | '\t'))
 }
 
+/// Text supplied with the platform command modifier is an accelerator, not
+/// manuscript input. Clipboard commands are handled above; the remaining
+/// accelerators must reach the native shell without inserting their key text.
+fn is_text_input(text: &str, modifiers: keyboard::Modifiers) -> bool {
+    !modifiers.command() && is_supported_en_us(text)
+}
+
 fn mounted_key_command(
     key: keyboard::Key<&str>,
     modifiers: keyboard::Modifiers,
@@ -1382,6 +1391,81 @@ mod tests {
         }
     }
 
+    fn focused_mounted_canvas_simulator() -> Simulator<'static, MountedEditorMessage> {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig {
+            layout_metrics: regression_layout_metrics(),
+            ..EditorIcedConfig::default()
+        })
+        .expect("adapter");
+        let document = DocumentId::from_bytes([63; 16]);
+        let block = BlockId::from_bytes([63; 16]);
+        let session = adapter
+            .open_session(CanonicalDocumentLoad::new(document, "shortcut regression"))
+            .expect("session");
+        let view = ViewId::from_bytes([64; 16]);
+        let host = adapter
+            .create_view_host(parchmint_platform_api::WindowCapability::new(63, 1), view)
+            .expect("host");
+        adapter
+            .attach_view(session.clone(), view, host)
+            .expect("mount");
+        let viewport = EditorViewport::new(240.0, 100.0).expect("viewport");
+        adapter
+            .set_view_presentation(
+                session.clone(),
+                view,
+                crate::MountedViewPresentation {
+                    focused: true,
+                    pixel_scroll_y: 0.0,
+                    viewport,
+                },
+            )
+            .expect("focus mounted view");
+        adapter
+            .cache_visible_blocks(
+                session.clone(),
+                view,
+                [VisibleEditorBlock::new(
+                    block,
+                    "shortcut regression",
+                    DocumentPosition::default(),
+                )],
+            )
+            .expect("layout");
+        let surface = mounted_surface(&adapter, session, view, block, EditorSurfaceTheme::light())
+            .expect("mounted surface");
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(viewport.width, viewport.height),
+            surface.element(),
+        );
+
+        simulator
+            .snapshot(&Theme::Light)
+            .expect("render focused mounted canvas");
+        simulator
+    }
+
+    fn key_pressed(
+        character: &str,
+        modifiers: keyboard::Modifiers,
+        text: Option<&str>,
+    ) -> iced::Event {
+        let key = keyboard::Key::Character(character.into());
+
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: text.map(Into::into),
+            repeat: false,
+        })
+    }
+
     #[test]
     fn canvas_clip_bounds_stay_local_to_the_allocated_pane() {
         assert_eq!(
@@ -1433,6 +1517,47 @@ mod tests {
         assert_eq!(
             clipboard_shortcut(keyboard::Key::Character("b"), keyboard::Modifiers::COMMAND,),
             None
+        );
+    }
+
+    #[test]
+    fn command_accelerator_text_is_not_inserted_into_the_manuscript() {
+        assert!(is_text_input("s", keyboard::Modifiers::NONE));
+        assert!(is_text_input("S", keyboard::Modifiers::SHIFT));
+        assert!(!is_text_input("s", keyboard::Modifiers::COMMAND));
+        assert!(!is_text_input(
+            "z",
+            keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
+        ));
+    }
+
+    #[test]
+    fn focused_mounted_canvas_routes_shortcuts_without_accelerator_text_input() {
+        let mut simulator = focused_mounted_canvas_simulator();
+
+        assert_eq!(
+            simulator.simulate([key_pressed("c", keyboard::Modifiers::COMMAND, Some("c"),)]),
+            vec![iced::event::Status::Captured],
+            "the focused canvas owns clipboard shortcuts"
+        );
+        assert_eq!(
+            simulator.simulate([key_pressed("s", keyboard::Modifiers::COMMAND, Some("s"),)]),
+            vec![iced::event::Status::Ignored],
+            "file accelerators stay available to outer native routing"
+        );
+        assert_eq!(
+            simulator.simulate([key_pressed("a", keyboard::Modifiers::COMMAND, Some("a"),)]),
+            vec![iced::event::Status::Captured],
+            "the focused canvas owns supported editor key commands"
+        );
+
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            vec![
+                MountedEditorMessage::Clipboard(MountedEditorClipboardIntent::Copy),
+                MountedEditorMessage::KeyCommand(MountedEditorKeyCommand::SelectAll),
+            ],
+            "clipboard and editor commands emit once; command text is never manuscript input"
         );
     }
 

@@ -3,7 +3,11 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -359,13 +363,17 @@ impl AppearanceService for FakeAppearance {
     }
 }
 
-struct FakeSystemAppearance(SystemAppearance);
+struct FakeSystemAppearance {
+    appearance: SystemAppearance,
+    reads: Arc<AtomicU64>,
+}
 
 struct FixtureApplicationServices;
 
 impl SystemAppearanceService for FakeSystemAppearance {
     fn current_appearance(&self) -> AsyncResult<SystemAppearance> {
-        let appearance = self.0;
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let appearance = self.appearance;
         Box::pin(async move { Ok(appearance) })
     }
 }
@@ -375,6 +383,7 @@ pub struct Fixture {
     pub filesystem: Arc<FakeProjectFilesystem>,
     pub preferences: Arc<FakePreferences>,
     pub ui: Arc<RecordingUi>,
+    pub system_appearance_reads: Arc<AtomicU64>,
 }
 
 pub fn fixture(preference_mode: AppearanceMode, system_appearance: SystemAppearance) -> Fixture {
@@ -389,12 +398,16 @@ pub fn fixture_with_filesystem(
 ) -> Fixture {
     let ui = Arc::new(RecordingUi::default());
     let preferences = Arc::new(FakePreferences::new(preference_mode));
+    let system_appearance_reads = Arc::new(AtomicU64::new(0));
     let bootstrap = DesktopBootstrap::new(
         Arc::new(FixtureApplicationServices) as ApplicationServices,
         filesystem.clone(),
         preferences.clone(),
         Arc::new(FakeAppearance::default()),
-        Arc::new(FakeSystemAppearance(system_appearance)) as PlatformServices,
+        Arc::new(FakeSystemAppearance {
+            appearance: system_appearance,
+            reads: Arc::clone(&system_appearance_reads),
+        }) as PlatformServices,
         ui.clone(),
     );
     Fixture {
@@ -402,6 +415,7 @@ pub fn fixture_with_filesystem(
         filesystem,
         preferences,
         ui,
+        system_appearance_reads,
     }
 }
 

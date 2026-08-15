@@ -24,8 +24,8 @@ use std::{
 
 use parchmint_platform_api::{SystemAppearance, SystemAppearanceService, WindowCapability};
 use parchmint_preferences::{
-    AppearanceService, PreferenceCommand, PreferenceError, PreferenceService, RecentProject,
-    ResolvedAppearance, ThemeSnapshot,
+    AppearanceMode, AppearanceService, PreferenceCommand, PreferenceError, PreferenceService,
+    RecentProject, ResolvedAppearance, ThemeSnapshot,
 };
 pub use parchmint_ui_api::{ExitCode, RequestedProjectPath, UiError as DesktopUiError};
 use parchmint_ui_api::{
@@ -352,14 +352,19 @@ impl DesktopBootstrap {
             .load()
             .await
             .map_err(StartupError::Preferences)?;
-        let system = self
-            .platform
-            .current_appearance()
-            .await
-            .map_err(StartupError::SystemAppearance)?;
+        let system = match preferences.values.appearance {
+            AppearanceMode::System => resolved_appearance(
+                self.platform
+                    .current_appearance()
+                    .await
+                    .map_err(StartupError::SystemAppearance)?,
+            ),
+            AppearanceMode::Light => ResolvedAppearance::Light,
+            AppearanceMode::Dark => ResolvedAppearance::Dark,
+        };
         let appearance = self
             .appearance
-            .initialize(&preferences, resolved_appearance(system))
+            .initialize(&preferences, system)
             .map_err(StartupError::Appearance)?;
         let services = DesktopServices {
             application: self.application.clone(),

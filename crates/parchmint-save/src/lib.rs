@@ -358,6 +358,50 @@ struct TicketState {
     ready: Condvar,
 }
 
+#[derive(Debug, Default)]
+struct OutstandingTickets {
+    states: Mutex<BTreeMap<SaveTicketId, Arc<TicketState>>>,
+}
+
+impl OutstandingTickets {
+    fn register(&self, ticket: SaveTicketId, state: Arc<TicketState>) {
+        self.states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(ticket, state);
+    }
+
+    fn complete(&self, ticket: SaveTicketId, result: TicketResult) {
+        let state = self
+            .states
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&ticket);
+        if let Some(state) = state {
+            complete_ticket(&state, result);
+        }
+    }
+
+    fn stop_all(&self, status: &Mutex<SaveStatusSnapshot>) {
+        let states = {
+            let mut states = self
+                .states
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            std::mem::take(&mut *states)
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        if states.is_empty() {
+            return;
+        }
+        mark_error(status, SaveError::WorkerStopped);
+        for state in states {
+            complete_ticket(&state, Err(SaveError::WorkerStopped));
+        }
+    }
+}
+
 /// An asynchronous result handle for one requested revision vector.
 #[derive(Debug, Clone)]
 pub struct SaveTicket {
@@ -464,6 +508,8 @@ pub struct OpenReconciliation {
 }
 
 pub trait SaveCoordinator: Send + Sync {
+    /// Every successfully returned ticket reaches a terminal result, including
+    /// when the project worker stops before executing the request.
     fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError>;
     fn status(&self) -> SaveStatusSnapshot;
     fn reconcile_open(&self) -> Result<OpenReconciliation, SaveError>;
@@ -474,6 +520,7 @@ pub trait SaveCoordinator: Send + Sync {
 pub struct ProjectSaveCoordinator {
     sender: mpsc::Sender<Command>,
     status: Arc<Mutex<SaveStatusSnapshot>>,
+    outstanding: Arc<OutstandingTickets>,
     next_ticket: AtomicU64,
     worker: Option<JoinHandle<()>>,
 }
@@ -518,23 +565,30 @@ impl ProjectSaveCoordinator {
         let (sender, receiver) = mpsc::channel();
         let status = Arc::new(Mutex::new(SaveStatusSnapshot::default()));
         let worker_status = Arc::clone(&status);
+        let outstanding = Arc::new(OutstandingTickets::default());
+        let worker_outstanding = Arc::clone(&outstanding);
         let worker = thread::Builder::new()
             .name(format!("parchmint-save-{:02x}", project.as_bytes()[15]))
             .spawn(move || {
-                run_worker(
+                let _exit = WorkerExitGuard {
+                    outstanding: Arc::clone(&worker_outstanding),
+                    status: Arc::clone(&worker_status),
+                };
+                let dependencies = WorkerDependencies {
                     project,
                     writer,
                     history,
                     intents,
-                    receiver,
-                    worker_status,
-                    worker_pause.clone(),
-                );
+                    status: worker_status,
+                    outstanding: worker_outstanding,
+                };
+                run_worker(dependencies, receiver, worker_pause.clone());
             })
             .map_err(|_| SaveError::WorkerStopped)?;
         Ok(Self {
             sender,
             status,
+            outstanding,
             next_ticket: AtomicU64::new(1),
             worker: Some(worker),
         })
@@ -550,6 +604,7 @@ impl SaveCoordinator for ProjectSaveCoordinator {
             id,
             state: Arc::clone(&state),
         };
+        self.outstanding.register(id, Arc::clone(&state));
         {
             let mut status = self.status.lock().expect("save status lock");
             status.requested = Some(request.revisions.clone());
@@ -558,16 +613,18 @@ impl SaveCoordinator for ProjectSaveCoordinator {
             }
             status.error = None;
         }
-        self.sender
+        if self
+            .sender
             .send(Command::Request(Box::new(WorkItem {
                 request,
-                tickets: vec![PendingTicket {
-                    id,
-                    state,
-                    requested,
-                }],
+                tickets: vec![PendingTicket { id, requested }],
             })))
-            .map_err(|_| SaveError::WorkerStopped)?;
+            .is_err()
+        {
+            self.outstanding.complete(id, Err(SaveError::WorkerStopped));
+            mark_error(&self.status, SaveError::WorkerStopped);
+            return Err(SaveError::WorkerStopped);
+        }
         Ok(ticket)
     }
 
@@ -610,7 +667,6 @@ impl Drop for ProjectSaveCoordinator {
 
 struct PendingTicket {
     id: SaveTicketId,
-    state: Arc<TicketState>,
     requested: SaveRevisionVector,
 }
 
@@ -637,6 +693,18 @@ struct WorkerDependencies {
     history: Arc<dyn HistoryStore>,
     intents: Arc<dyn CheckpointIntentStore>,
     status: Arc<Mutex<SaveStatusSnapshot>>,
+    outstanding: Arc<OutstandingTickets>,
+}
+
+struct WorkerExitGuard {
+    outstanding: Arc<OutstandingTickets>,
+    status: Arc<Mutex<SaveStatusSnapshot>>,
+}
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        self.outstanding.stop_all(&self.status);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -734,21 +802,10 @@ impl WorkerPause {
 }
 
 fn run_worker(
-    project: ProjectId,
-    writer: Arc<dyn AtomicWriter>,
-    history: Arc<dyn HistoryStore>,
-    intents: Arc<dyn CheckpointIntentStore>,
+    dependencies: WorkerDependencies,
     receiver: mpsc::Receiver<Command>,
-    status: Arc<Mutex<SaveStatusSnapshot>>,
     worker_pause: Option<Arc<WorkerPause>>,
 ) {
-    let dependencies = WorkerDependencies {
-        project,
-        writer,
-        history,
-        intents,
-        status,
-    };
     let mut queue = VecDeque::new();
     loop {
         let command = if queue.is_empty() {
@@ -760,12 +817,12 @@ fn run_worker(
             None
         };
         if command.is_some_and(|command| handle_command(command, &mut queue, &dependencies)) {
-            stop_pending(&mut queue);
+            stop_pending(&mut queue, &dependencies.outstanding);
             break;
         }
         while let Ok(command) = receiver.try_recv() {
             if handle_command(command, &mut queue, &dependencies) {
-                stop_pending(&mut queue);
+                stop_pending(&mut queue, &dependencies.outstanding);
                 return;
             }
         }
@@ -783,9 +840,10 @@ fn run_worker(
         let result = execute_save(&dependencies, &work.request);
         match result {
             Ok(completed) => {
+                mark_saved(&dependencies.status, completed.revisions.clone());
                 for ticket in work.tickets.drain(..) {
-                    complete_ticket(
-                        &ticket.state,
+                    dependencies.outstanding.complete(
+                        ticket.id,
                         Ok(SavedAcknowledgement {
                             ticket_id: ticket.id,
                             requested_revisions: ticket.requested,
@@ -794,13 +852,14 @@ fn run_worker(
                         }),
                     );
                 }
-                mark_saved(&dependencies.status, completed.revisions);
             }
             Err(error) => {
+                mark_error(&dependencies.status, error.clone());
                 for ticket in work.tickets.drain(..) {
-                    complete_ticket(&ticket.state, Err(error.clone()));
+                    dependencies
+                        .outstanding
+                        .complete(ticket.id, Err(error.clone()));
                 }
-                mark_error(&dependencies.status, error);
             }
         }
     }
@@ -814,7 +873,7 @@ fn handle_command(
     match command {
         Command::Request(work) => queue.push_back(*work),
         Command::Cancel { ticket, reply } => {
-            let outcome = cancel_queued(queue, ticket);
+            let outcome = cancel_queued(queue, ticket, &dependencies.outstanding);
             let _ = reply.send(outcome);
         }
         Command::Reconcile { reply } => {
@@ -874,7 +933,11 @@ fn highest_generation(queue: &VecDeque<WorkItem>) -> SaveGeneration {
         .unwrap_or_default()
 }
 
-fn cancel_queued(queue: &mut VecDeque<WorkItem>, ticket: SaveTicketId) -> CancelOutcome {
+fn cancel_queued(
+    queue: &mut VecDeque<WorkItem>,
+    ticket: SaveTicketId,
+    outstanding: &OutstandingTickets,
+) -> CancelOutcome {
     for index in 0..queue.len() {
         if let Some(ticket_index) = queue[index]
             .tickets
@@ -882,7 +945,7 @@ fn cancel_queued(queue: &mut VecDeque<WorkItem>, ticket: SaveTicketId) -> Cancel
             .position(|pending| pending.id == ticket)
         {
             let pending = queue[index].tickets.remove(ticket_index);
-            complete_ticket(&pending.state, Err(SaveError::Cancelled));
+            outstanding.complete(pending.id, Err(SaveError::Cancelled));
             if queue[index].tickets.is_empty() {
                 queue.remove(index);
             }
@@ -892,16 +955,19 @@ fn cancel_queued(queue: &mut VecDeque<WorkItem>, ticket: SaveTicketId) -> Cancel
     CancelOutcome::TooLate
 }
 
-fn stop_pending(queue: &mut VecDeque<WorkItem>) {
+fn stop_pending(queue: &mut VecDeque<WorkItem>, outstanding: &OutstandingTickets) {
     for work in queue {
         for ticket in &work.tickets {
-            complete_ticket(&ticket.state, Err(SaveError::WorkerStopped));
+            outstanding.complete(ticket.id, Err(SaveError::WorkerStopped));
         }
     }
 }
 
 fn complete_ticket(state: &TicketState, result: TicketResult) {
-    let mut current = state.result.lock().expect("save ticket lock");
+    let mut current = state
+        .result
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if current.is_none() {
         *current = Some(result);
         state.ready.notify_all();

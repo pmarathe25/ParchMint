@@ -9,6 +9,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, sync_channel},
     },
     time::Duration,
@@ -153,9 +154,7 @@ impl NativeFixture {
         self.services.publish_appearance(appearance);
     }
 
-    /// Changes the fake OS value without notifying listeners. Tests can follow
-    /// this with [`Self::poll_system_appearance`] to exercise the production
-    /// watcher path deterministically.
+    /// Changes the fake OS value without notifying event subscribers.
     pub fn set_system_appearance_silently(&self, appearance: SystemAppearance) {
         *self
             .backend
@@ -164,24 +163,8 @@ impl NativeFixture {
             .unwrap_or_else(|error| error.into_inner()) = appearance;
     }
 
-    pub fn poll_system_appearance(&self) {
-        self.services.poll_appearance();
-    }
-
-    pub fn stop_system_appearance_watcher(&self) {
-        self.services.stop_appearance_watcher();
-    }
-
-    pub fn ensure_system_appearance_watcher(&self) {
-        self.services.start_appearance_watcher();
-    }
-
-    pub fn has_system_appearance_watcher(&self) -> bool {
-        self.services.has_appearance_watcher()
-    }
-
-    pub fn system_appearance_watcher_starts(&self) -> u64 {
-        self.services.appearance_watcher_starts()
+    pub fn system_appearance_reads(&self) -> u64 {
+        self.backend.appearance_reads.load(Ordering::Relaxed)
     }
 
     pub fn registered_window(&self, window: WindowCapability) -> Option<WindowCapability> {
@@ -246,6 +229,7 @@ struct FixtureBackend {
     menus: Mutex<HashMap<WindowCapability, MenuSnapshot>>,
     clipboard: Mutex<UntrustedClipboardContent>,
     appearance: Mutex<SystemAppearance>,
+    appearance_reads: AtomicU64,
     opened_external_urls: Mutex<Vec<String>>,
     next_menu_pause: Mutex<Option<BackendMenuPause>>,
 }
@@ -261,6 +245,7 @@ impl Default for FixtureBackend {
             menus: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(UntrustedClipboardContent::empty()),
             appearance: Mutex::new(SystemAppearance::Light),
+            appearance_reads: AtomicU64::new(0),
             opened_external_urls: Mutex::new(Vec::new()),
             next_menu_pause: Mutex::new(None),
         }
@@ -382,6 +367,7 @@ impl NativeBackend for FixtureBackend {
     }
 
     fn appearance(&self) -> Result<SystemAppearance, PlatformError> {
+        self.appearance_reads.fetch_add(1, Ordering::Relaxed);
         Ok(*self
             .appearance
             .lock()

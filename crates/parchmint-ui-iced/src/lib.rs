@@ -5,6 +5,7 @@ pub mod components;
 pub mod design_tokens;
 mod editor_workspace;
 mod focus;
+mod hierarchy_drag;
 #[allow(
     dead_code,
     reason = "the private Iced surface is exercised by headless fixture tests"

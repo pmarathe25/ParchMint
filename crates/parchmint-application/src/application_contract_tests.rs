@@ -1009,6 +1009,259 @@ fn recovery_discard_keeps_current_state_and_resets_the_frontier_for_future_edits
         .expect("new edit starts from canonical frontier");
 }
 
+#[test]
+fn revisioned_save_serializes_only_dirty_canonical_resources_and_advances_after_ack() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let document = documents[0].document_id;
+    let document_path = encoding.paths.documents[&document].as_str().to_owned();
+    let baseline_resources = encoding.resources.len();
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            EditorRevision::from(2),
+            "<p>changed once</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("dirty projection");
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Final)
+        .expect("final save request");
+    coordinator.await_save(handle).expect("final save ack");
+
+    let requests = save.requests.lock().unwrap();
+    let changed_paths = requests[0]
+        .writes
+        .writes
+        .iter()
+        .map(|write| write.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(changed_paths.contains("project.toml"));
+    assert!(changed_paths.contains(document_path.as_str()));
+    assert_eq!(
+        changed_paths.len(),
+        3,
+        "body, annotations, and frontier manifest"
+    );
+    assert_eq!(
+        requests[0].checkpoint.resources.len(),
+        baseline_resources + 1,
+        "History still receives the complete resource set"
+    );
+    drop(requests);
+
+    let (clean_handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Final)
+        .expect("clean final save request");
+    coordinator
+        .await_save(clean_handle)
+        .expect("clean final save ack");
+    let requests = save.requests.lock().unwrap();
+    assert!(requests[1].writes.writes.is_empty());
+    assert!(requests[1].writes.deletions.is_empty());
+    assert_eq!(
+        requests[1].checkpoint.resources,
+        requests[0].checkpoint.resources
+    );
+}
+
+#[test]
+fn pending_save_does_not_advance_the_incremental_canonical_baseline() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let document = documents[0].document_id;
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(RecordingSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            EditorRevision::from(2),
+            "<p>still pending</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .unwrap();
+
+    coordinator
+        .request_save(PersistenceSaveKind::Final)
+        .unwrap();
+    coordinator
+        .request_save(PersistenceSaveKind::Final)
+        .unwrap();
+    let requests = save.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].writes, requests[1].writes);
+    assert!(!requests[1].writes.writes.is_empty());
+}
+
+#[test]
+fn one_dirty_document_save_keeps_three_hundred_forty_nine_closed_documents_lazy() {
+    fn scaled_id(prefix: u8, ordinal: u16) -> [u8; 16] {
+        let mut bytes = [prefix; 16];
+        bytes[14..].copy_from_slice(&ordinal.to_be_bytes());
+        bytes
+    }
+
+    let group = parchmint_domain::NodeId::from_bytes([111; 16]);
+    let mut project = Project::new(project_id());
+    project = parchmint_domain::apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::create_group(
+            group,
+            parchmint_domain::NodeId::manuscript_root(),
+            0,
+            "Scale",
+        ),
+    )
+    .unwrap()
+    .project;
+    let mut bodies = BTreeMap::new();
+    let mut summaries = Vec::new();
+    for ordinal in 0..350_u16 {
+        let node = parchmint_domain::NodeId::from_bytes(scaled_id(112, ordinal));
+        let document = DocumentId::from_bytes(scaled_id(113, ordinal));
+        project = parchmint_domain::apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::create_document(
+                node,
+                document,
+                group,
+                ordinal as usize,
+                format!("Document {ordinal}"),
+            ),
+        )
+        .unwrap()
+        .project;
+        bodies.insert(document, "body-71".to_owned());
+        summaries.push(LazyDocumentSummary {
+            document_id: document,
+            revision: EditorRevision::from(7),
+            visibility: if ordinal == 0 {
+                DocumentVisibility::Open
+            } else {
+                DocumentVisibility::Closed
+            },
+        });
+    }
+    let frontier = parchmint_project_format::CanonicalPersistenceFrontier {
+        recovery_project_revision: project.revision.value(),
+        document_revisions: summaries
+            .iter()
+            .map(|summary| (summary.document_id, summary.revision.value()))
+            .collect(),
+        ..Default::default()
+    };
+    let encoding = parchmint_project_format::ProjectFormatCodec::default()
+        .encode_domain_project_with_frontier(
+            &project,
+            &bodies,
+            &BTreeMap::new(),
+            &Default::default(),
+            &frontier,
+        )
+        .unwrap();
+    let document_paths = encoding
+        .paths
+        .documents
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_resources = encoding.resources.len() + 1;
+    let metadata = encoding
+        .resources
+        .iter()
+        .filter(|(path, _)| !document_paths.contains(*path))
+        .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+        .collect();
+    let reads = Arc::new(AtomicU64::new(0));
+    let owner = Arc::new(
+        NativeDocumentStateOwner::new_lazy(
+            summaries,
+            Arc::new(CountingDocumentLoader {
+                reads: reads.clone(),
+            }),
+        )
+        .unwrap(),
+    );
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(RecordingSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        metadata,
+        encoding.paths,
+    );
+    let dirty = DocumentId::from_bytes(scaled_id(113, 0));
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            dirty,
+            EditorRevision::from(8),
+            "<p>changed at close</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .unwrap();
+    coordinator
+        .request_save(PersistenceSaveKind::Final)
+        .unwrap();
+
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.loaded_snapshots().unwrap().len(), 1);
+    let requests = save.requests.lock().unwrap();
+    assert_eq!(requests[0].writes.writes.len(), 3);
+    assert_eq!(requests[0].checkpoint.resources.len(), expected_resources);
+}
+
 fn restore_plan(
     encoding: &parchmint_project_format::CanonicalProjectEncoding,
 ) -> parchmint_history_api::RestorePlan {

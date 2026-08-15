@@ -1052,6 +1052,10 @@ impl NativeProjectCommandDispatcher {
             .collect())
     }
 
+    pub fn has_unsaved_changes(&self) -> Result<bool, ApplicationError> {
+        Ok(!lock(&self.state)?.dirty.is_empty())
+    }
+
     pub fn execute_document(
         &self,
         command: DocumentCommand,

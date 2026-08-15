@@ -3218,8 +3218,12 @@ pub enum ProjectMessage {
     ConfirmDeleteStyle,
     ActivateCard(String),
     SetCardsSection(String),
-    BeginHierarchyDrag(String),
+    BeginHierarchyDrag {
+        source_id: String,
+        gesture: SelectionGesture,
+    },
     SetDragDestination(Option<DragDestination>),
+    ClearDragDestination(DragDestination),
     CommitHierarchyDrag,
     CancelHierarchyDrag,
     OpenHierarchyContextMenu {
@@ -3422,6 +3426,10 @@ pub struct ProjectWorkspace {
     hierarchy_rename: Option<HierarchyRename>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
+    /// Locally authored Synopsis text which has not yet been observed in an
+    /// authoritative snapshot. This keeps an earlier asynchronous completion
+    /// from replacing a newer editor draft.
+    synopsis_drafts: BTreeMap<String, String>,
     metadata_values: BTreeMap<(String, String), String>,
     settings: SettingsState,
     global_search: GlobalSearchState,
@@ -3507,6 +3515,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             last_activated_document: None,
             synopsis_editors,
+            synopsis_drafts: BTreeMap::new(),
             metadata_values: BTreeMap::from([(
                 ("chapter-one".to_owned(), "field-17".to_owned()),
                 "first person".to_owned(),
@@ -3563,6 +3572,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             last_activated_document: None,
             synopsis_editors,
+            synopsis_drafts: BTreeMap::new(),
             metadata_values,
             settings,
             global_search: GlobalSearchState::default(),
@@ -3606,7 +3616,7 @@ impl ProjectWorkspace {
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         self.project_revision = snapshot.project.revision.value();
         self.explorer.reconcile_project(&snapshot.project);
-        self.synopsis_editors = synopsis_editors(&self.explorer);
+        self.reconcile_synopsis_editors();
         self.metadata_values = metadata_values_from_project(&snapshot.project);
         let selected_category = self.settings.selected_category;
         let selected_detail = self.settings.selected_detail.clone();
@@ -3895,6 +3905,39 @@ impl ProjectWorkspace {
     fn replace_synopsis_editor(&mut self, node_id: &str, synopsis: &str) {
         if let Some(editor) = self.synopsis_editors.get_mut(node_id) {
             *editor = text_editor::Content::with_text(synopsis);
+        }
+    }
+
+    /// Reconciles canonical synopsis text without replacing an editor whose
+    /// text already matches. `text_editor::Content` owns the selection and
+    /// cursor, so recreating it after an acknowledged edit moves the caret
+    /// back to the start and reverses subsequent English typing.
+    fn reconcile_synopsis_editors(&mut self) {
+        self.synopsis_editors
+            .retain(|node_id, _| self.explorer.nodes.contains_key(node_id));
+        self.synopsis_drafts
+            .retain(|node_id, _| self.explorer.nodes.contains_key(node_id));
+        for (node_id, node) in &self.explorer.nodes {
+            if self
+                .synopsis_drafts
+                .get(node_id)
+                .is_some_and(|draft| draft == &node.synopsis)
+            {
+                self.synopsis_drafts.remove(node_id);
+            }
+            if self.synopsis_drafts.contains_key(node_id) {
+                continue;
+            }
+            match self.synopsis_editors.get_mut(node_id) {
+                Some(editor) if editor.text() == node.synopsis => {}
+                Some(editor) => *editor = text_editor::Content::with_text(&node.synopsis),
+                None => {
+                    self.synopsis_editors.insert(
+                        node_id.clone(),
+                        text_editor::Content::with_text(&node.synopsis),
+                    );
+                }
+            }
         }
     }
 
@@ -4338,6 +4381,8 @@ impl ProjectWorkspace {
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
                 self.explorer.set_synopsis(&node_id, synopsis.clone());
                 self.replace_synopsis_editor(&node_id, &synopsis);
+                self.synopsis_drafts
+                    .insert(node_id.clone(), synopsis.clone());
                 vec![ProjectEffect::CommitSynopsis { node_id, synopsis }]
             }
             ProjectMessage::EditSynopsis { node_id, action } => {
@@ -4351,6 +4396,8 @@ impl ProjectWorkspace {
                 }
                 let synopsis = editor.text();
                 self.explorer.set_synopsis(&node_id, synopsis.clone());
+                self.synopsis_drafts
+                    .insert(node_id.clone(), synopsis.clone());
                 vec![ProjectEffect::CommitSynopsis { node_id, synopsis }]
             }
             ProjectMessage::SetMetadataValue {
@@ -4654,7 +4701,15 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
-            ProjectMessage::BeginHierarchyDrag(source_id) => {
+            ProjectMessage::BeginHierarchyDrag { source_id, gesture } => {
+                if !self.explorer.nodes.contains_key(&source_id) {
+                    return Vec::new();
+                }
+                if !self.explorer.selected.contains(&source_id)
+                    || gesture != SelectionGesture::Replace
+                {
+                    self.explorer.select(&source_id, gesture);
+                }
                 if self
                     .explorer
                     .nodes
@@ -4676,6 +4731,15 @@ impl ProjectWorkspace {
                 {
                     self.cards_drag_destination = destination.clone();
                     drag.destination = destination;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ClearDragDestination(destination) => {
+                if let Some(drag) = self.pointer_drag.as_mut()
+                    && drag.destination.as_ref() == Some(&destination)
+                {
+                    self.cards_drag_destination = None;
+                    drag.destination = None;
                 }
                 Vec::new()
             }
@@ -6437,7 +6501,10 @@ mod tests {
     #[test]
     fn pointer_drag_commits_only_a_live_validated_source_and_target() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
-        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
         assert_eq!(workspace.hierarchy_drag_source(), Some("chapter-one"));
         let destination = DragDestination::AfterSibling("chapter-two".to_owned());
         workspace.update(ProjectMessage::SetDragDestination(Some(
@@ -6450,7 +6517,10 @@ mod tests {
         ));
         assert_eq!(workspace.hierarchy_drag_source(), None);
 
-        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
         workspace.update(ProjectMessage::SetDragDestination(Some(
             DragDestination::AfterSibling("chapter-two".to_owned()),
         )));
@@ -6461,6 +6531,31 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(workspace.hierarchy_drag_source(), None);
+    }
+
+    #[test]
+    fn pointer_drag_preserves_an_existing_multi_selection() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-two".to_owned(),
+            gesture: SelectionGesture::Additive,
+        });
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::SetDragDestination(Some(
+            DragDestination::AfterSibling("chapter-three".to_owned()),
+        )));
+        assert!(matches!(
+            workspace.update(ProjectMessage::CommitHierarchyDrag).as_slice(),
+            [ProjectEffect::MoveHierarchy { node_ids, .. }]
+                if node_ids == &vec!["chapter-one".to_owned(), "chapter-two".to_owned()]
+        ));
     }
 
     #[test]
@@ -6537,7 +6632,10 @@ mod tests {
     #[test]
     fn pointer_drag_and_context_menu_cancel_without_dispatching_a_move() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
-        workspace.update(ProjectMessage::BeginHierarchyDrag("chapter-one".to_owned()));
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
         workspace.update(ProjectMessage::SetDragDestination(Some(
             DragDestination::BeforeSibling("chapter-two".to_owned()),
         )));

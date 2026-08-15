@@ -18,7 +18,7 @@ use crate::{
     StatusCount, StyleProperty,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{ParchMintTheme, RIBBON_HEIGHT, STATUS_HEIGHT},
-    focus,
+    focus, hierarchy_drag,
     iced_editor_surface::EditorCenterMessage,
     icons::{Icon, icon, icon_sized},
     right_click, stationary_tooltip,
@@ -452,7 +452,7 @@ fn explorer_rail<'a>(
                     .width(Length::Fill)
                     .into()
             } else {
-                mouse_area(
+                let row = mouse_area(
                     container(text(title).size(13))
                         .padding([5, 6])
                         .width(Length::Fill)
@@ -469,12 +469,6 @@ fn explorer_rail<'a>(
                             }
                         }),
                 )
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::SelectHierarchy {
-                        node_id: item.id.to_owned(),
-                        gesture: SelectionGesture::Replace,
-                    },
-                ))
                 .on_double_click(ProjectSurfaceMessage::Project(
                     if item.kind == HierarchyRowKind::Document {
                         ProjectMessage::OpenHierarchyNode(item.id.to_owned())
@@ -482,28 +476,51 @@ fn explorer_rail<'a>(
                         ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned())
                     },
                 ))
-                .interaction(iced::mouse::Interaction::Pointer)
-                .into()
+                .interaction(iced::mouse::Interaction::Pointer);
+                hierarchy_drag::source(
+                    row,
+                    ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                        node_id: item.id.to_owned(),
+                        gesture: SelectionGesture::Replace,
+                    }),
+                    ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
+                        source_id: item.id.to_owned(),
+                        gesture: SelectionGesture::Replace,
+                    }),
+                    ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
+                )
             };
             let item_row = row![Space::new().width((depth * 14) as f32), disclosure, select]
                 .spacing(1)
                 .align_y(iced::alignment::Vertical::Center);
             let node_id = item.id.to_owned();
-            let row_target = right_click::right_click_area(
-                mouse_area(container(item_row).width(Length::Fill)).on_double_click(
-                    ProjectSurfaceMessage::Project(if item.kind == HierarchyRowKind::Document {
-                        ProjectMessage::OpenHierarchyNode(node_id.clone())
+            let drag_destination = workspace.hierarchy_drag_destination();
+            let indicator = hierarchy_row_indicator(item.kind, &node_id, drag_destination, theme);
+            let kind = item.kind;
+            let target_id = node_id.clone();
+            let row_body = hierarchy_drag::target(
+                container(item_row).width(Length::Fill).style(move |_| {
+                    if indicator.is_some() {
+                        components::surface(theme, Surface::Panel, Interaction::Selected)
                     } else {
-                        ProjectMessage::ToggleHierarchyExpanded(node_id.clone())
-                    }),
-                ),
-                move |point| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyContextMenu {
-                        node_id: node_id.clone(),
-                        point: Point::new(point.x, point.y),
-                    })
+                        iced::widget::container::Style::default()
+                    }
+                }),
+                indicator,
+                move |bounds, point| hierarchy_row_destination(kind, &target_id, bounds, point),
+                |target| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetDragDestination(Some(target)))
+                },
+                |target| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::ClearDragDestination(target))
                 },
             );
+            let row_target = right_click::right_click_area(row_body, move |point| {
+                ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyContextMenu {
+                    node_id: node_id.clone(),
+                    point: Point::new(point.x, point.y),
+                })
+            });
             column.push(row_target)
         });
     let rail = column![
@@ -529,6 +546,70 @@ fn explorer_rail<'a>(
     focus::f6_region(F6Region::Explorer, rail).into()
 }
 
+fn hierarchy_row_indicator(
+    kind: HierarchyRowKind,
+    node_id: &str,
+    current: Option<&DragDestination>,
+    theme: ParchMintTheme,
+) -> Option<hierarchy_drag::DropIndicator> {
+    use hierarchy_drag::DropIndicatorPosition;
+
+    let position = match current {
+        Some(DragDestination::BeforeSibling(target)) if target == node_id => {
+            DropIndicatorPosition::Before
+        }
+        Some(DragDestination::AfterSibling(target)) if target == node_id => {
+            DropIndicatorPosition::After
+        }
+        Some(DragDestination::IntoGroup(target))
+            if target == node_id
+                && matches!(kind, HierarchyRowKind::Root | HierarchyRowKind::Group) =>
+        {
+            DropIndicatorPosition::Into
+        }
+        _ => return None,
+    };
+    Some(hierarchy_drag::DropIndicator {
+        position,
+        color: {
+            let accent = theme.palette().accent;
+            if matches!(position, hierarchy_drag::DropIndicatorPosition::Into) {
+                Color { a: 0.18, ..accent }
+            } else {
+                accent
+            }
+        },
+    })
+}
+
+fn hierarchy_row_destination(
+    kind: HierarchyRowKind,
+    node_id: &str,
+    bounds: iced::Rectangle,
+    point: iced::Point,
+) -> Option<DragDestination> {
+    if !bounds.contains(point) {
+        return None;
+    }
+    let relative_y = (point.y - bounds.y) / bounds.height.max(1.0);
+    if matches!(kind, HierarchyRowKind::Root | HierarchyRowKind::Group) {
+        if relative_y < 0.25 {
+            Some(DragDestination::BeforeSibling(node_id.to_owned()))
+        } else if relative_y > 0.75 {
+            Some(DragDestination::AfterSibling(node_id.to_owned()))
+        } else {
+            Some(DragDestination::IntoGroup(node_id.to_owned()))
+        }
+    } else if relative_y < 0.5 {
+        Some(DragDestination::BeforeSibling(node_id.to_owned()))
+    } else {
+        Some(DragDestination::AfterSibling(node_id.to_owned()))
+    }
+}
+
+// Cards keep their existing compact reorder affordances. Explorer uses the
+// geometry-neutral full-row targets above so starting a drag cannot reflow its
+// outline.
 fn hierarchy_drop_strip<'a>(
     target: DragDestination,
     dragging: bool,
@@ -716,6 +797,7 @@ fn global_search_rail<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let search = workspace.global_search();
     let query = text_input("Search the project", search.query())
+        .id(global_search_query_input_id())
         .on_input(|query| {
             ProjectSurfaceMessage::Project(ProjectMessage::SetGlobalSearchQuery(query))
         })
@@ -850,6 +932,7 @@ fn global_search_rail<'a>(
         ]
     };
     let replace = text_input("Replace with (optional)", search.replacement())
+        .id(global_replacement_input_id())
         .on_input(|replacement| {
             ProjectSurfaceMessage::Project(ProjectMessage::SetGlobalReplacement(replacement))
         })
@@ -885,6 +968,14 @@ fn global_search_rail<'a>(
     .spacing(12)
     .height(Length::Fill)
     .into()
+}
+
+fn global_search_query_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("global-search-query")
+}
+
+fn global_replacement_input_id() -> iced::widget::Id {
+    iced::widget::Id::new("global-search-replacement")
 }
 
 fn search_match_count_label(count: usize) -> String {
@@ -1021,6 +1112,12 @@ fn cards_center<'a>(
                         }
                     }),
             ])
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::BeginHierarchyDrag {
+                    source_id: node_id.clone(),
+                    gesture: SelectionGesture::Replace,
+                },
+            ))
             .on_enter(ProjectSurfaceMessage::Project(
                 ProjectMessage::SetDragDestination(Some(middle)),
             ))
@@ -1081,6 +1178,7 @@ fn search_center<'a>(
         "Replace matches with",
         workspace.global_search().replacement(),
     )
+    .id(global_replacement_input_id())
     .on_input(|replacement| {
         ProjectSurfaceMessage::Project(ProjectMessage::SetGlobalReplacement(replacement))
     })
@@ -2232,20 +2330,6 @@ fn settings_center<'a>(
             column.push(row_content)
         },
     );
-    let detail = match settings.selected_detail() {
-        Some(SettingsDetail::MetadataField(id)) => settings
-            .metadata_field(id)
-            .map(|field| metadata_field_detail(field, theme)),
-        Some(SettingsDetail::Style(id)) => settings
-            .style(id)
-            .map(|style| style_detail(settings, style, theme)),
-        None => None,
-    }
-    .unwrap_or_else(|| {
-        text("Select a metadata field or style to edit its details.")
-            .size(12)
-            .into()
-    });
     let category = settings.selected_category();
     let appearance_heading = match settings.appearance() {
         parchmint_preferences::AppearanceMode::System => "System appearance",
@@ -2276,51 +2360,86 @@ fn settings_center<'a>(
                     }),
                 )
             });
-    if category == SettingsCategory::Appearance {
-        return row![
-            container(column![text("PROJECT SETTINGS").size(12), navigation].spacing(18))
-                .padding([16, 12])
-                .width(280)
-                .height(Length::Fill)
-                .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-            container(column![
-                text(appearance_heading).size(24),
-                text("Appearance").size(20),
-                text("Choose the application appearance. Project styles and export do not change.").size(15),
-                Space::new().height(8),
-                container(choices).width(540),
-                Space::new().height(12),
-                text("Operating system changes Light → Dark; every open ParchMint window updates immediately.").size(14),
-                text("Application preference only — project prose, history, saves, and export are unchanged.").size(13),
+    let content: Element<'a, ProjectSurfaceMessage> = match category {
+        SettingsCategory::Appearance => column![
+            text(appearance_heading).size(24),
+            text("Appearance").size(20),
+            text("Choose the application appearance. Project styles and export do not change.").size(15),
+            Space::new().height(8),
+            container(choices).width(540),
+            Space::new().height(12),
+            text("Operating system changes Light → Dark; every open ParchMint window updates immediately.").size(14),
+            text("Application preference only — project prose, history, saves, and export are unchanged.").size(13),
+        ]
+        .spacing(12)
+        .into(),
+        SettingsCategory::General => column![
+            text("General").size(24),
+            text("No project-backed general settings are available.").size(13),
+        ]
+        .spacing(12)
+        .into(),
+        SettingsCategory::Metadata => {
+            let detail = match settings.selected_detail() {
+                Some(SettingsDetail::MetadataField(id)) => settings
+                    .metadata_field(id)
+                    .map(|field| metadata_field_detail(field, theme)),
+                _ => None,
+            }
+            .unwrap_or_else(|| {
+                text("Select a metadata field to edit its details.")
+                    .size(12)
+                    .into()
+            });
+            column![
+                text("Metadata fields").size(24),
+                row![
+                    container(scrollable(metadata).height(Length::Fill))
+                        .width(Length::FillPortion(2))
+                        .height(Length::Fill),
+                    container(
+                        column![text("Metadata field details").size(16), scrollable(detail)]
+                            .spacing(10),
+                    )
+                    .padding(0)
+                    .width(Length::FillPortion(3))
+                    .height(Length::Fill)
+                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+                ]
+                .spacing(20)
+                .height(Length::Fill),
             ]
-            .spacing(12))
-            .padding([20, 24])
-            .width(Length::Fill)
+            .spacing(12)
             .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
-        ]
-        .height(Length::Fill)
-        .into();
-    }
-    let list: Element<'a, ProjectSurfaceMessage> = match category {
-        SettingsCategory::Appearance => {
-            unreachable!("appearance uses its dedicated settings layout")
+            .into()
         }
-        SettingsCategory::General => text("No project-backed general settings are available.")
-            .size(13)
-            .into(),
-        SettingsCategory::Metadata => column![
-            text("Metadata fields").size(16),
-            scrollable(metadata).height(Length::Fill)
-        ]
-        .spacing(10)
-        .into(),
-        SettingsCategory::Styles => column![
-            text("Styles").size(16),
-            scrollable(styles).height(Length::Fill)
-        ]
-        .spacing(10)
-        .into(),
+        SettingsCategory::Styles => {
+            let detail = match settings.selected_detail() {
+                Some(SettingsDetail::Style(id)) => settings
+                    .style(id)
+                    .map(|style| style_detail(settings, style, theme)),
+                _ => None,
+            }
+            .unwrap_or_else(|| text("Select a style to edit its details.").size(12).into());
+            column![
+                text("Styles").size(24),
+                row![
+                    container(scrollable(styles).height(Length::Fill))
+                        .width(Length::FillPortion(2))
+                        .height(Length::Fill),
+                    container(column![text("Style details").size(16), scrollable(detail)].spacing(10))
+                        .padding(0)
+                        .width(Length::FillPortion(3))
+                        .height(Length::Fill)
+                        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+                ]
+                .spacing(20)
+                .height(Length::Fill),
+            ]
+            .spacing(12)
+            .height(Length::Fill)
+            .into()
+        }
         SettingsCategory::Dictionaries => {
             let dictionaries = settings.dictionaries();
             let scopes =
@@ -2360,7 +2479,7 @@ fn settings_center<'a>(
                     .into(),
             };
             column![
-                text("Dictionaries").size(16),
+                text("Dictionaries").size(24),
                 text(format!("Language · {}", dictionaries.language())).size(12),
                 scopes,
                 words,
@@ -2369,30 +2488,19 @@ fn settings_center<'a>(
             .into()
         }
     };
-    column![
-        text("Settings").size(22),
-        text("Appearance changes every open window and does not enter project history.").size(13),
-        row![
-            container(navigation)
-                .padding(12)
-                .width(160)
-                .height(Length::Fill)
-                .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest,)),
-            container(list)
-                .padding(12)
-                .width(Length::FillPortion(2))
-                .height(Length::Fill)
-                .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest,)),
-            container(column![text("Details").size(16), scrollable(detail)].spacing(10))
-                .padding(12)
-                .width(Length::FillPortion(3))
-                .height(Length::Fill)
-                .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest,)),
-        ]
-        .spacing(16)
-        .height(Length::Fill),
+    row![
+        container(column![text("PROJECT SETTINGS").size(12), navigation].spacing(18))
+            .padding([16, 12])
+            .width(280)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(content)
+            .padding([20, 24])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
     ]
-    .spacing(14)
+    .height(Length::Fill)
     .into()
 }
 
@@ -2895,6 +3003,7 @@ fn inspector<'a>(
                 .synopsis_editor(selected)
                 .expect("every live hierarchy node has a synopsis editor"),
         )
+        .id(synopsis_editor_id(selected))
         .placeholder("No synopsis")
         .on_action(move |action| {
             ProjectSurfaceMessage::Project(ProjectMessage::EditSynopsis {
@@ -3323,6 +3432,10 @@ fn inspector<'a>(
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
     )
+}
+
+fn synopsis_editor_id(node_id: &str) -> iced::widget::Id {
+    format!("inspector-synopsis-{node_id}").into()
 }
 
 fn status_bar<'a>(
@@ -3780,8 +3893,13 @@ fn status_style(theme: &Theme) -> container::Style {
 mod tests {
     use std::path::PathBuf;
 
-    use iced::{Settings, Size, Theme};
-    use iced_test::Simulator;
+    use iced::{Settings, Size, Task, Theme, executor};
+    use iced_test::{Emulator, Instruction, Simulator};
+    use iced_test::{
+        emulator::Mode,
+        instruction::{Interaction, Mouse, Target},
+        program::Program,
+    };
     use parchmint_application::{DocumentSnapshot, DocumentVisibility, EditorRevision};
     use parchmint_domain::{
         DocumentId, MetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
@@ -4430,16 +4548,468 @@ mod tests {
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
-                node_id,
-                gesture: SelectionGesture::Replace,
-            }) if node_id == "chapter-one"
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
+                if node_id == "chapter-one"
         )));
         assert!(messages.iter().any(|message| matches!(
             message,
             ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(node_id))
                 if node_id == "chapter-one"
         )));
+    }
+
+    #[test]
+    fn continuous_explorer_drag_uses_one_production_lifecycle_and_blank_release_cancels() {
+        let program = ExplorerDragProgram;
+        let (sender, mut events) = iced_test::futures::futures::channel::mpsc::channel(8);
+        let mut emulator =
+            Emulator::new(sender, &program, Mode::Immediate, Size::new(1_440.0, 900.0));
+        let _ = iced_test::futures::futures::executor::block_on(
+            iced_test::futures::futures::StreamExt::next(&mut events),
+        );
+
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Press {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Chapter One".to_owned())),
+            },
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Move(Target::Text("Research".to_owned())),
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Release {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Research".to_owned())),
+            },
+        );
+
+        // Continue in this exact Emulator/cache. A release after leaving every
+        // target cannot commit the destination from a prior hover.
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Press {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Chapter One".to_owned())),
+            },
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Move(Target::Text("Research".to_owned())),
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Move(Target::Point(iced::Point::new(700.0, 15.0))),
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Release {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Point(iced::Point::new(700.0, 15.0))),
+            },
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Press {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Chapter One".to_owned())),
+            },
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Move(Target::Point(iced::Point::new(700.0, 400.0))),
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Release {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Point(iced::Point::new(700.0, 400.0))),
+            },
+        );
+        let (state, _) = emulator.into_state();
+        assert!(matches!(
+            state.effects.as_slice(),
+            [
+                crate::ProjectEffect::MoveHierarchy { node_ids, destination },
+                crate::ProjectEffect::OpenDocumentInPrimary(document_id),
+            ]
+                if node_ids == &vec!["chapter-one".to_owned()]
+                    && destination == &DragDestination::IntoGroup("research".to_owned())
+                    && document_id == "chapter-one"
+        ));
+        assert_eq!(
+            state
+                .workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .active_document(),
+            Some("chapter-one")
+        );
+        assert!(state.workspace.hierarchy_drag_source().is_none());
+    }
+
+    #[test]
+    fn explorer_click_below_drag_threshold_selects_without_starting_a_drag() {
+        let program = ExplorerDragProgram;
+        let (sender, mut events) = iced_test::futures::futures::channel::mpsc::channel(8);
+        let mut emulator =
+            Emulator::new(sender, &program, Mode::Immediate, Size::new(1_440.0, 900.0));
+        let _ = iced_test::futures::futures::executor::block_on(
+            iced_test::futures::futures::StreamExt::next(&mut events),
+        );
+
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Press {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Chapter One".to_owned())),
+            },
+        );
+        // This production-target move remains at the press point, below the
+        // four-pixel threshold, before the button is released.
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Move(Target::Text("Chapter One".to_owned())),
+        );
+        run_drag_instruction(
+            &mut emulator,
+            &program,
+            &mut events,
+            Mouse::Release {
+                button: iced::mouse::Button::Left,
+                target: Some(Target::Text("Chapter One".to_owned())),
+            },
+        );
+
+        let (state, _) = emulator.into_state();
+        assert!(state.effects.is_empty());
+        assert_eq!(state.workspace.explorer().selected_ids(), ["chapter-one"]);
+        assert!(state.workspace.hierarchy_drag_source().is_none());
+    }
+
+    struct ExplorerDragProgram;
+
+    struct ExplorerDragState {
+        workspace: ProjectWorkspace,
+        editor_slots: crate::iced_editor_surface::EditorHostSlots,
+        effects: Vec<crate::ProjectEffect>,
+    }
+
+    impl Program for ExplorerDragProgram {
+        type State = ExplorerDragState;
+        type Message = ProjectSurfaceMessage;
+        type Theme = Theme;
+        type Renderer = iced::Renderer;
+        type Executor = executor::Default;
+
+        fn name() -> &'static str {
+            "explorer_drag_test"
+        }
+
+        fn settings(&self) -> Settings {
+            Settings::default()
+        }
+
+        fn window(&self) -> Option<iced::window::Settings> {
+            None
+        }
+
+        fn boot(&self) -> (Self::State, Task<Self::Message>) {
+            (
+                ExplorerDragState {
+                    workspace: ProjectWorkspace::from_fixture(ProjectFixture::Explorer),
+                    editor_slots: Default::default(),
+                    effects: Vec::new(),
+                },
+                Task::none(),
+            )
+        }
+
+        fn update(&self, state: &mut Self::State, message: Self::Message) -> Task<Self::Message> {
+            let effects = match message {
+                ProjectSurfaceMessage::Project(message) => state.workspace.update(message),
+                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::HierarchyDropTarget(
+                    pane,
+                )) => state
+                    .workspace
+                    .update(ProjectMessage::SetDragDestination(Some(
+                        DragDestination::EditorPane(pane),
+                    ))),
+                ProjectSurfaceMessage::EditorCenter(
+                    EditorCenterMessage::ClearHierarchyDropTarget(pane),
+                ) => state.workspace.update(ProjectMessage::ClearDragDestination(
+                    DragDestination::EditorPane(pane),
+                )),
+                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::CommitHierarchyDrop) => {
+                    state.workspace.update(ProjectMessage::CommitHierarchyDrag)
+                }
+                _ => Vec::new(),
+            };
+            state.effects.extend(effects);
+            Task::none()
+        }
+
+        fn view<'a>(
+            &self,
+            state: &'a Self::State,
+            _window: iced::window::Id,
+        ) -> Element<'a, Self::Message, Self::Theme, Self::Renderer> {
+            let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+            let editor = crate::iced_editor_surface::editor_center_surface(
+                state.workspace.editor(),
+                theme,
+                &state.editor_slots,
+                None,
+            )
+            .map(ProjectSurfaceMessage::EditorCenter);
+            project_surface(&state.workspace, RibbonDestination::Editor, theme, editor)
+        }
+
+        fn theme(&self, _state: &Self::State, _window: iced::window::Id) -> Option<Self::Theme> {
+            Some(Theme::Light)
+        }
+    }
+
+    fn run_drag_instruction(
+        emulator: &mut Emulator<ExplorerDragProgram>,
+        program: &ExplorerDragProgram,
+        events: &mut iced_test::futures::futures::channel::mpsc::Receiver<
+            iced_test::emulator::Event<ExplorerDragProgram>,
+        >,
+        mouse: Mouse,
+    ) {
+        emulator.run(program, Instruction::Interact(Interaction::Mouse(mouse)));
+        loop {
+            match iced_test::futures::futures::executor::block_on(
+                iced_test::futures::futures::StreamExt::next(events),
+            ) {
+                Some(iced_test::emulator::Event::Action(action)) => {
+                    emulator.perform(program, action)
+                }
+                Some(iced_test::emulator::Event::Ready) => return,
+                Some(iced_test::emulator::Event::Failed(instruction)) => {
+                    panic!("continuous drag instruction failed: {instruction:?}")
+                }
+                None => panic!("continuous drag emulator stopped before becoming ready"),
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_cards_press_starts_drag_and_reorders_at_a_card_target() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_000.0, 700.0),
+            cards_center(&workspace, theme),
+        );
+        let source = simulator.find("Chapter One").expect("rendered card source");
+        simulator.point_at(source.visible_bounds().expect("card bounds").center());
+        simulator.simulate([iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+            iced::mouse::Button::Left,
+        ))]);
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag { source_id, .. })
+                if source_id == "chapter-one"
+        )));
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert_eq!(workspace.hierarchy_drag_source(), Some("chapter-one"));
+
+        let mut target = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_000.0, 700.0),
+            cards_center(&workspace, theme),
+        );
+        let card = target.find("Chapter Two").expect("rendered card target");
+        let position = card.visible_bounds().expect("target bounds").center();
+        target.point_at(position);
+        target.simulate([
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+        ]);
+        let messages = target.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::SetDragDestination(Some(
+                DragDestination::AfterSibling(node_id)
+            ))) if node_id == "chapter-two"
+        )));
+        assert!(matches!(
+            apply_project_messages(&mut workspace, messages).as_slice(),
+            [crate::ProjectEffect::MoveHierarchy { node_ids, destination: actual }]
+                if node_ids == &vec!["chapter-one".to_owned()]
+                    && actual == &DragDestination::AfterSibling("chapter-two".to_owned())
+        ));
+    }
+
+    #[test]
+    fn rendered_settings_keep_details_in_their_own_categories() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
+
+        let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
+            assert!(settings.find("PROJECT SETTINGS").is_ok());
+            settings
+                .click("Metadata fields")
+                .expect("metadata navigation");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert_eq!(
+            workspace.settings().selected_category(),
+            SettingsCategory::Metadata
+        );
+
+        let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
+            settings.click("Point of view").expect("metadata field");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        let _metadata = interact(&workspace, RibbonDestination::Settings, |settings| {
+            assert!(settings.find("Metadata field details").is_ok());
+            assert!(settings.find("PROJECT SETTINGS").is_ok());
+        });
+
+        for category in [SettingsCategory::Dictionaries, SettingsCategory::General] {
+            let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
+                settings
+                    .click(category.label())
+                    .expect("rendered settings category");
+            });
+            assert!(apply_project_messages(&mut workspace, messages).is_empty());
+            let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
+                assert!(settings.find("PROJECT SETTINGS").is_ok());
+                assert!(settings.find("Metadata field details").is_err());
+            });
+            assert!(messages.is_empty());
+        }
+    }
+
+    #[test]
+    fn rendered_synopsis_first_edit_retains_a_newer_local_draft_during_reconcile() {
+        let node = NodeId::from_bytes([0x51; 16]);
+        let document = DocumentId::from_bytes([0x52; 16]);
+        let mut project = Project::new(ProjectId::from_bytes([0x50; 16]));
+        project
+            .nodes
+            .try_insert_document(node, document, NodeId::manuscript_root(), 0, "Chapter One")
+            .expect("test document");
+        let mut snapshot = ProjectSnapshot {
+            project,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        };
+        let node_id = id_string(node.as_bytes());
+        let mut workspace = ProjectWorkspace::from_snapshot(&snapshot);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: node_id.clone(),
+            gesture: SelectionGesture::Replace,
+        });
+
+        let type_at_synopsis = |workspace: &ProjectWorkspace, value| {
+            let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+            let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+                Settings::default(),
+                Size::new(1_440.0, 900.0),
+                project_surface(
+                    workspace,
+                    RibbonDestination::Editor,
+                    theme,
+                    text("Editor").into(),
+                ),
+            );
+            let heading = simulator.find("SYNOPSIS").expect("rendered synopsis");
+            let bounds = heading.visible_bounds().expect("synopsis heading bounds");
+            simulator.point_at(iced::Point::new(
+                bounds.x + bounds.width - 20.0,
+                bounds.y + 30.0,
+            ));
+            assert_eq!(
+                simulator.simulate(iced_test::simulator::click()).first(),
+                Some(&iced::event::Status::Captured)
+            );
+            assert_eq!(simulator.typewrite(value), iced::event::Status::Captured);
+            simulator.into_messages().collect::<Vec<_>>()
+        };
+
+        let messages = type_at_synopsis(&workspace, "a");
+        let effects = apply_project_messages(&mut workspace, messages);
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::ProjectEffect::CommitSynopsis { synopsis, .. }] if synopsis == "a"
+        ));
+        // iced_test remounts the widget tree between simulated input batches,
+        // so its second keystroke cannot retain the live text-editor focus.
+        // Apply the exact reducer action emitted by that second key before an
+        // earlier persistence completion is reconciled.
+        let effects = workspace.update(ProjectMessage::EditSynopsis {
+            node_id: node_id.clone(),
+            action: text_editor::Action::Edit(text_editor::Edit::Insert('b')),
+        });
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::ProjectEffect::CommitSynopsis { synopsis, .. }] if synopsis == "ab"
+        ));
+
+        snapshot
+            .project
+            .nodes
+            .get_mut(node)
+            .expect("test node")
+            .synopsis = "a".to_owned();
+        workspace.reconcile_snapshot(&snapshot);
+        assert_eq!(
+            workspace
+                .synopsis_editor(&node_id)
+                .expect("local synopsis editor")
+                .text(),
+            "ab"
+        );
+
+        snapshot
+            .project
+            .nodes
+            .get_mut(node)
+            .expect("test node")
+            .synopsis = "ab".to_owned();
+        workspace.reconcile_snapshot(&snapshot);
+        assert_eq!(
+            workspace
+                .synopsis_editor(&node_id)
+                .expect("acknowledged synopsis editor")
+                .text(),
+            "ab"
+        );
     }
 
     #[test]
@@ -4474,6 +5044,366 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn rendered_organize_cards_and_editor_flow_share_selection_and_mutation_intent() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
+            explorer
+                .click("Chapter One")
+                .expect("visible hierarchy item");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
+
+        let messages = interact(&workspace, RibbonDestination::Cards, |cards| {
+            for projection in [
+                "Chapter One",
+                "SYNOPSIS",
+                "A first-person opening beside the river.",
+            ] {
+                assert!(
+                    cards.find(projection).is_ok(),
+                    "Cards and Inspector keep the selected hierarchy projection: {projection}"
+                );
+            }
+        });
+        assert!(messages.is_empty());
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
+            let target = explorer
+                .find("Chapter One")
+                .expect("visible hierarchy item");
+            explorer.point_at(
+                target
+                    .visible_bounds()
+                    .expect("visible hierarchy item bounds")
+                    .center(),
+            );
+            explorer.simulate([iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                iced::mouse::Button::Right,
+            ))]);
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert_eq!(workspace.hierarchy_context_menu(), Some("chapter-one"));
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |menu| {
+            menu.click("Delete").expect("visible hierarchy mutation");
+        });
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::DeleteHierarchy(vec![
+                "chapter-one".to_owned()
+            ])]
+        );
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
+            editor
+                .click("Chapter One")
+                .expect("first visible editor navigation click");
+            editor
+                .click("Chapter One")
+                .expect("second visible editor navigation click");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).iter().any(|effect| matches!(
+            effect,
+            crate::ProjectEffect::OpenDocumentInPrimary(document_id) if document_id == "chapter-one"
+        )));
+        assert_eq!(
+            workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .active_document(),
+            Some("chapter-one")
+        );
+    }
+
+    #[test]
+    fn rendered_global_replace_flow_revalidates_before_one_typed_apply_effect() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
+            explorer.click("⌕").expect("visible global search control");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+
+        let messages = interact(&workspace, RibbonDestination::GlobalSearch, |search| {
+            search
+                .click(global_search_query_input_id())
+                .expect("search query input");
+            assert_ne!(search.typewrite("river"), iced::event::Status::Ignored);
+        });
+        let search_effects = apply_project_messages(&mut workspace, messages);
+        assert!(matches!(
+            search_effects.last(),
+            Some(crate::ProjectEffect::SearchProject { query, .. }) if query == "river"
+        ));
+
+        let search_ticket = workspace.begin_task(crate::ProjectTask::GlobalSearch {
+            generation: workspace.global_search().query_generation(),
+        });
+        assert!(
+            workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
+                search_ticket,
+                crate::ProjectTaskPayload::SearchBatch {
+                    results: vec![crate::GlobalSearchResult {
+                        document_id: "chapter-one".to_owned(),
+                        match_id: "chapter-one-river".to_owned(),
+                        prefix: "beside the ".to_owned(),
+                        matching_text: "river".to_owned(),
+                        suffix: ", the path".to_owned(),
+                        indexed_revision: workspace.project_revision(),
+                    }],
+                    finished: true,
+                },
+            ))
+        );
+
+        let messages = interact(&workspace, RibbonDestination::GlobalSearch, |search| {
+            search
+                .click(global_replacement_input_id())
+                .expect("replacement input");
+            assert_ne!(search.typewrite("shore"), iced::event::Status::Ignored);
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+
+        let messages = interact(&workspace, RibbonDestination::GlobalSearch, |search| {
+            search
+                .click("Replace")
+                .expect("visible replacement preview action");
+        });
+        assert!(matches!(
+            apply_project_messages(&mut workspace, messages).as_slice(),
+            [crate::ProjectEffect::BuildReplacementPreview { replacement, .. }] if replacement == "shore"
+        ));
+        let preview_ticket = workspace.begin_task(crate::ProjectTask::ReplacementPreview);
+        assert!(
+            workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
+                preview_ticket,
+                crate::ProjectTaskPayload::ReplacementPreviewReady,
+            ))
+        );
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
+            preview
+                .click("Select none")
+                .expect("visible preview selection control");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
+            preview
+                .click("Select all")
+                .expect("visible preview selection control");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+
+        workspace.update(ProjectMessage::MarkDirty(2));
+        let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
+            assert!(
+                preview
+                    .find("Selection changed. Revalidate before applying.")
+                    .is_ok()
+            );
+            preview
+                .click("Revalidate selection")
+                .expect("visible stale-preview revalidation action");
+        });
+        assert!(matches!(
+            apply_project_messages(&mut workspace, messages).as_slice(),
+            [crate::ProjectEffect::BuildReplacementPreview {
+                captured_project_revision: 2,
+                replacement,
+                ..
+            }] if replacement == "shore"
+        ));
+        let revalidation_ticket = workspace.begin_task(crate::ProjectTask::ReplacementPreview);
+        assert!(
+            workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
+                revalidation_ticket,
+                crate::ProjectTaskPayload::ReplacementPreviewReady,
+            ))
+        );
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
+            preview
+                .click("Apply replacement")
+                .expect("visible apply replacement action");
+        });
+        assert!(matches!(
+            apply_project_messages(&mut workspace, messages).as_slice(),
+            [crate::ProjectEffect::ApplyGlobalReplacement {
+                captured_project_revision: 2,
+                included_match_ids,
+                replacement,
+            }] if included_match_ids == &["chapter-one-river"] && replacement == "shore"
+        ));
+    }
+
+    #[test]
+    fn rendered_history_restore_confirms_before_emitting_its_project_effect() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+
+        let messages = interact(&workspace, RibbonDestination::History, |history| {
+            history.click("Draft Two").expect("visible checkpoint");
+        });
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::PreviewHistory(
+                "snapshot-draft-two".to_owned()
+            )]
+        );
+        assert_eq!(
+            workspace.history().selected_checkpoint_id(),
+            Some("snapshot-draft-two")
+        );
+
+        let messages = interact(&workspace, RibbonDestination::History, |history| {
+            history
+                .click("Restore selected checkpoint")
+                .expect("visible restore action");
+        });
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert!(matches!(
+            workspace.modal(),
+            Some(ProjectModal::HistoryRestore { .. })
+        ));
+
+        let messages = interact(&workspace, RibbonDestination::History, |confirmation| {
+            assert!(
+                confirmation
+                    .find("Replace the entire current project with the selected checkpoint.")
+                    .is_ok()
+            );
+            confirmation
+                .click("Confirm")
+                .expect("visible restore confirmation");
+        });
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::RestoreHistory {
+                checkpoint_id: "snapshot-draft-two".to_owned(),
+                scope: crate::HistoryRestoreScope::EntireProject,
+            }]
+        );
+    }
+
+    #[test]
+    fn rendered_comment_creation_emits_the_real_editor_persistence_intent() {
+        let (mut workspace, ids) = production_workspace();
+        workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: ids.live_node,
+            gesture: SelectionGesture::Replace,
+        });
+        let _ = workspace
+            .editor_mut()
+            .update(EditorMessage::SetCommentDraft("A visible note".to_owned()));
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
+            assert!(editor.find("A visible note").is_ok());
+            editor
+                .click("Add to document")
+                .expect("visible comment creation action");
+        });
+        assert!(matches!(
+            apply_editor_messages(&mut workspace, messages).as_slice(),
+            [crate::EditorEffect::Command {
+                command: crate::EditorCommand::CreateComment {
+                    body,
+                    document_level: true,
+                },
+                ..
+            }] if body == "A visible note"
+        ));
+        assert!(workspace.editor().comment_draft().is_empty());
+        assert_eq!(
+            workspace.editor().comment_feedback(),
+            Some("Saving comment…")
+        );
+    }
+
+    #[test]
+    fn rendered_recovery_acceptance_transitions_back_to_the_workspace() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::ErrorRecovery);
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |recovery| {
+            recovery
+                .click("Recover changes")
+                .expect("visible recovery action");
+        });
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::FocusRecoveredEditor]
+        );
+        assert!(workspace.recovery().is_resolving());
+
+        let ticket = workspace.begin_task(crate::ProjectTask::AcceptRecovery);
+        assert!(
+            workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
+                ticket,
+                crate::ProjectTaskPayload::RecoveryAccepted { revision: 2 },
+            ))
+        );
+        assert_eq!(workspace.content_state(), &ContentState::Ready);
+        let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
+            assert!(editor.find("EXPLORER").is_ok());
+            assert!(editor.find("Recovered changes are ready").is_err());
+        });
+        assert!(messages.is_empty());
+    }
+
+    fn interact(
+        workspace: &ProjectWorkspace,
+        destination: RibbonDestination,
+        interaction: impl FnOnce(&mut Simulator<'_, ProjectSurfaceMessage>),
+    ) -> Vec<ProjectSurfaceMessage> {
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                workspace,
+                destination,
+                theme,
+                text("Mounted editor child").into(),
+            ),
+        );
+        interaction(&mut simulator);
+        simulator.into_messages().collect()
+    }
+
+    fn apply_project_messages(
+        workspace: &mut ProjectWorkspace,
+        messages: Vec<ProjectSurfaceMessage>,
+    ) -> Vec<crate::ProjectEffect> {
+        messages
+            .into_iter()
+            .flat_map(|message| match message {
+                ProjectSurfaceMessage::Project(message) => workspace.update(message),
+                unexpected => {
+                    panic!("project flow emitted unexpected surface message: {unexpected:?}")
+                }
+            })
+            .collect()
+    }
+
+    fn apply_editor_messages(
+        workspace: &mut ProjectWorkspace,
+        messages: Vec<ProjectSurfaceMessage>,
+    ) -> Vec<crate::EditorEffect> {
+        messages
+            .into_iter()
+            .map(|message| match message {
+                ProjectSurfaceMessage::EditorCenter(message) => message,
+                unexpected => {
+                    panic!("editor flow emitted unexpected surface message: {unexpected:?}")
+                }
+            })
+            .flat_map(|message| message.workspace_messages())
+            .flat_map(|message| workspace.editor_mut().update(message))
+            .collect()
     }
 
     struct ProductionIds {
