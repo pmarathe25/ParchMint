@@ -20,6 +20,7 @@ use parchmint_application::{
     ApplicationError, CreateDocumentWorkflow, DeleteSubtreesWorkflow, DuplicateSubtreesWorkflow,
     MoveNodeWorkflow, MoveNodesWorkflow,
 };
+use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
 use parchmint_domain::{
     DocumentId, MetadataFieldId, NodeId, NodeKind, ProjectCommand, ProjectRevision, StyleId,
     apply_project_command,
@@ -70,6 +71,36 @@ impl NativeProjectEffectExecutor {
 
     /// Executes one project effect and returns an owned Iced-task completion.
     pub(crate) async fn execute_project_effect(
+        self,
+        effect: ProjectEffect,
+    ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
+        let effect_name = project_effect_name(&effect);
+        let revision = self.snapshot.project.revision.value().to_string();
+        diagnostics::event(
+            DiagnosticLevel::Trace,
+            "ui.project-effect",
+            "started",
+            &[("effect", effect_name), ("snapshot_revision", &revision)],
+        );
+        let result = self.execute_project_effect_inner(effect).await;
+        match &result {
+            Ok(_) => diagnostics::event(
+                DiagnosticLevel::Trace,
+                "ui.project-effect",
+                "completed",
+                &[("effect", effect_name)],
+            ),
+            Err(error) => diagnostics::event(
+                DiagnosticLevel::Error,
+                "ui.project-effect",
+                "failed",
+                &[("effect", effect_name), ("error", &error.to_string())],
+            ),
+        }
+        result
+    }
+
+    async fn execute_project_effect_inner(
         self,
         effect: ProjectEffect,
     ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
@@ -362,6 +393,35 @@ impl NativeProjectEffectExecutor {
 
     /// Resolves or executes one editor effect without retaining framework handles.
     pub(crate) async fn execute_editor_effect(
+        self,
+        effect: EditorEffect,
+    ) -> Result<EditorEffectCompletion, ProjectRuntimeError> {
+        let effect_name = editor_effect_name(&effect);
+        diagnostics::event(
+            DiagnosticLevel::Trace,
+            "ui.editor-effect",
+            "started",
+            &[("effect", effect_name)],
+        );
+        let result = self.execute_editor_effect_inner(effect).await;
+        match &result {
+            Ok(_) => diagnostics::event(
+                DiagnosticLevel::Trace,
+                "ui.editor-effect",
+                "completed",
+                &[("effect", effect_name)],
+            ),
+            Err(error) => diagnostics::event(
+                DiagnosticLevel::Error,
+                "ui.editor-effect",
+                "failed",
+                &[("effect", effect_name), ("error", &error.to_string())],
+            ),
+        }
+        result
+    }
+
+    async fn execute_editor_effect_inner(
         self,
         effect: EditorEffect,
     ) -> Result<EditorEffectCompletion, ProjectRuntimeError> {
@@ -755,6 +815,63 @@ impl fmt::Display for ProjectRuntimeError {
                 unsupported.category, unsupported.missing_boundary
             ),
         }
+    }
+}
+
+fn project_effect_name(effect: &ProjectEffect) -> &'static str {
+    match effect {
+        ProjectEffect::OpenDocumentInPrimary(_) => "open-document-primary",
+        ProjectEffect::OpenDocumentInCompanion(_) => "open-document-companion",
+        ProjectEffect::CreateHierarchy { .. } => "create-hierarchy",
+        ProjectEffect::DeleteHierarchy(_) => "delete-hierarchy",
+        ProjectEffect::MoveHierarchy { .. } => "move-hierarchy",
+        ProjectEffect::PasteCopiedSubtrees { .. } => "paste-copied-subtrees",
+        ProjectEffect::PasteCutSubtrees { .. } => "paste-cut-subtrees",
+        ProjectEffect::CommitNodeTitle { .. } => "commit-node-title",
+        ProjectEffect::CommitSynopsis { .. } => "commit-synopsis",
+        ProjectEffect::CommitMetadataValue { .. } => "commit-metadata-value",
+        ProjectEffect::UpsertMetadataField(_) => "upsert-metadata-field",
+        ProjectEffect::ReorderMetadataField { .. } => "reorder-metadata-field",
+        ProjectEffect::DeleteMetadataField(_) => "delete-metadata-field",
+        ProjectEffect::UpsertStyle(_) => "upsert-style",
+        ProjectEffect::DeleteStyle(_) => "delete-style",
+        ProjectEffect::SearchProject { .. } => "search-project",
+        ProjectEffect::NavigateSearchResult { .. } => "navigate-search-result",
+        ProjectEffect::BuildReplacementPreview { .. } => "build-replacement-preview",
+        ProjectEffect::ApplyGlobalReplacement { .. } => "apply-global-replacement",
+        ProjectEffect::CreateNamedSnapshot(_) => "create-named-snapshot",
+        ProjectEffect::PreviewHistory(_) => "preview-history",
+        ProjectEffect::PreviewDeleted { .. } => "preview-deleted",
+        ProjectEffect::RestoreHistory { .. } => "restore-history",
+        ProjectEffect::ReinitializeHistory => "reinitialize-history",
+        ProjectEffect::RestoreDeletedSubtree { .. } => "restore-deleted-subtree",
+        ProjectEffect::ApplyAppearanceToAllWindows(_) => "apply-appearance",
+        ProjectEffect::SetProjectExportSettings(_) => "set-export-settings",
+        ProjectEffect::ExportEntireManuscript { .. } => "export-entire-manuscript",
+        ProjectEffect::ChooseExportDestination { .. } => "choose-export-destination",
+        ProjectEffect::CancelExport => "cancel-export",
+        ProjectEffect::OpenExportResult(_) => "open-export-result",
+        ProjectEffect::RevealExportResult(_) => "reveal-export-result",
+        ProjectEffect::SaveThroughRevision(_) => "save-through-revision",
+        ProjectEffect::FocusRecoveredEditor => "focus-recovered-editor",
+        ProjectEffect::ReconcileRecovery => "reconcile-recovery",
+        ProjectEffect::DiscardRecovery => "discard-recovery",
+    }
+}
+
+fn editor_effect_name(effect: &EditorEffect) -> &'static str {
+    match effect {
+        EditorEffect::Command { .. } => "command",
+        EditorEffect::MountDocument { .. } => "mount-document",
+        EditorEffect::UnmountView { .. } => "unmount-view",
+        EditorEffect::SetSearchDecorations { .. } => "set-search-decorations",
+        EditorEffect::SetSpellcheckDecorations { .. } => "set-spellcheck-decorations",
+        EditorEffect::NavigateCommentAnchor { .. } => "navigate-comment-anchor",
+        EditorEffect::ShowOrphanedComment { .. } => "show-orphaned-comment",
+        EditorEffect::ShowSpellingMenu(_) => "show-spelling-menu",
+        EditorEffect::SpellingDictionaryAction { .. } => "spelling-dictionary-action",
+        EditorEffect::RestoreEditorFocus { .. } => "restore-editor-focus",
+        EditorEffect::RequestSave => "request-save",
     }
 }
 

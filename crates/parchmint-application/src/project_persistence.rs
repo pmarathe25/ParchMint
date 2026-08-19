@@ -407,6 +407,32 @@ impl ProjectPersistenceCoordinator {
         self.request_save_inner(kind, None)
     }
 
+    /// Starts an ordinary save only when the captured authored frontier is
+    /// dirty. Named snapshots, restoration, and structural workflows use the
+    /// unconditional path because their checkpoint is itself meaningful.
+    pub fn request_save_if_changed(
+        &self,
+        kind: PersistenceSaveKind,
+    ) -> Result<Option<(PersistenceSaveHandle, PersistenceRevision)>, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        if !matches!(
+            kind,
+            PersistenceSaveKind::Autosave
+                | PersistenceSaveKind::Explicit
+                | PersistenceSaveKind::Final
+        ) {
+            return self.request_save_inner(kind, None).map(Some);
+        }
+        let Some((capture, snapshot)) = self.commands.capture_save_state_if_dirty()? else {
+            return Ok(None);
+        };
+        self.request_save_captured(kind, None, capture, snapshot)
+            .map(Some)
+    }
+
     pub fn has_unsaved_changes(&self) -> Result<bool, ProjectPersistenceError> {
         self.commands.has_unsaved_changes().map_err(Into::into)
     }
@@ -416,8 +442,23 @@ impl ProjectPersistenceCoordinator {
         kind: PersistenceSaveKind,
         name: Option<SnapshotName>,
     ) -> Result<(PersistenceSaveHandle, PersistenceRevision), ProjectPersistenceError> {
-        let capture = self.commands.capture_save_request()?;
-        let project = self.commands.project()?;
+        let (capture, snapshot) = self.commands.capture_save_state()?;
+        self.request_save_captured(kind, name, capture, snapshot)
+    }
+
+    fn request_save_captured(
+        &self,
+        kind: PersistenceSaveKind,
+        name: Option<SnapshotName>,
+        capture: RevisionedSaveRequest,
+        snapshot: crate::AuthoredProjectSnapshot,
+    ) -> Result<(PersistenceSaveHandle, PersistenceRevision), ProjectPersistenceError> {
+        let project = snapshot.project;
+        let loaded_documents = snapshot
+            .documents
+            .into_iter()
+            .map(|snapshot| (snapshot.document_id, snapshot))
+            .collect::<BTreeMap<_, _>>();
         let dirty_documents = capture
             .dirty_resources
             .iter()
@@ -426,9 +467,11 @@ impl ProjectPersistenceCoordinator {
                 Resource::Manifest | Resource::Styles | Resource::Dictionary => None,
             })
             .map(|document| {
-                self.documents
-                    .snapshot(document)
+                loaded_documents
+                    .get(&document)
+                    .cloned()
                     .map(|snapshot| (document, snapshot))
+                    .ok_or(crate::ApplicationError::MissingDocument { document })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let update = CanonicalDomainUpdate {
@@ -525,11 +568,15 @@ impl ProjectPersistenceCoordinator {
             .or_else(|| dirty_documents.values().next())
             .cloned()
             .or_else(|| {
-                project.nodes.iter().find_map(|(_, node)| match node.kind {
-                    NodeKind::Document(document) => self.documents.snapshot(document).ok(),
-                    NodeKind::Root(_) | NodeKind::Group => None,
-                })
+                loaded_documents
+                    .values()
+                    .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
+                    .cloned()
             })
+            .or_else(|| loaded_documents.values().next().cloned())
+            // A project can become document-empty after deletion. The editor
+            // save bridge still needs a projection token, so use a retained
+            // undo record without reintroducing it into authored snapshots.
             .or_else(|| self.documents.snapshots().ok()?.into_iter().next())
             .ok_or_else(|| {
                 ProjectPersistenceError::Application(
@@ -724,12 +771,13 @@ impl ProjectPersistenceCoordinator {
         {
             return Err(ProjectPersistenceError::OperationInProgress);
         }
-        let mut simulated = self.commands.project()?;
+        let current = self.commands.complete_authored_snapshot()?;
+        let mut simulated = current.project;
         for movement in &request.moves {
             let command = ProjectCommand::move_node(movement.node, movement.parent, movement.index);
             simulated = apply_project_command(&simulated, simulated.revision, command)?.project;
         }
-        self.persist_prepared_state(simulated, self.documents.snapshots()?)
+        self.persist_prepared_state(simulated, current.documents)
     }
 
     /// Clones one group or document subtree with fresh identities. The entire
@@ -752,9 +800,8 @@ impl ProjectPersistenceCoordinator {
             return Err(ProjectPersistenceError::OperationInProgress);
         }
 
-        let current_project = self.commands.project()?;
-        let current_documents = self.documents.snapshots()?;
-        let prepared = prepare_duplicates(&current_project, &current_documents, &request)?;
+        let current = self.commands.complete_authored_snapshot()?;
+        let prepared = prepare_duplicates(&current.project, &current.documents, &request)?;
         let revision =
             self.persist_prepared_state(prepared.project.clone(), prepared.documents.clone())?;
 
@@ -937,8 +984,9 @@ impl ProjectPersistenceCoordinator {
 
         let source = plan.source();
         let restored_resources = validated_restore_resources(&plan)?;
-        let current_project = self.commands.project()?;
-        let current_documents = self.documents.snapshots()?;
+        let current = self.commands.complete_authored_snapshot()?;
+        let current_project = current.project;
+        let current_documents = current.documents;
         let (mut project, restored_paths, restored_frontier, restored_bodies, restored_comments) =
             decode_restored_project(current_project.id, &restored_resources)?;
 
@@ -1259,8 +1307,9 @@ impl ProjectPersistenceCoordinator {
             .get(&acceptance)
             .cloned()
             .ok_or(ProjectPersistenceError::UnknownRecoveryAcceptance)?;
-        let current_project = self.commands.project()?;
-        let current_documents = self.documents.snapshots()?;
+        let current = self.commands.complete_authored_snapshot()?;
+        let current_project = current.project;
+        let current_documents = current.documents;
         let canonical_resources = self
             .canonical
             .lock()

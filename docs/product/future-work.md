@@ -10,6 +10,7 @@ The product specification's [Included and Explicitly deferred sections](scope.md
 - **Search and language:** scoped or regex search, saved/structural queries, additional spellcheck languages, per-document or mixed-language spellcheck, CJK IME, bidirectional and Arabic editing, grammar, and writing analysis.
 - **Export and publishing:** partial export, generated contents, additional document/ebook/print formats, profiles, and front/back matter.
 - **History and backup:** partial checkpoint restore, remote backup, integrity tools, and explicitly governed retention or compaction.
+- **History details:** whole-project checkpoint details with a collapsible list of changed items, per-item differences, and renamed paths. This needs a complete checkpoint/current resource comparison API before the UI can identify every change accurately.
 - **Preferences and distribution:** additional/user themes, density, roaming preferences, automatic updates, app stores, architectures, and package formats.
 - **Collaboration and clients:** review packages before real-time collaboration; mobile, web, and AI assistance only after separate privacy, ownership, offline/network, and architecture decisions.
 - **Accessibility:** screen-reader integration, reduced-motion preference

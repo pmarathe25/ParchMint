@@ -264,6 +264,15 @@ pub trait ProjectPersistencePort: Send + Sync {
         kind: ProjectSaveKind,
     ) -> Result<(ProjectSaveHandle, ProjectPersistenceRevision), ProjectPersistenceError>;
 
+    /// Starts an ordinary save only when authored project state changed.
+    ///
+    /// A `None` result is a successful no-op. Named snapshots and other
+    /// meaningful checkpoint kinds still return a save handle.
+    fn request_save_if_changed(
+        &self,
+        kind: ProjectSaveKind,
+    ) -> Result<Option<(ProjectSaveHandle, ProjectPersistenceRevision)>, ProjectPersistenceError>;
+
     fn await_save(
         &self,
         handle: ProjectSaveHandle,
@@ -443,6 +452,14 @@ impl ProjectPersistencePort for parchmint_application::ProjectPersistenceCoordin
         kind: ProjectSaveKind,
     ) -> Result<(ProjectSaveHandle, ProjectPersistenceRevision), ProjectPersistenceError> {
         self.request_save(kind)
+    }
+
+    fn request_save_if_changed(
+        &self,
+        kind: ProjectSaveKind,
+    ) -> Result<Option<(ProjectSaveHandle, ProjectPersistenceRevision)>, ProjectPersistenceError>
+    {
+        self.request_save_if_changed(kind)
     }
 
     fn await_save(

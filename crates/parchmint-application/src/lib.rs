@@ -85,6 +85,7 @@ pub enum ProjectEvent {
     Executed,
     Undone,
     Redone,
+    Unchanged,
     GlobalReplacementApplied { documents: usize },
 }
 
@@ -109,6 +110,24 @@ pub struct LazyDocumentSummary {
     pub document_id: DocumentId,
     pub revision: EditorRevision,
     pub visibility: DocumentVisibility,
+}
+
+/// One coherent view of the current authored project and its live documents.
+///
+/// The dispatcher captures these fields while holding the project operation
+/// boundary. Document records retained for undo after deletion are not part of
+/// the live authored snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthoredProjectSnapshot {
+    pub project: Project,
+    pub document_summaries: Vec<LazyDocumentSummary>,
+    pub documents: Vec<DocumentSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentStateSnapshot {
+    summaries: Vec<LazyDocumentSummary>,
+    documents: Vec<DocumentSnapshot>,
 }
 
 /// Session-scoped authority for materializing one canonical document body.
@@ -251,9 +270,10 @@ pub trait DocumentStateOwner: Send + Sync {
         revision: EditorRevision,
         body: String,
         comments: Vec<CanonicalComment>,
-    ) -> Result<(), ApplicationError>;
+    ) -> Result<bool, ApplicationError>;
     fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError>;
     fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError>;
+    fn state_snapshot(&self, complete: bool) -> Result<DocumentStateSnapshot, ApplicationError>;
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -297,7 +317,7 @@ pub struct ProjectCommandResult {
     pub revision: ProjectRevision,
     pub dirty_resources: ResourceSet,
     pub events: Vec<ProjectEvent>,
-    pub checkpoint_group: CheckpointGroupId,
+    pub checkpoint_group: Option<CheckpointGroupId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,6 +699,16 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
             });
         }
         let opened_session = record.visibility == DocumentVisibility::Closed;
+        if record.body == command.body {
+            if opened_session {
+                record.visibility = DocumentVisibility::Hidden;
+            }
+            return Ok(DocumentCommandResult {
+                document_id: command.document_id,
+                revision: record.revision,
+                opened_session,
+            });
+        }
         let previous = std::mem::replace(&mut record.body, command.body);
         if opened_session {
             record.visibility = DocumentVisibility::Hidden;
@@ -864,7 +894,7 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         revision: EditorRevision,
         body: String,
         comments: Vec<CanonicalComment>,
-    ) -> Result<(), ApplicationError> {
+    ) -> Result<bool, ApplicationError> {
         self.ensure_loaded(document)?;
         let mut state = lock(&self.state)?;
         let record = state
@@ -880,10 +910,12 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
                 current: record.revision,
             });
         }
+        let changed =
+            revision > record.revision || body != record.body || comments != record.comments;
         record.revision = revision;
         record.body = body;
         record.comments = comments;
-        Ok(())
+        Ok(changed)
     }
 
     fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError> {
@@ -938,6 +970,51 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         state.unloaded.clear();
         state.loader = None;
         Ok(())
+    }
+
+    fn state_snapshot(&self, complete: bool) -> Result<DocumentStateSnapshot, ApplicationError> {
+        if complete {
+            let documents = NativeDocumentStateOwner::snapshots(self)?;
+            let summaries = documents
+                .iter()
+                .map(|document| LazyDocumentSummary {
+                    document_id: document.document_id,
+                    revision: document.revision,
+                    visibility: document.visibility,
+                })
+                .collect();
+            Ok(DocumentStateSnapshot {
+                summaries,
+                documents,
+            })
+        } else {
+            let state = lock(&self.state)?;
+            let documents = state
+                .documents
+                .iter()
+                .map(|(document, record)| DocumentSnapshot {
+                    document_id: *document,
+                    body: record.body.clone(),
+                    comments: record.comments.clone(),
+                    revision: record.revision,
+                    visibility: record.visibility,
+                })
+                .collect::<Vec<_>>();
+            let summaries = state
+                .documents
+                .iter()
+                .map(|(document, record)| LazyDocumentSummary {
+                    document_id: *document,
+                    revision: record.revision,
+                    visibility: record.visibility,
+                })
+                .chain(state.unloaded.values().copied())
+                .collect();
+            Ok(DocumentStateSnapshot {
+                summaries,
+                documents,
+            })
+        }
     }
 }
 
@@ -1040,6 +1117,27 @@ impl NativeProjectCommandDispatcher {
         Ok(lock(&self.state)?.project.clone())
     }
 
+    /// Captures the project tree, full document catalog, and loaded bodies at
+    /// one application operation boundary.
+    pub fn authored_snapshot(&self) -> Result<AuthoredProjectSnapshot, ApplicationError> {
+        self.authored_snapshot_inner(false)
+    }
+
+    /// Captures the same authoritative state while materializing every live
+    /// document body for whole-project persistence operations.
+    pub fn complete_authored_snapshot(&self) -> Result<AuthoredProjectSnapshot, ApplicationError> {
+        self.authored_snapshot_inner(true)
+    }
+
+    fn authored_snapshot_inner(
+        &self,
+        complete: bool,
+    ) -> Result<AuthoredProjectSnapshot, ApplicationError> {
+        let state = lock(&self.state)?;
+        let documents = self.documents.state_snapshot(complete)?;
+        authored_snapshot(&state.project, documents)
+    }
+
     pub fn project_undo_entries(&self) -> Result<Vec<ProjectUndoEntry>, ApplicationError> {
         Ok(lock(&self.state)?.undo.iter().cloned().collect())
     }
@@ -1061,9 +1159,12 @@ impl NativeProjectCommandDispatcher {
         command: DocumentCommand,
     ) -> Result<DocumentCommandResult, ApplicationError> {
         let mut state = lock(&self.state)?;
+        let observed_revision = command.observed_revision;
         let result = self.documents.execute(command)?;
-        let mutation = state.mark_document_dirty(result.document_id);
-        state.stage_checkpoint(mutation);
+        if result.revision != observed_revision {
+            let mutation = state.mark_document_dirty(result.document_id);
+            state.stage_checkpoint(mutation);
+        }
         Ok(result)
     }
 
@@ -1071,15 +1172,17 @@ impl NativeProjectCommandDispatcher {
         &self,
         projection: &CanonicalProjection,
     ) -> Result<(), ApplicationError> {
-        self.documents.accept_projection(
+        let mut state = lock(&self.state)?;
+        let changed = self.documents.accept_projection(
             projection.document_id(),
             projection.revision(),
             projection.body().to_owned(),
             projection.comments().to_vec(),
         )?;
-        let mut state = lock(&self.state)?;
-        let mutation = state.mark_document_dirty(projection.document_id());
-        state.stage_checkpoint(mutation);
+        if changed {
+            let mutation = state.mark_document_dirty(projection.document_id());
+            state.stage_checkpoint(mutation);
+        }
         Ok(())
     }
 
@@ -1115,7 +1218,33 @@ impl NativeProjectCommandDispatcher {
     }
 
     pub fn capture_save_request(&self) -> Result<RevisionedSaveRequest, ApplicationError> {
+        self.capture_save_state().map(|(request, _)| request)
+    }
+
+    pub(crate) fn capture_save_state(
+        &self,
+    ) -> Result<(RevisionedSaveRequest, AuthoredProjectSnapshot), ApplicationError> {
         let mut state = lock(&self.state)?;
+        self.capture_save_state_locked(&mut state)
+    }
+
+    pub(crate) fn capture_save_state_if_dirty(
+        &self,
+    ) -> Result<Option<(RevisionedSaveRequest, AuthoredProjectSnapshot)>, ApplicationError> {
+        let mut state = lock(&self.state)?;
+        if state.dirty.is_empty() {
+            return Ok(None);
+        }
+        self.capture_save_state_locked(&mut state).map(Some)
+    }
+
+    fn capture_save_state_locked(
+        &self,
+        state: &mut DispatcherState,
+    ) -> Result<(RevisionedSaveRequest, AuthoredProjectSnapshot), ApplicationError> {
+        let snapshot = authored_snapshot(&state.project, self.documents.state_snapshot(false)?)?;
+        // Recovery/save frontiers retain deleted document revisions until the
+        // post-delete checkpoint commits. Authored snapshots filter them out.
         let revisions = self.documents.revisions()?;
         state.save_generation = state.save_generation.saturating_add(1);
         let mut dirty_resources = ResourceSet::default();
@@ -1139,13 +1268,14 @@ impl NativeProjectCommandDispatcher {
         state
             .captured_saves
             .insert(request.generation, request.clone());
-        Ok(request)
+        Ok((request, snapshot))
     }
 
     pub(crate) fn recovery_revision_request(
         &self,
     ) -> Result<RevisionedSaveRequest, ApplicationError> {
         let state = lock(&self.state)?;
+        let _snapshot = authored_snapshot(&state.project, self.documents.state_snapshot(false)?)?;
         let revisions = self.documents.revisions()?;
         let mut dirty_resources = ResourceSet::default();
         for resource in state.dirty.keys() {
@@ -1220,6 +1350,16 @@ impl NativeProjectCommandDispatcher {
         let forward = command.clone();
         let applied = parchmint_domain::apply_project_command(&state.project, before, command)?;
 
+        if applied.changed_resources.iter().next().is_none() {
+            return Ok(ProjectCommandResult {
+                operation_id: state.operation_id(),
+                revision: before,
+                dirty_resources: ResourceSet::default(),
+                events: vec![ProjectEvent::Unchanged],
+                checkpoint_group: None,
+            });
+        }
+
         // A document node and its canonical editor state are one application
         // mutation. The project lock remains held until both are published, so
         // snapshot queries can never observe a node without its default body.
@@ -1259,7 +1399,7 @@ impl NativeProjectCommandDispatcher {
             revision: state.project.revision,
             dirty_resources: applied.changed_resources,
             events: vec![ProjectEvent::Executed],
-            checkpoint_group,
+            checkpoint_group: Some(checkpoint_group),
         })
     }
 
@@ -1270,6 +1410,20 @@ impl NativeProjectCommandDispatcher {
         let mut state = lock(&self.state)?;
         let patch = self.documents.prepare_composite(&selection.edits)?;
         let before = state.project.revision;
+        if patch.is_empty()
+            || patch
+                .patches()
+                .iter()
+                .all(|patch| patch.before() == patch.after())
+        {
+            return Ok(ProjectCommandResult {
+                operation_id: state.operation_id(),
+                revision: before,
+                dirty_resources: ResourceSet::default(),
+                events: vec![ProjectEvent::Unchanged],
+                checkpoint_group: None,
+            });
+        }
         let after = before.next();
         let operation_id = state.operation_id();
         let affected = affected_documents(&patch);
@@ -1310,7 +1464,7 @@ impl NativeProjectCommandDispatcher {
             events: vec![ProjectEvent::GlobalReplacementApplied {
                 documents: patch.len(),
             }],
-            checkpoint_group,
+            checkpoint_group: Some(checkpoint_group),
         })
     }
 
@@ -1334,7 +1488,7 @@ impl NativeProjectCommandDispatcher {
             revision: state.project.revision,
             dirty_resources: affected,
             events: vec![ProjectEvent::Undone],
-            checkpoint_group,
+            checkpoint_group: Some(checkpoint_group),
         })
     }
 
@@ -1357,7 +1511,7 @@ impl NativeProjectCommandDispatcher {
             revision: state.project.revision,
             dirty_resources: affected,
             events: vec![ProjectEvent::Redone],
-            checkpoint_group,
+            checkpoint_group: Some(checkpoint_group),
         })
     }
 
@@ -1386,6 +1540,41 @@ impl NativeProjectCommandDispatcher {
             }
         }
     }
+}
+
+fn authored_snapshot(
+    project: &Project,
+    documents: DocumentStateSnapshot,
+) -> Result<AuthoredProjectSnapshot, ApplicationError> {
+    let live_documents = project
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| match node.kind {
+            parchmint_domain::NodeKind::Document(document) => Some(document),
+            parchmint_domain::NodeKind::Root(_) | parchmint_domain::NodeKind::Group => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let summaries = documents
+        .summaries
+        .into_iter()
+        .filter(|summary| live_documents.contains(&summary.document_id))
+        .collect::<Vec<_>>();
+    let represented = summaries
+        .iter()
+        .map(|summary| summary.document_id)
+        .collect::<BTreeSet<_>>();
+    if let Some(document) = live_documents.difference(&represented).next().copied() {
+        return Err(ApplicationError::MissingDocument { document });
+    }
+    Ok(AuthoredProjectSnapshot {
+        project: project.clone(),
+        document_summaries: summaries,
+        documents: documents
+            .documents
+            .into_iter()
+            .filter(|document| live_documents.contains(&document.document_id))
+            .collect(),
+    })
 }
 
 #[derive(Debug, Clone, Copy)]

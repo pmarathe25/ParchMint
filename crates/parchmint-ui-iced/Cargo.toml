@@ -25,6 +25,7 @@ parchmint-editor-iced = { path = "../parchmint-editor-iced" }
 parchmint-export-api = { path = "../parchmint-export-api" }
 parchmint-history-api = { path = "../parchmint-history-api" }
 parchmint-design-system = { path = "../parchmint-design-system" }
+parchmint-diagnostics = { path = "../parchmint-diagnostics" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-platform-api = { path = "../parchmint-platform-api" }
 parchmint-preferences = { path = "../parchmint-preferences" }

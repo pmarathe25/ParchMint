@@ -12,6 +12,6 @@
 - **WS-010:** Focus, selection, open-tab state, and active context must be distinguishable and usable from the keyboard. Color alone is insufficient.
 - **WS-011:** The minimum supported application-window size is 1280 × 720 logical pixels. ParchMint must prevent smaller window sizes and must not substitute a mobile or feature-reduced layout.
 - **WS-012:** Every project workspace must provide persistent, mutually exclusive navigation to Editor, Cards, project History, Recently Deleted, Export, and Project Settings. Global Search is entered from the Explorer header and replaces Explorer in the left sidebar.
-- **WS-013:** The bottom status bar must provide keyboard-accessible controls to show or hide Explorer and Inspector in addition to word count, save status, and a contextual document-History action. Pane controls expose pressed state. The History action targets the focused pane's active document and is unavailable when no document is active.
+- **WS-013:** The bottom status bar must provide keyboard-accessible controls to show or hide Explorer and Inspector in addition to word count and save status. Pane controls expose pressed state.
 - **WS-014:** Applicable Synopsis and metadata values in Inspector must be editable in place; Comments remain available only for document context.
 - **WS-015:** Inspector sections, Explorer roots, grouped Global Search results, and comparable Cards groups must expose consistent expand/collapse behavior and state.

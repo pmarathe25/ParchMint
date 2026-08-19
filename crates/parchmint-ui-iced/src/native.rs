@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fmt,
     fs::File,
+    hash::Hash,
     io::BufWriter,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -13,10 +14,14 @@ use std::{
 
 use iced::widget::svg::Handle;
 use iced::{
-    Element, Event, Font, Length, Subscription, Task, Theme, event, font,
+    Element, Event, Font, Length, Subscription, Task, Theme,
+    advanced::subscription::{
+        EventStream as SubscriptionEventStream, Hasher as SubscriptionHasher, Recipe, from_recipe,
+    },
+    event, font,
     futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc},
     keyboard, mouse,
-    widget::{Space, button, column, container, row, svg, text, text_input},
+    widget::{Space, button, column, container, opaque, row, stack, svg, text, text_input},
     window,
 };
 use parchmint_application::{ReplacementEdit, ReplacementSelection};
@@ -25,7 +30,8 @@ use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, CanonicalComment, CanonicalCommentAnchor,
     CanonicalCommentMessage, CanonicalDocumentLoad, CommentId, EditorAdapter,
     EditorCommand as AdapterEditorCommand, EditorCommandKind, EditorCommandOrigin, EditorRevision,
-    EditorSelection, InlineMarkKind, SharedEditorSession, StyleCatalogProjection, ViewId,
+    EditorSelection, EventStream, InlineMarkKind, SharedEditorSession, StyleCatalogProjection,
+    ViewId,
 };
 use parchmint_editor_core::EditorCoreSession;
 use parchmint_editor_iced::{
@@ -39,7 +45,7 @@ use parchmint_platform_api::{
     UntrustedClipboardContent, WindowCapability,
 };
 use parchmint_preferences::{
-    AppearanceMode, RecentProject as PreferenceRecentProject, ResolvedAppearance,
+    AppearanceMode, PreferenceChange, RecentProject as PreferenceRecentProject, ResolvedAppearance,
 };
 use parchmint_ui_api::{
     DictionaryRevision, ExportArtifactAction, ExportOperationToken, ExportOutcome, LanguageId,
@@ -384,6 +390,13 @@ pub trait NativeDesktopCallbacks: Send + Sync {
         Ok(None)
     }
 
+    /// Streams authoritative application-preference updates while the native
+    /// driver is running. The launcher uses this only for its recent-project
+    /// projection; project state remains outside preferences.
+    fn preference_changes(&self) -> Option<EventStream<PreferenceChange>> {
+        None
+    }
+
     /// Records the platform capability when this driver creates its native
     /// project window.
     fn project_window_created(&self, _window: WindowCapability) {}
@@ -528,6 +541,7 @@ enum Message {
         result: Result<Option<PathBuf>, String>,
     },
     OpenRecentProject(PathBuf),
+    RecentProjectsChanged(Vec<PreferenceRecentProject>),
     CreateProject,
     ProjectOpenFinished {
         project: PathBuf,
@@ -825,8 +839,44 @@ pub(crate) struct NativeDesktop {
     creating_project: bool,
     status: Option<String>,
     callbacks: Arc<dyn NativeDesktopCallbacks>,
+    preference_changes:
+        Arc<Mutex<Option<futures_mpsc::UnboundedReceiver<Vec<PreferenceRecentProject>>>>>,
     last_appearance_generation: u64,
     capture: Option<NativeCaptureState>,
+}
+
+struct PreferenceChangeSubscription {
+    receiver: Arc<Mutex<Option<futures_mpsc::UnboundedReceiver<Vec<PreferenceRecentProject>>>>>,
+}
+
+impl Recipe for PreferenceChangeSubscription {
+    type Output = Message;
+
+    fn hash(&self, state: &mut SubscriptionHasher) {
+        std::any::TypeId::of::<Self>().hash(state);
+        "native-preference-recent-projects".hash(state);
+    }
+
+    fn stream(
+        self: Box<Self>,
+        _input: SubscriptionEventStream,
+    ) -> iced::futures::stream::BoxStream<'static, Message> {
+        let receiver = self
+            .receiver
+            .lock()
+            .expect("preference change receiver mutex poisoned")
+            .take();
+        match receiver {
+            Some(receiver) => Box::pin(receiver.map(Message::RecentProjectsChanged)),
+            None => Box::pin(iced::futures::stream::pending()),
+        }
+    }
+}
+
+fn preference_change_subscription(
+    receiver: Arc<Mutex<Option<futures_mpsc::UnboundedReceiver<Vec<PreferenceRecentProject>>>>>,
+) -> Subscription<Message> {
+    from_recipe(PreferenceChangeSubscription { receiver })
 }
 
 /// Ephemeral driver state for one native render capture. It intentionally has
@@ -1463,6 +1513,20 @@ impl NativeDesktop {
             .as_ref()
             .and_then(|request| request.validates_output().err());
         let capture_valid = capture_error.is_none();
+        let callbacks = startup.callbacks;
+        let (preference_change_sender, preference_changes) = futures_mpsc::unbounded();
+        if let Some(mut changes) = callbacks.preference_changes() {
+            std::thread::spawn(move || {
+                while let Some(change) = changes.next() {
+                    if preference_change_sender
+                        .unbounded_send(change.snapshot.values.recent_projects)
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
         let mut desktop = Self {
             appearance: startup.appearance,
             appearance_mode: startup.appearance_mode,
@@ -1478,7 +1542,8 @@ impl NativeDesktop {
                     .locked_project
                     .map(|path| format!("Project is already open: {}", path.display()))
             }),
-            callbacks: startup.callbacks,
+            callbacks,
+            preference_changes: Arc::new(Mutex::new(Some(preference_changes))),
             last_appearance_generation: 0,
             capture: capture_valid
                 .then(|| {
@@ -1492,13 +1557,9 @@ impl NativeDesktop {
                 })
                 .flatten(),
         };
-        for project in startup.recent_projects.into_iter().rev() {
-            desktop.launcher.add_recent_project(
-                project.name,
-                project.path,
-                format_last_opened(project.last_opened_unix_seconds),
-            );
-        }
+        desktop
+            .launcher
+            .set_recent_projects(launcher_recent_projects(startup.recent_projects));
         let mut tasks = vec![desktop.open_launcher_window()];
         tasks.extend(
             startup
@@ -1613,6 +1674,11 @@ impl NativeDesktop {
                 self.finish_directory_choice(create, result)
             }
             Message::OpenRecentProject(project) => self.route_recent_project_open(project),
+            Message::RecentProjectsChanged(projects) => {
+                self.launcher
+                    .set_recent_projects(launcher_recent_projects(projects));
+                Task::none()
+            }
             Message::CreateProject => self.route_project_create(),
             Message::ProjectOpenFinished { project, result } => {
                 self.opening_project = false;
@@ -2488,7 +2554,6 @@ impl NativeDesktop {
                         self.close_failures
                             .get(&state.project.window)
                             .map(String::as_str),
-                        self.status.as_deref(),
                     )
                 },
             ),
@@ -2545,6 +2610,9 @@ impl NativeDesktop {
             #[cfg(not(target_os = "linux"))]
             subscriptions.push(iced::system::theme_changes().map(Message::SystemThemeMode));
         }
+        subscriptions.push(preference_change_subscription(Arc::clone(
+            &self.preference_changes,
+        )));
         Subscription::batch(subscriptions)
     }
 
@@ -3036,7 +3104,6 @@ impl NativeDesktop {
         inspector_expansion: [bool; 3],
         appearance: ResolvedAppearance,
         close_failure: Option<&str>,
-        status: Option<&str>,
     ) -> Element<'a, Message> {
         let theme = ParchMintTheme::new(appearance);
         let editor = editor_center_surface(workspace.editor(), theme, editor_hosts, spelling_menu)
@@ -3053,32 +3120,74 @@ impl NativeDesktop {
             window: id,
             message,
         });
-        let mut content = column![surface]
+        let content = column![surface]
             .spacing(0)
             .width(Length::Fill)
             .height(Length::Fill);
-        if let Some(error) = close_failure {
-            content = content.push(
-                container(
-                    row![
-                        text(format!("Final save failed: {error}")).size(13),
-                        button("Retry").on_press(Message::RetryClose(id)),
-                        button("Cancel Close").on_press(Message::CancelClose(id)),
-                    ]
-                    .spacing(8),
+        let modal: Option<Element<'a, Message>> = if close_failure.is_some() {
+            Some(Self::native_error_modal(
+                "Couldn't save before closing",
+                "Your project is still open. Try saving again or keep working.",
+                row![
+                    button(components::button_label("Keep working"))
+                        .on_press(Message::CancelClose(id)),
+                    button(components::button_label("Try again")).on_press(Message::RetryClose(id)),
+                ]
+                .spacing(8)
+                .into(),
+                theme,
+            ))
+        } else {
+            None
+        };
+        match modal {
+            Some(modal) => stack![
+                content,
+                opaque(
+                    container(modal)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .align_y(iced::alignment::Vertical::Center)
+                        .style(|_| iced::widget::container::Style {
+                            background: Some(iced::Background::Color(iced::Color::from_rgba8(
+                                0, 0, 0, 0.55,
+                            ))),
+                            ..Default::default()
+                        })
                 )
-                .padding([6, 12])
-                .width(Length::Fill),
-            );
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+            None => content.into(),
         }
-        if let Some(status) = status {
-            content = content.push(
-                container(text(status.to_owned()).size(12))
-                    .padding([4, 12])
-                    .width(Length::Fill),
-            );
-        }
-        content.into()
+    }
+
+    fn native_error_modal<'a>(
+        title: &'a str,
+        detail: &'a str,
+        actions: Element<'a, Message>,
+        theme: ParchMintTheme,
+    ) -> Element<'a, Message> {
+        container(
+            column![
+                text(title).size(18),
+                text(detail).size(13),
+                row![Space::new().width(Length::Fill), actions].spacing(10),
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .width(Length::Fixed(440.0))
+        .style(move |_| {
+            components::surface(
+                theme,
+                crate::components::Surface::Dialog,
+                Interaction::Error,
+            )
+        })
+        .into()
     }
 
     fn update_project_surface(
@@ -3215,39 +3324,6 @@ impl NativeDesktop {
             ProjectSurfaceMessage::ToggleInspectorSection(section) => {
                 state.shell.toggle_inspector_section(section);
                 Task::none()
-            }
-            ProjectSurfaceMessage::OpenContextualHistory => {
-                let Some(document) = workspace.focused_history_document().map(str::to_owned) else {
-                    return Task::none();
-                };
-                workspace.update(ProjectMessage::SetHistoryDocumentFilter(Some(
-                    document.clone(),
-                )));
-                state.shell.select_destination(RibbonDestination::History);
-                let ticket = workspace.begin_task(ProjectTask::LoadHistory);
-                let Some(feeds) = state.service_feeds.as_ref() else {
-                    workspace.accept_completion(ProjectTaskCompletion::for_ticket(
-                        ticket,
-                        ProjectTaskPayload::Failed(
-                            "History is unavailable for this project session.".to_owned(),
-                        ),
-                    ));
-                    return Task::none();
-                };
-                let affected = stable_id_bytes(&document)
-                    .ok()
-                    .map(parchmint_domain::DocumentId::from_bytes);
-                let job = feeds.history_list(None, 100, affected);
-                let load = Task::perform(Self::run_service_job(job), move |result| {
-                    Message::HistoryFinished {
-                        window: id,
-                        ticket,
-                        append: false,
-                        result,
-                    }
-                });
-                let persist = Self::workspace_persist_task(id, state);
-                Task::batch([load, persist])
             }
             ProjectSurfaceMessage::BeginResize(panel) => {
                 state.resizing = Some(panel);
@@ -5192,6 +5268,18 @@ impl NativeDesktop {
                         workspace.complete_history_workflow();
                     }
                 }
+                let hierarchy_rename = matches!(
+                    mutation.as_ref().map(|ticket| &ticket.effect),
+                    Some(ProjectEffect::CreateHierarchy { .. })
+                )
+                .then(|| {
+                    state
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.hierarchy_rename())
+                        .map(|(node_id, _)| node_id.to_owned())
+                })
+                .flatten();
                 state.effect_executor = state
                     .project
                     .ports()
@@ -5257,7 +5345,12 @@ impl NativeDesktop {
                         None,
                     )
                 });
-                Task::batch([reopen, refresh, terminal])
+                let rename_focus = hierarchy_rename.map_or_else(Task::none, |node_id| {
+                    iced::widget::operation::focus(
+                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
+                    )
+                });
+                Task::batch([reopen, refresh, terminal, rename_focus])
             }
             Ok(ProjectEffectCompletion::RefreshedSnapshot(snapshot)) => {
                 let snapshot = *snapshot;
@@ -5473,10 +5566,12 @@ impl NativeDesktop {
             }
             Err(error) => {
                 let error = format!("Project action could not complete: {error}");
-                if history_action.is_some()
-                    && let Some(workspace) = state.workspace.as_mut()
-                {
-                    workspace.fail_history_workflow(error.clone());
+                if let Some(workspace) = state.workspace.as_mut() {
+                    if history_action.is_some() {
+                        workspace.fail_history_workflow(error.clone());
+                    } else {
+                        workspace.report_error("project", error.clone());
+                    }
                 }
                 let terminal = mutation
                     .map(PersistentMutationTerminal::ProjectEffectFailed)
@@ -5676,6 +5771,11 @@ impl NativeDesktop {
             }
             Err(error) => {
                 let error = format!("Editor action could not complete: {error}");
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    workspace.report_error("editor", error.clone());
+                }
                 if let Some(token) = mutation {
                     return self.after_persistent_mutation_terminal(
                         window,
@@ -6301,20 +6401,31 @@ impl NativeDesktop {
                     |plan| Self::persist_projection(&ports, adapter.as_ref(), plan),
                     || {
                         let access = ports.access().map_err(|error| error.to_string())?;
-                        let (handle, _) = access
-                            .persistence(|persistence| persistence.request_save(kind))
+                        let save = access
+                            .persistence(|persistence| persistence.request_save_if_changed(kind))
                             .map_err(|error| error.to_string())?
                             .map_err(|error| error.to_string())?;
-                        let saved = access
-                            .persistence(|persistence| persistence.await_save(handle))
-                            .map_err(|error| error.to_string())?
-                            .map_err(|error| error.to_string())?;
+                        let saved_revision = match save {
+                            Some((handle, _)) => Some(
+                                access
+                                    .persistence(|persistence| persistence.await_save(handle))
+                                    .map_err(|error| error.to_string())?
+                                    .map_err(|error| error.to_string())?
+                                    .written
+                                    .project_revision
+                                    .value(),
+                            ),
+                            // Explicit Save and autosave are both successful
+                            // when the captured project is already durable.
+                            None => None,
+                        };
                         let snapshot = access
                             .snapshot(|query| query.snapshot())
                             .map_err(|error| error.to_string())?
                             .map_err(|error| error.to_string())?;
                         Ok(AutosaveCompletion {
-                            saved_revision: saved.written.project_revision.value(),
+                            saved_revision: saved_revision
+                                .unwrap_or_else(|| snapshot.project.revision.value()),
                             snapshot,
                         })
                     },
@@ -6365,15 +6476,22 @@ impl NativeDesktop {
         Task::perform(
             Self::run_blocking_operation("save project", move || {
                 let access = ports.access().map_err(|error| error.to_string())?;
-                let (handle, _) = access
-                    .persistence(|persistence| persistence.request_save(kind))
+                let save = access
+                    .persistence(|persistence| persistence.request_save_if_changed(kind))
                     .map_err(|error| error.to_string())?
                     .map_err(|error| error.to_string())?;
-                let saved = access
-                    .persistence(|persistence| persistence.await_save(handle))
-                    .map_err(|error| error.to_string())?
-                    .map_err(|error| error.to_string())?;
-                Ok(saved.written.project_revision.value())
+                match save {
+                    Some((handle, _)) => access
+                        .persistence(|persistence| persistence.await_save(handle))
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())
+                        .map(|saved| saved.written.project_revision.value()),
+                    None => access
+                        .snapshot(|query| query.snapshot())
+                        .map_err(|error| error.to_string())?
+                        .map_err(|error| error.to_string())
+                        .map(|snapshot| snapshot.project.revision.value()),
+                }
             }),
             move |result| Message::SaveFinished {
                 window,
@@ -8465,6 +8583,19 @@ fn history_current_document(
         body: source.body.clone(),
         semantic,
     })
+}
+
+fn launcher_recent_projects(projects: Vec<PreferenceRecentProject>) -> Vec<RecentProject> {
+    projects
+        .into_iter()
+        .map(|project| {
+            RecentProject::new(
+                project.name,
+                project.path,
+                format_last_opened(project.last_opened_unix_seconds),
+            )
+        })
+        .collect()
 }
 
 fn format_last_opened(seconds: u64) -> String {

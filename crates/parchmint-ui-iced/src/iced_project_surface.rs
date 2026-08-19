@@ -35,7 +35,6 @@ pub(crate) enum ProjectSurfaceMessage {
     ToggleExplorer,
     ToggleInspector,
     ToggleInspectorSection(InspectorSection),
-    OpenContextualHistory,
     BeginResize(SidebarPanel),
     LoadMoreHistory,
 }
@@ -285,9 +284,7 @@ fn destination_footer(
     theme: ParchMintTheme,
 ) -> Option<Element<'static, ProjectSurfaceMessage>> {
     let label = match destination {
-        RibbonDestination::History => {
-            "History is app-managed; Git terminology and object IDs are never shown."
-        }
+        RibbonDestination::History => "Earlier project versions are saved here automatically.",
         RibbonDestination::RecentlyDeleted => "Deleted items remain recoverable through History.",
         _ => return None,
     };
@@ -438,19 +435,21 @@ fn explorer_rail<'a>(
                     .hierarchy_rename()
                     .map(|(_, draft)| draft)
                     .unwrap_or(item.title);
-                text_input("Rename", draft)
-                    .id(hierarchy_rename_input_id(item.id))
-                    .on_input(|title| {
-                        ProjectSurfaceMessage::Project(ProjectMessage::SetHierarchyRenameDraft(
-                            title,
+                hierarchy_drag::commit_on_click_away(
+                    text_input("Rename", draft)
+                        .id(hierarchy_rename_input_id(item.id))
+                        .on_input(|title| {
+                            ProjectSurfaceMessage::Project(ProjectMessage::SetHierarchyRenameDraft(
+                                title,
+                            ))
+                        })
+                        .on_submit(ProjectSurfaceMessage::Project(
+                            ProjectMessage::CommitHierarchyRename,
                         ))
-                    })
-                    .on_submit(ProjectSurfaceMessage::Project(
-                        ProjectMessage::CommitHierarchyRename,
-                    ))
-                    .padding([5, 6])
-                    .width(Length::Fill)
-                    .into()
+                        .padding([5, 6])
+                        .width(Length::Fill),
+                    ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyRename),
+                )
             } else {
                 let row = mouse_area(
                     container(text(title).size(13))
@@ -469,20 +468,27 @@ fn explorer_rail<'a>(
                             }
                         }),
                 )
-                .on_double_click(ProjectSurfaceMessage::Project(
-                    if item.kind == HierarchyRowKind::Document {
-                        ProjectMessage::OpenHierarchyNode(item.id.to_owned())
-                    } else {
-                        ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned())
-                    },
-                ))
                 .interaction(iced::mouse::Interaction::Pointer);
-                hierarchy_drag::source(
-                    row,
+                let row = if item.kind == HierarchyRowKind::Document {
+                    row.on_double_click(ProjectSurfaceMessage::Project(
+                        ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
+                    ))
+                } else {
+                    row
+                };
+                let on_press = if item.kind == HierarchyRowKind::Group {
+                    ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(
+                        item.id.to_owned(),
+                    ))
+                } else {
                     ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
                         node_id: item.id.to_owned(),
                         gesture: SelectionGesture::Replace,
-                    }),
+                    })
+                };
+                hierarchy_drag::source(
+                    row,
+                    on_press,
                     ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                         source_id: item.id.to_owned(),
                         gesture: SelectionGesture::Replace,
@@ -607,9 +613,9 @@ fn hierarchy_row_destination(
     }
 }
 
-// Cards keep their existing compact reorder affordances. Explorer uses the
-// geometry-neutral full-row targets above so starting a drag cannot reflow its
-// outline.
+// Cards use transparent hover targets and one visible insertion indicator.
+// This preserves a generous direct-manipulation target without drawing every
+// possible drop boundary when a drag begins.
 fn hierarchy_drop_strip<'a>(
     target: DragDestination,
     dragging: bool,
@@ -621,18 +627,12 @@ fn hierarchy_drop_strip<'a>(
     }
     let active = current == Some(&target);
     mouse_area(
-        container(Space::new().height(if active { 5 } else { 3 }))
+        container(Space::new().height(if active { 6 } else { 4 }))
             .width(Length::Fill)
             .style(move |_| {
-                components::surface(
-                    theme,
-                    Surface::Panel,
-                    if active {
-                        Interaction::Selected
-                    } else {
-                        Interaction::Rest
-                    },
-                )
+                active
+                    .then(|| components::surface(theme, Surface::Panel, Interaction::Selected))
+                    .unwrap_or_default()
             }),
     )
     .on_enter(ProjectSurfaceMessage::Project(
@@ -1062,18 +1062,12 @@ fn cards_center<'a>(
             );
             let node_id = item.node_id.to_owned();
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Group => button(text(if item.expanded { "▾" } else { "▸" }))
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ToggleHierarchyExpanded(node_id.clone()),
-                    ))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            interaction(status, item.expanded),
-                        )
-                    })
-                    .into(),
+                HierarchyRowKind::Group => {
+                    container(text(if item.expanded { "▾" } else { "▸" }))
+                        .width(28)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .into()
+                }
                 _ => Space::new().width(28).into(),
             };
             // Cards are a scan-friendly projection of the hierarchy. Direct
@@ -1099,38 +1093,65 @@ fn cards_center<'a>(
                 after.clone()
             };
             let middle_active = drag_destination.as_ref() == Some(&middle);
+            let source_active = drag_source.as_deref() == Some(node_id.as_str());
+            let drag_state: Element<'a, ProjectSurfaceMessage> = if source_active {
+                text("Moving").size(11).into()
+            } else {
+                Space::new().width(0).into()
+            };
+            let drop_state: Element<'a, ProjectSurfaceMessage> = if middle_active {
+                text("Drop inside").size(11).into()
+            } else {
+                Space::new().height(0).into()
+            };
             let card = mouse_area(row![
                 Space::new().width((item.depth * 18) as f32),
-                container(card_content)
-                    .padding([10, 16])
-                    .width(Length::Fill)
-                    .style(move |_| {
-                        if middle_active {
-                            components::surface(theme, Surface::Panel, Interaction::Selected)
-                        } else {
-                            iced::widget::container::Style::default()
-                        }
-                    }),
+                container(
+                    column![
+                        row![card_content, drag_state].align_y(iced::alignment::Vertical::Center),
+                        drop_state,
+                    ]
+                    .spacing(if middle_active { 4 } else { 0 })
+                )
+                .padding([10, 16])
+                .width(Length::Fill)
+                .style(move |_| {
+                    if source_active || middle_active {
+                        components::surface(theme, Surface::Panel, Interaction::Selected)
+                    } else {
+                        iced::widget::container::Style::default()
+                    }
+                }),
             ])
-            .on_press(ProjectSurfaceMessage::Project(
-                ProjectMessage::BeginHierarchyDrag {
-                    source_id: node_id.clone(),
-                    gesture: SelectionGesture::Replace,
-                },
-            ))
             .on_enter(ProjectSurfaceMessage::Project(
                 ProjectMessage::SetDragDestination(Some(middle)),
-            ))
-            .on_release(ProjectSurfaceMessage::Project(
-                ProjectMessage::CommitHierarchyDrag,
-            ))
-            .on_double_click(ProjectSurfaceMessage::Project(
-                if item.kind == HierarchyRowKind::Document {
-                    ProjectMessage::ActivateCard(node_id.clone())
-                } else {
-                    ProjectMessage::ToggleHierarchyExpanded(node_id.clone())
-                },
             ));
+            let card = if item.kind == HierarchyRowKind::Document {
+                card.on_double_click(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ActivateCard(node_id.clone()),
+                ))
+            } else {
+                card
+            };
+            let on_press = if item.kind == HierarchyRowKind::Group {
+                ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(
+                    node_id.clone(),
+                ))
+            } else {
+                ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                    node_id: node_id.clone(),
+                    gesture: SelectionGesture::Replace,
+                })
+            };
+            let card = hierarchy_drag::source(
+                card,
+                on_press,
+                ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
+                    source_id: node_id.clone(),
+                    gesture: SelectionGesture::Replace,
+                }),
+                ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
+            );
             column
                 .push(hierarchy_drop_strip(
                     before,
@@ -1270,7 +1291,7 @@ fn search_center<'a>(
             rows.push(row_content)
         });
     let validation = if preview.is_validating() {
-        "Revalidating selected matches against the captured project revision…".to_owned()
+        "Checking selected matches…".to_owned()
     } else if let Some(error) = preview.validation_error() {
         format!("Preview needs attention: {error}")
     } else if preview.is_revalidated() {
@@ -1303,10 +1324,13 @@ fn search_center<'a>(
         .align_y(iced::alignment::Vertical::Center),
         replacement,
         text(format!(
-            "Captured project revision {} · search generation {} · {} included matches",
-            preview.captured_project_revision(),
-            preview.captured_query_generation(),
+            "{} selected match{} ready to replace",
             preview.included_match_ids().len(),
+            if preview.included_match_ids().len() == 1 {
+                ""
+            } else {
+                "es"
+            },
         ))
         .size(13),
         text(validation).size(13),
@@ -1481,14 +1505,7 @@ fn history_center<'a>(
         error,
         maintenance,
         scrollable(comparison).height(Length::Fill),
-        row![
-            container(text("Read-only comparison · restoring creates a new checkpoint.").size(12))
-                .padding(12)
-                .width(Length::Fill)
-                .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-            restore,
-        ]
-        .spacing(12),
+        row![Space::new().width(Length::Fill), restore].spacing(12),
     ]
     .spacing(14);
     row![
@@ -1655,7 +1672,7 @@ fn deleted_center<'a>(
         None if selected_item_id.is_some() => container(
             column![
                 text("Formatted preview unavailable").size(18),
-                text("No canonical document snapshot is available for this deleted item.").size(12),
+                text("This deleted document is no longer available to preview.").size(12),
             ]
             .spacing(8),
         )
@@ -2290,7 +2307,6 @@ fn settings_center<'a>(
             let delete_id = id.clone();
             let reserved = style.role.is_reserved();
             let mut row_content = row![
-                text("⠿").size(14),
                 button(
                     row![
                         column![
@@ -2364,18 +2380,17 @@ fn settings_center<'a>(
         SettingsCategory::Appearance => column![
             text(appearance_heading).size(24),
             text("Appearance").size(20),
-            text("Choose the application appearance. Project styles and export do not change.").size(15),
+            text("Choose the application appearance.").size(15),
             Space::new().height(8),
             container(choices).width(540),
             Space::new().height(12),
             text("Operating system changes Light → Dark; every open ParchMint window updates immediately.").size(14),
-            text("Application preference only — project prose, history, saves, and export are unchanged.").size(13),
         ]
         .spacing(12)
         .into(),
         SettingsCategory::General => column![
             text("General").size(24),
-            text("No project-backed general settings are available.").size(13),
+            text("No general settings are available.").size(13),
         ]
         .spacing(12)
         .into(),
@@ -3448,7 +3463,7 @@ fn status_bar<'a>(
         SaveState::SavedThrough(_) => "Saved".to_owned(),
         SaveState::Dirty { .. } => "Unsaved changes".to_owned(),
         SaveState::Saving { .. } => "Saving changes".to_owned(),
-        SaveState::Error(error) => format!("Save failed · {error}"),
+        SaveState::Error(_) => "Couldn't save changes".to_owned(),
     };
     let editor_status = workspace.editor().status_bar();
     let active_count = match editor_status.current_count() {
@@ -3470,18 +3485,6 @@ fn status_bar<'a>(
             editor_status.manuscript_total()
         ))
         .size(12),
-        button(text("Document History").size(12))
-            .on_press_maybe(
-                workspace
-                    .focused_history_document()
-                    .is_some()
-                    .then_some(ProjectSurfaceMessage::OpenContextualHistory)
-            )
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                interaction(status, false)
-            )),
         Space::new().width(Length::Fill),
         text(label).size(12),
         button(sidebar_toggle_glyph(theme, false))
@@ -3570,6 +3573,33 @@ fn modal_view<'a>(
     modal: ProjectModal,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    if let ProjectModal::Error { title, detail } = &modal {
+        return container(
+            column![
+                text(title.clone()).size(18),
+                text(detail.clone()).size(13),
+                row![
+                    Space::new().width(Length::Fill),
+                    focus::region(
+                        focus::modal_cancel_id(),
+                        button(text("Dismiss"))
+                            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Secondary,
+                                interaction(status, false)
+                            )),
+                    ),
+                ]
+                .spacing(10)
+            ]
+            .spacing(8),
+        )
+        .padding(16)
+        .width(Length::Fixed(520.0))
+        .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Error))
+        .into();
+    }
     let (title, detail) = match &modal {
         ProjectModal::HistoryRestore { .. } => (
             "Restore project history",
@@ -3587,6 +3617,7 @@ fn modal_view<'a>(
             "Reinitialize History",
             "Preserve the damaged History store when possible, then create a new empty History. Project documents are not changed.".to_owned(),
         ),
+        ProjectModal::Error { .. } => unreachable!("error modals return above"),
     };
     container(
         column![
@@ -3615,6 +3646,7 @@ fn modal_view<'a>(
                             ProjectModal::DeleteStyle { .. } => ProjectMessage::ConfirmDeleteStyle,
                             ProjectModal::ReinitializeHistory =>
                                 ProjectMessage::ConfirmHistoryReinitialize,
+                            ProjectModal::Error { .. } => ProjectMessage::DismissModal,
                         }))
                         .style(move |_, status| components::button_style(
                             theme,
@@ -4042,7 +4074,7 @@ mod tests {
         assert!(cards_surface.find("Manuscript outline").is_ok());
         assert!(cards_surface.find("EXPLORER").is_ok());
         assert!(cards_surface.find("Inspector").is_ok());
-        assert!(cards_surface.find("Document History").is_ok());
+        assert!(cards_surface.find("Document History").is_err());
         assert!(cards_surface.find("+ Document").is_err());
         assert!(cards_surface.find("Copy").is_err());
         assert!(cards_surface.find("P · C").is_err());
@@ -4491,6 +4523,82 @@ mod tests {
     }
 
     #[test]
+    fn inline_hierarchy_rename_captures_typing_and_commits_on_click_away() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::BeginHierarchyRename(
+            "chapter-one".to_owned(),
+        ));
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Mounted editor child").into(),
+            ),
+        );
+        let rename = simulator.find("Chapter One").expect("inline rename input");
+        simulator.point_at(rename.visible_bounds().expect("rename bounds").center());
+        assert!(
+            simulator
+                .simulate(iced_test::simulator::click())
+                .contains(&iced::event::Status::Captured)
+        );
+        assert_eq!(
+            simulator.typewrite(" revised"),
+            iced::event::Status::Captured
+        );
+        // This point is outside the Explorer field. The wrapper must emit the
+        // same reducer command used by Enter rather than leave a stale draft.
+        let outside = iced::Point::new(1_000.0, 820.0);
+        simulator.point_at(outside);
+        simulator.simulate([
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: outside }),
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+        ]);
+
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::SetHierarchyRenameDraft(value))
+                if value == "Chapter One revised"
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyRename)
+        )));
+        assert!(
+            messages
+                .iter()
+                .all(|message| matches!(message, ProjectSurfaceMessage::Project(_)))
+        );
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "Chapter One revised".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn document_row_drop_destinations_are_reorder_only() {
+        let bounds = iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(160.0, 40.0));
+        for point in [
+            iced::Point::new(80.0, 2.0),
+            iced::Point::new(80.0, 20.0),
+            iced::Point::new(80.0, 38.0),
+        ] {
+            assert!(matches!(
+                hierarchy_row_destination(HierarchyRowKind::Document, "chapter-two", bounds, point),
+                Some(DragDestination::BeforeSibling(_)) | Some(DragDestination::AfterSibling(_))
+            ));
+        }
+    }
+
+    #[test]
     fn hierarchy_context_delete_action_targets_the_right_clicked_document() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::OpenHierarchyContextMenu {
@@ -4556,6 +4664,64 @@ mod tests {
             ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(node_id))
                 if node_id == "chapter-one"
         )));
+    }
+
+    #[test]
+    fn single_group_click_toggles_in_explorer_and_cards() {
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+
+        let mut explorer = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let mut explorer_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &explorer,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+            ),
+        );
+        explorer_surface.click("Part One").expect("Explorer group");
+        let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
+        assert!(explorer_messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
+                if node_id == "part-one"
+        )));
+        assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
+        assert!(
+            !explorer
+                .explorer()
+                .rows()
+                .into_iter()
+                .find(|row| row.id == "part-one")
+                .expect("Explorer group row")
+                .expanded
+        );
+
+        let mut cards = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let mut cards_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            cards_center(&cards, theme),
+        );
+        cards_surface.click("Part One").expect("Cards group");
+        let card_messages = cards_surface.into_messages().collect::<Vec<_>>();
+        assert!(card_messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
+                if node_id == "part-one"
+        )));
+        assert!(apply_project_messages(&mut cards, card_messages).is_empty());
+        assert!(
+            !cards
+                .explorer()
+                .rows()
+                .into_iter()
+                .find(|row| row.id == "part-one")
+                .expect("Cards group row")
+                .expanded
+        );
     }
 
     #[test]
@@ -4823,7 +4989,7 @@ mod tests {
     }
 
     #[test]
-    fn rendered_cards_press_starts_drag_and_reorders_at_a_card_target() {
+    fn rendered_cards_drag_starts_after_movement_and_reorders_at_a_card_target() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
@@ -4832,42 +4998,37 @@ mod tests {
             cards_center(&workspace, theme),
         );
         let source = simulator.find("Chapter One").expect("rendered card source");
-        simulator.point_at(source.visible_bounds().expect("card bounds").center());
+        let source_position = source.visible_bounds().expect("card bounds").center();
+        let target = simulator.find("Chapter Two").expect("rendered card target");
+        let target_position = target.visible_bounds().expect("target bounds").center();
+        simulator.point_at(source_position);
         simulator.simulate([iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
             iced::mouse::Button::Left,
         ))]);
+        simulator.point_at(target_position);
+        simulator.simulate([
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved {
+                position: target_position,
+            }),
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+        ]);
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
             ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag { source_id, .. })
                 if source_id == "chapter-one"
         )));
-        assert!(apply_project_messages(&mut workspace, messages).is_empty());
-        assert_eq!(workspace.hierarchy_drag_source(), Some("chapter-one"));
-
-        let mut target = Simulator::<ProjectSurfaceMessage>::with_size(
-            Settings::default(),
-            Size::new(1_000.0, 700.0),
-            cards_center(&workspace, theme),
-        );
-        let card = target.find("Chapter Two").expect("rendered card target");
-        let position = card.visible_bounds().expect("target bounds").center();
-        target.point_at(position);
-        target.simulate([
-            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }),
-            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                iced::mouse::Button::Left,
-            )),
-        ]);
-        let messages = target.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
             ProjectSurfaceMessage::Project(ProjectMessage::SetDragDestination(Some(
                 DragDestination::AfterSibling(node_id)
             ))) if node_id == "chapter-two"
         )));
+        let effects = apply_project_messages(&mut workspace, messages);
         assert!(matches!(
-            apply_project_messages(&mut workspace, messages).as_slice(),
+            effects.as_slice(),
             [crate::ProjectEffect::MoveHierarchy { node_ids, destination: actual }]
                 if node_ids == &vec!["chapter-one".to_owned()]
                     && actual == &DragDestination::AfterSibling("chapter-two".to_owned())

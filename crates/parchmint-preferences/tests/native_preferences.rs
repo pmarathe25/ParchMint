@@ -226,6 +226,57 @@ fn coordinator_applies_recent_projects_and_global_dictionary_as_application_chan
 }
 
 #[test]
+fn recent_project_operations_publish_complete_newest_first_launcher_snapshots() {
+    let file = TemporaryFile::new("recent-operations");
+    let store: Arc<dyn PreferenceStore> = Arc::new(FilePreferenceStore::new(file.path()));
+    let service = PreferenceCoordinator::new(store);
+    let mut changes = service.changes();
+    let mut current = block_on(service.load()).expect("load defaults");
+
+    for project in [
+        RecentProject::new("First", "/work/first.parchment", 10),
+        RecentProject::new("Second", "/work/second.parchment", 20),
+        RecentProject::new("First renamed", "/work/first.parchment", 30),
+    ] {
+        current = block_on(service.update(
+            current.revision,
+            PreferenceCommand::AddRecentProject(project),
+        ))
+        .expect("recent project operation");
+        let published = changes.next().expect("complete launcher snapshot");
+        assert_eq!(published.snapshot, current);
+    }
+    assert_eq!(
+        current.values.recent_projects,
+        [
+            RecentProject::new("First renamed", "/work/first.parchment", 30),
+            RecentProject::new("Second", "/work/second.parchment", 20),
+        ]
+    );
+
+    current = block_on(service.update(
+        current.revision,
+        PreferenceCommand::RemoveRecentProject("/work/second.parchment".into()),
+    ))
+    .expect("remove recent project");
+    assert_eq!(
+        changes.next().expect("removal launcher snapshot").snapshot,
+        current
+    );
+    assert_eq!(
+        block_on(service.load())
+            .expect("durable recent projects")
+            .values
+            .recent_projects,
+        [RecentProject::new(
+            "First renamed",
+            "/work/first.parchment",
+            30,
+        )]
+    );
+}
+
+#[test]
 fn appearance_modes_resolve_and_system_events_publish_snapshots() {
     let file = TemporaryFile::new("appearance");
     let store: Arc<dyn PreferenceStore> = Arc::new(FilePreferenceStore::new(file.path()));

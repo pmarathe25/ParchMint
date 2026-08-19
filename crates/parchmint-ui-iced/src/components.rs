@@ -1,11 +1,13 @@
 //! Reusable semantic Iced widget styles for all ParchMint screens.
 
 use iced::{
-    Background, Color, Shadow, Vector, border,
-    widget::{button, container, text_input},
+    Background, Color, Font, Shadow, Vector, border, font,
+    widget::{button, container, text, text_input},
 };
 
-use crate::design_tokens::{DEFAULT_RADIUS, FOCUS_BORDER_WIDTH, ParchMintTheme, SemanticPalette};
+use crate::design_tokens::{
+    DEFAULT_RADIUS, FOCUS_BORDER_WIDTH, ParchMintTheme, SemanticPalette, UI_LABEL,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Surface {
@@ -41,6 +43,18 @@ pub enum StatusKind {
     Saving,
     Warning,
     Error,
+}
+
+/// Text content for controls uses the Penpot label token instead of the
+/// ambient body font. Buttons are compact actions, not authored prose.
+pub fn button_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(value)
+        .size(u32::from(UI_LABEL.size))
+        .line_height(UI_LABEL.line_height)
+        .font(Font {
+            weight: font::Weight::Semibold,
+            ..Font::with_name(UI_LABEL.family)
+        })
 }
 
 pub fn surface(

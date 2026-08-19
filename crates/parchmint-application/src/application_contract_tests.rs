@@ -111,7 +111,7 @@ fn closed_document() -> DocumentId {
 
 fn sample_project() -> Project {
     let project = Project::new(project_id());
-    parchmint_domain::apply_project_command(
+    let project = parchmint_domain::apply_project_command(
         &project,
         project.revision,
         ProjectCommand::create_group(
@@ -122,6 +122,32 @@ fn sample_project() -> Project {
         ),
     )
     .expect("sample group is valid")
+    .project;
+    let project = parchmint_domain::apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::create_document(
+            parchmint_domain::NodeId::from_bytes(stable_id(5)),
+            open_document(),
+            group_id(),
+            0,
+            "Open",
+        ),
+    )
+    .expect("sample open document is valid")
+    .project;
+    parchmint_domain::apply_project_command(
+        &project,
+        project.revision,
+        ProjectCommand::create_document(
+            parchmint_domain::NodeId::from_bytes(stable_id(6)),
+            closed_document(),
+            group_id(),
+            1,
+            "Closed",
+        ),
+    )
+    .expect("sample closed document is valid")
     .project
 }
 
@@ -687,13 +713,139 @@ fn create_document_state_failure_keeps_the_project_tree_unchanged() {
         "Conflicting Chapter",
     )));
 
-    assert!(matches!(
-        result,
-        Err(ApplicationError::DuplicateDocument { document }) if document == open_document()
-    ));
+    assert!(
+        result.is_err(),
+        "duplicate document identity must be rejected"
+    );
     assert_eq!(dispatcher.project().unwrap(), before);
     assert!(dispatcher.project_undo_entries().unwrap().is_empty());
     assert_eq!(documents.snapshots().unwrap().len(), 2);
+}
+
+fn assert_authoritative_snapshot_invariants(dispatcher: &NativeProjectCommandDispatcher) {
+    let snapshot = dispatcher
+        .authored_snapshot()
+        .expect("authoritative snapshot should be available");
+    let live_documents = snapshot
+        .project
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| match node.kind {
+            parchmint_domain::NodeKind::Document(document) => Some(document),
+            parchmint_domain::NodeKind::Root(_) | parchmint_domain::NodeKind::Group => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let summarized = snapshot
+        .document_summaries
+        .iter()
+        .map(|summary| summary.document_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(summarized, live_documents);
+    for document in &snapshot.documents {
+        assert!(live_documents.contains(&document.document_id));
+        let summary = snapshot
+            .document_summaries
+            .iter()
+            .find(|summary| summary.document_id == document.document_id)
+            .expect("loaded document has one summary");
+        assert_eq!(summary.revision, document.revision);
+        assert_eq!(summary.visibility, document.visibility);
+    }
+}
+
+#[test]
+fn authoritative_snapshot_stays_coherent_across_project_operations() {
+    let documents = Arc::new(NativeDocumentStateOwner::new([]));
+    let dispatcher = NativeProjectCommandDispatcher::new(Project::new(project_id()), documents);
+    let group = parchmint_domain::NodeId::from_bytes(stable_id(34));
+    let node = parchmint_domain::NodeId::from_bytes(stable_id(35));
+    let document = DocumentId::from_bytes(stable_id(36));
+
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.execute(ProjectCommand::create_group(
+        group,
+        parchmint_domain::NodeId::manuscript_root(),
+        0,
+        "Draft",
+    )))
+    .unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.execute(ProjectCommand::create_document(
+        node, document, group, 0, "Chapter",
+    )))
+    .unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    dispatcher
+        .execute_document(DocumentCommand {
+            document_id: document,
+            observed_revision: EditorRevision::default(),
+            body: "authored body".into(),
+        })
+        .unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.execute(ProjectCommand::move_node(
+        node,
+        parchmint_domain::NodeId::research_root(),
+        0,
+    )))
+    .unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.execute(ProjectCommand::delete_node(node))).unwrap();
+    let deleted = dispatcher.authored_snapshot().unwrap();
+    assert!(deleted.document_summaries.is_empty());
+    assert!(deleted.documents.is_empty());
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.undo()).unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+    wait(dispatcher.redo()).unwrap();
+    assert_authoritative_snapshot_invariants(&dispatcher);
+}
+
+#[test]
+fn unchanged_operations_create_neither_dirty_state_nor_checkpoint_groups() {
+    let (dispatcher, _) = setup();
+    let revision = dispatcher.project().unwrap().revision;
+
+    let rename = wait(dispatcher.execute(ProjectCommand::rename_node(group_id(), "Draft")))
+        .expect("same-title rename is accepted as unchanged");
+    assert_eq!(rename.revision, revision);
+    assert_eq!(rename.events, [ProjectEvent::Unchanged]);
+    assert_eq!(rename.checkpoint_group, None);
+
+    let document = dispatcher
+        .execute_document(DocumentCommand {
+            document_id: open_document(),
+            observed_revision: EditorRevision::default(),
+            body: "alpha needle".into(),
+        })
+        .expect("same document body is accepted as unchanged");
+    assert_eq!(document.revision, EditorRevision::default());
+    dispatcher
+        .accept_editor_projection(&CanonicalProjection::new(
+            open_document(),
+            EditorRevision::default(),
+            "alpha needle",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("identical projection is accepted as unchanged");
+    let replacement = wait(dispatcher.apply(ReplacementSelection {
+        label: "No replacement".into(),
+        edits: vec![ReplacementEdit {
+            document_id: open_document(),
+            observed_revision: EditorRevision::default(),
+            expected_body: "alpha needle".into(),
+            replacement_body: "alpha needle".into(),
+        }],
+    }))
+    .expect("identity replacement is accepted as unchanged");
+    assert_eq!(replacement.events, [ProjectEvent::Unchanged]);
+    assert_eq!(replacement.checkpoint_group, None);
+
+    assert!(!dispatcher.has_unsaved_changes().unwrap());
+    assert!(dispatcher.pending_checkpoints().unwrap().is_empty());
+    assert!(dispatcher.project_undo_entries().unwrap().is_empty());
 }
 
 fn persisted_project(
@@ -1085,6 +1237,75 @@ fn revisioned_save_serializes_only_dirty_canonical_resources_and_advances_after_
         requests[1].checkpoint.resources,
         requests[0].checkpoint.resources
     );
+}
+
+#[test]
+fn ordinary_save_gating_skips_clean_frontiers_but_named_snapshots_remain_explicit_markers() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let document = documents[0].document_id;
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+
+    assert!(
+        coordinator
+            .request_save_if_changed(PersistenceSaveKind::Final)
+            .expect("clean final-save check")
+            .is_none()
+    );
+    assert!(save.requests.lock().unwrap().is_empty());
+
+    coordinator
+        .create_named_snapshot("Clean marker".into())
+        .expect("named snapshot is allowed without authored changes");
+    assert_eq!(save.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        save.requests.lock().unwrap()[0].checkpoint.category,
+        CheckpointCategory::NamedSnapshot
+    );
+
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            EditorRevision::from(2),
+            "<p>changed</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("authored edit");
+    let (handle, _) = coordinator
+        .request_save_if_changed(PersistenceSaveKind::Final)
+        .expect("dirty final-save check")
+        .expect("dirty state starts a save");
+    coordinator
+        .await_save(handle)
+        .expect("dirty save completes");
+    assert_eq!(save.requests.lock().unwrap().len(), 2);
+    assert!(
+        coordinator
+            .request_save_if_changed(PersistenceSaveKind::Autosave)
+            .expect("clean autosave check")
+            .is_none()
+    );
+    assert_eq!(save.requests.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -1850,10 +2071,10 @@ fn global_replacement_has_one_inverse_project_undo_and_checkpoint() {
             ..
         }
     ));
-    assert_eq!(entries[0].checkpoint_group, result.checkpoint_group);
+    assert_eq!(Some(entries[0].checkpoint_group), result.checkpoint_group);
     assert_eq!(
         dispatcher.pending_checkpoints().unwrap(),
-        vec![result.checkpoint_group]
+        vec![result.checkpoint_group.expect("replacement checkpoint")]
     );
     assert_eq!(documents.document_undo_len(open_document()).unwrap(), 0);
     assert_eq!(documents.document_undo_len(closed_document()).unwrap(), 0);

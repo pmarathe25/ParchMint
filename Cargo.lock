@@ -2425,6 +2425,7 @@ version = "0.1.0"
 dependencies = [
  "parchmint-application",
  "parchmint-contracts",
+ "parchmint-diagnostics",
  "parchmint-domain",
  "parchmint-editor-api",
  "parchmint-editor-core",
@@ -2452,6 +2453,10 @@ dependencies = [
  "parchmint-workspace-state",
  "sha2 0.11.0",
 ]
+
+[[package]]
+name = "parchmint-diagnostics"
+version = "0.1.0"
 
 [[package]]
 name = "parchmint-domain"
@@ -2684,6 +2689,7 @@ dependencies = [
  "iced_test",
  "parchmint-application",
  "parchmint-design-system",
+ "parchmint-diagnostics",
  "parchmint-domain",
  "parchmint-editor-api",
  "parchmint-editor-core",

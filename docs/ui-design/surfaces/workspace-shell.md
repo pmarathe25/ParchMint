@@ -30,8 +30,7 @@ intentional rule for growing or scrolling.
 
 The status bar places the Explorer visibility control at the left and the
 Inspector visibility control at the far right. Each uses the selected mint
-treatment while its pane is shown. The contextual document-History control also
-belongs in the status bar.
+treatment while its pane is shown.
 
 Focus, selection, disabled, warning, error, comment, search-match, and save
 states must meet contrast requirements without color alone. Reference boards

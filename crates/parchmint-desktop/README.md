@@ -33,6 +33,26 @@ Startup sends file and operating-system work to background tasks. When the user
 closes a project, its window stays open until the final save finishes or reports
 an error.
 
+## Diagnosing failures
+
+The production application writes a local append-only debug log at
+`logs/parchmint-debug.log` under its application data directory. It records
+project and editor effect starts, completions, ignored stale completions, and
+the technical causes of user-visible failures. It records action names, session
+identifiers, and revision numbers; it does not record document text.
+Each line includes a timestamp and in-process sequence number, so the most
+recent failure can be traced back through the preceding operations.
+
+The usual path is:
+
+- Linux: `$XDG_DATA_HOME/parchmint/logs/parchmint-debug.log` (or `~/.local/share` when `XDG_DATA_HOME` is unset)
+- macOS: `~/Library/Application Support/ParchMint/logs/parchmint-debug.log`
+- Windows: `%LOCALAPPDATA%/ParchMint/Data/logs/parchmint-debug.log`
+
+Authors see a consistent ParchMint error modal for action failures; its detail
+is safe to show to users, while the precise backend cause is retained in this
+local log.
+
 ## Interface
 
 The package builds the `parchmint` executable. The following library types let

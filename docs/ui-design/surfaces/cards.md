@@ -4,4 +4,5 @@
   Synopsis are editable where designed; metadata is read-only in a right-hand
   area with short separators rather than chips or tiles, and is edited in
   Inspector. Do not add an implicit `Status: Draft`. Show a clear insertion
-  marker while dragging.
+  marker while dragging. Single-clicking a group card expands or collapses its
+  children.

@@ -20,6 +20,7 @@ use parchmint_application::{
     NativeProjectCommandDispatcher, PersistenceSaveKind, ProjectPersistenceCoordinator,
 };
 use parchmint_contracts::{AnnotationAnchor, AnnotationThread};
+use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
 use parchmint_domain::{
     BlockId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectExportSetting,
     ProjectId, apply_project_command,
@@ -41,7 +42,7 @@ use parchmint_history_git2::Git2HistoryStore;
 use parchmint_platform_api::{PathDialog, PathDialogKind, WindowCapability};
 use parchmint_platform_native::{NativePlatform, iced_adapter::IcedWindowRegistry};
 use parchmint_preferences::{
-    AppearanceController, AppearanceMode, AppearanceService, FilePreferenceStore,
+    AppearanceController, AppearanceMode, AppearanceService, FilePreferenceStore, PreferenceChange,
     PreferenceCoordinator, PreferenceService, ResolvedAppearance,
 };
 use parchmint_project_format::{
@@ -1074,19 +1075,21 @@ struct ProductionProjectQuery {
 
 impl ProjectSnapshotQuery for ProductionProjectQuery {
     fn snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
-        let project = self.commands.project().map_err(map_project_query_error)?;
-        let documents = self
-            .documents
-            .loaded_snapshots()
+        // The dispatcher captures tree and document state under one operation
+        // boundary. Reading them separately can otherwise combine a new tree
+        // with an older document catalog while a command is completing.
+        let authored = self
+            .commands
+            .authored_snapshot()
             .map_err(map_project_query_error)?;
+        let project = authored.project;
+        let documents = authored.documents;
         let loaded = documents
             .iter()
             .map(|document| (document.document_id, document))
             .collect::<BTreeMap<_, _>>();
-        let document_summaries = self
-            .documents
-            .summaries()
-            .map_err(map_project_query_error)?
+        let document_summaries = authored
+            .document_summaries
             .into_iter()
             .map(|summary| {
                 let persisted = self
@@ -1320,6 +1323,19 @@ impl ProjectPersistencePort for SearchRefreshingPersistence {
         parchmint_ui_api::ProjectPersistenceError,
     > {
         self.inner.request_save(kind)
+    }
+
+    fn request_save_if_changed(
+        &self,
+        kind: parchmint_ui_api::ProjectSaveKind,
+    ) -> Result<
+        Option<(
+            parchmint_ui_api::ProjectSaveHandle,
+            parchmint_ui_api::ProjectPersistenceRevision,
+        )>,
+        parchmint_ui_api::ProjectPersistenceError,
+    > {
+        self.inner.request_save_if_changed(kind)
     }
 
     fn await_save(
@@ -2550,6 +2566,10 @@ struct ProductionUiCallbacks {
 }
 
 impl NativeDesktopCallbacks for ProductionUiCallbacks {
+    fn preference_changes(&self) -> Option<parchmint_editor_api::EventStream<PreferenceChange>> {
+        Some(self.preferences.changes())
+    }
+
     fn open_project(&self, project: PathBuf) -> Result<NativeProjectOpenResult, String> {
         let result = self
             .runtime
@@ -2698,6 +2718,15 @@ pub(crate) fn assemble_with_controls(
         .map_err(|error| StartupError::production("native platform", error))?;
     let paths = block_on(platform.application_paths.application_paths())
         .map_err(|error| StartupError::production("application paths", error))?;
+    match diagnostics::configure_file(paths.data()) {
+        Ok(path) => diagnostics::event(
+            DiagnosticLevel::Info,
+            "desktop.startup",
+            "production application graph is assembling",
+            &[("log_path", path.to_string_lossy().as_ref())],
+        ),
+        Err(error) => eprintln!("ParchMint diagnostics could not be configured: {error}"),
+    }
     let preference_store = Arc::new(FilePreferenceStore::new(
         paths.configuration().join("preferences.json"),
     ));

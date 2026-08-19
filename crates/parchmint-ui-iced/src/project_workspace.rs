@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::text_editor;
+use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
 use parchmint_domain::{
     MetadataApplicability as DomainMetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
     MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSetting,
@@ -96,6 +97,12 @@ struct HierarchyPointerDrag {
 struct HierarchyRename {
     node_id: String,
     title: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingHierarchyCreation {
+    parent_id: String,
+    kind: HierarchyItemKind,
 }
 
 /// Deterministic validation for one drag operation.
@@ -1821,7 +1828,7 @@ pub enum HistoryRestoreScope {
     EntireProject,
 }
 
-/// A project modal with complete, explicit destructive scope.
+/// A project modal with the context required by its controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectModal {
     HistoryRestore {
@@ -1835,6 +1842,12 @@ pub enum ProjectModal {
         style_id: String,
     },
     ReinitializeHistory,
+    /// A user-facing failure. Technical detail remains in the local debug log
+    /// so that a backend implementation cannot accidentally expose internals.
+    Error {
+        title: String,
+        detail: String,
+    },
 }
 
 /// Authoritative category reported for a History checkpoint.
@@ -3024,6 +3037,49 @@ pub enum ProjectTask {
     PersistWorkspace,
 }
 
+fn project_task_name(task: &ProjectTask) -> &'static str {
+    match task {
+        ProjectTask::GlobalSearch { .. } => "search",
+        ProjectTask::ReplacementPreview | ProjectTask::ApplyReplacement => "replacement",
+        ProjectTask::LoadHistory
+        | ProjectTask::PreviewHistory { .. }
+        | ProjectTask::RestoreHistory { .. } => "history",
+        ProjectTask::PreviewDeleted { .. } | ProjectTask::RestoreDeleted { .. } => {
+            "recently-deleted"
+        }
+        ProjectTask::Save { .. } => "save",
+        ProjectTask::Export { .. } => "export",
+        ProjectTask::ReconcileRecovery
+        | ProjectTask::AcceptRecovery
+        | ProjectTask::DiscardRecovery => "recovery",
+        ProjectTask::PersistWorkspace => "workspace",
+    }
+}
+
+fn project_error_title(operation: &str) -> &'static str {
+    match operation {
+        "save" => "Couldn't save changes",
+        "export" => "Couldn't export your project",
+        "history" => "Couldn't complete the History request",
+        "recovery" => "Couldn't recover unsaved changes",
+        "search" => "Couldn't search this project",
+        "replacement" => "Couldn't replace project text",
+        "recently-deleted" => "Couldn't restore that item",
+        "editor" => "Couldn't update the editor",
+        _ => "Couldn't complete that action",
+    }
+}
+
+fn project_error_detail(operation: &str) -> &'static str {
+    match operation {
+        "save" => "Please try again. Your project remains open and your recovery data is intact.",
+        "recovery" => {
+            "Please try again. ParchMint has kept the project open so you can choose how to proceed."
+        }
+        _ => "Please try again. ParchMint wrote technical details to its local debug log.",
+    }
+}
+
 /// Exact identity for delayed work in one live project session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectTaskTicket {
@@ -3424,6 +3480,7 @@ pub struct ProjectWorkspace {
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
     hierarchy_rename: Option<HierarchyRename>,
+    pending_hierarchy_creation: Option<PendingHierarchyCreation>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
     /// Locally authored Synopsis text which has not yet been observed in an
@@ -3513,6 +3570,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
@@ -3570,6 +3628,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
@@ -3614,8 +3673,10 @@ impl ProjectWorkspace {
 
     /// Reconciles authoritative project/document data while retaining live UI state.
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
         self.explorer.reconcile_project(&snapshot.project);
+        self.begin_rename_for_created_hierarchy(&prior_node_ids);
         self.reconcile_synopsis_editors();
         self.metadata_values = metadata_values_from_project(&snapshot.project);
         let selected_category = self.settings.selected_category;
@@ -4002,7 +4063,31 @@ impl ProjectWorkspace {
 
     pub fn fail_history_workflow(&mut self, error: String) {
         self.history.creating_named_snapshot = false;
-        self.history.error = Some(error);
+        self.history.error = Some(error.clone());
+        self.report_error("history", error);
+    }
+
+    /// Records the technical cause locally and opens the shared modal language
+    /// with safe, actionable copy for the author.
+    pub fn report_error(&mut self, operation: &'static str, error: impl Into<String>) {
+        let error = error.into();
+        let session = self.session.to_string();
+        let revision = self.project_revision.to_string();
+        diagnostics::event(
+            DiagnosticLevel::Error,
+            "ui.user-error",
+            "presented",
+            &[
+                ("operation", operation),
+                ("session", &session),
+                ("project_revision", &revision),
+                ("error", &error),
+            ],
+        );
+        self.modal = Some(ProjectModal::Error {
+            title: project_error_title(operation).to_owned(),
+            detail: project_error_detail(operation).to_owned(),
+        });
     }
 
     pub fn recently_deleted(&self) -> &RecentlyDeletedState {
@@ -4199,6 +4284,14 @@ impl ProjectWorkspace {
         self.next_request = 0;
         self.tree_clipboard = None;
         self.explorer.cancel_cut();
+        let session = session.to_string();
+        let revision = project_revision.to_string();
+        diagnostics::event(
+            DiagnosticLevel::Info,
+            "ui.project-session",
+            "started",
+            &[("session", &session), ("project_revision", &revision)],
+        );
     }
 
     /// Blocks editable presentation while the startup recovery journal is
@@ -4234,6 +4327,12 @@ impl ProjectWorkspace {
             || !project_payload_claim_is_exact(&ticket.task, completion.payload())
             || !self.ticket_revision_is_live(ticket)
         {
+            diagnostics::event(
+                DiagnosticLevel::Warn,
+                "ui.project-task",
+                "ignored stale or invalid completion",
+                &[("task", project_task_name(&ticket.task))],
+            );
             return false;
         }
         let keep_streaming = matches!(
@@ -4246,9 +4345,16 @@ impl ProjectWorkspace {
                 | ProjectTaskPayload::ExportCommitting
         );
         let task = ticket.task.clone();
+        let failure = match completion.payload() {
+            ProjectTaskPayload::Failed(error) => Some((project_task_name(&task), error.clone())),
+            _ => None,
+        };
         let accepted = self.apply_completion(completion);
         if accepted && !keep_streaming {
             self.pending.remove(&task);
+        }
+        if accepted && let Some((operation, error)) = failure {
+            self.report_error(operation, error);
         }
         accepted
     }
@@ -4304,10 +4410,14 @@ impl ProjectWorkspace {
                             HierarchyNodeKind::Root | HierarchyNodeKind::Group
                         )
                     });
-                can_contain_children
-                    .then_some(ProjectEffect::CreateHierarchy { parent_id, kind })
-                    .into_iter()
-                    .collect()
+                if !can_contain_children {
+                    return Vec::new();
+                }
+                self.pending_hierarchy_creation = Some(PendingHierarchyCreation {
+                    parent_id: parent_id.clone(),
+                    kind,
+                });
+                vec![ProjectEffect::CreateHierarchy { parent_id, kind }]
             }
             ProjectMessage::DeleteSelection => {
                 let selected = self.explorer.normalized_selected_ids();
@@ -5164,7 +5274,8 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::ExportFailed(error) => {
-                self.export.state = ExportState::Failed(error);
+                self.export.state = ExportState::Failed(error.clone());
+                self.report_error("export", error);
                 Vec::new()
             }
             ProjectMessage::MarkDirty(revision) => {
@@ -5183,8 +5294,9 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::SaveFailed(error) => {
-                self.save.state = SaveState::Error(error);
+                self.save.state = SaveState::Error(error.clone());
                 self.save.recovery_intact = true;
+                self.report_error("save", error);
                 Vec::new()
             }
             ProjectMessage::RequestClose => {
@@ -5200,6 +5312,9 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::SetContentState(state) => {
+                if let ContentState::Error(error) = &state {
+                    self.report_error("project", error.clone());
+                }
                 self.content_state = state;
                 Vec::new()
             }
@@ -5373,6 +5488,37 @@ impl ProjectWorkspace {
             EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(document_id)],
             EditorPane::Companion => vec![ProjectEffect::OpenDocumentInCompanion(document_id)],
         }
+    }
+
+    fn begin_rename_for_created_hierarchy(&mut self, prior_node_ids: &BTreeSet<String>) {
+        let Some(pending) = self.pending_hierarchy_creation.take() else {
+            return;
+        };
+        let expected_kind = match pending.kind {
+            HierarchyItemKind::Group => HierarchyNodeKind::Group,
+            HierarchyItemKind::Document => HierarchyNodeKind::Document,
+        };
+        let mut created = self.explorer.nodes.values().filter(|node| {
+            !prior_node_ids.contains(&node.id)
+                && node.parent.as_deref() == Some(pending.parent_id.as_str())
+                && node.kind == expected_kind
+        });
+        let Some(node) = created.next() else {
+            // A different asynchronous refresh can arrive before this create
+            // workflow completes. Keep waiting for the authoritative node.
+            self.pending_hierarchy_creation = Some(pending);
+            return;
+        };
+        if created.next().is_some() {
+            // More than one matching node means this completion cannot be
+            // identified safely. Do not start editing an unrelated item.
+            return;
+        }
+        let node_id = node.id.clone();
+        let title = node.title.clone();
+        self.explorer.select(&node_id, SelectionGesture::Replace);
+        self.explorer.expanded.insert(pending.parent_id);
+        self.hierarchy_rename = Some(HierarchyRename { node_id, title });
     }
 
     fn drop_hierarchy(
@@ -6701,6 +6847,103 @@ mod tests {
     }
 
     #[test]
+    fn created_hierarchy_enters_inline_rename_after_its_authoritative_snapshot_arrives() {
+        let parent = parchmint_domain::NodeId::manuscript_root();
+        let parent_id = stable_id_string(parent.as_bytes());
+        let project = Project::new(parchmint_domain::ProjectId::from_bytes([0x71; 16]));
+        let initial = ProjectSnapshot {
+            project: project.clone(),
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        };
+        let mut workspace = ProjectWorkspace::from_snapshot(&initial);
+
+        assert_eq!(
+            workspace.update(ProjectMessage::RequestCreateHierarchy {
+                parent_id: parent_id.clone(),
+                kind: HierarchyItemKind::Group,
+            }),
+            [ProjectEffect::CreateHierarchy {
+                parent_id: parent_id.clone(),
+                kind: HierarchyItemKind::Group,
+            }]
+        );
+        // An unrelated refresh before the create workflow completes must not
+        // consume the pending inline-rename request.
+        workspace.reconcile_snapshot(&initial);
+        assert_eq!(workspace.hierarchy_rename(), None);
+
+        let created_node = parchmint_domain::NodeId::from_bytes([0x72; 16]);
+        let created = parchmint_domain::apply_project_command(
+            &project,
+            project.revision,
+            parchmint_domain::ProjectCommand::create_group(created_node, parent, 0, "New Group"),
+        )
+        .expect("create group snapshot")
+        .project;
+        let created_id = stable_id_string(created_node.as_bytes());
+        workspace.reconcile_snapshot(&ProjectSnapshot {
+            project: created,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        });
+
+        assert_eq!(
+            workspace.hierarchy_rename(),
+            Some((created_id.as_str(), "New Group"))
+        );
+        assert_eq!(workspace.explorer().selected_ids(), [created_id.as_str()]);
+        assert!(workspace.explorer().is_expanded(&parent_id));
+    }
+
+    #[test]
+    fn created_document_enters_inline_rename_after_its_authoritative_snapshot_arrives() {
+        let parent = parchmint_domain::NodeId::manuscript_root();
+        let parent_id = stable_id_string(parent.as_bytes());
+        let project = Project::new(parchmint_domain::ProjectId::from_bytes([0x73; 16]));
+        let mut workspace = ProjectWorkspace::from_snapshot(&ProjectSnapshot {
+            project: project.clone(),
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        });
+        workspace.update(ProjectMessage::RequestCreateHierarchy {
+            parent_id: parent_id.clone(),
+            kind: HierarchyItemKind::Document,
+        });
+
+        let created_node = parchmint_domain::NodeId::from_bytes([0x74; 16]);
+        let created = parchmint_domain::apply_project_command(
+            &project,
+            project.revision,
+            parchmint_domain::ProjectCommand::create_document(
+                created_node,
+                parchmint_domain::DocumentId::from_bytes([0x75; 16]),
+                parent,
+                0,
+                "Untitled",
+            ),
+        )
+        .expect("create document snapshot")
+        .project;
+        let created_id = stable_id_string(created_node.as_bytes());
+        workspace.reconcile_snapshot(&ProjectSnapshot {
+            project: created,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        });
+
+        assert_eq!(
+            workspace.hierarchy_rename(),
+            Some((created_id.as_str(), "Untitled"))
+        );
+        assert_eq!(workspace.explorer().selected_ids(), [created_id.as_str()]);
+    }
+
+    #[test]
     fn group_clipboard_survives_navigation_and_cut_clears_only_on_completion() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -6830,6 +7073,40 @@ mod tests {
                 current_revision: 2
             }
         );
+    }
+
+    #[test]
+    fn failed_async_work_uses_the_shared_error_modal_without_exposing_technical_detail() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let ticket = workspace.begin_task(ProjectTask::Export { source_revision: 1 });
+
+        assert!(
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket,
+                ProjectTaskPayload::Failed(
+                    "export writer rejected /private/author-notes".to_owned()
+                ),
+            ))
+        );
+        assert!(matches!(
+            workspace.modal(),
+            Some(ProjectModal::Error { title, detail })
+                if title == "Couldn't export your project"
+                    && !detail.contains("author-notes")
+        ));
+    }
+
+    #[test]
+    fn direct_save_failures_use_the_shared_error_modal() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SaveFailed(
+            "filesystem unavailable".to_owned(),
+        ));
+
+        assert!(matches!(
+            workspace.modal(),
+            Some(ProjectModal::Error { title, .. }) if title == "Couldn't save changes"
+        ));
     }
 
     #[test]

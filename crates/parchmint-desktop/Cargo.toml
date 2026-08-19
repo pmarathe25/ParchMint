@@ -18,6 +18,7 @@ workspace = true
 parchmint-application = { path = "../parchmint-application" }
 parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
+parchmint-diagnostics = { path = "../parchmint-diagnostics" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-editor-iced = { path = "../parchmint-editor-iced" }
 parchmint-export-api = { path = "../parchmint-export-api" }

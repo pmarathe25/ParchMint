@@ -255,6 +255,18 @@ pub struct RecentProject {
 }
 
 impl RecentProject {
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        last_opened: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            last_opened: last_opened.into(),
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -308,6 +320,13 @@ impl LauncherState {
                 last_opened: last_opened.into(),
             },
         );
+    }
+
+    /// Reconciles the launcher with the authoritative application preference
+    /// snapshot. Recent projects are global preferences, so this replaces the
+    /// projection instead of retaining stale launcher-only entries.
+    pub fn set_recent_projects(&mut self, projects: Vec<RecentProject>) {
+        self.recent_projects = projects;
     }
 }
 

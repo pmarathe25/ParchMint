@@ -31,6 +31,25 @@ where
     .into()
 }
 
+/// Commits an inline field when the user presses outside its bounds.
+///
+/// Iced does not emit a text-input submit message merely because it loses
+/// focus. Keeping this behavior next to the drag widgets lets the Explorer
+/// retain a single editable control while treating click-away like Enter.
+pub(crate) fn commit_on_click_away<'a, Message>(
+    content: impl Into<Element<'a, Message>>,
+    on_click_away: Message,
+) -> Element<'a, Message>
+where
+    Message: Clone + 'a,
+{
+    CommitOnClickAway {
+        content: content.into(),
+        on_click_away,
+    }
+    .into()
+}
+
 pub(crate) fn target<'a, Message, Destination>(
     content: impl Into<Element<'a, Message>>,
     indicator: Option<DropIndicator>,
@@ -70,6 +89,159 @@ struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Re
     on_press: Message,
     on_drag_start: Message,
     on_finish: Message,
+}
+
+struct CommitOnClickAway<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
+    content: Element<'a, Message, Theme, Renderer>,
+    on_click_away: Message,
+}
+
+#[derive(Default)]
+struct ClickAwayState {
+    last_pointer: Option<Point>,
+}
+
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for CommitOnClickAway<'_, Message, Theme, Renderer>
+where
+    Message: Clone,
+    Renderer: renderer::Renderer,
+{
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<ClickAwayState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ClickAwayState::default())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        let state = tree.state.downcast_mut::<ClickAwayState>();
+        match event {
+            Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                state.last_pointer = Some(*position);
+            }
+            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
+                if state
+                    .last_pointer
+                    .or_else(|| cursor.position())
+                    .is_some_and(|position| !layout.bounds().contains(position)) =>
+            {
+                shell.publish(self.on_click_away.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
 }
 
 #[derive(Default)]
@@ -250,6 +422,18 @@ where
 {
     fn from(source: HierarchyDragSource<'a, Message, Theme, Renderer>) -> Self {
         Element::new(source)
+    }
+}
+
+impl<'a, Message, Theme, Renderer> From<CommitOnClickAway<'a, Message, Theme, Renderer>>
+    for Element<'a, Message, Theme, Renderer>
+where
+    Message: Clone + 'a,
+    Theme: 'a,
+    Renderer: renderer::Renderer + 'a,
+{
+    fn from(commit: CommitOnClickAway<'a, Message, Theme, Renderer>) -> Self {
+        Element::new(commit)
     }
 }
 
