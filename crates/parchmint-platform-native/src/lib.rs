@@ -85,8 +85,19 @@ impl NativePlatform {
     }
 
     fn with_backend(backend: Arc<dyn NativeBackend>) -> (Self, Arc<NativeServices>) {
+        Self::with_backend_and_before_window_work(backend, Arc::new(|| {}))
+    }
+
+    fn with_backend_and_before_window_work(
+        backend: Arc<dyn NativeBackend>,
+        before_window_work: Arc<dyn Fn() + Send + Sync>,
+    ) -> (Self, Arc<NativeServices>) {
         let registry = CapabilityRegistry::new();
-        let services = Arc::new(NativeServices::new(Arc::clone(&backend), registry.clone()));
+        let services = Arc::new(NativeServices::new(
+            Arc::clone(&backend),
+            registry.clone(),
+            before_window_work,
+        ));
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         native_menu::register_activation_target(&services);
         let platform = Self {
@@ -113,6 +124,7 @@ impl NativePlatform {
 struct NativeServices {
     backend: Arc<dyn NativeBackend>,
     registry: CapabilityRegistry,
+    before_window_work: Arc<dyn Fn() + Send + Sync>,
     next_menu_binding: AtomicU64,
     installed_menus: Arc<Mutex<HashMap<WindowCapability, InstalledMenu>>>,
     menu_activation_listeners: Mutex<Vec<mpsc::Sender<MenuActivation>>>,
@@ -122,10 +134,15 @@ struct NativeServices {
 }
 
 impl NativeServices {
-    fn new(backend: Arc<dyn NativeBackend>, registry: CapabilityRegistry) -> Self {
+    fn new(
+        backend: Arc<dyn NativeBackend>,
+        registry: CapabilityRegistry,
+        before_window_work: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         Self {
             backend,
             registry,
+            before_window_work,
             next_menu_binding: AtomicU64::new(1),
             installed_menus: Arc::new(Mutex::new(HashMap::new())),
             menu_activation_listeners: Mutex::new(Vec::new()),
@@ -217,8 +234,12 @@ impl NativeServices {
 
         let registry = self.registry.clone();
         let backend = Arc::clone(&self.backend);
+        let before_window_work = Arc::clone(&self.before_window_work);
         Box::pin(dispatch(move |sender| {
-            let result = work(backend).map(|value| WindowResult::new(window, value));
+            before_window_work();
+            let result = registry
+                .authorize(window)
+                .and_then(|()| work(backend).map(|value| WindowResult::new(window, value)));
             registry.complete(window, sender, result);
         }))
     }

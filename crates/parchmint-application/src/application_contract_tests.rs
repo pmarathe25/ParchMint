@@ -180,6 +180,34 @@ fn setup() -> (
 }
 
 #[test]
+fn editor_persistence_constructors_start_with_empty_status_and_queue() {
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([(ResourceId::Document, hash("base"))]),
+    };
+    let recovery_only = EditorPersistenceCoordinator::new_recovery_only(
+        Arc::new(ProductionJournal::default()),
+        base.clone(),
+    );
+    let with_save = EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(RecordingSave::default()),
+        base,
+    );
+
+    for coordinator in [&recovery_only, &with_save] {
+        assert_eq!(coordinator.status(), EditorPersistenceStatus::default());
+        assert_eq!(coordinator.save_queue_depth(), 0);
+        assert_eq!(coordinator.max_save_queue_depth(), 0);
+        assert_eq!(coordinator.submitted_save_requests(), 0);
+        assert_eq!(coordinator.coalesced_save_requests(), 0);
+    }
+}
+
+#[test]
 fn production_editor_coordinator_routes_projections_and_tracks_newer_dirty_frontier() {
     let journal = Arc::new(ProductionJournal::default());
     let base = RecoveryBaseSnapshot {

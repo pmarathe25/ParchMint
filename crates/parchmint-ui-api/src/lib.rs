@@ -662,14 +662,16 @@ impl ProjectUiPorts {
         self.authority.is_current(self.session)
     }
 
+    fn authorize(&self) -> Result<(), StaleProjectSession> {
+        self.is_current().then_some(()).ok_or(StaleProjectSession {
+            session: self.session,
+        })
+    }
+
     /// Authorizes this exact generation and returns borrowed typed services.
     /// Callers reacquire access for each user action or asynchronous task.
     pub fn access(&self) -> Result<ProjectUiAccess<'_>, StaleProjectSession> {
-        if !self.is_current() {
-            return Err(StaleProjectSession {
-                session: self.session,
-            });
-        }
+        self.authorize()?;
         Ok(ProjectUiAccess { ports: self })
     }
 }
@@ -681,11 +683,7 @@ pub struct ProjectUiAccess<'a> {
 
 impl ProjectUiAccess<'_> {
     fn services(&self) -> Result<&ProjectUiServices, StaleProjectSession> {
-        if !self.ports.is_current() {
-            return Err(StaleProjectSession {
-                session: self.ports.session,
-            });
-        }
+        self.ports.authorize()?;
         Ok(self.ports.services.as_ref())
     }
 

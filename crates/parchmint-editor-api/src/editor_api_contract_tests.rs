@@ -20,7 +20,6 @@ use parchmint_recovery_api::{
 };
 use parchmint_save::{SaveGeneration, SaveRevisionVector};
 use serde_json::json;
-use sha2::Digest;
 
 use super::*;
 
@@ -303,6 +302,76 @@ fn persistence_coordinator_keeps_distinct_recovery_hashes_for_multiple_documents
     );
 }
 
+#[test]
+fn persistence_coordinator_merges_partial_document_frontiers_during_ack_and_replay() {
+    let journal = Arc::new(ContractJournal::default());
+    let first = document_id();
+    let second = DocumentId::from_bytes([2; 16]);
+    let first_resource = document_resource_id(first);
+    let second_resource = document_resource_id(second);
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(ProjectRevision::default(), BTreeMap::new()),
+        hashes: BTreeMap::from([
+            (first_resource, hash("first base")),
+            (second_resource, hash("second base")),
+        ]),
+    };
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+
+    let persist = |coordinator: &EditorPersistenceCoordinator,
+                   document,
+                   revision,
+                   body,
+                   generation| {
+        let projection = CanonicalProjection::new(document, revision, body, vec![], vec![], 1);
+        let revisions = SaveRevisionVector {
+            project_revision: ProjectRevision::default(),
+            open_documents: BTreeMap::from([(document, DocumentRevision::from(revision.value()))]),
+            closed_resources: BTreeMap::new(),
+            canonical_hashes: BTreeMap::new(),
+            generation: SaveGeneration::from(generation),
+        };
+        coordinator
+            .persist_projection(&projection, &revisions, payload(body))
+            .unwrap()
+    };
+
+    coordinator
+        .acknowledge_recovery(persist(&coordinator, first, revision(1), "first one", 1))
+        .unwrap();
+    coordinator
+        .acknowledge_recovery(persist(
+            &coordinator,
+            second,
+            revision(7),
+            "second seven",
+            2,
+        ))
+        .unwrap();
+    let third = persist(&coordinator, first, revision(2), "first two", 3);
+    assert_eq!(
+        third.batch().documents[&first].first,
+        DocumentRevision::from(2)
+    );
+    coordinator.acknowledge_recovery(third).unwrap();
+
+    let expected = RecoveryRevisionVector::new(
+        ProjectRevision::from(3),
+        BTreeMap::from([
+            (first, DocumentRevision::from(2)),
+            (second, DocumentRevision::from(7)),
+        ]),
+    );
+    assert_eq!(coordinator.frontier().unwrap(), expected);
+
+    let reopened = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let replay = reopened.reconcile_recovery(base).unwrap();
+    assert_eq!(replay.accepted.len(), 3);
+    assert!(replay.isolated.is_empty());
+    assert_eq!(reopened.frontier().unwrap(), expected);
+}
+
 #[derive(Debug, Default)]
 struct ContractJournal {
     records: Mutex<Vec<RecoveryRecord>>,
@@ -315,7 +384,15 @@ impl RecoveryJournal for ContractJournal {
             RecoveryRecord::Complete(batch) => Some(batch),
             _ => None,
         });
-        batch.validate_after(previous)?;
+        batch.validate()?;
+        if let Some(previous) = previous
+            && batch.project_revision != previous.project_revision.next()
+        {
+            return Err(RecoveryError::NonConsecutiveProjectRevision {
+                expected: previous.project_revision.next(),
+                actual: batch.project_revision,
+            });
+        }
         let frontier = batch.revision_vector();
         records.push(RecoveryRecord::Complete(batch));
         let RecoveryRecord::Complete(batch) = records.last().expect("record appended") else {
@@ -427,7 +504,7 @@ fn payload(body: &str) -> VersionedRecoveryPayload {
 }
 
 fn hash(body: &str) -> ContentHash {
-    ContentHash::from_bytes(sha2::Sha256::digest(body.as_bytes()).into())
+    ContentHash::of_bytes(body.as_bytes())
 }
 
 fn attach(adapter: &dyn EditorAdapter, session: SharedEditorSession, view: ViewId) {

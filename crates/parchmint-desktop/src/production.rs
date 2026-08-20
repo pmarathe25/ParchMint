@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
@@ -854,7 +854,7 @@ struct SharedServices {
 /// from the preference store. The spellcheck worker therefore never owns a
 /// second, divergent dictionary store.
 struct ProductionDictionarySource {
-    projects: Mutex<BTreeMap<ProjectId, Arc<dyn ProjectSnapshotQuery>>>,
+    projects: Mutex<BTreeMap<ProjectId, Weak<dyn ProjectSnapshotQuery>>>,
     preferences: Arc<dyn PreferenceService>,
 }
 
@@ -867,10 +867,12 @@ impl ProductionDictionarySource {
     }
 
     fn register_project(&self, project: ProjectId, query: Arc<dyn ProjectSnapshotQuery>) {
-        self.projects
+        let mut projects = self
+            .projects
             .lock()
-            .expect("production dictionary project registry lock")
-            .insert(project, query);
+            .expect("production dictionary project registry lock");
+        projects.retain(|_, query| query.upgrade().is_some());
+        projects.insert(project, Arc::downgrade(&query));
     }
 }
 
@@ -880,13 +882,18 @@ impl SavedDictionarySource for ProductionDictionarySource {
         project: SpellcheckProjectId,
         _revision: DictionaryRevision,
     ) -> Result<Vec<String>, DictionaryLoadError> {
-        let query = self
-            .projects
-            .lock()
-            .map_err(|_| DictionaryLoadError::new("project dictionary registry lock is poisoned"))?
-            .get(&project)
-            .cloned()
-            .ok_or_else(|| DictionaryLoadError::new("project dictionary source is unavailable"))?;
+        let query = {
+            let mut projects = self.projects.lock().map_err(|_| {
+                DictionaryLoadError::new("project dictionary registry lock is poisoned")
+            })?;
+            let query = projects.get(&project).and_then(Weak::upgrade);
+            if query.is_none() {
+                projects.remove(&project);
+            }
+            query.ok_or_else(|| {
+                DictionaryLoadError::new("project dictionary source is unavailable")
+            })?
+        };
         let snapshot = query
             .snapshot()
             .map_err(|error| DictionaryLoadError::new(error.to_string()))?;
@@ -3650,18 +3657,14 @@ mod dictionary_source_tests {
         let source = Arc::new(ProductionDictionarySource::new(preferences.clone()));
         let first = ProjectId::from_bytes([11; 16]);
         let second = ProjectId::from_bytes([12; 16]);
-        source.register_project(
-            first,
-            Arc::new(FixedProjectQuery {
-                snapshot: project_snapshot(first, "Quillflux"),
-            }),
-        );
-        source.register_project(
-            second,
-            Arc::new(FixedProjectQuery {
-                snapshot: project_snapshot(second, "Fablewright"),
-            }),
-        );
+        let first_query: Arc<dyn ProjectSnapshotQuery> = Arc::new(FixedProjectQuery {
+            snapshot: project_snapshot(first, "Quillflux"),
+        });
+        let second_query: Arc<dyn ProjectSnapshotQuery> = Arc::new(FixedProjectQuery {
+            snapshot: project_snapshot(second, "Fablewright"),
+        });
+        source.register_project(first, Arc::clone(&first_query));
+        source.register_project(second, Arc::clone(&second_query));
 
         assert_eq!(
             source
@@ -3703,6 +3706,7 @@ mod dictionary_source_tests {
         let request = SpellcheckRequest {
             language: LanguageId::EnUs,
             document_id: DocumentId::from_bytes([13; 16]),
+            project_id: first,
             document_revision: EditorRevision::default(),
             blocks: vec![RevisionedTextRange {
                 block_id: BlockId::from_bytes([13; 16]),
@@ -3719,6 +3723,78 @@ mod dictionary_source_tests {
             results.next().expect("spellcheck result").issues.is_empty(),
             "both persisted dictionary scopes must be active before recheck"
         );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_registry_releases_and_prunes_closed_or_failed_open_queries() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("parchmint-dictionary-source-lifetime-{nonce}.json"));
+        let preferences: Arc<dyn PreferenceService> = Arc::new(PreferenceCoordinator::new(
+            Arc::new(FilePreferenceStore::new(&path)),
+        ));
+        let source = ProductionDictionarySource::new(preferences);
+        let project = ProjectId::from_bytes([14; 16]);
+        let query: Arc<dyn ProjectSnapshotQuery> = Arc::new(FixedProjectQuery {
+            snapshot: project_snapshot(project, "Ephemeralword"),
+        });
+        let query_lifetime = Arc::downgrade(&query);
+
+        source.register_project(project, Arc::clone(&query));
+        drop(query);
+
+        assert!(
+            query_lifetime.upgrade().is_none(),
+            "the process-wide dictionary registry must not retain a closed session or a partial open"
+        );
+        let error = source
+            .project_words(project, DictionaryRevision::from(1))
+            .expect_err("a released project query must be unavailable");
+        assert!(error.to_string().contains("unavailable"));
+        assert!(
+            source.projects.lock().expect("project registry").is_empty(),
+            "failed lookup must prune the stale registry entry"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_registry_prunes_expired_entries_when_registering_a_project() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "parchmint-dictionary-source-register-prune-{nonce}.json"
+        ));
+        let preferences: Arc<dyn PreferenceService> = Arc::new(PreferenceCoordinator::new(
+            Arc::new(FilePreferenceStore::new(&path)),
+        ));
+        let source = ProductionDictionarySource::new(preferences);
+        let expired_one = ProjectId::from_bytes([15; 16]);
+        let expired_two = ProjectId::from_bytes([16; 16]);
+        let live = ProjectId::from_bytes([17; 16]);
+
+        for project in [expired_one, expired_two] {
+            let query: Arc<dyn ProjectSnapshotQuery> = Arc::new(FixedProjectQuery {
+                snapshot: project_snapshot(project, "Ephemeralword"),
+            });
+            source.register_project(project, query);
+        }
+
+        let live_query: Arc<dyn ProjectSnapshotQuery> = Arc::new(FixedProjectQuery {
+            snapshot: project_snapshot(live, "Retainedword"),
+        });
+        source.register_project(live, Arc::clone(&live_query));
+
+        let projects = source.projects.lock().expect("project registry");
+        assert_eq!(projects.len(), 1);
+        assert!(projects.contains_key(&live));
+        drop(projects);
         let _ = fs::remove_file(path);
     }
 }

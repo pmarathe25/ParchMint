@@ -13,3 +13,4 @@ ParchMint v1 is complete only when:
 9. System/Light/Dark switching, persistence, contrast, and open-window propagation pass.
 10. Installers/packages launch and operate on the supported platform matrix.
 11. No required workflow depends on a proprietary project database, installed Git executable, network service, or raw source editing.
+12. Locked dependencies, advisories, licenses, provenance, dependency notices, and repository-baseline and candidate SBOM verification pass.

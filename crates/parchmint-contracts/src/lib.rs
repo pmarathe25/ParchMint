@@ -132,6 +132,14 @@ impl From<serde_json::Error> for ContractError {
     }
 }
 
+macro_rules! decode_validate_reencode {
+    ($type:ty, $descriptor:expr, $json:expr) => {{
+        let value: $type = serde_json::from_slice($json)?;
+        validate_schema_name($descriptor, &value.schema)?;
+        let _canonical = serde_json::to_vec(&value)?;
+    }};
+}
+
 /// Returns the published descriptor for a contract ID.
 pub fn descriptor(schema_id: &str) -> Option<&'static ContractDescriptor> {
     CONTRACTS
@@ -144,19 +152,13 @@ pub fn descriptor(schema_id: &str) -> Option<&'static ContractDescriptor> {
 pub fn validate_fixture(descriptor: &ContractDescriptor, json: &[u8]) -> Result<(), ContractError> {
     match descriptor.schema_id {
         "parchmint.annotation-sidecar" => {
-            let value: generated::AnnotationSidecarV1 = serde_json::from_slice(json)?;
-            validate_schema_name(descriptor, &value.schema)?;
-            let _canonical = serde_json::to_vec(&value)?;
+            decode_validate_reencode!(generated::AnnotationSidecarV1, descriptor, json);
         }
         "parchmint.recovery-record" => {
-            let value: generated::RecoveryRecordV1 = serde_json::from_slice(json)?;
-            validate_schema_name(descriptor, &value.schema)?;
-            let _canonical = serde_json::to_vec(&value)?;
+            decode_validate_reencode!(generated::RecoveryRecordV1, descriptor, json);
         }
         "parchmint.cli-output" => {
-            let value: generated::CliOutputV1 = serde_json::from_slice(json)?;
-            validate_schema_name(descriptor, &value.schema)?;
-            let _canonical = serde_json::to_vec(&value)?;
+            decode_validate_reencode!(generated::CliOutputV1, descriptor, json);
         }
         _ => {
             let value: serde_json::Value = serde_json::from_slice(json)?;
@@ -299,6 +301,20 @@ mod tests {
             validate_fixture(descriptor, br#"{"schema":"parchmint.other/v1","ok":true}"#),
             Err(ContractError::SchemaMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn every_typed_descriptor_rejects_wrong_schema() {
+        for contract in CONTRACTS {
+            let fixture = read_file(fixture_paths(contract).first().unwrap());
+            let mut value = serde_json::from_slice::<serde_json::Value>(&fixture).unwrap();
+            value["schema"] = serde_json::Value::String("parchmint.other/v1".to_owned());
+
+            assert!(matches!(
+                validate_fixture(&contract.descriptor, &serde_json::to_vec(&value).unwrap()),
+                Err(ContractError::SchemaMismatch { .. })
+            ));
+        }
     }
 
     fn fixture_paths(contract: &ContractSpec) -> Vec<PathBuf> {

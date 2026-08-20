@@ -76,6 +76,15 @@ jobs:
       - name: Verify workspace metadata
         run: cargo +$RUST_TOOLCHAIN metadata --locked --offline --no-deps --format-version 1
 
+      - name: Verify dependency boundaries
+        run: >-
+          cargo +$RUST_TOOLCHAIN run
+          --locked
+          --offline
+          --package parchmint-ci
+          --
+          architecture verify
+
       - name: Verify formatting
         run: cargo +$RUST_TOOLCHAIN fmt --all --check
 

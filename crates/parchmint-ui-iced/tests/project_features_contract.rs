@@ -1056,6 +1056,13 @@ fn production_snapshot_hydrates_ordered_hierarchy_metadata_deleted_items_and_edi
             .active_document(),
         Some(id_string(fixture.manuscript_document.as_bytes()).as_str())
     );
+    assert_eq!(
+        workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .active_document(),
+        Some("05050505050505050505050505050505")
+    );
     assert!(
         !workspace
             .editor()

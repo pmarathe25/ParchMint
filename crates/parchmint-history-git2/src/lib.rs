@@ -26,7 +26,6 @@ use parchmint_project_fs::{
     NativeProjectFileSystem, ProjectFileSystem, ProjectRootCapability as NativeProjectRoot,
 };
 use parchmint_project_repository::{AtomicWritePlan, ProjectRootCapability, StagedResource};
-use sha2::{Digest, Sha256};
 
 const MAIN_REF: &str = "refs/heads/main";
 const FORMAT_MARKER: &str = "parchmint.historyFormat";
@@ -314,7 +313,7 @@ impl HistoryStore for Git2HistoryStore {
                     .ok_or_else(|| HistoryError::CorruptHistory {
                         reason: format!("checkpoint resource {} has no bytes", path.as_str()),
                     })?;
-            let actual = ContentHash::from_bytes(Sha256::digest(&bytes).into());
+            let actual = ContentHash::of_bytes(&bytes);
             if actual != content_hash {
                 return Err(HistoryError::CorruptHistory {
                     reason: format!("checkpoint resource {} has the wrong hash", path.as_str()),
@@ -884,7 +883,7 @@ fn build_tree(
                 reason: error.to_string(),
             })?;
         let bytes = normalize_line_endings(&bytes);
-        let actual_hash = ContentHash::from_bytes(Sha256::digest(&bytes).into());
+        let actual_hash = ContentHash::of_bytes(&bytes);
         if &actual_hash != expected_hash {
             return Err(HistoryError::InvalidInput {
                 field: "checkpoint resources",
@@ -1270,7 +1269,7 @@ fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, 
             .find_blob(entry.id)
             .map_err(|error| corrupt_git("load checkpoint resource", error))?;
         let bytes = blob.content().to_vec();
-        let hash = ContentHash::from_bytes(Sha256::digest(&bytes).into());
+        let hash = ContentHash::of_bytes(&bytes);
         resources.insert(path.clone(), hash);
         bytes_by_path.insert(path, bytes);
     }

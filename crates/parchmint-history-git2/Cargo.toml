@@ -17,4 +17,3 @@ parchmint-history-api = { path = "../parchmint-history-api" }
 parchmint-project-format = { path = "../parchmint-project-format" }
 parchmint-project-fs = { path = "../parchmint-project-fs" }
 parchmint-project-repository = { path = "../parchmint-project-repository" }
-sha2.workspace = true

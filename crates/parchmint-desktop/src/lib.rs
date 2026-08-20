@@ -730,8 +730,9 @@ impl DesktopRuntime {
             }
             (live.window, live.session)
         };
+        self.ui.project_closed(window).map_err(DesktopError::Ui)?;
         self.unregister(project, session);
-        self.ui.project_closed(window).map_err(DesktopError::Ui)
+        Ok(())
     }
 
     /// Applies a background final-save result only if both generations are
@@ -751,10 +752,10 @@ impl DesktopRuntime {
 
         match result {
             Ok(()) => {
-                self.unregister(&project, request.session);
                 self.ui
                     .project_closed(request.window)
                     .map_err(DesktopError::Ui)?;
+                self.unregister(&project, request.session);
                 Ok(FinalSaveResolution::Closed(request.window))
             }
             Err(error) => {

@@ -2457,6 +2457,10 @@ dependencies = [
 [[package]]
 name = "parchmint-diagnostics"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "parchmint-domain"
@@ -2471,7 +2475,6 @@ dependencies = [
  "parchmint-recovery-api",
  "parchmint-save",
  "serde_json",
- "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2535,7 +2538,6 @@ dependencies = [
  "parchmint-project-format",
  "parchmint-project-fs",
  "parchmint-project-repository",
- "sha2 0.11.0",
 ]
 
 [[package]]

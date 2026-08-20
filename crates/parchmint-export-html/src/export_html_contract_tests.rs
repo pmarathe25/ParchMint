@@ -111,8 +111,9 @@ fn export_is_deterministic_golden_html_bytes_and_embeds_project_css() {
         "p { color: #123456; }",
     );
 
-    assert_eq!(render(&fixture).as_bytes(), expected);
-    assert_eq!(render(&fixture).as_bytes(), expected);
+    let first_render = render(&fixture);
+    assert_eq!(first_render.as_bytes(), expected);
+    assert_eq!(render(&fixture), first_render);
 }
 
 #[test]
@@ -134,6 +135,34 @@ fn html_css_and_links_are_sanitized_without_remote_content() {
     assert!(!html.contains("<script"));
     assert!(!html.contains("onload="));
     assert!(!html.contains("cdn.example.test"));
+}
+
+#[test]
+fn css_escape_and_comment_obfuscation_cannot_hide_unsafe_constructs() {
+    let unsafe_styles = [
+        r"p { background: u\72l(https://attacker.invalid/escaped-url); }",
+        r"p { custom: \6a avascript:alert(1); }",
+        "p { background: u/**/rl(https://attacker.invalid/commented-url); }",
+        "@im/**/port \"https://attacker.invalid/import.css\";",
+    ];
+
+    for css in unsafe_styles {
+        let html = render(&plan(Vec::new(), BTreeMap::new(), css));
+        assert_eq!(
+            html,
+            "<!doctype html><html><head><meta charset=\"utf-8\"><style></style></head><body></body></html>",
+            "unsafe stylesheet was not rejected: {css}"
+        );
+    }
+}
+
+#[test]
+fn safe_css_declarations_and_at_rules_are_preserved() {
+    let css = "p, blockquote { color: #123456; margin: 1rem 2px; font-family: \"Source Serif\"; }\n@media print { .page-break { break-before: page; } }";
+
+    let html = render(&plan(Vec::new(), BTreeMap::new(), css));
+
+    assert!(html.contains(&format!("<style>{css}</style>")));
 }
 
 #[test]

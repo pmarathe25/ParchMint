@@ -255,6 +255,9 @@ impl ProjectRepository for InMemoryProjectRepository {
             .ok_or_else(|| RepositoryError::NotFound {
                 document: document.clone(),
             })?;
+        if state.leases.get(&path).copied() != Some(true) {
+            return Err(RepositoryError::NotFound { document });
+        }
         let bytes = state
             .projects
             .get(&path)
@@ -564,6 +567,19 @@ mod tests {
         assert_eq!(repo.load_document(DocumentId::new("doc")).unwrap(), b"body");
         assert_eq!(repo.body_load_count(), 1);
         drop(open);
+    }
+
+    #[test]
+    fn repository_rejects_document_load_after_lease_drop() {
+        let repo = InMemoryProjectRepository::new();
+        let open = repo.create(request("project")).unwrap();
+        assert_eq!(repo.load_document(DocumentId::new("doc")).unwrap(), b"body");
+        drop(open);
+
+        assert!(matches!(
+            repo.load_document(DocumentId::new("doc")),
+            Err(RepositoryError::NotFound { .. })
+        ));
     }
 
     #[test]

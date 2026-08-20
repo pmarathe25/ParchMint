@@ -120,7 +120,10 @@ fn write_chunked(output: &mut TemporaryExport<'_>, rendered: &str) -> Result<(),
 
 fn sanitize_css(css: &str) -> String {
     let normalized = css.replace("\r\n", "\n").replace('\r', "\n");
-    let lowered = normalized.to_ascii_lowercase();
+    let Some(canonical) = canonicalize_css_for_security(&normalized) else {
+        return String::new();
+    };
+    let lowered = canonical.to_ascii_lowercase();
     if [
         "@import",
         "url(",
@@ -136,6 +139,111 @@ fn sanitize_css(css: &str) -> String {
     } else {
         normalized
     }
+}
+
+/// Builds a conservative comparison form without changing the CSS we emit.
+///
+/// CSS comments can split a dangerous name and CSS escapes can spell any part
+/// of one. Removing comments and decoding escapes before applying the policy
+/// closes both forms of obfuscation. This is deliberately only a lexical
+/// security gate, not a CSS parser: an unterminated comment rejects the whole
+/// stylesheet, and safe input is returned byte-for-byte after newline
+/// normalization.
+fn canonicalize_css_for_security(css: &str) -> Option<String> {
+    let characters: Vec<char> = css.chars().collect();
+    let mut canonical = String::with_capacity(css.len());
+    let mut cursor = 0;
+    let mut quote = None;
+
+    while cursor < characters.len() {
+        let character = characters[cursor];
+        if quote.is_none()
+            && character == '/'
+            && characters.get(cursor + 1).is_some_and(|next| *next == '*')
+        {
+            cursor += 2;
+            let mut terminated = false;
+            while cursor < characters.len() {
+                if characters[cursor] == '*'
+                    && characters.get(cursor + 1).is_some_and(|next| *next == '/')
+                {
+                    cursor += 2;
+                    terminated = true;
+                    break;
+                }
+                cursor += 1;
+            }
+            if !terminated {
+                return None;
+            }
+            continue;
+        }
+
+        if character == '\\' {
+            cursor += 1;
+            decode_css_escape(&characters, &mut cursor, &mut canonical);
+            continue;
+        }
+
+        if matches!(character, '\'' | '"') {
+            match quote {
+                Some(current) if current == character => quote = None,
+                None => quote = Some(character),
+                _ => {}
+            }
+        }
+        canonical.push(character);
+        cursor += 1;
+    }
+
+    Some(canonical)
+}
+
+fn decode_css_escape(characters: &[char], cursor: &mut usize, output: &mut String) {
+    let Some(&first) = characters.get(*cursor) else {
+        output.push(char::REPLACEMENT_CHARACTER);
+        return;
+    };
+
+    if matches!(first, '\n' | '\r' | '\u{000c}') {
+        *cursor += 1;
+        return;
+    }
+
+    if first.is_ascii_hexdigit() {
+        let mut value = 0_u32;
+        let mut digits = 0;
+        while digits < 6 {
+            let Some(character) = characters.get(*cursor) else {
+                break;
+            };
+            let Some(digit) = character.to_digit(16) else {
+                break;
+            };
+            value = value * 16 + digit;
+            *cursor += 1;
+            digits += 1;
+        }
+        if characters
+            .get(*cursor)
+            .is_some_and(|character| is_css_whitespace(*character))
+        {
+            *cursor += 1;
+        }
+        output.push(
+            char::from_u32(value)
+                .filter(|_| value != 0)
+                .unwrap_or(char::REPLACEMENT_CHARACTER),
+        );
+        return;
+    }
+
+    output.push(first);
+    *cursor += 1;
+}
+
+fn is_css_whitespace(character: char) -> bool {
+    matches!(character, '\t' | '\n' | '\r' | '\u{000c}' | ' ')
 }
 
 fn sanitize_body(body: &str) -> String {

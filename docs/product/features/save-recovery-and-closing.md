@@ -10,7 +10,7 @@
 - **SAVE-008:** Only dirty canonical resources are serialized and written.
 - **SAVE-009:** Canonical writes use crash-safe temporary-write/flush/atomic-replace behavior appropriate to each platform.
 - **SAVE-010:** A completed history checkpoint corresponds to successfully written canonical state.
-- **SAVE-011:** A high-frequency recovery journal protects changes after the latest completed autosave.
+- **SAVE-011:** A high-frequency recovery journal protects changes after the latest completed durable save or checkpoint.
 - **SAVE-012:** Recovery data is implementation-specific, versioned, and never the sole copy of completed authored state.
 - **SAVE-013:** On save failure, editing remains available, the error persists visibly, recovery remains intact, and the application does not claim Saved.
 - **SAVE-014:** A normal close waits asynchronously for final save. Failure keeps the project open with Retry and Cancel Close.

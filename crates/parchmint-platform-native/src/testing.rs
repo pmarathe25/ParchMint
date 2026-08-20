@@ -49,23 +49,51 @@ impl PausedMenuInstall {
     }
 }
 
+pub struct PausedWindowWork {
+    started: Receiver<()>,
+    resume: Option<SyncSender<()>>,
+}
+
+impl PausedWindowWork {
+    pub fn wait_until_started(&self) {
+        self.started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("window worker did not start");
+    }
+
+    pub fn release(mut self) {
+        self.resume
+            .take()
+            .expect("window worker was already released")
+            .send(())
+            .expect("window worker stopped before release");
+    }
+}
+
 pub struct NativeFixture {
     _platform: NativePlatform,
     backend: Arc<FixtureBackend>,
     services: Arc<NativeServices>,
     registry: IcedWindowRegistry,
+    window_work_pauses: Arc<WindowWorkPauses>,
 }
 
 impl NativeFixture {
     pub fn new() -> Self {
         let backend = Arc::new(FixtureBackend::default());
-        let (platform, services) = NativePlatform::with_backend(backend.clone());
+        let window_work_pauses = Arc::new(WindowWorkPauses::default());
+        let pauses = Arc::clone(&window_work_pauses);
+        let (platform, services) = NativePlatform::with_backend_and_before_window_work(
+            backend.clone(),
+            Arc::new(move || pauses.wait_if_paused()),
+        );
         let registry = platform.iced_window_registry();
         Self {
             _platform: platform,
             backend,
             services,
             registry,
+            window_work_pauses,
         }
     }
 
@@ -190,6 +218,29 @@ impl NativeFixture {
         }
     }
 
+    pub fn pause_next_window_work(&self) -> PausedWindowWork {
+        let (started_sender, started) = sync_channel(0);
+        let (resume, resume_receiver) = sync_channel(0);
+        let previous = self
+            .window_work_pauses
+            .next
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .replace(WindowWorkPause {
+                started: started_sender,
+                resume: resume_receiver,
+            });
+        assert!(previous.is_none(), "a window worker is already paused");
+        PausedWindowWork {
+            started,
+            resume: Some(resume),
+        }
+    }
+
+    pub fn dialog_invocations(&self) -> u64 {
+        self.backend.dialog_invocations.load(Ordering::Relaxed)
+    }
+
     pub fn opened_external_urls(&self) -> Vec<String> {
         self.backend
             .opened_external_urls
@@ -230,11 +281,36 @@ struct FixtureBackend {
     clipboard: Mutex<UntrustedClipboardContent>,
     appearance: Mutex<SystemAppearance>,
     appearance_reads: AtomicU64,
+    dialog_invocations: AtomicU64,
     opened_external_urls: Mutex<Vec<String>>,
     next_menu_pause: Mutex<Option<BackendMenuPause>>,
 }
 
 struct BackendMenuPause {
+    started: SyncSender<()>,
+    resume: Receiver<()>,
+}
+
+#[derive(Default)]
+struct WindowWorkPauses {
+    next: Mutex<Option<WindowWorkPause>>,
+}
+
+impl WindowWorkPauses {
+    fn wait_if_paused(&self) {
+        let pause = self
+            .next
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(pause) = pause {
+            let _ = pause.started.send(());
+            let _ = pause.resume.recv();
+        }
+    }
+}
+
+struct WindowWorkPause {
     started: SyncSender<()>,
     resume: Receiver<()>,
 }
@@ -246,6 +322,7 @@ impl Default for FixtureBackend {
             clipboard: Mutex::new(UntrustedClipboardContent::empty()),
             appearance: Mutex::new(SystemAppearance::Light),
             appearance_reads: AtomicU64::new(0),
+            dialog_invocations: AtomicU64::new(0),
             opened_external_urls: Mutex::new(Vec::new()),
             next_menu_pause: Mutex::new(None),
         }
@@ -288,6 +365,7 @@ impl NativeBackend for FixtureBackend {
         _window: WindowCapability,
         _request: PathDialog,
     ) -> Result<Option<UntrustedPathSelection>, PlatformError> {
+        self.dialog_invocations.fetch_add(1, Ordering::Relaxed);
         #[cfg(target_os = "windows")]
         let path = PathBuf::from(r"C:\outside\project.parchment");
         #[cfg(not(target_os = "windows"))]

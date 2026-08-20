@@ -110,11 +110,18 @@ fn external_open_requires_a_validated_https_intent() {
         .expect("a checked HTTPS URL should be accepted");
     assert_eq!(https.scheme(), "https");
 
-    assert!(ValidatedExternalIntent::https_url("javascript:alert(1)").is_err());
-    assert!(ValidatedExternalIntent::https_url("file:///etc/passwd").is_err());
-    assert!(ValidatedExternalIntent::https_url("https://").is_err());
-    assert!(ValidatedExternalIntent::https_url("https://user@parchmint.example").is_err());
-    assert!(ValidatedExternalIntent::https_url("https://parchmint.example/%zz").is_err());
+    for input in [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "https://",
+        "https://user@parchmint.example",
+        "https://parchmint.example/%zz",
+    ] {
+        assert!(
+            ValidatedExternalIntent::https_url(input).is_err(),
+            "invalid HTTPS intent accepted: {input}"
+        );
+    }
 }
 
 #[test]

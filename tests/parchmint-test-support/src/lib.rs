@@ -343,6 +343,9 @@ fn collect_files(
         let entry = entry?;
         let metadata = entry.file_type()?;
         if metadata.is_dir() {
+            if is_git_directory(&entry.path()) {
+                continue;
+            }
             collect_files(root, &entry.path(), output)?;
             continue;
         }
@@ -371,12 +374,19 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> io::Result<()> {
         let file_type = entry.file_type()?;
 
         if file_type.is_dir() {
+            if is_git_directory(&source_path) {
+                continue;
+            }
             copy_dir_recursive(&source_path, &target_path)?;
         } else if file_type.is_file() {
             fs::copy(&source_path, &target_path)?;
         }
     }
     Ok(())
+}
+
+fn is_git_directory(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == ".git")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,6 +592,30 @@ mod tests {
             first.canonical_bytes().expect("fixture should decode"),
             second.canonical_bytes().expect("fixture should decode")
         );
+    }
+
+    #[test]
+    fn fixture_helpers_skip_git_but_keep_parchmint() {
+        let source = temporary_root();
+        let target = temporary_root();
+        fs::create_dir_all(source.join(".git")).expect("git directory should be created");
+        fs::create_dir_all(source.join(".parchmint"))
+            .expect("parchmint directory should be created");
+        fs::write(source.join(".git/HEAD"), b"git metadata")
+            .expect("git metadata should be written");
+        fs::write(source.join(".parchmint/format-version"), b"format control")
+            .expect("parchmint metadata should be written");
+
+        copy_dir_recursive(&source, &target).expect("fixture should be copied");
+        assert!(!target.join(".git").exists());
+        assert!(target.join(".parchmint/format-version").is_file());
+
+        let files = read_fixture_files(&source).expect("fixture files should be collected");
+        assert!(!files.contains_key(".git/HEAD"));
+        assert!(files.contains_key(".parchmint/format-version"));
+
+        fs::remove_dir_all(&source).expect("source fixture should be removed");
+        fs::remove_dir_all(&target).expect("copied fixture should be removed");
     }
 
     struct ContinueSchedule;

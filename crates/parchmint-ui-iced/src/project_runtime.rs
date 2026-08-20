@@ -36,7 +36,7 @@ use parchmint_ui_api::{ProjectSaveKind, ProjectSnapshot, ProjectUiPorts};
 use crate::{
     DragDestination, EditorCommand, EditorEffect, EditorPane, FindMatch, HierarchyItemKind,
     HistoryRestoreScope, ProjectEffect, RestoreLocation, SpellingDictionaryScope, SpellingMenu,
-    TreeClipboardKind,
+    TreeClipboardKind, stable_id_string,
 };
 
 type RuntimeFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -1865,16 +1865,6 @@ fn parse_stable_hex(value: &str, field: &'static str) -> Result<[u8; 16], Projec
     Ok(bytes)
 }
 
-fn stable_id_string(bytes: &[u8; 16]) -> String {
-    use std::fmt::Write as _;
-
-    let mut serialized = String::with_capacity(32);
-    for byte in bytes {
-        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    serialized
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -2372,7 +2362,9 @@ mod tests {
         let (snapshot, node, document, field) = fixture();
         let resolver = StableIdResolvers::from_snapshot(&snapshot);
 
-        assert_eq!(resolver.node(&stable_id_string(node.as_bytes())), Ok(node));
+        let node_id = stable_id_string(node.as_bytes());
+        assert_eq!(node_id, "03030303030303030303030303030303");
+        assert_eq!(resolver.node(&node_id), Ok(node));
         assert_eq!(
             resolver.document(&stable_id_string(document.as_bytes())),
             Ok(document)

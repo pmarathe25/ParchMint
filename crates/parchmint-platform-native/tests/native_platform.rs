@@ -294,42 +294,41 @@ fn silent_system_changes_do_not_create_events_or_background_reads() {
 
 #[test]
 fn stale_capabilities_reject_every_window_scoped_native_service() {
+    macro_rules! assert_stale {
+        ($window:expr, $future:expr) => {
+            assert_eq!(
+                block_on($future),
+                Err(PlatformError::stale_capability($window))
+            );
+        };
+    }
+
     let native = fixture();
     let live = native.register_window(live_window());
     let stale = stale_window();
     native.close_window(live);
     native.register_window(live_window());
 
-    assert_eq!(
-        block_on(native.menus().install(stale, menu())),
-        Err(PlatformError::stale_capability(stale))
+    assert_stale!(stale, native.menus().install(stale, menu()));
+    assert_stale!(
+        stale,
+        native
+            .clipboard()
+            .write(stale, ClipboardContent::plain_text("stale"))
     );
-    assert_eq!(
-        block_on(
-            native
-                .clipboard()
-                .write(stale, ClipboardContent::plain_text("stale"))
-        ),
-        Err(PlatformError::stale_capability(stale))
+    assert_stale!(
+        stale,
+        native.dialogs().choose_path(stale, PathDialog::default())
     );
-    assert_eq!(
-        block_on(native.dialogs().choose_path(stale, PathDialog::default())),
-        Err(PlatformError::stale_capability(stale))
-    );
-    assert_eq!(
-        block_on(
-            native
-                .clipboard()
-                .read(stale, ClipboardFormats::plain_text())
-        ),
-        Err(PlatformError::stale_capability(stale))
+    assert_stale!(
+        stale,
+        native
+            .clipboard()
+            .read(stale, ClipboardFormats::plain_text())
     );
     let intent = ValidatedExternalIntent::https_url("https://parchmint.example/help")
         .expect("validated HTTPS intent");
-    assert_eq!(
-        block_on(native.external_open().open(stale, intent)),
-        Err(PlatformError::stale_capability(stale))
-    );
+    assert_stale!(stale, native.external_open().open(stale, intent));
 }
 
 #[test]
@@ -347,6 +346,24 @@ fn worker_dispatch_is_nonblocking_and_revalidates_before_completion() {
         block_on(install),
         Err(PlatformError::stale_capability(window))
     );
+}
+
+#[test]
+fn closing_a_window_before_dispatched_work_begins_prevents_the_dialog_side_effect() {
+    let native = fixture();
+    let window = native.register_window(live_window());
+    let paused = native.pause_next_window_work();
+
+    let choose_path = native.dialogs().choose_path(window, PathDialog::default());
+    paused.wait_until_started();
+    native.close_window(window);
+    paused.release();
+
+    assert_eq!(
+        block_on(choose_path),
+        Err(PlatformError::stale_capability(window))
+    );
+    assert_eq!(native.dialog_invocations(), 0);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path};
 use std::process::{Command, ExitCode};
@@ -15,6 +15,48 @@ const LOCKFILE_PATH: &str = "Cargo.lock";
 const SBOM_BASELINE_PATH: &str = "supply-chain/sbom-baseline.toml";
 const RELEASE_INPUTS_PATH: &str = "packaging/release-inputs.toml";
 const RELEASE_MANIFEST_PATH: &str = "packaging/release-candidates.toml";
+const CRATES_DIRECTORY: &str = "crates";
+const COMPOSITION_ROOT_CRATES: &[&str] = &["parchmint-core-cli", "parchmint-desktop"];
+const CONCRETE_ADAPTER_CRATES: &[&str] = &[
+    "parchmint-editor-iced",
+    "parchmint-export-html",
+    "parchmint-history-git2",
+    "parchmint-platform-native",
+    "parchmint-preferences",
+    "parchmint-project-fs",
+    "parchmint-recovery-fs",
+    "parchmint-search-sqlite",
+    "parchmint-spellcheck-en-us",
+    "parchmint-ui-iced",
+    "parchmint-workspace-state",
+];
+// These two crates currently combine their public contract and file-backed
+// implementation. The UI API already depends on both contracts; keep that
+// deliberate exception visible until a second implementation justifies a
+// contract split.
+const REVIEWED_PROTECTED_ADAPTER_EDGES: &[(&str, &str)] = &[
+    ("parchmint-ui-api", "parchmint-preferences"),
+    ("parchmint-ui-api", "parchmint-workspace-state"),
+];
+const REVIEWED_NON_ADAPTER_CRATES: &[&str] = &[
+    "parchmint-application",
+    "parchmint-contracts",
+    "parchmint-design-system",
+    "parchmint-diagnostics",
+    "parchmint-domain",
+    "parchmint-editor-api",
+    "parchmint-editor-core",
+    "parchmint-export-api",
+    "parchmint-history-api",
+    "parchmint-platform-api",
+    "parchmint-project-format",
+    "parchmint-project-repository",
+    "parchmint-recovery-api",
+    "parchmint-save",
+    "parchmint-search-api",
+    "parchmint-spellcheck-api",
+    "parchmint-ui-api",
+];
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -37,6 +79,11 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             verify_exceptions(Path::new(EXCEPTIONS_PATH), today)?;
             verify_artifacts(Path::new(ARTIFACTS_PATH))?;
             println!("supply-chain exception and bundled-artifact policies are valid");
+            Ok(())
+        }
+        (Some("architecture"), Some("verify"), None) => {
+            verify_dependency_boundaries(Path::new(CRATES_DIRECTORY))?;
+            println!("dependency boundaries are valid");
             Ok(())
         }
         (Some("sbom"), Some("verify"), None) => {
@@ -64,9 +111,185 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             Ok(())
         }
         _ => Err(
-            "usage: cargo parchmint-ci verify\n       cargo parchmint-ci sbom <verify|generate>\n       cargo parchmint-ci release inputs verify\n       cargo parchmint-ci release verify".to_owned(),
+            "usage: cargo parchmint-ci verify\n       cargo parchmint-ci architecture verify\n       cargo parchmint-ci sbom <verify|generate>\n       cargo parchmint-ci release inputs verify\n       cargo parchmint-ci release verify".to_owned(),
         ),
     }
+}
+
+/// Verifies that adapters remain behind the application and API boundaries.
+///
+/// The desktop and core CLI are the reviewed composition roots. Domain,
+/// application, and API crates may depend on contracts and ports, but must not
+/// acquire a concrete adapter directly. Every product crate is classified by
+/// the reviewed constants above so a newly added adapter cannot silently evade
+/// this check.
+fn verify_dependency_boundaries(crates_directory: &Path) -> Result<(), String> {
+    let workspace_manifest_path = crates_directory
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("Cargo.toml");
+    let workspace_dependencies =
+        workspace_dependency_packages(&read_toml(&workspace_manifest_path)?);
+    let mut dependencies_by_crate = BTreeMap::new();
+    let entries = fs::read_dir(crates_directory).map_err(|error| {
+        format!(
+            "cannot read crate manifests in {}: {error}",
+            crates_directory.display()
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read crate directory entry: {error}"))?;
+        let manifest_path = entry.path().join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest = read_toml(&manifest_path)?;
+        let package = manifest
+            .get("package")
+            .and_then(Value::as_table)
+            .ok_or_else(|| format!("{} is missing a [package] table", manifest_path.display()))?;
+        let name = required_text(package, "name", &manifest_path.display().to_string())?;
+        dependencies_by_crate.insert(
+            name,
+            manifest_dependencies(&manifest, &workspace_dependencies),
+        );
+    }
+
+    verify_reviewed_package_policy(dependencies_by_crate.keys())?;
+    verify_dependency_boundary_map(&dependencies_by_crate)
+}
+
+fn workspace_dependency_packages(manifest: &Table) -> BTreeMap<String, String> {
+    manifest
+        .get("workspace")
+        .and_then(Value::as_table)
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+        .map(|dependencies| {
+            dependencies
+                .iter()
+                .map(|(name, value)| (name.clone(), explicit_package_name(name, value)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn explicit_package_name(dependency_name: &str, dependency: &Value) -> String {
+    dependency
+        .as_table()
+        .and_then(|details| details.get("package"))
+        .and_then(Value::as_str)
+        .unwrap_or(dependency_name)
+        .to_owned()
+}
+
+fn manifest_dependencies(
+    manifest: &Table,
+    workspace_dependencies: &BTreeMap<String, String>,
+) -> BTreeSet<String> {
+    let mut dependencies = BTreeSet::new();
+    collect_manifest_dependencies(manifest, workspace_dependencies, &mut dependencies);
+    dependencies
+}
+
+/// Development-only dependencies are deliberately excluded: contract and
+/// integration tests may use concrete adapters as fixtures without changing a
+/// production crate's dependency direction.
+fn collect_manifest_dependencies(
+    table: &Table,
+    workspace_dependencies: &BTreeMap<String, String>,
+    dependencies: &mut BTreeSet<String>,
+) {
+    for section in ["dependencies", "build-dependencies"] {
+        let Some(dependency_table) = table.get(section).and_then(Value::as_table) else {
+            continue;
+        };
+        dependencies.extend(dependency_table.iter().map(|(name, value)| {
+            let declared = explicit_package_name(name, value);
+            if declared == name.as_str()
+                && value
+                    .as_table()
+                    .and_then(|details| details.get("workspace"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+            {
+                workspace_dependencies
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(declared)
+            } else {
+                declared
+            }
+        }));
+    }
+    if let Some(targets) = table.get("target").and_then(Value::as_table) {
+        for target in targets.values().filter_map(Value::as_table) {
+            collect_manifest_dependencies(target, workspace_dependencies, dependencies);
+        }
+    }
+}
+
+fn verify_reviewed_package_policy<'a>(
+    package_names: impl Iterator<Item = &'a String>,
+) -> Result<(), String> {
+    let actual = package_names.map(String::as_str).collect::<BTreeSet<_>>();
+    let reviewed = COMPOSITION_ROOT_CRATES
+        .iter()
+        .chain(CONCRETE_ADAPTER_CRATES)
+        .chain(REVIEWED_NON_ADAPTER_CRATES)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let unreviewed = actual.difference(&reviewed).copied().collect::<Vec<_>>();
+    let missing = reviewed.difference(&actual).copied().collect::<Vec<_>>();
+    if unreviewed.is_empty() && missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "dependency boundary package policy is stale; classify new crates and remove retired crates explicitly\n  unreviewed: {}\n  missing: {}",
+        if unreviewed.is_empty() {
+            "none".to_owned()
+        } else {
+            unreviewed.join(", ")
+        },
+        if missing.is_empty() {
+            "none".to_owned()
+        } else {
+            missing.join(", ")
+        }
+    ))
+}
+
+fn verify_dependency_boundary_map(
+    dependencies_by_crate: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<(), String> {
+    let violations = dependencies_by_crate
+        .iter()
+        .filter(|(crate_name, _)| is_protected_boundary_crate(crate_name))
+        .flat_map(|(crate_name, dependencies)| {
+            dependencies
+                .iter()
+                .filter(|dependency| {
+                    CONCRETE_ADAPTER_CRATES.contains(&dependency.as_str())
+                        && !REVIEWED_PROTECTED_ADAPTER_EDGES
+                            .contains(&(crate_name.as_str(), dependency.as_str()))
+                })
+                .map(move |dependency| format!("{crate_name} -> {dependency}"))
+        })
+        .collect::<Vec<_>>();
+    if violations.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "concrete adapters may only be composed outside protected domain, application, and API crates:\n  - {}",
+        violations.join("\n  - ")
+    ))
+}
+
+fn is_protected_boundary_crate(crate_name: &str) -> bool {
+    matches!(crate_name, "parchmint-domain" | "parchmint-application")
+        || crate_name.ends_with("-api")
 }
 
 fn verify_release_inputs(path: &Path, require_ready: bool) -> Result<(), String> {
@@ -224,25 +447,33 @@ fn verify_release(manifest_path: &Path) -> Result<(), String> {
             manifest.source_revision
         ));
     }
-    verify_release_file_hash(
-        &manifest.dependency_notices,
-        &manifest.dependency_notices_sha256,
-        "dependency notices",
-    )?;
+    for (path, digest, label) in [
+        (
+            manifest.dependency_notices.as_str(),
+            manifest.dependency_notices_sha256.as_str(),
+            "dependency notices",
+        ),
+        (
+            manifest.sbom.as_str(),
+            manifest.sbom_sha256.as_str(),
+            "release SBOM",
+        ),
+        (
+            manifest.provenance.as_str(),
+            manifest.provenance_sha256.as_str(),
+            "release provenance",
+        ),
+        (
+            manifest.release_gate_evidence.as_str(),
+            manifest.release_gate_evidence_sha256.as_str(),
+            "release-gate evidence",
+        ),
+    ] {
+        verify_release_file_hash(path, digest, label)?;
+    }
     verify_dependency_notices(Path::new(&manifest.dependency_notices))?;
-    verify_release_file_hash(&manifest.sbom, &manifest.sbom_sha256, "release SBOM")?;
     verify_release_sbom(Path::new(&manifest.sbom))?;
-    verify_release_file_hash(
-        &manifest.provenance,
-        &manifest.provenance_sha256,
-        "release provenance",
-    )?;
     verify_release_provenance(Path::new(&manifest.provenance), &manifest)?;
-    verify_release_file_hash(
-        &manifest.release_gate_evidence,
-        &manifest.release_gate_evidence_sha256,
-        "release-gate evidence",
-    )?;
     verify_release_gate_evidence(Path::new(&manifest.release_gate_evidence), &manifest)?;
 
     for candidate in &manifest.candidates {
@@ -284,34 +515,30 @@ fn verify_release(manifest_path: &Path) -> Result<(), String> {
                 candidate,
             )?;
         }
-        verify_release_evidence(
-            &candidate.install_evidence,
-            &candidate.install_evidence_sha256,
-            "install",
-            &manifest,
-            candidate,
-        )?;
-        verify_release_evidence(
-            &candidate.launch_evidence,
-            &candidate.launch_evidence_sha256,
-            "launch",
-            &manifest,
-            candidate,
-        )?;
-        verify_release_evidence(
-            &candidate.upgrade_evidence,
-            &candidate.upgrade_evidence_sha256,
-            "upgrade",
-            &manifest,
-            candidate,
-        )?;
-        verify_release_evidence(
-            &candidate.uninstall_evidence,
-            &candidate.uninstall_evidence_sha256,
-            "uninstall",
-            &manifest,
-            candidate,
-        )?;
+        for (path, digest, kind) in [
+            (
+                candidate.install_evidence.as_str(),
+                candidate.install_evidence_sha256.as_str(),
+                "install",
+            ),
+            (
+                candidate.launch_evidence.as_str(),
+                candidate.launch_evidence_sha256.as_str(),
+                "launch",
+            ),
+            (
+                candidate.upgrade_evidence.as_str(),
+                candidate.upgrade_evidence_sha256.as_str(),
+                "upgrade",
+            ),
+            (
+                candidate.uninstall_evidence.as_str(),
+                candidate.uninstall_evidence_sha256.as_str(),
+                "uninstall",
+            ),
+        ] {
+            verify_release_evidence(path, digest, kind, &manifest, candidate)?;
+        }
 
         match candidate.native_ui_validation {
             NativeUiValidation::Passed => verify_release_evidence(
@@ -2647,6 +2874,107 @@ mod tests {
             _ => panic!("unknown release schema {name}"),
         };
         serde_json::from_str(text).expect("release schema must be valid JSON")
+    }
+
+    #[test]
+    fn dependency_boundaries_allow_adapters_only_outside_protected_crates() {
+        let dependencies = BTreeMap::from([
+            (
+                "parchmint-desktop".to_owned(),
+                BTreeSet::from(["parchmint-project-fs".to_owned()]),
+            ),
+            ("parchmint-domain".to_owned(), BTreeSet::new()),
+            (
+                "parchmint-ui-api".to_owned(),
+                BTreeSet::from([
+                    "parchmint-platform-api".to_owned(),
+                    "parchmint-preferences".to_owned(),
+                    "parchmint-workspace-state".to_owned(),
+                ]),
+            ),
+        ]);
+
+        verify_dependency_boundary_map(&dependencies)
+            .expect("composition roots may assemble concrete adapters");
+    }
+
+    #[test]
+    fn dependency_boundaries_reject_adapters_in_protected_crates() {
+        let dependencies = BTreeMap::from([
+            ("parchmint-core-cli".to_owned(), BTreeSet::new()),
+            (
+                "parchmint-application".to_owned(),
+                BTreeSet::from(["parchmint-project-fs".to_owned()]),
+            ),
+            (
+                "parchmint-history-api".to_owned(),
+                BTreeSet::from(["parchmint-history-git2".to_owned()]),
+            ),
+        ]);
+
+        let error = verify_dependency_boundary_map(&dependencies)
+            .expect_err("protected crates must not depend on concrete adapters");
+        assert!(error.contains("parchmint-application -> parchmint-project-fs"));
+        assert!(error.contains("parchmint-history-api -> parchmint-history-git2"));
+    }
+
+    #[test]
+    fn manifest_dependencies_resolve_aliases_and_production_build_sections() {
+        let workspace = table(
+            r#"
+            [workspace.dependencies]
+            workspace-fs = { package = "parchmint-project-fs", path = "crates/parchmint-project-fs" }
+            "#,
+        );
+        let manifest = table(
+            r#"
+            [dependencies]
+            renamed-history = { package = "parchmint-history-git2", path = "../history" }
+            workspace-fs.workspace = true
+
+            [build-dependencies]
+            build-search = { package = "parchmint-search-sqlite", path = "../search" }
+
+            [target.'cfg(unix)'.dependencies]
+            target-ui = { package = "parchmint-ui-iced", path = "../ui" }
+
+            [target.'cfg(windows)'.build-dependencies]
+            target-native = { package = "parchmint-platform-native", path = "../native" }
+
+            [dev-dependencies]
+            test-only-fs = { package = "parchmint-recovery-fs", path = "../recovery" }
+
+            [target.'cfg(test)'.dev-dependencies]
+            test-only-export = { package = "parchmint-export-html", path = "../export" }
+            "#,
+        );
+
+        assert_eq!(
+            manifest_dependencies(&manifest, &workspace_dependency_packages(&workspace)),
+            BTreeSet::from([
+                "parchmint-history-git2".to_owned(),
+                "parchmint-platform-native".to_owned(),
+                "parchmint-project-fs".to_owned(),
+                "parchmint-search-sqlite".to_owned(),
+                "parchmint-ui-iced".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn package_policy_requires_explicit_review_for_new_crates() {
+        let mut packages = COMPOSITION_ROOT_CRATES
+            .iter()
+            .chain(CONCRETE_ADAPTER_CRATES)
+            .chain(REVIEWED_NON_ADAPTER_CRATES)
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        verify_reviewed_package_policy(packages.iter()).expect("reviewed package inventory");
+
+        packages.push("parchmint-new-adapter".to_owned());
+        let error = verify_reviewed_package_policy(packages.iter())
+            .expect_err("new crates require explicit architecture classification");
+        assert!(error.contains("unreviewed: parchmint-new-adapter"));
     }
 
     #[test]

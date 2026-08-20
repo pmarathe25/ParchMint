@@ -6,6 +6,8 @@ use parchmint_editor_api::ViewId;
 use parchmint_preferences::ResolvedAppearance;
 use parchmint_ui_api::ProjectSnapshot;
 
+use crate::stable_id_string;
+
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
 const TAB_MIN_WIDTH: f32 = 64.0;
@@ -2716,16 +2718,6 @@ fn production_view_id(snapshot: &ProjectSnapshot, pane: EditorPane) -> ViewId {
 
 fn count_words(body: &str) -> usize {
     body.split_whitespace().count()
-}
-
-fn stable_id_string(bytes: &[u8; 16]) -> String {
-    use std::fmt::Write as _;
-
-    let mut serialized = String::with_capacity(32);
-    for byte in bytes {
-        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    serialized
 }
 
 fn snapshot_comment_anchors(snapshot: &ProjectSnapshot) -> BTreeMap<String, CommentAnchor> {

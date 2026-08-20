@@ -15,6 +15,7 @@ fn request(text: &str) -> SpellcheckRequest {
     SpellcheckRequest {
         language: LanguageId::EnUs,
         document_id: DocumentId::from_bytes([1; 16]),
+        project_id: ProjectId::from_bytes([1; 16]),
         document_revision: EditorRevision::from(1),
         blocks: vec![parchmint_spellcheck_api::RevisionedTextRange {
             block_id: BlockId::from_bytes([2; 16]),
@@ -68,6 +69,7 @@ fn global_reload_failure_is_recoverable_without_erasing_saved_words() {
 
     let suggestions = block_on_test(harness.service().suggest(SuggestionRequest {
         document_id: DocumentId::from_bytes([1; 16]),
+        project_id: ProjectId::from_bytes([1; 16]),
         block_id: BlockId::from_bytes([2; 16]),
         range: EditorSelection::new(DocumentPosition::from(0), DocumentPosition::from(9)),
         word: "Quillflux".to_owned(),
@@ -97,6 +99,7 @@ fn oversized_suggestion_words_are_rejected_before_engine_work() {
     let service = EnUsSpellcheckService::default();
     let result = block_on_test(service.suggest(SuggestionRequest {
         document_id: DocumentId::from_bytes([1; 16]),
+        project_id: ProjectId::from_bytes([1; 16]),
         block_id: BlockId::from_bytes([2; 16]),
         range: EditorSelection::new(DocumentPosition::from(0), DocumentPosition::from(257)),
         word: "x".repeat(257),
@@ -120,10 +123,12 @@ fn saved_project_dictionary_is_selected_by_loaded_revision() {
     .expect("project dictionary reload");
 
     let mut current = request("Zzquillfluxzz");
+    current.project_id = project;
     current.project_dictionary = DictionaryRevision::from(2);
     assert!(harness.check(current).expect("current revision").is_empty());
 
     let mut old = request("Zzquillfluxzz");
+    old.project_id = project;
     old.document_id = DocumentId::from_bytes([2; 16]);
     old.project_dictionary = DictionaryRevision::from(1);
     assert!(!harness.check(old).expect("old revision").is_empty());

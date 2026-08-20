@@ -84,6 +84,8 @@ a fixed status message; machine output carries only safe summaries (such as
 `checkpoint_id` or `hit_count`), never project paths, user prose, search text,
 or dictionary entries.
 
-The CLI offers a fixed set of operations and accepts project-relative paths.
-It does not accept raw SQL, Git commands, arbitrary filesystem changes, shell
+The CLI offers a fixed set of operations. Project paths (`<dir>`) are
+filesystem paths and may be relative or absolute. The `edit` command's
+`<resource>` argument is a canonical project-relative resource path. The CLI
+does not accept raw SQL, Git commands, arbitrary filesystem changes, shell
 commands, or network requests.

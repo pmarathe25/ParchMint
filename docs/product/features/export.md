@@ -2,7 +2,7 @@
 
 - **EXP-001:** v1 exports one self-contained HTML5 manuscript.
 - **EXP-002:** v1 always exports the entire Manuscript. Partial scope is deferred.
-- **EXP-003:** Project defaults, group overrides, and document overrides use Inherit/Enabled/Disabled for title emission and page-break behavior. Per-node inclusion overrides are deferred.
+- **EXP-003:** Title emission uses Inherit/Enabled/Disabled at the project, group, and document levels. Group and document page breaks are Enabled or Inherit; the project page-break default is Enabled or Disabled. Per-node inclusion overrides are deferred.
 - **EXP-004:** Numbering is an export-run option. v1 does not persist arbitrary numbering for individual nodes.
 - **EXP-005:** Group titles may emit headings despite groups having no body.
 - **EXP-006:** The exporter does not duplicate existing document title content.

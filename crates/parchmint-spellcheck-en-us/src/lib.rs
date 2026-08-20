@@ -861,14 +861,17 @@ impl PrivateSpellingRuntime {
     fn contains(
         &self,
         word: &str,
+        project_id: ProjectId,
         project: DictionaryRevision,
         global: DictionaryRevision,
     ) -> bool {
         self.bundled.contains_word_str(word)
             || self
                 .project_words
-                .values()
-                .any(|(revision, words)| *revision == project && words.contains_word_str(word))
+                .get(&project_id)
+                .is_some_and(|(revision, words)| {
+                    *revision == project && words.contains_word_str(word)
+                })
             || self.global_words.as_ref().is_some_and(|(revision, words)| {
                 *revision == global && words.contains_word_str(word)
             })
@@ -877,6 +880,7 @@ impl PrivateSpellingRuntime {
     fn suggestions(
         &self,
         word: &str,
+        project_id: ProjectId,
         project: DictionaryRevision,
         global: DictionaryRevision,
     ) -> Vec<SpellingSuggestion> {
@@ -890,9 +894,9 @@ impl PrivateSpellingRuntime {
             self.bundled.as_ref(),
         );
 
-        for (_, dictionary) in self
+        if let Some((_, dictionary)) = self
             .project_words
-            .values()
+            .get(&project_id)
             .filter(|(revision, _)| *revision == project)
         {
             candidates.extend(suggest_correct_spelling_str(
@@ -936,6 +940,7 @@ impl PrivateSpellingRuntime {
     fn suggest(&self, request: &SuggestionRequest) -> Vec<SpellingSuggestion> {
         if self.contains(
             &request.word,
+            request.project_id,
             request.project_dictionary,
             request.global_dictionary,
         ) {
@@ -943,6 +948,7 @@ impl PrivateSpellingRuntime {
         } else {
             self.suggestions(
                 &request.word,
+                request.project_id,
                 request.project_dictionary,
                 request.global_dictionary,
             )
@@ -956,6 +962,7 @@ impl PrivateSpellingRuntime {
             for token in word_tokens(&block.text) {
                 if self.contains(
                     token.word,
+                    request.project_id,
                     request.project_dictionary,
                     request.global_dictionary,
                 ) {
@@ -971,6 +978,7 @@ impl PrivateSpellingRuntime {
                     category: SpellingCategory::Misspelling,
                     suggestions: self.suggestions(
                         token.word,
+                        request.project_id,
                         request.project_dictionary,
                         request.global_dictionary,
                     ),

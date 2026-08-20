@@ -471,10 +471,9 @@ fn save(path: PathBuf, priority: SavePriority) -> Outcome {
     if let Err(outcome) = open_project(&path) {
         return outcome;
     }
-    let files = NativeProjectFileSystem::new();
-    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path.clone())) {
+    let (files, root, _lease) = match acquire_project_root(&path) {
         Ok(value) => value,
-        Err(error) => return filesystem_outcome(error),
+        Err(outcome) => return outcome,
     };
     let manifest_path =
         CanonicalRelativePath::parse("project.toml").expect("the manifest path is canonical");
@@ -610,10 +609,9 @@ fn checkpoint(path: PathBuf, name: String) -> CommandResult {
         Ok(name) => name,
         Err(_) => return Outcome::usage().into(),
     };
-    let files = NativeProjectFileSystem::new();
-    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
+    let (files, root, _lease) = match acquire_project_root(&path) {
         Ok(value) => value,
-        Err(error) => return filesystem_outcome(error).into(),
+        Err(outcome) => return outcome.into(),
     };
     let resources = match canonical_resources(&root, &files) {
         Ok(resources) => resources,
@@ -646,10 +644,9 @@ fn restore(path: PathBuf, encoded_checkpoint: String) -> Outcome {
         Some(bytes) => CheckpointId::from_bytes(bytes),
         None => return Outcome::usage(),
     };
-    let files = NativeProjectFileSystem::new();
-    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
+    let (files, root, _lease) = match acquire_project_root(&path) {
         Ok(value) => value,
-        Err(error) => return filesystem_outcome(error),
+        Err(outcome) => return outcome,
     };
     let store = Git2HistoryStore::new(root.clone());
     if store.initialize(ProjectRootCapability::new(0)).is_err() {
@@ -668,10 +665,9 @@ fn history(path: PathBuf) -> CommandResult {
     if let Err(outcome) = open_project(&path) {
         return outcome.into();
     }
-    let files = NativeProjectFileSystem::new();
-    let (root, _lease) = match files.acquire(UntrustedProjectPath::new(path)) {
+    let (_files, root, _lease) = match acquire_project_root(&path) {
         Ok(value) => value,
-        Err(error) => return filesystem_outcome(error).into(),
+        Err(outcome) => return outcome.into(),
     };
     let store = Git2HistoryStore::new(root);
     if store.initialize(ProjectRootCapability::new(0)).is_err() {
@@ -804,6 +800,23 @@ fn filesystem_outcome(error: parchmint_project_fs::FsError) -> Outcome {
         | parchmint_project_fs::FsError::Io { .. } => Outcome::invalid_project(),
         parchmint_project_fs::FsError::Injected { .. } => Outcome::failed(),
     }
+}
+
+fn acquire_project_root(
+    path: &Path,
+) -> Result<
+    (
+        NativeProjectFileSystem,
+        parchmint_project_fs::ProjectRootCapability,
+        parchmint_project_fs::ProjectLockLease,
+    ),
+    Outcome,
+> {
+    let files = NativeProjectFileSystem::new();
+    let (root, lease) = files
+        .acquire(UntrustedProjectPath::new(path))
+        .map_err(filesystem_outcome)?;
+    Ok((files, root, lease))
 }
 
 fn safe_path(path: &Path) -> bool {
@@ -1122,10 +1135,7 @@ fn pending_recovery(project: &Path) -> Result<Vec<RecoveryBatch>, Outcome> {
     }
 
     let mut base_hashes = vec![content_hash(&[])];
-    let files = NativeProjectFileSystem::new();
-    let (root, lease) = files
-        .acquire(UntrustedProjectPath::new(project))
-        .map_err(filesystem_outcome)?;
+    let (files, root, lease) = acquire_project_root(project)?;
     for (path, bytes) in canonical_resource_bytes(&root, &files)? {
         if is_document_resource(&path) {
             let hash = content_hash(&bytes);

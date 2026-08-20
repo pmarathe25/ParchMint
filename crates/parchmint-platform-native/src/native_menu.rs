@@ -23,6 +23,16 @@ fn failed(reason: impl Into<String>) -> PlatformError {
 }
 
 #[cfg(target_os = "linux")]
+fn matching_handles(raw_window: RawWindowHandle, raw_display: RawDisplayHandle) -> bool {
+    matches!(
+        (raw_window, raw_display),
+        (RawWindowHandle::Xlib(_), RawDisplayHandle::Xlib(_))
+            | (RawWindowHandle::Xcb(_), RawDisplayHandle::Xcb(_))
+            | (RawWindowHandle::Wayland(_), RawDisplayHandle::Wayland(_))
+    )
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn attach(
     _window: WindowCapability,
     _binding: u64,
@@ -30,15 +40,12 @@ pub(crate) fn attach(
     raw_window: RawWindowHandle,
     raw_display: RawDisplayHandle,
 ) -> Result<AttachmentKind, PlatformError> {
-    match (raw_window, raw_display) {
-        (RawWindowHandle::Xlib(_), RawDisplayHandle::Xlib(_))
-        | (RawWindowHandle::Xcb(_), RawDisplayHandle::Xcb(_))
-        | (RawWindowHandle::Wayland(_), RawDisplayHandle::Wayland(_)) => {
-            Ok(AttachmentKind::InWindow)
-        }
-        _ => Err(failed(
+    if matching_handles(raw_window, raw_display) {
+        Ok(AttachmentKind::InWindow)
+    } else {
+        Err(failed(
             "Iced did not provide a matching X11 or Wayland window/display handle",
-        )),
+        ))
     }
 }
 
@@ -48,13 +55,98 @@ pub(crate) fn detach(
     raw_window: RawWindowHandle,
     raw_display: RawDisplayHandle,
 ) -> Result<(), PlatformError> {
-    match (raw_window, raw_display) {
-        (RawWindowHandle::Xlib(_), RawDisplayHandle::Xlib(_))
-        | (RawWindowHandle::Xcb(_), RawDisplayHandle::Xcb(_))
-        | (RawWindowHandle::Wayland(_), RawDisplayHandle::Wayland(_)) => Ok(()),
-        _ => Err(failed(
+    if matching_handles(raw_window, raw_display) {
+        Ok(())
+    } else {
+        Err(failed(
             "Iced did not provide a matching X11 or Wayland window/display handle",
-        )),
+        ))
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::{num::NonZeroU32, ptr::NonNull};
+
+    use raw_window_handle::{
+        WaylandDisplayHandle, WaylandWindowHandle, XcbDisplayHandle, XcbWindowHandle,
+        XlibDisplayHandle, XlibWindowHandle,
+    };
+
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum HandleFamily {
+        Xlib,
+        Xcb,
+        Wayland,
+    }
+
+    fn handles(
+        window_family: HandleFamily,
+        display_family: HandleFamily,
+    ) -> (RawWindowHandle, RawDisplayHandle) {
+        let raw_window = match window_family {
+            HandleFamily::Xlib => RawWindowHandle::Xlib(XlibWindowHandle::new(1)),
+            HandleFamily::Xcb => RawWindowHandle::Xcb(XcbWindowHandle::new(
+                NonZeroU32::new(1).expect("nonzero Xcb window"),
+            )),
+            HandleFamily::Wayland => {
+                RawWindowHandle::Wayland(WaylandWindowHandle::new(NonNull::dangling()))
+            }
+        };
+        let raw_display = match display_family {
+            HandleFamily::Xlib => RawDisplayHandle::Xlib(XlibDisplayHandle::new(None, 0)),
+            HandleFamily::Xcb => RawDisplayHandle::Xcb(XcbDisplayHandle::new(None, 0)),
+            HandleFamily::Wayland => {
+                RawDisplayHandle::Wayland(WaylandDisplayHandle::new(NonNull::dangling()))
+            }
+        };
+        (raw_window, raw_display)
+    }
+
+    #[test]
+    fn linux_menu_lifecycle_accepts_only_matching_window_and_display_families() {
+        let window = WindowCapability::new(1, 1);
+        let menu = SemanticMenu::new(Vec::new());
+        let families = [HandleFamily::Xlib, HandleFamily::Xcb, HandleFamily::Wayland];
+
+        for window_family in families {
+            for display_family in families {
+                let matching = window_family == display_family;
+                let (raw_window, raw_display) = handles(window_family, display_family);
+                let attach_result = attach(window, 1, &menu, raw_window, raw_display);
+                assert_eq!(
+                    attach_result.is_ok(),
+                    matching,
+                    "attach {window_family:?}/{display_family:?}"
+                );
+                if !matching {
+                    assert_eq!(
+                        attach_result,
+                        Err(failed(
+                            "Iced did not provide a matching X11 or Wayland window/display handle"
+                        ))
+                    );
+                }
+
+                let (raw_window, raw_display) = handles(window_family, display_family);
+                let detach_result = detach(window, raw_window, raw_display);
+                assert_eq!(
+                    detach_result.is_ok(),
+                    matching,
+                    "detach {window_family:?}/{display_family:?}"
+                );
+                if !matching {
+                    assert_eq!(
+                        detach_result,
+                        Err(failed(
+                            "Iced did not provide a matching X11 or Wayland window/display handle"
+                        ))
+                    );
+                }
+            }
+        }
     }
 }
 

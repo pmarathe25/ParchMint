@@ -23,7 +23,6 @@ use parchmint_recovery_api::{
 use parchmint_save::{
     CancelOutcome, SaveCoordinator, SaveError, SaveRequest, SaveRevisionVector, SaveTicket,
 };
-use sha2::{Digest, Sha256};
 
 pub use parchmint_domain::{
     BlockId, CommentId, DocumentId, ProjectOperationId, StyleCatalog, StyleDefinition, StyleId,
@@ -791,6 +790,15 @@ struct RecoveryFrontier {
     hashes: BTreeMap<ResourceId, parchmint_recovery_api::ContentHash>,
 }
 
+fn advance_frontier(frontier: &mut RecoveryFrontier, batch: &RecoveryBatch) {
+    frontier.revisions.project_revision = batch.project_revision;
+    frontier
+        .revisions
+        .documents
+        .extend(batch.revision_vector().documents);
+    frontier.hashes.extend(batch.result_hashes.clone());
+}
+
 impl fmt::Debug for EditorPersistenceCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -958,9 +966,7 @@ impl EditorPersistenceCoordinator {
             }
             .into());
         }
-        frontier.revisions.project_revision = durable.batch.project_revision;
-        frontier.revisions.documents = durable.batch.revision_vector().documents;
-        frontier.hashes.extend(durable.batch.result_hashes);
+        advance_frontier(&mut frontier, &durable.batch);
         Ok(frontier.revisions.clone())
     }
 
@@ -971,15 +977,13 @@ impl EditorPersistenceCoordinator {
         base: RecoveryBaseSnapshot,
     ) -> Result<parchmint_recovery_api::RecoveryReplay, EditorPersistenceError> {
         let replay = self.recovery.replay(base)?;
-        if let Some(last) = replay.accepted.last() {
+        if !replay.accepted.is_empty() {
             let mut frontier = self
                 .frontier
                 .lock()
                 .map_err(|_| EditorPersistenceError::StateUnavailable)?;
-            frontier.revisions.project_revision = last.project_revision;
-            frontier.revisions.documents = last.revision_vector().documents;
             for batch in &replay.accepted {
-                frontier.hashes.extend(batch.result_hashes.clone());
+                advance_frontier(&mut frontier, batch);
             }
         }
         Ok(replay)
@@ -1046,9 +1050,7 @@ impl EditorPersistenceCoordinator {
         frontier.revisions = base.revisions;
         frontier.hashes = base.hashes;
         for batch in &replay.accepted[..index] {
-            frontier.revisions.project_revision = batch.project_revision;
-            frontier.revisions.documents = batch.revision_vector().documents;
-            frontier.hashes.extend(batch.result_hashes.clone());
+            advance_frontier(&mut frontier, batch);
         }
         drop(frontier);
         self.acknowledge_recovery(durable)
@@ -1138,7 +1140,7 @@ impl EditorPersistenceCoordinator {
 }
 
 fn content_hash(bytes: &[u8]) -> parchmint_recovery_api::ContentHash {
-    parchmint_recovery_api::ContentHash::from_bytes(Sha256::digest(bytes).into())
+    parchmint_recovery_api::ContentHash::of_bytes(bytes)
 }
 
 fn document_resource_id(document: DocumentId) -> ResourceId {

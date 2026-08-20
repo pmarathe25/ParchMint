@@ -34,6 +34,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use parchmint_platform_api::WindowCapability;
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
 
+pub(crate) fn stable_id_string(bytes: &[u8; 16]) -> String {
+    use std::fmt::Write as _;
+
+    let mut serialized = String::with_capacity(32);
+    for byte in bytes {
+        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    serialized
+}
+
 /// The three application appearance choices supported by the shell.
 pub const SUPPORTED_APPEARANCES: &[AppearanceMode] = &[
     AppearanceMode::System,

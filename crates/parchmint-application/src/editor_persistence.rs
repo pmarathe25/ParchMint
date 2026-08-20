@@ -54,6 +54,18 @@ struct SaveQueue {
     coalesced: usize,
 }
 
+impl SaveQueue {
+    fn new() -> Self {
+        Self {
+            latest: None,
+            in_flight: Default::default(),
+            max_depth: 0,
+            submitted: 0,
+            coalesced: 0,
+        }
+    }
+}
+
 /// Application-owned public seam joining real editor projections to recovery
 /// and revisioned saves. The desktop graph supplies one coordinator per live
 /// project lease.
@@ -82,13 +94,7 @@ impl EditorPersistenceCoordinator {
         Self {
             recovery: RecoveryCoordinator::new(recovery, save.clone(), base),
             status: Mutex::new(EditorPersistenceStatus::default()),
-            queue: Mutex::new(SaveQueue {
-                latest: None,
-                in_flight: Default::default(),
-                max_depth: 0,
-                submitted: 0,
-                coalesced: 0,
-            }),
+            queue: Mutex::new(SaveQueue::new()),
         }
     }
 
@@ -99,13 +105,7 @@ impl EditorPersistenceCoordinator {
         Self {
             recovery: RecoveryCoordinator::new_recovery_only(recovery, base),
             status: Mutex::new(EditorPersistenceStatus::default()),
-            queue: Mutex::new(SaveQueue {
-                latest: None,
-                in_flight: Default::default(),
-                max_depth: 0,
-                submitted: 0,
-                coalesced: 0,
-            }),
+            queue: Mutex::new(SaveQueue::new()),
         }
     }
 
@@ -130,8 +130,7 @@ impl EditorPersistenceCoordinator {
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
         let inventory = self.recovery.recovery_inventory()?;
-        status.recovery_retained_records = inventory.records.len();
-        status.recovery_inventory = Some(inventory);
+        self.refresh_recovery_status(&mut status, inventory);
         status.recovery_isolation = None;
         status.requested = Some(revisions.clone());
         if status.state != SaveState::Error {
@@ -175,8 +174,7 @@ impl EditorPersistenceCoordinator {
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
         let inventory = self.recovery.recovery_inventory()?;
-        status.recovery_retained_records = inventory.records.len();
-        status.recovery_inventory = Some(inventory);
+        self.refresh_recovery_status(&mut status, inventory);
         status.recovery_isolation = None;
         Ok(durable)
     }
@@ -196,8 +194,7 @@ impl EditorPersistenceCoordinator {
         let inventory = self.recovery.recovery_inventory()?;
         {
             let mut status = self.status.lock().expect("editor persistence status lock");
-            status.recovery_retained_records = inventory.records.len();
-            status.recovery_inventory = Some(inventory);
+            self.refresh_recovery_status(&mut status, inventory);
             status.recovery_isolation = replay.isolation.clone();
         }
         if let Some(isolation) = &replay.isolation {
@@ -227,8 +224,7 @@ impl EditorPersistenceCoordinator {
         status.state = SaveState::Saved;
         status.active = None;
         status.error = None;
-        status.recovery_retained_records = inventory.records.len();
-        status.recovery_inventory = Some(inventory);
+        self.refresh_recovery_status(&mut status, inventory);
         status.recovery_isolation = None;
         Ok(report)
     }
@@ -408,5 +404,14 @@ impl EditorPersistenceCoordinator {
     ) -> Result<(), EditorPersistenceError> {
         self.recovery
             .register_document_base(document, revision, hash)
+    }
+
+    fn refresh_recovery_status(
+        &self,
+        status: &mut EditorPersistenceStatus,
+        inventory: RecoveryInventory,
+    ) {
+        status.recovery_retained_records = inventory.records.len();
+        status.recovery_inventory = Some(inventory);
     }
 }

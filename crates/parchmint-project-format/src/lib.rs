@@ -53,6 +53,7 @@ pub enum FormatError {
     InvalidDocument(String),
     InvalidAnnotations(String),
     MissingFormatControl,
+    MissingManifest,
     UnsupportedResource { path: String },
 }
 
@@ -84,6 +85,7 @@ impl fmt::Display for FormatError {
             Self::MissingFormatControl => {
                 formatter.write_str("project is missing its format control")
             }
+            Self::MissingManifest => formatter.write_str("project is missing its manifest"),
             Self::UnsupportedResource { path } => {
                 write!(formatter, "unsupported canonical resource {path:?}")
             }
@@ -166,6 +168,10 @@ pub struct ContentHash([u8; 32]);
 impl ContentHash {
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -533,7 +539,7 @@ impl ProjectFormatCodec {
         frontier.document_summaries = documents
             .iter()
             .map(|(document, body)| {
-                let content_hash = ContentHash::from_bytes(Sha256::digest(body.as_bytes()).into());
+                let content_hash = ContentHash::of_bytes(body.as_bytes());
                 (
                     *document,
                     CanonicalDocumentSummary {
@@ -580,7 +586,7 @@ impl ProjectFormatCodec {
                     resource: resource_for_path(path),
                     path: path.clone(),
                     bytes: bytes.clone(),
-                    hash: ContentHash(Sha256::digest(bytes).into()),
+                    hash: ContentHash::of_bytes(bytes),
                 },
             );
         }
@@ -691,9 +697,7 @@ impl ProjectFormatCodec {
             let summary = if let Some(update) = update.documents.get(document) {
                 CanonicalDocumentSummary {
                     revision,
-                    content_hash: ContentHash::from_bytes(
-                        Sha256::digest(update.body.as_bytes()).into(),
-                    ),
+                    content_hash: ContentHash::of_bytes(update.body.as_bytes()),
                     word_count: update.body.split_whitespace().count(),
                 }
             } else {
@@ -1953,6 +1957,12 @@ impl CanonicalCodec for ProjectFormatCodec {
             .ok_or(FormatError::MissingFormatControl)?;
         let format_version = self.detect(format_control)?;
         validate_paths(input.resources.keys())?;
+        if !input
+            .resources
+            .contains_key(&CanonicalRelativePath::parse("project.toml")?)
+        {
+            return Err(FormatError::MissingManifest);
+        }
 
         let mut resources = BTreeMap::new();
         for (path, bytes) in input.resources {
@@ -2060,7 +2070,7 @@ impl CanonicalCodec for ProjectFormatCodec {
                 canonical_json(&annotations.0)?.into_bytes(),
             ),
         };
-        let hash = ContentHash(Sha256::digest(&bytes).into());
+        let hash = ContentHash::of_bytes(&bytes);
         Ok(CanonicalBytes {
             resource,
             path,
@@ -3225,6 +3235,18 @@ mod tests {
     }
 
     #[test]
+    fn content_hash_of_empty_bytes_is_stable() {
+        assert_eq!(
+            ContentHash::of_bytes(b""),
+            ContentHash::from_bytes([
+                0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4, 0xc8, 0x99, 0x6f,
+                0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b,
+                0x78, 0x52, 0xb8, 0x55,
+            ])
+        );
+    }
+
+    #[test]
     fn canonical_html_normalizes_entities_tags_and_attributes() {
         let document = codec()
             .decode_document(
@@ -3542,10 +3564,39 @@ mod tests {
     }
 
     #[test]
+    fn decode_project_rejects_missing_manifest() {
+        assert_eq!(
+            codec().decode_project(CanonicalInputSet {
+                format_control: Some(FORMAT_CONTROL_V1.to_vec()),
+                resources: BTreeMap::new(),
+            }),
+            Err(FormatError::MissingManifest)
+        );
+    }
+
+    #[test]
+    fn migration_rejects_missing_manifest() {
+        assert!(matches!(
+            codec().migrate(
+                SourceFormatSnapshot {
+                    format_control: FORMAT_CONTROL_V1.to_vec(),
+                    resources: BTreeMap::new(),
+                },
+                FormatVersion::V1,
+            ),
+            Err(MigrationError::Format(FormatError::MissingManifest))
+        ));
+    }
+
+    #[test]
     fn migration_reencodes_a_complete_v1_snapshot_without_changing_resource_paths() {
         let document_path = CanonicalRelativePath::parse("manuscript/chapter.html").unwrap();
         let annotation_path = CanonicalRelativePath::parse("annotations/document-1.json").unwrap();
         let mut resources = BTreeMap::new();
+        resources.insert(
+            CanonicalRelativePath::parse("project.toml").unwrap(),
+            b"[project]\n".to_vec(),
+        );
         resources.insert(
             document_path.clone(),
             b"<p data-style-id=\"body\" data-block-id=\"block-1\">Text</p>".to_vec(),

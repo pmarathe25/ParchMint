@@ -50,6 +50,7 @@ pub enum Event {
 pub struct RecordingUi {
     events: Mutex<Vec<Event>>,
     fail_project_open: Mutex<bool>,
+    fail_project_closed: Mutex<bool>,
     received_application_services: Mutex<bool>,
 }
 
@@ -64,6 +65,13 @@ impl RecordingUi {
     pub fn fail_next_project_open(&self) {
         *self
             .fail_project_open
+            .lock()
+            .expect("UI failure mutex poisoned") = true;
+    }
+
+    pub fn fail_next_project_closed(&self) {
+        *self
+            .fail_project_closed
             .lock()
             .expect("UI failure mutex poisoned") = true;
     }
@@ -138,6 +146,14 @@ impl DesktopUi for RecordingUi {
     }
 
     fn project_closed(&self, window: WindowCapability) -> Result<(), DesktopUiError> {
+        if std::mem::take(
+            &mut *self
+                .fail_project_closed
+                .lock()
+                .expect("UI failure mutex poisoned"),
+        ) {
+            return Err(DesktopUiError::new("injected project-close failure"));
+        }
         self.event(Event::Closed(window));
         Ok(())
     }

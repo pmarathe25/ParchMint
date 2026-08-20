@@ -42,6 +42,7 @@ fn check_request(
     SpellcheckRequest {
         language: LanguageId::EnUs,
         document_id,
+        project_id: ProjectId::from_bytes([1; 16]),
         document_revision: EditorRevision::from(document_revision),
         blocks: vec![parchmint_spellcheck_api::RevisionedTextRange {
             block_id: block(2),
@@ -64,6 +65,7 @@ fn suggestions_for(
 ) -> Vec<String> {
     let suggestions = block_on_test(service.suggest(SuggestionRequest {
         document_id,
+        project_id: ProjectId::from_bytes([1; 16]),
         block_id: block(2),
         range: selection(0, word.len() as u64),
         word: word.into(),
@@ -82,6 +84,29 @@ fn suggestions_for(
         .into_iter()
         .map(|suggestion| suggestion.word)
         .collect()
+}
+
+fn project_suggestions(
+    service: &EnUsSpellcheckService,
+    document_id: DocumentId,
+    project_id: ProjectId,
+    word: &str,
+    revision: DictionaryRevision,
+) -> Vec<String> {
+    block_on_test(service.suggest(SuggestionRequest {
+        document_id,
+        project_id,
+        block_id: block(2),
+        range: selection(0, word.len() as u64),
+        word: word.into(),
+        document_revision: EditorRevision::from(1),
+        project_dictionary: revision,
+        global_dictionary: DictionaryRevision::default(),
+    }))
+    .expect("project suggestions")
+    .into_iter()
+    .map(|suggestion| suggestion.word)
+    .collect()
 }
 
 #[test]
@@ -109,17 +134,19 @@ fn project_and_global_dictionary_actions_change_subsequent_checks() {
     harness.save_project_word(project, DictionaryRevision::from(1), "ParchMint");
     block_on_test(service.reload_project_dictionary(project, DictionaryRevision::from(1)))
         .expect("project dictionary reload");
+    let mut project_request = check_request(
+        document_id,
+        7,
+        1,
+        0,
+        1,
+        SpellcheckPriority::Visible,
+        "ParchMint",
+    );
+    project_request.project_id = project;
     assert!(
         harness
-            .check(check_request(
-                document_id,
-                7,
-                1,
-                0,
-                1,
-                SpellcheckPriority::Visible,
-                "ParchMint",
-            ))
+            .check(project_request)
             .expect("project dictionary check")
             .is_empty()
     );
@@ -140,6 +167,65 @@ fn project_and_global_dictionary_actions_change_subsequent_checks() {
             ))
             .expect("global dictionary check")
             .is_empty()
+    );
+}
+
+#[test]
+fn project_dictionaries_do_not_leak_between_projects_at_same_revision() {
+    let harness = SpellcheckTestHarness::new();
+    let service = harness.service();
+    let first = ProjectId::from_bytes([1; 16]);
+    let second = ProjectId::from_bytes([2; 16]);
+    let revision = DictionaryRevision::from(1);
+    harness.save_project_word(first, revision, "Zzquillfluxzz");
+    harness.save_project_word(second, revision, "Zzotherwordzz");
+    block_on_test(service.reload_project_dictionary(first, revision)).expect("first reload");
+    block_on_test(service.reload_project_dictionary(second, revision)).expect("second reload");
+    let misspelling = "Zzquillfluz";
+
+    let mut first_request = check_request(
+        document(20),
+        1,
+        1,
+        0,
+        1,
+        SpellcheckPriority::Visible,
+        "Zzquillfluxzz",
+    );
+    first_request.project_id = first;
+    assert!(
+        harness
+            .check(first_request)
+            .expect("first project check")
+            .is_empty()
+    );
+    let mut second_request = check_request(
+        document(21),
+        1,
+        1,
+        0,
+        1,
+        SpellcheckPriority::Visible,
+        "Zzquillfluxzz",
+    );
+    second_request.project_id = second;
+    assert_eq!(
+        harness
+            .check(second_request)
+            .expect("second project check")
+            .len(),
+        1
+    );
+
+    let first_suggestions =
+        project_suggestions(service, document(20), first, misspelling, revision);
+    assert_eq!(first_suggestions, vec!["Zzquillfluxzz"]);
+    let second_suggestions =
+        project_suggestions(service, document(21), second, misspelling, revision);
+    assert!(
+        !second_suggestions
+            .iter()
+            .any(|word| word == "Zzquillfluxzz")
     );
 }
 
@@ -178,17 +264,19 @@ fn a_failed_reload_does_not_lose_the_saved_project_dictionary_change() {
     );
 
     block_on_test(service.reload_project_dictionary(project, revision)).expect("reload retry");
+    let mut retry_request = check_request(
+        document(5),
+        7,
+        revision.value(),
+        0,
+        1,
+        SpellcheckPriority::Visible,
+        "ParchMint",
+    );
+    retry_request.project_id = project;
     assert!(
         harness
-            .check(check_request(
-                document(5),
-                7,
-                revision.value(),
-                0,
-                1,
-                SpellcheckPriority::Visible,
-                "ParchMint",
-            ))
+            .check(retry_request)
             .expect("retry check")
             .is_empty()
     );

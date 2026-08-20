@@ -945,6 +945,11 @@ fn production_faults_are_explicit_one_shot_failures() {
     let mut spellcheck = graph.check_spelling(SpellcheckRequest {
         language: LanguageId::EnUs,
         document_id: DocumentId::from_bytes([1; 16]),
+        project_id: production
+            .ui_snapshot()
+            .expect("project snapshot")
+            .project
+            .id,
         document_revision: EditorRevision::default(),
         blocks: Vec::new(),
         project_dictionary: DictionaryRevision::default(),

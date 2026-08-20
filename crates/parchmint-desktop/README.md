@@ -35,11 +35,12 @@ an error.
 
 ## Diagnosing failures
 
-The production application writes a local append-only debug log at
-`logs/parchmint-debug.log` under its application data directory. It records
-project and editor effect starts, completions, ignored stale completions, and
-the technical causes of user-visible failures. It records action names, session
-identifiers, and revision numbers; it does not record document text.
+The production application writes a bounded, rotating debug log at
+`logs/parchmint-debug.log` under its application data directory. The log
+truncates before it exceeds 1 MiB. It records project and editor effect starts,
+completions, ignored stale completions, and the technical causes of
+user-visible failures. It records action names, session identifiers, and
+revision numbers; it does not record document text.
 Each line includes a timestamp and in-process sequence number, so the most
 recent failure can be traced back through the preceding operations.
 

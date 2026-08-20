@@ -26,6 +26,7 @@ use iced::{
 };
 use parchmint_application::{ReplacementEdit, ReplacementSelection};
 use parchmint_design_system::production_icon_svg;
+use parchmint_diagnostics as diagnostics;
 use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, CanonicalComment, CanonicalCommentAnchor,
     CanonicalCommentMessage, CanonicalDocumentLoad, CommentId, EditorAdapter,
@@ -65,7 +66,7 @@ use crate::{
         AsyncServiceFeeds, BlockingServiceJob, DeletedPreviewResult, HistoryListResult,
         HistoryPreviewResult, RecoveryAcceptanceTicket, RecoveryAcceptedResult,
         RecoveryDiscardedResult, RecoveryReconcileResult, SearchBatchResult, SearchRequest,
-        SearchStart,
+        SearchStart, ServiceFeedError,
     },
     components::{self, ButtonKind, Interaction},
     design_tokens::{
@@ -90,6 +91,10 @@ use crate::{
 };
 
 const LAUNCHER_CAPABILITY: WindowCapability = WindowCapability::new(u64::MAX, 1);
+
+fn worker_launch_failure(operation: &str, error: &std::io::Error) -> String {
+    format!("could not start {operation} worker: {error}")
+}
 
 fn runtime_event(event: Event, status: event::Status, window: window::Id) -> Option<Message> {
     matches!(
@@ -598,18 +603,18 @@ enum Message {
     SearchFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
-        result: Result<Vec<SearchBatchResult>, String>,
+        result: NativeTaskResult<Vec<SearchBatchResult>>,
     },
     HistoryFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
         append: bool,
-        result: Result<HistoryListResult, String>,
+        result: NativeTaskResult<HistoryListResult>,
     },
     HistoryPreviewFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
-        result: Result<HistoryPreviewResult, String>,
+        result: NativeTaskResult<HistoryPreviewResult>,
     },
     HistoryMaintenanceFinished {
         window: window::Id,
@@ -627,7 +632,7 @@ enum Message {
     DeletedPreviewFinished {
         window: window::Id,
         ticket: ProjectTaskTicket,
-        result: Result<DeletedPreviewResult, String>,
+        result: NativeTaskResult<DeletedPreviewResult>,
     },
     ReplacementPreviewFinished {
         window: window::Id,
@@ -655,7 +660,7 @@ enum Message {
         window: window::Id,
         ticket: ProjectTaskTicket,
         operation: Option<ExportOperationToken>,
-        result: Result<ExportOutcome, String>,
+        result: NativeTaskResult<ExportOutcome>,
     },
     ExportCancelFinished {
         window: window::Id,
@@ -667,21 +672,21 @@ enum Message {
         window: window::Id,
         session: ProjectSessionCapability,
         ticket: ProjectTaskTicket,
-        result: Result<RecoveryReconcileResult, String>,
+        result: NativeTaskResult<RecoveryReconcileResult>,
     },
     RecoveryAccepted {
         window: window::Id,
         session: ProjectSessionCapability,
         ticket: ProjectTaskTicket,
         mutation: Option<OpaqueMutationToken>,
-        result: Result<RecoveryAcceptedResult, String>,
+        result: NativeTaskResult<RecoveryAcceptedResult>,
     },
     RecoveryDiscarded {
         window: window::Id,
         session: ProjectSessionCapability,
         ticket: ProjectTaskTicket,
         mutation: Option<OpaqueMutationToken>,
-        result: Result<RecoveryDiscardedResult, String>,
+        result: NativeTaskResult<RecoveryDiscardedResult>,
     },
     SelectDestination {
         window: window::Id,
@@ -706,9 +711,78 @@ enum HistoryWorkflowAction {
     Restore,
 }
 
+type NativeTaskResult<T> = Result<T, NativeTaskOutcome>;
+
+/// Outcomes whose distinctions already change native task completion behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NativeTaskOutcome {
+    StaleSession,
+    Canceled,
+    Unavailable,
+    Failed { message: String },
+}
+
+impl NativeTaskOutcome {
+    fn from_service_error(operation: &'static str, error: ServiceFeedError) -> Self {
+        let category = match &error {
+            ServiceFeedError::StaleSession { .. }
+            | ServiceFeedError::StaleSearchGeneration { .. } => "stale-session",
+            ServiceFeedError::CanceledSearchGeneration { .. } => "canceled",
+            ServiceFeedError::InvalidIdentifier { .. } => "invalid-identifier",
+            ServiceFeedError::InvalidServiceData { .. } => "invalid-service-data",
+            ServiceFeedError::Service { .. } => "service",
+            ServiceFeedError::Unsupported(_) => "unsupported",
+            ServiceFeedError::Conversion(_) => "conversion",
+            ServiceFeedError::NoRecoveryToAccept => "no-recovery-to-accept",
+            ServiceFeedError::OutputUnavailable => "output-unavailable",
+            ServiceFeedError::InvalidState { .. } => "invalid-state",
+        };
+        let message = error.to_string();
+        let outcome = match error {
+            ServiceFeedError::StaleSession { .. }
+            | ServiceFeedError::StaleSearchGeneration { .. } => Self::StaleSession,
+            ServiceFeedError::CanceledSearchGeneration { .. } => Self::Canceled,
+            ServiceFeedError::Unsupported(_) | ServiceFeedError::OutputUnavailable => {
+                Self::Unavailable
+            }
+            _ => Self::Failed {
+                message: message.clone(),
+            },
+        };
+        if matches!(outcome, Self::Failed { .. }) {
+            diagnostics::event(
+                diagnostics::Level::Error,
+                "ui.native-task",
+                "service task failed",
+                &[("operation", operation), ("category", category)],
+            );
+        }
+        outcome
+    }
+
+    fn failed(operation: &'static str, category: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
+        diagnostics::event(
+            diagnostics::Level::Error,
+            "ui.native-task",
+            "worker task failed",
+            &[("operation", operation), ("category", category)],
+        );
+        Self::Failed { message }
+    }
+
+    fn failure_message(self) -> Option<String> {
+        match self {
+            Self::StaleSession | Self::Canceled => None,
+            Self::Unavailable => Some("The requested project service is unavailable.".to_owned()),
+            Self::Failed { message } => Some(message),
+        }
+    }
+}
+
 enum ExportWorkerEvent {
     Progress(ExportProgress),
-    Finished(Result<ExportOutcome, String>),
+    Finished(NativeTaskResult<ExportOutcome>),
 }
 
 struct NativeExportProgressSink {
@@ -1888,7 +1962,10 @@ impl NativeDesktop {
                             }
                         }
                     }
-                    Err(error) => {
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
                         workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                             ticket,
                             ProjectTaskPayload::Failed(error.clone()),
@@ -1910,21 +1987,26 @@ impl NativeDesktop {
                 let Some(workspace) = state.workspace.as_mut() else {
                     return Task::none();
                 };
-                let next_cursor = result
-                    .as_ref()
-                    .ok()
-                    .and_then(|history| history.next_cursor.as_ref())
-                    .map(|cursor| cursor.as_str().to_owned());
-                let payload = result
-                    .map(|mut history| {
+                let (payload, next_cursor) = match result {
+                    Ok(mut history) => {
+                        let next_cursor = history
+                            .next_cursor
+                            .as_ref()
+                            .map(|cursor| cursor.as_str().to_owned());
                         if append {
                             let mut checkpoints = workspace.history().checkpoints().to_vec();
                             checkpoints.append(&mut history.checkpoints);
                             history.checkpoints = checkpoints;
                         }
-                        history.reducer_payload()
-                    })
-                    .unwrap_or_else(ProjectTaskPayload::Failed);
+                        (history.reducer_payload(), next_cursor)
+                    }
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
+                        (ProjectTaskPayload::Failed(error), None)
+                    }
+                };
                 if workspace.accept_completion(ProjectTaskCompletion::for_ticket(ticket, payload)) {
                     workspace.finish_history_page(next_cursor);
                 }
@@ -1941,9 +2023,15 @@ impl NativeDesktop {
                 let Some(workspace) = state.workspace.as_mut() else {
                     return Task::none();
                 };
-                let payload = result
-                    .map(|preview| preview.reducer_payload())
-                    .unwrap_or_else(ProjectTaskPayload::Failed);
+                let payload = match result {
+                    Ok(preview) => preview.reducer_payload(),
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
+                        ProjectTaskPayload::Failed(error)
+                    }
+                };
                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(ticket, payload));
                 Task::none()
             }
@@ -2026,9 +2114,15 @@ impl NativeDesktop {
                 let Some(workspace) = state.workspace.as_mut() else {
                     return Task::none();
                 };
-                let payload = result
-                    .map(|preview| preview.reducer_payload())
-                    .unwrap_or_else(ProjectTaskPayload::Failed);
+                let payload = match result {
+                    Ok(preview) => preview.reducer_payload(),
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
+                        ProjectTaskPayload::Failed(error)
+                    }
+                };
                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(ticket, payload));
                 Task::none()
             }
@@ -2177,7 +2271,12 @@ impl NativeDesktop {
                         ProjectTaskPayload::ExportSucceeded { artifact }
                     }
                     Ok(ExportOutcome::Cancelled) => ProjectTaskPayload::ExportCancelled,
-                    Err(error) => ProjectTaskPayload::Failed(error),
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
+                        ProjectTaskPayload::Failed(error)
+                    }
                 };
                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(ticket, payload));
                 if state.active_export == operation {
@@ -2254,7 +2353,23 @@ impl NativeDesktop {
                         }
                         Task::none()
                     }
-                    Err(error) => {
+                    Err(NativeTaskOutcome::Unavailable) => {
+                        let accepted = state.workspace.as_mut().is_some_and(|workspace| {
+                            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                                ticket,
+                                ProjectTaskPayload::RecoveryUnavailable,
+                            ))
+                        });
+                        if accepted {
+                            self.status = None;
+                            return self.activate_reconciled_project(window, None);
+                        }
+                        Task::none()
+                    }
+                    Err(outcome) => {
+                        let Some(error) = outcome.failure_message() else {
+                            return Task::none();
+                        };
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                 ticket,
@@ -2317,7 +2432,10 @@ impl NativeDesktop {
                             }
                             activate = completion_accepted && fully_resolved;
                         }
-                        Err(error) => {
+                        Err(outcome) => {
+                            let Some(error) = outcome.failure_message() else {
+                                return Task::none();
+                            };
                             failed = Some(error.clone());
                             let completion_accepted =
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -2398,7 +2516,10 @@ impl NativeDesktop {
                             }
                             activate = completion_accepted && fully_resolved;
                         }
-                        Err(error) => {
+                        Err(outcome) => {
+                            let Some(error) = outcome.failure_message() else {
+                                return Task::none();
+                            };
                             failed = Some(error.clone());
                             let completion_accepted =
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -6599,6 +6720,7 @@ impl NativeDesktop {
         let request = SpellcheckRequest {
             language: LanguageId::EnUs,
             document_id,
+            project_id,
             document_revision: revision,
             blocks: vec![RevisionedTextRange {
                 block_id: block.block(),
@@ -6764,17 +6886,45 @@ impl NativeDesktop {
         )
     }
 
-    async fn run_service_job<T: Send + 'static>(job: BlockingServiceJob<T>) -> Result<T, String> {
-        let (sender, receiver) = iced::futures::channel::oneshot::channel();
+    fn launch_worker<T, F, D>(operation: &'static str, work: F, deliver: D) -> Result<(), String>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+        D: FnOnce(T) + Send + 'static,
+    {
         std::thread::Builder::new()
-            .name(format!("parchmint-{}", job.operation().replace(' ', "-")))
+            .name(format!("parchmint-{}", operation.replace(' ', "-")))
             .spawn(move || {
-                let _ = sender.send(job.run().map_err(|error| error.to_string()));
+                let started = Instant::now();
+                let result = work();
+                deliver(result);
+                diagnostics::timing(operation, "blocking-worker", started.elapsed());
             })
-            .map_err(|error| error.to_string())?;
-        receiver
-            .await
-            .map_err(|_| "project service worker stopped without a result".to_owned())?
+            .map(|_| ())
+            .map_err(|error| worker_launch_failure(operation, &error))
+    }
+
+    async fn run_service_job<T: Send + 'static>(job: BlockingServiceJob<T>) -> NativeTaskResult<T> {
+        let operation = job.operation();
+        let (sender, receiver) = iced::futures::channel::oneshot::channel();
+        Self::launch_worker(
+            operation,
+            move || {
+                job.run()
+                    .map_err(|error| NativeTaskOutcome::from_service_error(operation, error))
+            },
+            move |result| {
+                let _ = sender.send(result);
+            },
+        )
+        .map_err(|error| NativeTaskOutcome::failed(operation, "worker-launch", error))?;
+        receiver.await.map_err(|_| {
+            NativeTaskOutcome::failed(
+                operation,
+                "worker-communication",
+                "project service worker stopped without a result",
+            )
+        })?
     }
 
     async fn run_blocking_operation<T, F>(
@@ -6786,12 +6936,9 @@ impl NativeDesktop {
         F: FnOnce() -> Result<T, String> + Send + 'static,
     {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
-        std::thread::Builder::new()
-            .name(format!("parchmint-{}", operation_name.replace(' ', "-")))
-            .spawn(move || {
-                let _ = sender.send(operation());
-            })
-            .map_err(|error| error.to_string())?;
+        Self::launch_worker(operation_name, operation, move |result| {
+            let _ = sender.send(result);
+        })?;
         receiver
             .await
             .map_err(|_| format!("{operation_name} worker stopped without a result"))?
@@ -6809,29 +6956,30 @@ impl NativeDesktop {
             let progress: Arc<dyn ExportProgressSink> = Arc::new(NativeExportProgressSink {
                 sender: worker_sender.clone(),
             });
-            let operation =
-                match ports
-                    .access()
-                    .map_err(|error| error.to_string())
-                    .and_then(|access| {
-                        access
-                            .export_target(|export| export.begin_export(progress))
-                            .map_err(|error| error.to_string())?
-                            .map_err(|error| error.to_string())
-                    }) {
-                    Ok(operation) => operation,
-                    Err(error) => {
-                        let _ = output
-                            .send(Message::ExportFinished {
-                                window,
-                                ticket,
-                                operation: None,
-                                result: Err(error),
-                            })
-                            .await;
-                        return;
-                    }
-                };
+            let operation = match ports
+                .access()
+                .map_err(|_| NativeTaskOutcome::StaleSession)
+                .and_then(|access| {
+                    access
+                        .export_target(|export| export.begin_export(progress))
+                        .map_err(|_| NativeTaskOutcome::StaleSession)?
+                        .map_err(|error| {
+                            NativeTaskOutcome::failed("begin export", "adapter", error.to_string())
+                        })
+                }) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    let _ = output
+                        .send(Message::ExportFinished {
+                            window,
+                            ticket,
+                            operation: None,
+                            result: Err(error),
+                        })
+                        .await;
+                    return;
+                }
+            };
             if output
                 .send(Message::ExportOperationStarted {
                     window,
@@ -6846,25 +6994,36 @@ impl NativeDesktop {
 
             let worker_ports = ports.clone();
             let terminal_sender = worker_sender.clone();
-            let spawn = std::thread::Builder::new()
-                .name("parchmint-export-project".into())
-                .spawn(move || {
+            let spawn = Self::launch_worker(
+                "export project",
+                move || {
                     let result = worker_ports
                         .access()
-                        .map_err(|error| error.to_string())
+                        .map_err(|_| NativeTaskOutcome::StaleSession)
                         .and_then(|access| {
                             access
                                 .export_target(|export| {
                                     export.export_to_path(operation, selection, options)
                                 })
-                                .map_err(|error| error.to_string())?
-                                .map_err(|error| error.to_string())
+                                .map_err(|_| NativeTaskOutcome::StaleSession)?
+                                .map_err(|error| {
+                                    NativeTaskOutcome::failed(
+                                        "export project",
+                                        "adapter",
+                                        error.to_string(),
+                                    )
+                                })
                         });
+                    result
+                },
+                move |result| {
                     let _ = terminal_sender.unbounded_send(ExportWorkerEvent::Finished(result));
-                });
+                },
+            );
             if let Err(error) = spawn {
-                let _ = worker_sender
-                    .unbounded_send(ExportWorkerEvent::Finished(Err(error.to_string())));
+                let _ = worker_sender.unbounded_send(ExportWorkerEvent::Finished(Err(
+                    NativeTaskOutcome::failed("export project", "worker-launch", error),
+                )));
             }
             drop(worker_sender);
 
@@ -6892,22 +7051,31 @@ impl NativeDesktop {
         Task::run(stream, |message| message)
     }
 
-    async fn run_search(start: SearchStart) -> Result<Vec<SearchBatchResult>, String> {
+    async fn run_search(start: SearchStart) -> NativeTaskResult<Vec<SearchBatchResult>> {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
-        std::thread::Builder::new()
-            .name(format!("parchmint-search-{}", start.generation))
-            .spawn(move || {
-                let result = start
+        Self::launch_worker(
+            "run global search",
+            move || {
+                start
                     .job
                     .run()
                     .and_then(|_| start.batches.into_iter().collect())
-                    .map_err(|error| error.to_string());
+                    .map_err(|error| {
+                        NativeTaskOutcome::from_service_error("run global search", error)
+                    })
+            },
+            move |result| {
                 let _ = sender.send(result);
-            })
-            .map_err(|error| error.to_string())?;
-        receiver
-            .await
-            .map_err(|_| "search worker stopped without a result".to_owned())?
+            },
+        )
+        .map_err(|error| NativeTaskOutcome::failed("run global search", "worker-launch", error))?;
+        receiver.await.map_err(|_| {
+            NativeTaskOutcome::failed(
+                "run global search",
+                "worker-communication",
+                "search worker stopped without a result",
+            )
+        })?
     }
 
     fn autosave_tick(&mut self, now: Instant) -> Task<Message> {
@@ -9559,6 +9727,31 @@ mod tests {
         .expect("blocking callback worker");
 
         assert_ne!(worker_thread, event_loop_thread);
+    }
+
+    #[test]
+    fn worker_launch_helper_delivers_the_completed_result() {
+        let (sender, receiver) = iced::futures::channel::oneshot::channel();
+        NativeDesktop::launch_worker(
+            "test worker",
+            || 42_u8,
+            move |result| {
+                let _ = sender.send(result);
+            },
+        )
+        .expect("worker launches");
+
+        assert_eq!(block_on(receiver), Ok(42));
+    }
+
+    #[test]
+    fn worker_launch_failure_message_names_the_operation() {
+        let error = std::io::Error::new(std::io::ErrorKind::Other, "resource unavailable");
+
+        assert_eq!(
+            worker_launch_failure("export project", &error),
+            "could not start export project worker: resource unavailable"
+        );
     }
 
     #[test]

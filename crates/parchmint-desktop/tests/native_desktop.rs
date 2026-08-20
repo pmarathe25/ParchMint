@@ -265,3 +265,66 @@ fn final_save_failure_retains_the_window_and_reports_the_error() {
     assert!(runtime.is_current_window(window));
     assert!(desktop.ui.events().contains(&Event::SaveFailed(window)));
 }
+
+#[test]
+fn clean_close_callback_failure_keeps_the_project_current_for_retry() {
+    let project = "/tmp/clean-close-callback-failure.parchmint";
+    let desktop = fixture(AppearanceMode::System, SystemAppearance::Light);
+    let runtime = block_on(desktop.bootstrap.start(LaunchRequest::launcher())).unwrap();
+    let OpenProjectResult::Opened { window, session } = runtime.open_project(project).unwrap()
+    else {
+        panic!("open must create a project");
+    };
+    desktop.ui.fail_next_project_closed();
+
+    assert!(matches!(
+        runtime.close_clean_project(Path::new(project)),
+        Err(DesktopError::Ui(_))
+    ));
+    assert!(runtime.is_current_window(window));
+    assert!(runtime.is_current_session(session));
+
+    assert_eq!(runtime.close_clean_project(Path::new(project)), Ok(()));
+    assert!(!runtime.is_current_window(window));
+    assert!(!runtime.is_current_session(session));
+    assert_eq!(
+        desktop
+            .ui
+            .events()
+            .iter()
+            .filter(|event| **event == Event::Closed(window))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn final_save_close_callback_failure_keeps_the_project_current_for_retry() {
+    let project = "/tmp/final-save-close-callback-failure.parchmint";
+    let desktop = fixture(AppearanceMode::System, SystemAppearance::Light);
+    let runtime = block_on(desktop.bootstrap.start(LaunchRequest::launcher())).unwrap();
+    let OpenProjectResult::Opened { window, session } = runtime.open_project(project).unwrap()
+    else {
+        panic!("open must create a project");
+    };
+    let request = final_save_request(&runtime, Path::new(project));
+    desktop.ui.fail_next_project_closed();
+
+    assert!(matches!(
+        runtime.resolve_final_save(request, Ok(())),
+        Err(DesktopError::Ui(_))
+    ));
+    assert!(runtime.is_current_window(window));
+    assert!(runtime.is_current_session(session));
+
+    assert_eq!(
+        runtime.resolve_final_save(request, Ok(())),
+        Ok(FinalSaveResolution::Closed(window))
+    );
+    assert!(!runtime.is_current_window(window));
+    assert!(!runtime.is_current_session(session));
+    assert_eq!(
+        runtime.resolve_final_save(request, Ok(())),
+        Ok(FinalSaveResolution::IgnoredStale)
+    );
+}

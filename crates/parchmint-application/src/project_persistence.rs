@@ -1680,7 +1680,7 @@ fn validated_restore_resources(
         let expected = plan.resources().get(&path).ok_or_else(|| {
             ProjectPersistenceError::History("restore write is absent from its manifest".into())
         })?;
-        let actual = ContentHash::from_bytes(Sha256::digest(&write.bytes).into());
+        let actual = ContentHash::of_bytes(&write.bytes);
         if &actual != expected || resources.insert(path, write.bytes.clone()).is_some() {
             return Err(ProjectPersistenceError::History(
                 "restore resources do not match their History manifest".into(),
@@ -1813,7 +1813,7 @@ fn canonical_resource_metadata(
                 path.clone(),
                 CanonicalResourceMetadata {
                     resource,
-                    hash: ContentHash::from_bytes(Sha256::digest(bytes).into()),
+                    hash: ContentHash::of_bytes(bytes),
                 },
             )
         })

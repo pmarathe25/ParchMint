@@ -142,10 +142,10 @@ since the last completed save.
 
 | Data | Location |
 | --- | --- |
-| Current project files | `project.toml` and the project-directory paths it lists |
+| Current project files | `project.toml`, including document word-count summaries, and the project-directory paths it lists |
 | Project History | The app-managed Git repository at the project root |
 | Recovery records | `.parchmint/recovery/` inside the project directory |
-| Search and word-count caches | `.parchmint/cache/` inside the project directory |
+| Search cache | `.parchmint/cache/` inside the project directory |
 | Tabs, panes, scroll positions, and window layout | The platform application-data directory, keyed by project ID |
 | Appearance, global dictionary, and recent projects | The application preference file |
 

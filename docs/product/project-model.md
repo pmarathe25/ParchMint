@@ -4,7 +4,8 @@
 
 A project's authored content lives in canonical files. ParchMint also keeps
 project history and crash-recovery data, and it may build disposable data such
-as a search index. Each project has:
+as a search index. Document word counts are canonical `project.toml` manifest
+data. Each project has:
 
 - Stable project ID.
 - Display title.

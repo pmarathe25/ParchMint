@@ -36,6 +36,12 @@ without adding a second runtime parser.
 
 ## Candidate workflow
 
+Before creating a candidate, run the architecture boundary check:
+
+```text
+cargo run --locked --offline --package parchmint-ci -- architecture verify
+```
+
 1. Run native CI and runtime validation on proposed minimum platform versions.
    Change each `minimum-version-status` to `frozen` only with a repository-local
    evidence path from those runs.
@@ -54,15 +60,25 @@ without adding a second runtime parser.
    supported predecessor, and uninstall it. Record each passed observation as a
    separate evidence document. Record menus, dialogs, and clipboard checks as
    `kind = "native-ui"` with all three check names.
-6. Generate the reviewed dependency notices and release SBOM. Preserve the
-   existing SBOM baseline policy: changes to `Cargo.lock` or bundled artifacts
-   require a reviewed baseline update.
+6. Generate and review dependency notices for every package in `Cargo.lock`.
+   Generate the release SBOM from the locked dependency and bundled-artifact
+   inventory:
+
+   ```text
+   cargo run --locked --offline --package parchmint-ci -- sbom generate > release/parchmint.sbom.toml
+   ```
+
+   `sbom verify` checks the repository baseline in
+   `supply-chain/sbom-baseline.toml` against `Cargo.lock` and
+   `supply-chain/bundled-artifacts.toml`; update that baseline only after
+   review. `release verify` checks the candidate SBOM named by
+   `packaging/release-candidates.toml` against the same current inventory.
 7. Create provenance that binds the source revision, `Cargo.lock`, notices,
    SBOM, package paths, and SHA-256 digests to the native build runs.
 8. Create `packaging/release-candidates.toml` from the real files and run:
 
    ```text
-   cargo parchmint-ci release verify
+   cargo run --locked --offline --package parchmint-ci -- release verify
    ```
 
 The release-tag CI gate runs the same command only for `v*-rc*` tags. It also

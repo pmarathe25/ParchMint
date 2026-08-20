@@ -100,6 +100,7 @@ pub struct RevisionedTextRange {
 pub struct SpellcheckRequest {
     pub language: LanguageId,
     pub document_id: DocumentId,
+    pub project_id: ProjectId,
     pub document_revision: EditorRevision,
     pub blocks: Vec<RevisionedTextRange>,
     pub project_dictionary: DictionaryRevision,
@@ -174,6 +175,7 @@ impl SpellcheckRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestionRequest {
     pub document_id: DocumentId,
+    pub project_id: ProjectId,
     pub block_id: BlockId,
     pub range: EditorSelection,
     pub word: String,

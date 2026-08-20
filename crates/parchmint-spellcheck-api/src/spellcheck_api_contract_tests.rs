@@ -67,6 +67,7 @@ fn request(document_id: DocumentId) -> SpellcheckRequest {
     SpellcheckRequest {
         language: LanguageId::EnUs,
         document_id,
+        project_id: ProjectId::from_bytes([1; 16]),
         document_revision: EditorRevision::from(7),
         blocks: vec![RevisionedTextRange {
             block_id: block(2),
@@ -106,6 +107,7 @@ fn en_us_request_result_and_suggestion_values_preserve_editor_context() {
     let result = result(&request);
     let suggestion = SuggestionRequest {
         document_id: request.document_id,
+        project_id: request.project_id,
         block_id: block(7),
         range: selection(10, 13),
         word: "teh".into(),
@@ -115,6 +117,7 @@ fn en_us_request_result_and_suggestion_values_preserve_editor_context() {
     };
 
     assert_eq!(LanguageId::EnUs.as_str(), "en-US");
+    assert_eq!(request.project_id, ProjectId::from_bytes([1; 16]));
     assert_eq!(request.blocks[0].range, selection(4, 12));
     assert_eq!(request.blocks[0].text, "teh quik");
     assert_eq!(result.issues[0].word, "teh");
@@ -124,6 +127,7 @@ fn en_us_request_result_and_suggestion_values_preserve_editor_context() {
         SuggestionRank::from(1)
     );
     assert_eq!(suggestion.range, selection(10, 13));
+    assert_eq!(suggestion.project_id, request.project_id);
     assert_eq!(suggestion.word, "teh");
     assert_eq!(suggestion.document_revision, EditorRevision::from(14));
     assert_eq!(suggestion.project_dictionary, DictionaryRevision::from(4));
