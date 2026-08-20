@@ -17,4 +17,3 @@ parchmint-recovery-api = { path = "../parchmint-recovery-api" }
 parchmint-save = { path = "../parchmint-save" }
 
 [dev-dependencies]
-serde_json.workspace = true

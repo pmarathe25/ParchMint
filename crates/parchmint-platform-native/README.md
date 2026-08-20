@@ -86,6 +86,11 @@ window ID with its exact generation; on Windows and macOS the narrow menu
 adapter also retains a validated raw handle next to the capability. No handle
 leaves the concrete adapters.
 
+Native calls that run away from the UI update loop may outlive the initiating
+window. Before a detached call publishes completion, the adapter reauthorizes
+its capability, so a closed or replaced window receives a stale-capability
+result rather than a completion for a former window.
+
 ```rust
 impl CapabilityRegistry {
     fn complete<T>(

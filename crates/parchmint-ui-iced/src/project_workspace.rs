@@ -3150,6 +3150,7 @@ pub enum ProjectTaskPayload {
     RecoveryAccepted {
         revision: u64,
     },
+    RecoveryCanceled,
     RecoveryUnavailable,
     RecoveryAvailable {
         accepted_records: usize,
@@ -5629,6 +5630,12 @@ impl ProjectWorkspace {
                 self.content_state = self.ready_content_state();
                 true
             }
+            ProjectTaskPayload::RecoveryCanceled => {
+                self.recovery.resolving = false;
+                self.recovery.error = None;
+                self.content_state = ContentState::Recovery;
+                true
+            }
             ProjectTaskPayload::RecoveryDiscarded { revision } => {
                 self.project_revision = revision;
                 self.save.state = SaveState::SavedThrough(revision);
@@ -5838,10 +5845,14 @@ fn project_payload_matches(task: &ProjectTask, payload: &ProjectTaskPayload) -> 
                 | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::AcceptRecovery,
-            ProjectTaskPayload::RecoveryAccepted { .. } | ProjectTaskPayload::Failed(_)
+            ProjectTaskPayload::RecoveryAccepted { .. }
+                | ProjectTaskPayload::RecoveryCanceled
+                | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::DiscardRecovery,
-            ProjectTaskPayload::RecoveryDiscarded { .. } | ProjectTaskPayload::Failed(_)
+            ProjectTaskPayload::RecoveryDiscarded { .. }
+                | ProjectTaskPayload::RecoveryCanceled
+                | ProjectTaskPayload::Failed(_)
         ) | (
             ProjectTask::PersistWorkspace,
             ProjectTaskPayload::WorkspacePersisted | ProjectTaskPayload::Failed(_)

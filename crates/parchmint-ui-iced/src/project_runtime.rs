@@ -13,7 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_application::{
@@ -75,6 +75,7 @@ impl NativeProjectEffectExecutor {
         effect: ProjectEffect,
     ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
         let effect_name = project_effect_name(&effect);
+        let started = Instant::now();
         let revision = self.snapshot.project.revision.value().to_string();
         diagnostics::event(
             DiagnosticLevel::Trace,
@@ -97,6 +98,7 @@ impl NativeProjectEffectExecutor {
                 &[("effect", effect_name), ("error", &error.to_string())],
             ),
         }
+        diagnostics::timing(effect_name, "project-effect", started.elapsed());
         result
     }
 
@@ -397,6 +399,7 @@ impl NativeProjectEffectExecutor {
         effect: EditorEffect,
     ) -> Result<EditorEffectCompletion, ProjectRuntimeError> {
         let effect_name = editor_effect_name(&effect);
+        let started = Instant::now();
         diagnostics::event(
             DiagnosticLevel::Trace,
             "ui.editor-effect",
@@ -418,6 +421,7 @@ impl NativeProjectEffectExecutor {
                 &[("effect", effect_name), ("error", &error.to_string())],
             ),
         }
+        diagnostics::timing(effect_name, "editor-effect", started.elapsed());
         result
     }
 

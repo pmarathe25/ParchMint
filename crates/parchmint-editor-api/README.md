@@ -125,16 +125,12 @@ fail with `EditorError::Closed`. Projection requests outside the retained
 revision budget fail explicitly, so a save cannot acknowledge a different
 revision or crash the persistence worker.
 
-Beyond the adapter, this crate defines the persistence coordination boundary
-used by the application shell. `EditorPersistenceCoordinator` appends a
-`CanonicalProjection` to a `RecoveryJournal` as a durable batch
-(`persist_projection`), advances the frontier only for that exact batch
-(`acknowledge_recovery`), reconciles, discards, and resumes interrupted
-replays, submits a revisioned save request only when its vector matches the
-projection (`submit_save`), and retires the recovery prefix covered by a
-completed save. The view, command, event, and error values the adapter
-contract uses (`EditorViewState`, `EditorCommandKind`, `EditorEvent`,
-`EditorCapabilities`, `EditorError`) live in this crate.
+Beyond the adapter, this crate defines the durable projection token and error
+contracts used by application-owned persistence coordination. Journal, save,
+and mutable recovery-frontier ownership live in `parchmint-application`. The
+view, command, event, and error values the adapter contract uses
+(`EditorViewState`, `EditorCommandKind`, `EditorEvent`, `EditorCapabilities`,
+`EditorError`) live in this crate.
 
 ## Implementation boundary
 

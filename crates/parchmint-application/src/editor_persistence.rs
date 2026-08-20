@@ -3,15 +3,18 @@
 //! This seam is constructible before the desktop service graph; Stage 38 owns
 //! only the final production graph assembly.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use parchmint_editor_api::{
-    CanonicalProjection, DurableProjectionBatch, EditorError,
-    EditorPersistenceCoordinator as RecoveryCoordinator, EditorPersistenceError,
+    CanonicalProjection, DurableProjectionBatch, EditorError, EditorPersistenceError,
 };
 use parchmint_recovery_api::{
-    RecoveryBaseSnapshot, RecoveryInventory, RecoveryIsolation, RecoveryJournal, RecoveryReplay,
-    RecoveryRevisionVector, VersionedRecoveryPayload,
+    EditorRevisionRange, RecoveryBaseSnapshot, RecoveryBatch, RecoveryError, RecoveryInventory,
+    RecoveryIsolation, RecoveryJournal, RecoveryReplay, RecoveryRevisionVector, ResourceId,
+    VersionedRecoveryPayload,
 };
 use parchmint_save::{
     CancelOutcome, SaveCoordinator, SaveRequest, SaveRevisionVector, SaveState, SaveTicket,
@@ -70,9 +73,26 @@ impl SaveQueue {
 /// and revisioned saves. The desktop graph supplies one coordinator per live
 /// project lease.
 pub struct EditorPersistenceCoordinator {
-    recovery: RecoveryCoordinator,
+    recovery: Arc<dyn RecoveryJournal>,
+    save: Option<Arc<dyn SaveCoordinator>>,
+    frontier: Mutex<RecoveryFrontier>,
     status: Mutex<EditorPersistenceStatus>,
     queue: Mutex<SaveQueue>,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryFrontier {
+    revisions: RecoveryRevisionVector,
+    hashes: BTreeMap<ResourceId, parchmint_recovery_api::ContentHash>,
+}
+
+fn advance_frontier(frontier: &mut RecoveryFrontier, batch: &RecoveryBatch) {
+    frontier.revisions.project_revision = batch.project_revision;
+    frontier
+        .revisions
+        .documents
+        .extend(batch.revision_vector().documents);
+    frontier.hashes.extend(batch.result_hashes.clone());
 }
 
 impl std::fmt::Debug for EditorPersistenceCoordinator {
@@ -92,7 +112,12 @@ impl EditorPersistenceCoordinator {
         base: RecoveryBaseSnapshot,
     ) -> Self {
         Self {
-            recovery: RecoveryCoordinator::new(recovery, save.clone(), base),
+            recovery,
+            save: Some(save),
+            frontier: Mutex::new(RecoveryFrontier {
+                revisions: base.revisions,
+                hashes: base.hashes,
+            }),
             status: Mutex::new(EditorPersistenceStatus::default()),
             queue: Mutex::new(SaveQueue::new()),
         }
@@ -103,7 +128,12 @@ impl EditorPersistenceCoordinator {
         base: RecoveryBaseSnapshot,
     ) -> Self {
         Self {
-            recovery: RecoveryCoordinator::new_recovery_only(recovery, base),
+            recovery,
+            save: None,
+            frontier: Mutex::new(RecoveryFrontier {
+                revisions: base.revisions,
+                hashes: base.hashes,
+            }),
             status: Mutex::new(EditorPersistenceStatus::default()),
             queue: Mutex::new(SaveQueue::new()),
         }
@@ -115,10 +145,12 @@ impl EditorPersistenceCoordinator {
         revisions: &SaveRevisionVector,
         payload: VersionedRecoveryPayload,
     ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
-        let durable = match self
-            .recovery
-            .persist_projection(projection, revisions, payload)
-        {
+        let durable = match self.persist_projection_record(
+            projection,
+            revisions,
+            payload,
+            content_hash(projection.body().as_bytes()),
+        ) {
             Ok(durable) => durable,
             Err(error) => {
                 self.mark_error(error.clone());
@@ -129,7 +161,7 @@ impl EditorPersistenceCoordinator {
             .status
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
-        let inventory = self.recovery.recovery_inventory()?;
+        let inventory = self.recovery_inventory()?;
         self.refresh_recovery_status(&mut status, inventory);
         status.recovery_isolation = None;
         status.requested = Some(revisions.clone());
@@ -157,23 +189,19 @@ impl EditorPersistenceCoordinator {
         payload: VersionedRecoveryPayload,
         result_hash: parchmint_recovery_api::ContentHash,
     ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
-        let durable = match self.recovery.persist_projection_with_document_hash(
-            projection,
-            revisions,
-            payload,
-            result_hash,
-        ) {
-            Ok(durable) => durable,
-            Err(error) => {
-                self.mark_error(error.clone());
-                return Err(error);
-            }
-        };
+        let durable =
+            match self.persist_projection_record(projection, revisions, payload, result_hash) {
+                Ok(durable) => durable,
+                Err(error) => {
+                    self.mark_error(error.clone());
+                    return Err(error);
+                }
+            };
         let mut status = self
             .status
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
-        let inventory = self.recovery.recovery_inventory()?;
+        let inventory = self.recovery_inventory()?;
         self.refresh_recovery_status(&mut status, inventory);
         status.recovery_isolation = None;
         Ok(durable)
@@ -183,15 +211,55 @@ impl EditorPersistenceCoordinator {
         &self,
         durable: DurableProjectionBatch,
     ) -> Result<RecoveryRevisionVector, EditorPersistenceError> {
-        self.recovery.acknowledge_recovery(durable)
+        if !durable.receipt().authenticates(durable.batch()) {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        }
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        if durable.batch().project_revision != frontier.revisions.project_revision.next()
+            || durable
+                .batch()
+                .base_hashes
+                .iter()
+                .any(|(resource, hash)| frontier.hashes.get(resource) != Some(hash))
+            || durable.batch().documents.iter().any(|(document, range)| {
+                range.first
+                    != frontier
+                        .revisions
+                        .documents
+                        .get(document)
+                        .copied()
+                        .unwrap_or_default()
+                        .next()
+            })
+        {
+            return Err(RecoveryError::NonConsecutiveProjectRevision {
+                expected: frontier.revisions.project_revision.next(),
+                actual: durable.batch().project_revision,
+            }
+            .into());
+        }
+        advance_frontier(&mut frontier, durable.batch());
+        Ok(frontier.revisions.clone())
     }
 
     pub fn reconcile_recovery(
         &self,
         base: RecoveryBaseSnapshot,
     ) -> Result<RecoveryReplay, EditorPersistenceError> {
-        let replay = self.recovery.reconcile_recovery(base)?;
-        let inventory = self.recovery.recovery_inventory()?;
+        let replay = self.recovery.replay(base)?;
+        if !replay.accepted.is_empty() {
+            let mut frontier = self
+                .frontier
+                .lock()
+                .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+            for batch in &replay.accepted {
+                advance_frontier(&mut frontier, batch);
+            }
+        }
+        let inventory = self.recovery_inventory()?;
         {
             let mut status = self.status.lock().expect("editor persistence status lock");
             self.refresh_recovery_status(&mut status, inventory);
@@ -215,8 +283,33 @@ impl EditorPersistenceCoordinator {
         base: RecoveryBaseSnapshot,
         replay: &RecoveryReplay,
     ) -> Result<parchmint_recovery_api::DiscardReport, EditorPersistenceError> {
-        let report = self.recovery.discard_reconciled_recovery(base, replay)?;
-        let inventory = self.recovery.recovery_inventory()?;
+        let Some(endpoint) = replay
+            .accepted
+            .last()
+            .map(parchmint_recovery_api::RecoveryBatch::revision_vector)
+        else {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        };
+        let observed = self.recovery.replay(base.clone())?;
+        if &observed != replay {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        }
+        let report = {
+            let mut frontier = self
+                .frontier
+                .lock()
+                .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+            if frontier.revisions != endpoint {
+                return Err(RecoveryError::UnknownRevisionVector.into());
+            }
+            let report = self
+                .recovery
+                .discard_through(parchmint_recovery_api::DurableRevisionVector::new(endpoint))?;
+            frontier.revisions = base.revisions;
+            frontier.hashes = base.hashes;
+            report
+        };
+        let inventory = self.recovery_inventory()?;
         let mut status = self
             .status
             .lock()
@@ -234,7 +327,26 @@ impl EditorPersistenceCoordinator {
         base: RecoveryBaseSnapshot,
         durable: DurableProjectionBatch,
     ) -> Result<RecoveryRevisionVector, EditorPersistenceError> {
-        self.recovery.resume_recovery_acknowledgement(base, durable)
+        let replay = self.recovery.replay(base.clone())?;
+        let target = durable.receipt().durable_through.clone();
+        let Some(index) = replay
+            .accepted
+            .iter()
+            .position(|batch| batch == durable.batch() && batch.revision_vector() == target)
+        else {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        };
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        frontier.revisions = base.revisions;
+        frontier.hashes = base.hashes;
+        for batch in &replay.accepted[..index] {
+            advance_frontier(&mut frontier, batch);
+        }
+        drop(frontier);
+        self.acknowledge_recovery(durable)
     }
 
     pub fn submit_save(
@@ -258,12 +370,25 @@ impl EditorPersistenceCoordinator {
                 if let Some(ticket) = queue.latest.as_ref().map(|(_, ticket)| ticket.clone())
                     && ticket.try_result().is_none()
                 {
-                    if self.recovery.cancel_save(ticket.clone()) == CancelOutcome::Cancelled {
+                    if self.cancel_save(ticket.clone()) == CancelOutcome::Cancelled {
                         queue.in_flight.remove(&ticket.id());
                     }
                     queue.coalesced += 1;
                 }
-                let ticket = self.recovery.submit_save(projection, request.clone())?;
+                if request
+                    .revisions
+                    .open_documents
+                    .get(&projection.document_id())
+                    != Some(&parchmint_recovery_api::DocumentRevision::from(
+                        projection.revision().value(),
+                    ))
+                {
+                    return Err(EditorPersistenceError::RevisionMismatch);
+                }
+                let Some(save) = self.save.as_ref() else {
+                    return Err(EditorPersistenceError::StateUnavailable);
+                };
+                let ticket = save.request(request.clone())?;
                 queue.latest = Some((request.revisions.clone(), ticket.clone()));
                 queue
                     .in_flight
@@ -299,7 +424,11 @@ impl EditorPersistenceCoordinator {
         &self,
         base: &parchmint_recovery_api::RecoveryBaseSnapshot,
     ) -> Result<(), EditorPersistenceError> {
-        self.recovery.retire_recovery_through(base)
+        self.recovery
+            .discard_through(parchmint_recovery_api::DurableRevisionVector::new(
+                base.revisions.clone(),
+            ))?;
+        Ok(())
     }
 
     pub fn acknowledge_save(
@@ -393,7 +522,10 @@ impl EditorPersistenceCoordinator {
     }
 
     pub fn frontier(&self) -> Option<RecoveryRevisionVector> {
-        self.recovery.frontier()
+        self.frontier
+            .lock()
+            .ok()
+            .map(|frontier| frontier.revisions.clone())
     }
 
     pub fn register_document_base(
@@ -402,8 +534,104 @@ impl EditorPersistenceCoordinator {
         revision: parchmint_recovery_api::DocumentRevision,
         hash: parchmint_recovery_api::ContentHash,
     ) -> Result<(), EditorPersistenceError> {
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        let resource = document_resource_id(document);
+        if let Some(existing) = frontier.hashes.get(&resource) {
+            return (*existing == hash)
+                .then_some(())
+                .ok_or(EditorPersistenceError::RevisionMismatch);
+        }
+        if frontier
+            .revisions
+            .documents
+            .get(&document)
+            .is_some_and(|known| *known != revision)
+        {
+            return Err(EditorPersistenceError::RevisionMismatch);
+        }
+        frontier.revisions.documents.insert(document, revision);
+        frontier.hashes.insert(resource, hash);
+        Ok(())
+    }
+
+    fn persist_projection_record(
+        &self,
+        projection: &CanonicalProjection,
+        revisions: &SaveRevisionVector,
+        payload: VersionedRecoveryPayload,
+        result_hash: parchmint_recovery_api::ContentHash,
+    ) -> Result<DurableProjectionBatch, EditorPersistenceError> {
+        let frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?
+            .clone();
+        let Some(requested) = revisions.open_documents.get(&projection.document_id()) else {
+            return Err(EditorPersistenceError::RevisionMismatch);
+        };
+        if *requested
+            < parchmint_recovery_api::DocumentRevision::from(projection.revision().value())
+        {
+            return Err(EditorPersistenceError::RevisionMismatch);
+        }
+        let previous = frontier
+            .revisions
+            .documents
+            .get(&projection.document_id())
+            .copied()
+            .unwrap_or_default();
+        let last = parchmint_recovery_api::DocumentRevision::from(projection.revision().value());
+        if last <= previous {
+            return Err(EditorPersistenceError::RevisionMismatch);
+        }
+        let exact_resource = document_resource_id(projection.document_id());
+        let document_resource = if frontier.hashes.contains_key(&exact_resource) {
+            exact_resource
+        } else {
+            ResourceId::Document
+        };
+        if !frontier.hashes.contains_key(&document_resource) {
+            return Err(RecoveryError::MissingBaseHash {
+                resource: document_resource,
+            }
+            .into());
+        }
+        let batch = RecoveryBatch {
+            project_revision: frontier.revisions.project_revision.next(),
+            documents: BTreeMap::from([(
+                projection.document_id(),
+                EditorRevisionRange::new(previous.next(), last)?,
+            )]),
+            base_hashes: BTreeMap::from([(
+                document_resource.clone(),
+                frontier.hashes[&document_resource],
+            )]),
+            result_hashes: BTreeMap::from([(document_resource, result_hash)]),
+            payload,
+        };
+        batch.validate_after(None)?;
+        let receipt = self.recovery.append(batch.clone())?;
+        if receipt.durable_through != batch.revision_vector() {
+            return Err(RecoveryError::UnknownRevisionVector.into());
+        }
+        DurableProjectionBatch::new(batch, receipt)
+    }
+
+    fn recovery_inventory(&self) -> Result<RecoveryInventory, EditorPersistenceError> {
         self.recovery
-            .register_document_base(document, revision, hash)
+            .inspect()
+            .map_err(EditorPersistenceError::Recovery)
+    }
+
+    fn cancel_save(&self, ticket: SaveTicket) -> CancelOutcome {
+        self.save
+            .as_ref()
+            .map_or(CancelOutcome::WorkerStopped, |save| {
+                save.cancel_pending(ticket)
+            })
     }
 
     fn refresh_recovery_status(
@@ -414,4 +642,17 @@ impl EditorPersistenceCoordinator {
         status.recovery_retained_records = inventory.records.len();
         status.recovery_inventory = Some(inventory);
     }
+}
+
+fn content_hash(bytes: &[u8]) -> parchmint_recovery_api::ContentHash {
+    parchmint_recovery_api::ContentHash::of_bytes(bytes)
+}
+
+fn document_resource_id(document: parchmint_domain::DocumentId) -> ResourceId {
+    let document_id = document
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    ResourceId::DocumentById { document_id }
 }

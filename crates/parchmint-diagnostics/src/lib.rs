@@ -21,6 +21,8 @@ const LOG_FILE_NAME: &str = "parchmint-debug.log";
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_TIMING_GROUPS: usize = 64;
 const TIMING_SAMPLES_PER_REPORT: u64 = 64;
+const MAX_BLOCKING_WORKER_GROUPS: usize = 64;
+const BLOCKING_WORKER_SAMPLES_PER_REPORT: u64 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -262,6 +264,166 @@ pub fn timing(operation: &'static str, context: &'static str, duration: Duration
     );
 }
 
+/// Whether a completed blocking worker could publish its result to the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerDelivery {
+    Accepted,
+    Dropped,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BlockingWorkerAggregate {
+    samples: u64,
+    accepted: u64,
+    dropped: u64,
+    total_duration_us: u128,
+    max_duration_us: u128,
+    active_concurrency: u64,
+    peak_concurrency: u64,
+}
+
+impl BlockingWorkerAggregate {
+    fn record(
+        &mut self,
+        duration: Duration,
+        delivery: WorkerDelivery,
+        active: u64,
+    ) -> Option<Self> {
+        self.samples = self.samples.saturating_add(1);
+        match delivery {
+            WorkerDelivery::Accepted => self.accepted = self.accepted.saturating_add(1),
+            WorkerDelivery::Dropped => self.dropped = self.dropped.saturating_add(1),
+        }
+        let duration_us = duration.as_micros();
+        self.total_duration_us = self.total_duration_us.saturating_add(duration_us);
+        self.max_duration_us = self.max_duration_us.max(duration_us);
+        self.active_concurrency = active;
+        self.peak_concurrency = self.peak_concurrency.max(active);
+        if self.samples < BLOCKING_WORKER_SAMPLES_PER_REPORT {
+            return None;
+        }
+        Some(std::mem::take(self))
+    }
+}
+
+#[derive(Default)]
+struct BlockingWorkerState {
+    active: BTreeMap<&'static str, u64>,
+    aggregates: BTreeMap<&'static str, BlockingWorkerAggregate>,
+}
+
+fn blocking_workers() -> &'static Mutex<BlockingWorkerState> {
+    static WORKERS: OnceLock<Mutex<BlockingWorkerState>> = OnceLock::new();
+    WORKERS.get_or_init(|| Mutex::new(BlockingWorkerState::default()))
+}
+
+/// Measures one detached blocking worker without changing how it is scheduled.
+///
+/// The guard counts active and peak concurrency per static operation name. Call
+/// [`BlockingWorkerActivity::complete`] after attempting result delivery. If a
+/// worker unwinds before that point, dropping the guard records a dropped
+/// delivery. Reports are emitted only after a bounded sample window.
+pub struct BlockingWorkerActivity {
+    operation: &'static str,
+    started: std::time::Instant,
+    tracked: bool,
+    completed: bool,
+}
+
+/// Starts passive diagnostics for a blocking worker.
+pub fn blocking_worker(operation: &'static str) -> BlockingWorkerActivity {
+    let tracked = {
+        let mut workers = blocking_workers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !workers.active.contains_key(operation)
+            && workers.active.len() >= MAX_BLOCKING_WORKER_GROUPS
+        {
+            false
+        } else {
+            let active = {
+                let active = workers.active.entry(operation).or_default();
+                *active = active.saturating_add(1);
+                *active
+            };
+            let aggregate = workers.aggregates.entry(operation).or_default();
+            aggregate.peak_concurrency = aggregate.peak_concurrency.max(active);
+            true
+        }
+    };
+    BlockingWorkerActivity {
+        operation,
+        started: std::time::Instant::now(),
+        tracked,
+        completed: false,
+    }
+}
+
+impl BlockingWorkerActivity {
+    /// Records the worker duration and whether the receiver accepted its result.
+    pub fn complete(mut self, delivery: WorkerDelivery) {
+        self.finish(delivery);
+    }
+
+    fn finish(&mut self, delivery: WorkerDelivery) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        if !self.tracked {
+            return;
+        }
+        let aggregate = {
+            let mut workers = blocking_workers()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let active = workers
+                .active
+                .get_mut(self.operation)
+                .expect("tracked worker has an active count");
+            *active = active.saturating_sub(1);
+            let active = *active;
+            workers
+                .aggregates
+                .get_mut(self.operation)
+                .expect("tracked worker has an aggregate")
+                .record(self.started.elapsed(), delivery, active)
+        };
+        let Some(aggregate) = aggregate else {
+            return;
+        };
+        let samples = aggregate.samples.to_string();
+        let accepted = aggregate.accepted.to_string();
+        let dropped = aggregate.dropped.to_string();
+        let total_duration_us = aggregate.total_duration_us.to_string();
+        let max_duration_us = aggregate.max_duration_us.to_string();
+        let active_concurrency = aggregate.active_concurrency.to_string();
+        let peak_concurrency = aggregate.peak_concurrency.to_string();
+        write_event(
+            Level::Info,
+            "performance",
+            "blocking worker aggregate",
+            &[
+                ("operation", self.operation),
+                ("samples", &samples),
+                ("accepted", &accepted),
+                ("dropped", &dropped),
+                ("total_duration_us", &total_duration_us),
+                ("max_duration_us", &max_duration_us),
+                ("active_concurrency", &active_concurrency),
+                ("peak_concurrency", &peak_concurrency),
+            ],
+            false,
+        );
+    }
+}
+
+impl Drop for BlockingWorkerActivity {
+    fn drop(&mut self) {
+        self.finish(WorkerDelivery::Dropped);
+    }
+}
+
 fn append_escaped(output: &mut String, value: &str) {
     for character in value.chars() {
         match character {
@@ -330,6 +492,30 @@ mod tests {
             })
         );
         assert_eq!(aggregate, TimingAggregate::default());
+    }
+
+    #[test]
+    fn blocking_worker_aggregate_reports_and_resets_a_bounded_window() {
+        let mut aggregate = BlockingWorkerAggregate::default();
+        for _ in 1..BLOCKING_WORKER_SAMPLES_PER_REPORT {
+            assert_eq!(
+                aggregate.record(Duration::from_micros(3), WorkerDelivery::Accepted, 2),
+                None
+            );
+        }
+        assert_eq!(
+            aggregate.record(Duration::from_micros(5), WorkerDelivery::Dropped, 1),
+            Some(BlockingWorkerAggregate {
+                samples: BLOCKING_WORKER_SAMPLES_PER_REPORT,
+                accepted: BLOCKING_WORKER_SAMPLES_PER_REPORT - 1,
+                dropped: 1,
+                total_duration_us: u128::from(BLOCKING_WORKER_SAMPLES_PER_REPORT - 1) * 3 + 5,
+                max_duration_us: 5,
+                active_concurrency: 1,
+                peak_concurrency: 2,
+            })
+        );
+        assert_eq!(aggregate, BlockingWorkerAggregate::default());
     }
 
     #[test]

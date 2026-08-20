@@ -1,0 +1,1735 @@
+use super::composition::SharedServices;
+use super::dependencies::*;
+use super::workflow_adapters::{
+    ProductionProjectQuery, ProductionProjectWorkflows, ProductionSaveStatus,
+    SearchRefreshingCommands, SearchRefreshingPersistence,
+};
+use super::*;
+
+pub(super) struct ControlledHistory {
+    inner: Git2HistoryStore,
+    controls: ProductionControls,
+}
+
+struct ProductionHistoryMaintenance {
+    history: Arc<ControlledHistory>,
+    root: HistoryRoot,
+    problem: Option<String>,
+}
+
+impl ProjectHistoryMaintenancePort for ProductionHistoryMaintenance {
+    fn status(&self) -> Result<HistoryMaintenanceStatus, ProjectQueryError> {
+        let availability = self
+            .history
+            .reinitialize_availability()
+            .map_err(|error| ProjectQueryError::new(error.to_string()))?;
+        Ok(match (self.problem.as_ref(), availability) {
+            (None, _) | (_, history::HistoryReinitializeAvailability::NotNeeded) => {
+                HistoryMaintenanceStatus::Available
+            }
+            (Some(problem), history::HistoryReinitializeAvailability::Ready { .. }) => {
+                HistoryMaintenanceStatus::Reinitializable {
+                    problem: problem.clone(),
+                }
+            }
+            (Some(problem), history::HistoryReinitializeAvailability::Blocked { reason }) => {
+                HistoryMaintenanceStatus::Unavailable {
+                    problem: problem.clone(),
+                    reason,
+                }
+            }
+        })
+    }
+
+    fn reinitialize(&self) -> Result<String, ProjectQueryError> {
+        let report = self
+            .history
+            .reinitialize(self.root.clone())
+            .map_err(|error| ProjectQueryError::new(error.to_string()))?;
+        Ok(report.preserved_history.map_or_else(
+            || "History was reinitialized.".to_owned(),
+            |path| format!("History was reinitialized; the damaged store was preserved at {path}."),
+        ))
+    }
+}
+
+impl ControlledHistory {
+    fn before(&self, operation: &'static str) -> Result<(), history::HistoryError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::History) {
+            self.controls
+                .service_operation(ProductionFaultPoint::History, operation, false);
+            return Err(history::HistoryError::Storage {
+                operation,
+                reason: format!("injected {kind:?} fault"),
+            });
+        }
+        Ok(())
+    }
+
+    fn observed<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, history::HistoryError>,
+    ) -> Result<T, history::HistoryError> {
+        self.controls
+            .service_operation(ProductionFaultPoint::History, operation, result.is_ok());
+        result
+    }
+}
+
+impl HistoryStore for ControlledHistory {
+    fn initialize(
+        &self,
+        project: HistoryRoot,
+    ) -> Result<history::HistoryState, history::HistoryError> {
+        self.before("initialize")?;
+        self.observed("initialize", self.inner.initialize(project))
+    }
+
+    fn reinitialize_availability(
+        &self,
+    ) -> Result<history::HistoryReinitializeAvailability, history::HistoryError> {
+        self.before("inspect reinitialization")?;
+        self.observed(
+            "inspect reinitialization",
+            self.inner.reinitialize_availability(),
+        )
+    }
+
+    fn reinitialize(
+        &self,
+        project: HistoryRoot,
+    ) -> Result<history::HistoryReinitializeReport, history::HistoryError> {
+        self.before("reinitialize")?;
+        self.observed("reinitialize", self.inner.reinitialize(project))
+    }
+
+    fn checkpoint(
+        &self,
+        input: history::CheckpointInput,
+    ) -> Result<history::CheckpointId, history::HistoryError> {
+        self.before("checkpoint")?;
+        self.observed("checkpoint", self.inner.checkpoint(input))
+    }
+
+    fn list(
+        &self,
+        query: history::HistoryPageQuery,
+    ) -> Result<history::HistoryPage, history::HistoryError> {
+        self.before("list")?;
+        self.observed("list", self.inner.list(query))
+    }
+
+    fn preview(
+        &self,
+        checkpoint: history::CheckpointId,
+    ) -> Result<history::SnapshotPreview, history::HistoryError> {
+        self.before("preview")?;
+        self.observed("preview", self.inner.preview(checkpoint))
+    }
+
+    fn read_resource(
+        &self,
+        checkpoint: history::CheckpointId,
+        path: &history::CanonicalRelativePath,
+    ) -> Result<history::CheckpointResource, history::HistoryError> {
+        self.before("read resource")?;
+        self.observed("read resource", self.inner.read_resource(checkpoint, path))
+    }
+
+    fn restore(
+        &self,
+        checkpoint: history::CheckpointId,
+    ) -> Result<history::RestorePlan, history::HistoryError> {
+        self.before("restore")?;
+        self.observed("restore", self.inner.restore(checkpoint))
+    }
+
+    fn verify(&self) -> Result<history::HistoryIntegrityReport, history::HistoryError> {
+        self.before("verify")?;
+        self.observed("verify", self.inner.verify())
+    }
+
+    fn maintain(
+        &self,
+        budget: history::MaintenanceBudget,
+    ) -> Result<history::MaintenanceReport, history::HistoryError> {
+        self.before("maintain")?;
+        self.observed("maintain", self.inner.maintain(budget))
+    }
+}
+
+pub(super) struct ControlledRecovery {
+    inner: FsRecoveryJournal,
+    controls: ProductionControls,
+}
+
+impl ControlledRecovery {
+    fn before(&self, operation: &'static str) -> Result<(), recovery::RecoveryError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::Recovery) {
+            self.controls
+                .service_operation(ProductionFaultPoint::Recovery, operation, false);
+            return Err(recovery::RecoveryError::Storage {
+                operation,
+                reason: format!("injected {kind:?} fault"),
+            });
+        }
+        Ok(())
+    }
+
+    fn observed<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, recovery::RecoveryError>,
+    ) -> Result<T, recovery::RecoveryError> {
+        self.controls
+            .service_operation(ProductionFaultPoint::Recovery, operation, result.is_ok());
+        result
+    }
+
+    fn before_intent(&self, operation: &'static str) -> Result<(), IntentStoreError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::Recovery) {
+            self.controls
+                .service_operation(ProductionFaultPoint::Recovery, operation, false);
+            return Err(IntentStoreError::Storage {
+                operation,
+                reason: format!("injected {kind:?} fault"),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl RecoveryJournal for ControlledRecovery {
+    fn append(
+        &self,
+        batch: recovery::RecoveryBatch,
+    ) -> Result<recovery::RecoveryReceipt, recovery::RecoveryError> {
+        self.before("append")?;
+        self.observed("append", self.inner.append(batch))
+    }
+
+    fn flush_through(
+        &self,
+        target: recovery::RecoveryRevisionVector,
+    ) -> Result<recovery::RecoveryReceipt, recovery::RecoveryError> {
+        self.before("flush")?;
+        self.observed("flush", self.inner.flush_through(target))
+    }
+
+    fn inspect(&self) -> Result<recovery::RecoveryInventory, recovery::RecoveryError> {
+        self.before("inspect")?;
+        self.observed("inspect", self.inner.inspect())
+    }
+
+    fn replay(
+        &self,
+        base: recovery::RecoveryBaseSnapshot,
+    ) -> Result<recovery::RecoveryReplay, recovery::RecoveryError> {
+        self.before("replay")?;
+        self.observed("replay", self.inner.replay(base))
+    }
+
+    fn compact(
+        &self,
+        durable: recovery::DurableRevisionVector,
+    ) -> Result<recovery::CompactionReport, recovery::RecoveryError> {
+        self.before("compact")?;
+        self.observed("compact", self.inner.compact(durable))
+    }
+
+    fn discard_through(
+        &self,
+        durable: recovery::DurableRevisionVector,
+    ) -> Result<recovery::DiscardReport, recovery::RecoveryError> {
+        self.before("discard")?;
+        self.observed("discard", self.inner.discard_through(durable))
+    }
+}
+
+impl CheckpointIntentStore for ControlledRecovery {
+    fn persist(&self, intent: CheckpointIntent) -> Result<(), IntentStoreError> {
+        self.before_intent("persist intent")?;
+        let result = self.inner.persist(intent);
+        self.controls.service_operation(
+            ProductionFaultPoint::Recovery,
+            "persist intent",
+            result.is_ok(),
+        );
+        result
+    }
+
+    fn pending(&self) -> Result<Vec<CheckpointIntent>, IntentStoreError> {
+        self.before_intent("read pending intents")?;
+        let result = self.inner.pending();
+        self.controls.service_operation(
+            ProductionFaultPoint::Recovery,
+            "read pending intents",
+            result.is_ok(),
+        );
+        result
+    }
+
+    fn complete(&self, receipt: CheckpointReceipt) -> Result<(), IntentStoreError> {
+        self.before_intent("complete intent")?;
+        let result = self.inner.complete(receipt);
+        self.controls.service_operation(
+            ProductionFaultPoint::Recovery,
+            "complete intent",
+            result.is_ok(),
+        );
+        result
+    }
+}
+
+pub(super) struct ControlledSearch {
+    inner: SqliteSearchIndex,
+    controls: ProductionControls,
+    live: Mutex<Option<LiveSearchProjectionState>>,
+}
+
+struct LiveSearchProjectionSource {
+    commands: Arc<NativeProjectCommandDispatcher>,
+    documents: Arc<NativeDocumentStateOwner>,
+}
+
+struct LiveSearchProjectionState {
+    source: Arc<LiveSearchProjectionSource>,
+    indexed: BTreeMap<DocumentId, SearchDocumentProjection>,
+}
+
+impl LiveSearchProjectionSource {
+    fn projections(&self) -> Result<Vec<SearchDocumentProjection>, search::SearchError> {
+        let project = self
+            .commands
+            .project()
+            .map_err(|error| search::SearchError::Source {
+                reason: error.to_string(),
+            })?;
+        let documents =
+            self.documents
+                .snapshots()
+                .map_err(|error| search::SearchError::Source {
+                    reason: error.to_string(),
+                })?;
+        let documents = documents
+            .into_iter()
+            .map(|document| (document.document_id, document))
+            .collect::<BTreeMap<_, _>>();
+        project
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| match node.kind {
+                NodeKind::Document(document) => Some((document, documents.get(&document))),
+                NodeKind::Root(_) | NodeKind::Group => None,
+            })
+            .map(|(document, source)| {
+                let source = source.ok_or_else(|| search::SearchError::Source {
+                    reason: format!("live document {document:?} has no canonical body"),
+                })?;
+                Ok(SearchDocumentProjection {
+                    document_id: document,
+                    // Search hits are revalidated against the canonical editor
+                    // revision. Project-only fields may change without advancing
+                    // it; SQLite deliberately permits equal-revision replacement.
+                    revision: RevisionId::from(source.revision.value()),
+                    texts: search_texts(&project, document, &source.body),
+                })
+            })
+            .collect()
+    }
+}
+
+impl SearchProjectionSource for LiveSearchProjectionSource {
+    fn visit_projections(
+        &self,
+        visitor: &mut dyn SearchProjectionVisitor,
+    ) -> Result<(), search::SearchError> {
+        for projection in self.projections()? {
+            visitor.visit(projection)?;
+        }
+        Ok(())
+    }
+}
+
+impl ControlledSearch {
+    fn attach_live_source(
+        &self,
+        source: Arc<LiveSearchProjectionSource>,
+        initial: Vec<SearchDocumentProjection>,
+    ) -> Result<(), search::SearchError> {
+        let indexed = initial
+            .into_iter()
+            .map(|projection| (projection.document_id, projection))
+            .collect();
+        *self.live.lock().map_err(|_| search::SearchError::Storage {
+            operation: "attach live projection source",
+            reason: "live projection state lock was poisoned".into(),
+        })? = Some(LiveSearchProjectionState { source, indexed });
+        Ok(())
+    }
+
+    pub(super) fn refresh_live(&self) -> Result<(), search::SearchError> {
+        if let search::SearchRebuildStatus::Running { generation, .. } = self.inner.rebuild_status()
+        {
+            self.inner.cancel(generation);
+            return Err(search::SearchError::Rebuilding { generation });
+        }
+        let mut guard = self.live.lock().map_err(|_| search::SearchError::Storage {
+            operation: "refresh live projections",
+            reason: "live projection state lock was poisoned".into(),
+        })?;
+        let Some(live) = guard.as_mut() else {
+            return Ok(());
+        };
+        let current = live
+            .source
+            .projections()?
+            .into_iter()
+            .map(|projection| (projection.document_id, projection))
+            .collect::<BTreeMap<_, _>>();
+        let removed = live
+            .indexed
+            .keys()
+            .filter(|document| !current.contains_key(document))
+            .copied()
+            .collect::<Vec<_>>();
+        for document in removed {
+            let deletion_revision = live
+                .indexed
+                .get(&document)
+                .map(|projection| projection.revision.value().saturating_add(1))
+                .unwrap_or_default();
+            let receipt = self
+                .inner
+                .delete_document(document, RevisionId::from(deletion_revision))?;
+            if receipt.replaced {
+                live.indexed.remove(&document);
+            }
+        }
+        for (document, projection) in current {
+            if live.indexed.get(&document) == Some(&projection) {
+                continue;
+            }
+            let receipt = self.inner.replace_document(projection.clone())?;
+            if !receipt.replaced {
+                // A restored document can legitimately return with a canonical
+                // revision older than its disposable tombstone. The live source
+                // is authoritative, so rebuild instead of publishing stale hits.
+                self.inner.rebuild(live.source.as_ref())?;
+                live.indexed = live
+                    .source
+                    .projections()?
+                    .into_iter()
+                    .map(|projection| (projection.document_id, projection))
+                    .collect();
+                return Ok(());
+            }
+            live.indexed.insert(document, projection);
+        }
+        Ok(())
+    }
+
+    fn before(&self, operation: &'static str) -> Result<(), search::SearchError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::Search) {
+            self.controls
+                .service_operation(ProductionFaultPoint::Search, operation, false);
+            return Err(search::SearchError::Storage {
+                operation,
+                reason: format!("injected {kind:?} fault"),
+            });
+        }
+        Ok(())
+    }
+
+    fn observed<T>(
+        &self,
+        operation: &'static str,
+        result: Result<T, search::SearchError>,
+    ) -> Result<T, search::SearchError> {
+        self.controls
+            .service_operation(ProductionFaultPoint::Search, operation, result.is_ok());
+        result
+    }
+}
+
+impl SearchIndex for ControlledSearch {
+    fn open_or_rebuild(
+        &self,
+        project: ProjectId,
+        source: &dyn SearchProjectionSource,
+    ) -> Result<search::SearchIndexState, search::SearchError> {
+        self.before("open or rebuild")?;
+        self.observed(
+            "open or rebuild",
+            self.inner.open_or_rebuild(project, source),
+        )
+    }
+
+    fn open_or_rebuild_background(
+        &self,
+        project: ProjectId,
+        source: Arc<dyn SearchProjectionSource>,
+    ) -> Result<search::SearchIndexState, search::SearchError> {
+        self.before("open or rebuild in background")?;
+        self.observed(
+            "open or rebuild in background",
+            self.inner.open_or_rebuild_background(project, source),
+        )
+    }
+
+    fn rebuild_status(&self) -> search::SearchRebuildStatus {
+        self.inner.rebuild_status()
+    }
+
+    fn replace_document(
+        &self,
+        projection: SearchDocumentProjection,
+    ) -> Result<search::ProjectionReceipt, search::SearchError> {
+        self.before("replace document")?;
+        self.observed("replace document", self.inner.replace_document(projection))
+    }
+
+    fn delete_document(
+        &self,
+        id: DocumentId,
+        revision: RevisionId,
+    ) -> Result<search::ProjectionReceipt, search::SearchError> {
+        self.before("delete document")?;
+        self.observed("delete document", self.inner.delete_document(id, revision))
+    }
+
+    fn query(
+        &self,
+        query: search::SearchQuery,
+        sink: Box<dyn search::SearchBatchSink>,
+    ) -> Result<(), search::SearchError> {
+        self.before("query")?;
+        if let search::SearchRebuildStatus::Running { generation, .. } = self.inner.rebuild_status()
+        {
+            return Err(search::SearchError::Rebuilding { generation });
+        }
+        if let Err(error) = self.refresh_live() {
+            self.controls
+                .service_operation(ProductionFaultPoint::Search, "query", false);
+            return Err(error);
+        }
+        self.observed("query", self.inner.query(query, sink))
+    }
+
+    fn cancel(&self, generation: u64) {
+        self.inner.cancel(generation);
+        self.controls
+            .service_operation(ProductionFaultPoint::Search, "cancel", true);
+    }
+
+    fn verify(&self) -> Result<search::SearchIntegrityReport, search::SearchError> {
+        self.before("verify")?;
+        self.observed("verify", self.inner.verify())
+    }
+
+    fn rebuild(
+        &self,
+        source: &dyn SearchProjectionSource,
+    ) -> Result<search::RebuildReport, search::SearchError> {
+        self.before("rebuild")?;
+        self.observed("rebuild", self.inner.rebuild(source))
+    }
+}
+
+/// Concrete services scoped to one exact writable project lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductionHistoryStatus {
+    Available {
+        checkpoint_count: usize,
+    },
+    Unavailable {
+        problem: String,
+        reinitialize: history::HistoryReinitializeAvailability,
+    },
+}
+
+pub struct ProductionProjectSession {
+    path: PathBuf,
+    project_id: ProjectId,
+    commands: Arc<NativeProjectCommandDispatcher>,
+    history: Arc<ControlledHistory>,
+    history_status: ProductionHistoryStatus,
+    recovery: Arc<ControlledRecovery>,
+    search: Arc<ControlledSearch>,
+    save: Arc<ProjectSaveCoordinator>,
+    persistence: Arc<EditorPersistenceCoordinator>,
+    project_persistence: Arc<ProjectPersistenceCoordinator>,
+    query: Arc<ProductionProjectQuery>,
+    ui_services: ProjectUiServices,
+    _repository: Arc<FsProjectRepository>,
+    _open_project: OpenProject,
+    controls: ProductionControls,
+}
+
+impl ProductionProjectSession {
+    pub const fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn commands(&self) -> Arc<NativeProjectCommandDispatcher> {
+        Arc::clone(&self.commands)
+    }
+
+    pub fn history(&self) -> Arc<dyn HistoryStore> {
+        self.history.clone()
+    }
+
+    pub fn history_status(&self) -> &ProductionHistoryStatus {
+        &self.history_status
+    }
+
+    pub fn recovery(&self) -> Arc<dyn RecoveryJournal> {
+        self.recovery.clone()
+    }
+
+    pub fn search(&self) -> Arc<dyn SearchIndex> {
+        self.search.clone()
+    }
+
+    pub fn save(&self) -> &dyn SaveCoordinator {
+        self.save.as_ref()
+    }
+
+    pub fn persistence(&self) -> Arc<EditorPersistenceCoordinator> {
+        Arc::clone(&self.persistence)
+    }
+
+    pub fn project_persistence(&self) -> Arc<ProjectPersistenceCoordinator> {
+        Arc::clone(&self.project_persistence)
+    }
+
+    pub fn ui_snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
+        self.query.snapshot()
+    }
+
+    pub fn request_save(&self, request: SaveRequest) -> Result<SaveTicket, ProjectFilesystemError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::FinalSave) {
+            self.controls
+                .service_operation(ProductionFaultPoint::FinalSave, "request save", false);
+            return Err(injected_failure("save", kind));
+        }
+        let result = self
+            .save
+            .request(request)
+            .map_err(|error| ProjectFilesystemError::failed("save", error.to_string()));
+        self.controls.service_operation(
+            ProductionFaultPoint::FinalSave,
+            "request save",
+            result.is_ok(),
+        );
+        result
+    }
+
+    fn reconcile_final_save(&self) -> Result<(), ProjectFilesystemError> {
+        if let Some(kind) = self.controls.take_fault(ProductionFaultPoint::FinalSave) {
+            self.controls.service_operation(
+                ProductionFaultPoint::FinalSave,
+                "reconcile final save",
+                false,
+            );
+            return Err(injected_failure("save", kind));
+        }
+        if !self
+            .project_persistence
+            .has_unsaved_changes()
+            .map_err(|error| {
+                ProjectFilesystemError::failed("inspect final save", error.to_string())
+            })?
+        {
+            self.controls
+                .observe(ProductionObservation::FinalSaveReconciled {
+                    path: self.path.clone(),
+                });
+            self.controls.service_operation(
+                ProductionFaultPoint::FinalSave,
+                "reconcile final save",
+                true,
+            );
+            return Ok(());
+        }
+        let (handle, _) = match self
+            .project_persistence
+            .request_save(PersistenceSaveKind::Final)
+        {
+            Ok(request) => request,
+            Err(error) => {
+                self.controls.service_operation(
+                    ProductionFaultPoint::FinalSave,
+                    "reconcile final save",
+                    false,
+                );
+                return Err(ProjectFilesystemError::failed(
+                    "capture final save",
+                    error.to_string(),
+                ));
+            }
+        };
+        if let Err(error) = self.project_persistence.await_save(handle) {
+            self.controls.service_operation(
+                ProductionFaultPoint::FinalSave,
+                "reconcile final save",
+                false,
+            );
+            return Err(ProjectFilesystemError::failed("save", error.to_string()));
+        }
+        self.controls
+            .observe(ProductionObservation::FinalSaveReconciled {
+                path: self.path.clone(),
+            });
+        self.controls.service_operation(
+            ProductionFaultPoint::FinalSave,
+            "reconcile final save",
+            true,
+        );
+        Ok(())
+    }
+}
+
+pub(super) struct ProductionProjectFilesystem {
+    pub(super) shared: Arc<SharedServices>,
+}
+
+impl ProjectFilesystemService for ProductionProjectFilesystem {
+    fn create(
+        &self,
+        request: &NewProjectRequest,
+    ) -> Result<Box<dyn ProjectSession>, ProjectFilesystemError> {
+        let repository = FsProjectRepository::native();
+        let manifest = new_project_manifest(&request.title, request.author.as_deref());
+        let created = repository
+            .create(RepositoryCreateProject {
+                path: ProjectPath::new(&request.destination),
+                manifest,
+                documents: BTreeMap::from([(
+                    RepositoryDocumentId::new("untitled-document"),
+                    b"<p></p>".to_vec(),
+                )]),
+            })
+            .map_err(map_repository_error)?;
+        drop(created);
+        drop(repository);
+        self.open(&RequestedProjectPath::new(&request.destination))
+    }
+
+    fn open(
+        &self,
+        requested: &RequestedProjectPath,
+    ) -> Result<Box<dyn ProjectSession>, ProjectFilesystemError> {
+        if let Some(kind) = self
+            .shared
+            .controls
+            .take_fault(ProductionFaultPoint::ProjectOpen)
+        {
+            self.shared.controls.service_operation(
+                ProductionFaultPoint::ProjectOpen,
+                "open",
+                false,
+            );
+            return Err(injected_failure("open", kind));
+        }
+
+        let path = requested.as_path().to_path_buf();
+        let repository = Arc::new(FsProjectRepository::native());
+        let open_project = repository
+            .open(ProjectPath::new(&path))
+            .map_err(map_repository_error)?;
+        let root = repository.active_root().ok_or_else(|| {
+            ProjectFilesystemError::failed("open", "validated root capability was not retained")
+        })?;
+        let root_path = root
+            .checked_path()
+            .map_err(|error| ProjectFilesystemError::failed("authorize root", error.to_string()))?
+            .to_path_buf();
+        let resources = canonical_resources(&root)?;
+        let project_id = project_id(&root, &resources.metadata);
+        let (
+            project,
+            document_summaries,
+            document_loader,
+            search_source,
+            canonical_paths,
+            persistence_frontier,
+        ) = application_state(project_id, root.clone(), &resources)?;
+        let document_owner = Arc::new(
+            NativeDocumentStateOwner::new_lazy(document_summaries.clone(), document_loader.clone())
+                .map_err(|error| {
+                    ProjectFilesystemError::failed(
+                        "initialize document sessions",
+                        error.to_string(),
+                    )
+                })?,
+        );
+        let initial_document = document_summaries
+            .iter()
+            .find(|summary| summary.visibility == DocumentVisibility::Open)
+            .map(|summary| summary.document_id);
+        if let Some(initial) = initial_document {
+            document_owner.snapshot(initial).map_err(|error| {
+                ProjectFilesystemError::failed("load initial document", error.to_string())
+            })?;
+        }
+        let mut recovery_base = recovery_base(
+            &document_summaries,
+            &resources.metadata,
+            &canonical_paths,
+            &persistence_frontier,
+        );
+        if let Some(initial) = initial_document
+            && let Some(hash) = document_loader.recovery_hash(initial)
+        {
+            recovery_base.hashes.insert(
+                recovery::ResourceId::DocumentById {
+                    document_id: stable_id_text(initial.as_bytes()),
+                },
+                hash,
+            );
+        }
+        let commands = Arc::new(NativeProjectCommandDispatcher::new(
+            project,
+            document_owner.clone(),
+        ));
+
+        let history = Arc::new(ControlledHistory {
+            inner: Git2HistoryStore::new(root.clone()),
+            controls: self.shared.controls.clone(),
+        });
+        let history_root = HistoryRoot::new(history_root_id(project_id));
+        let history_status = match history.initialize(history_root.clone()) {
+            Ok(state) => ProductionHistoryStatus::Available {
+                checkpoint_count: state.checkpoint_count,
+            },
+            Err(
+                error @ (history::HistoryError::CorruptHistory { .. }
+                | history::HistoryError::MissingHistory),
+            ) => ProductionHistoryStatus::Unavailable {
+                problem: error.to_string(),
+                reinitialize: history.reinitialize_availability().map_err(
+                    |availability_error| {
+                        ProjectFilesystemError::failed(
+                            "inspect History reinitialization",
+                            availability_error.to_string(),
+                        )
+                    },
+                )?,
+            },
+            Err(error) => {
+                return Err(ProjectFilesystemError::failed(
+                    "initialize History",
+                    error.to_string(),
+                ));
+            }
+        };
+        let recovery = Arc::new(ControlledRecovery {
+            inner: FsRecoveryJournal::open(&root_path).map_err(|error| {
+                ProjectFilesystemError::failed("initialize recovery", error.to_string())
+            })?,
+            controls: self.shared.controls.clone(),
+        });
+        let search = Arc::new(ControlledSearch {
+            inner: SqliteSearchIndex::new(&root_path),
+            controls: self.shared.controls.clone(),
+            live: Mutex::new(None),
+        });
+        search
+            .open_or_rebuild_background(project_id, Arc::new(search_source))
+            .map_err(|error| {
+                ProjectFilesystemError::failed("initialize search", error.to_string())
+            })?;
+        search
+            .attach_live_source(
+                Arc::new(LiveSearchProjectionSource {
+                    commands: commands.clone(),
+                    documents: document_owner.clone(),
+                }),
+                Vec::new(),
+            )
+            .map_err(|error| {
+                ProjectFilesystemError::failed("hydrate live search", error.to_string())
+            })?;
+        let writer = Arc::new(FsAtomicWriter::new(NativeAtomicFileOps::new(root)));
+        let save = Arc::new(
+            ProjectSaveCoordinator::new(project_id, writer, history.clone(), recovery.clone())
+                .map_err(|error| {
+                    ProjectFilesystemError::failed("initialize save", error.to_string())
+                })?,
+        );
+        save.reconcile_open().map_err(|error| {
+            ProjectFilesystemError::failed("reconcile pending save", error.to_string())
+        })?;
+        let persistence = Arc::new(EditorPersistenceCoordinator::new(
+            recovery.clone(),
+            save.clone(),
+            recovery_base.clone(),
+        ));
+        let project_persistence = Arc::new(ProjectPersistenceCoordinator::new(
+            commands.clone(),
+            document_owner.clone(),
+            persistence.clone(),
+            recovery_base,
+            resources.metadata.clone(),
+            canonical_paths,
+        ));
+        let query = Arc::new(ProductionProjectQuery {
+            commands: commands.clone(),
+            documents: document_owner,
+            persistence: project_persistence.clone(),
+            persisted_summaries: persistence_frontier.document_summaries.clone(),
+            document_loader,
+            search: search.clone(),
+        });
+        self.shared
+            .dictionary_source
+            .register_project(project_id, query.clone());
+        let dictionary_revision = query
+            .snapshot()
+            .map_err(|error| {
+                ProjectFilesystemError::failed("read project dictionary", error.to_string())
+            })?
+            .project
+            .revision
+            .value();
+        block_on(
+            self.shared.spellcheck.reload_project_dictionary(
+                project_id,
+                DictionaryRevision::from(dictionary_revision),
+            ),
+        )
+        .map_err(|error| {
+            ProjectFilesystemError::failed("hydrate project dictionary", error.to_string())
+        })?;
+        block_on(
+            self.shared
+                .spellcheck
+                .reload_global_dictionary(DictionaryRevision::default()),
+        )
+        .map_err(|error| {
+            ProjectFilesystemError::failed("hydrate global dictionary", error.to_string())
+        })?;
+        let workflows = Arc::new(ProductionProjectWorkflows {
+            history: history.clone(),
+            persistence: project_persistence.clone(),
+            query: query.clone(),
+            exporter: self.shared.exporter.clone(),
+            search: search.clone(),
+            artifacts: Mutex::new(BTreeMap::new()),
+            next_artifact: AtomicU64::new(1),
+            active_export: Mutex::new(None),
+            next_export_operation: AtomicU64::new(1),
+        });
+        let refreshing_commands = Arc::new(SearchRefreshingCommands {
+            inner: commands.clone(),
+            search: search.clone(),
+        });
+        let refreshing_persistence = Arc::new(SearchRefreshingPersistence {
+            inner: project_persistence.clone(),
+            search: search.clone(),
+        });
+        let history_maintenance = Arc::new(ProductionHistoryMaintenance {
+            history: history.clone(),
+            root: history_root,
+            problem: match &history_status {
+                ProductionHistoryStatus::Available { .. } => None,
+                ProductionHistoryStatus::Unavailable { problem, .. } => Some(problem.clone()),
+            },
+        });
+        let ui_services = ProjectUiServices::new(
+            UiApplicationServices::new(refreshing_commands.clone(), refreshing_commands),
+            query.clone(),
+            history.clone(),
+            history_maintenance,
+            recovery.clone(),
+            search.clone(),
+            Arc::new(ProductionSaveStatus { save: save.clone() }),
+            refreshing_persistence,
+            workflows.clone(),
+            workflows,
+            self.shared.exporter.clone(),
+            self.shared.editor.clone(),
+            self.shared.spellcheck.clone(),
+            self.shared.workspace_state.clone(),
+            self.shared.preferences.clone(),
+            self.shared.appearance.clone(),
+            self.shared.platform.clone(),
+        );
+
+        self.shared
+            .controls
+            .observe(ProductionObservation::ProjectOpened {
+                path: path.clone(),
+                project: project_id,
+            });
+        self.shared
+            .controls
+            .service_operation(ProductionFaultPoint::ProjectOpen, "open", true);
+        Ok(Box::new(ProductionProjectSession {
+            path,
+            project_id,
+            commands,
+            history,
+            history_status,
+            recovery,
+            search,
+            save,
+            persistence,
+            project_persistence,
+            query,
+            ui_services,
+            _repository: repository,
+            _open_project: open_project,
+            controls: self.shared.controls.clone(),
+        }))
+    }
+
+    fn begin_final_save(&self, session: &dyn ProjectSession) -> Result<(), ProjectFilesystemError> {
+        let session = session
+            .as_any()
+            .downcast_ref::<ProductionProjectSession>()
+            .ok_or_else(|| {
+                ProjectFilesystemError::failed(
+                    "save",
+                    "project session was not created by the production graph",
+                )
+            })?;
+        session.reconcile_final_save()
+    }
+
+    fn ui_services(
+        &self,
+        session: &dyn ProjectSession,
+    ) -> Result<Option<ProjectUiServices>, ProjectFilesystemError> {
+        let session = session
+            .as_any()
+            .downcast_ref::<ProductionProjectSession>()
+            .ok_or_else(|| {
+                ProjectFilesystemError::failed(
+                    "project UI services",
+                    "project session was not created by the production graph",
+                )
+            })?;
+        Ok(Some(session.ui_services.clone()))
+    }
+}
+
+#[derive(Default)]
+
+struct CanonicalOpenResources {
+    metadata: BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    document_paths: Vec<CanonicalRelativePath>,
+}
+
+fn canonical_resources(
+    root: &parchmint_project_fs::ProjectRootCapability,
+) -> Result<CanonicalOpenResources, ProjectFilesystemError> {
+    let root_path = root
+        .checked_path()
+        .map_err(|error| ProjectFilesystemError::failed("authorize root", error.to_string()))?;
+    let mut paths = Vec::new();
+    for relative in [
+        ".parchmint/format-version",
+        "project.toml",
+        "styles.css",
+        "dictionary.txt",
+        "deletions.json",
+    ] {
+        let path = root_path.join(relative);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                paths.push(CanonicalRelativePath::parse(relative).expect("fixed path is canonical"))
+            }
+            Ok(_) => {
+                return Err(ProjectFilesystemError::failed(
+                    "enumerate canonical resources",
+                    format!("unsafe canonical path {}", path.display()),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ProjectFilesystemError::failed(
+                    "enumerate canonical resources",
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+    for directory in ["manuscript", "research", "annotations"] {
+        collect_canonical_paths(root_path, &root_path.join(directory), &mut paths)?;
+    }
+    paths.sort();
+    let document_paths = paths
+        .iter()
+        .filter(|path| is_document_resource(path))
+        .cloned()
+        .collect();
+    let files = NativeProjectFileSystem::new();
+    let metadata = paths
+        .into_iter()
+        .filter(|path| !is_document_resource(path))
+        .map(|path| {
+            files
+                .read(root, &path)
+                .map(|bytes| (path, bytes))
+                .map_err(|error| {
+                    ProjectFilesystemError::failed("read canonical resource", error.to_string())
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(CanonicalOpenResources {
+        metadata,
+        document_paths,
+    })
+}
+
+fn collect_canonical_paths(
+    root: &Path,
+    directory: &Path,
+    paths: &mut Vec<CanonicalRelativePath>,
+) -> Result<(), ProjectFilesystemError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(ProjectFilesystemError::failed(
+                "read canonical directory",
+                error.to_string(),
+            ));
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            ProjectFilesystemError::failed("read canonical entry", error.to_string())
+        })?;
+        let kind = entry.file_type().map_err(|error| {
+            ProjectFilesystemError::failed("inspect canonical entry", error.to_string())
+        })?;
+        if kind.is_symlink() || !kind.is_dir() && !kind.is_file() {
+            return Err(ProjectFilesystemError::failed(
+                "inspect canonical entry",
+                format!("unsafe canonical path {}", entry.path().display()),
+            ));
+        }
+        if kind.is_dir() {
+            collect_canonical_paths(root, &entry.path(), paths)?;
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .ok()
+            .and_then(Path::to_str)
+            .map(|path| path.replace('\\', "/"))
+            .and_then(|path| CanonicalRelativePath::parse(path).ok())
+            .filter(is_canonical_resource)
+            .ok_or_else(|| {
+                ProjectFilesystemError::failed(
+                    "inspect canonical entry",
+                    format!("unsupported canonical path {}", entry.path().display()),
+                )
+            })?;
+        paths.push(relative);
+    }
+    Ok(())
+}
+
+fn is_canonical_resource(path: &CanonicalRelativePath) -> bool {
+    let path = path.as_str();
+    ((path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html"))
+        || (path.starts_with("annotations/") && path.ends_with(".json"))
+}
+
+pub(super) struct CanonicalDocumentLoader {
+    root: parchmint_project_fs::ProjectRootCapability,
+    paths: BTreeMap<DocumentId, CanonicalRelativePath>,
+    summaries: BTreeMap<DocumentId, CanonicalDocumentSummary>,
+    annotations: BTreeMap<DocumentId, Vec<CanonicalComment>>,
+    annotation_bytes: BTreeMap<DocumentId, Vec<u8>>,
+    recovery_hashes: Mutex<BTreeMap<DocumentId, recovery::ContentHash>>,
+    hydrated_summaries: Mutex<BTreeMap<DocumentId, CanonicalDocumentSummary>>,
+}
+
+impl CanonicalDocumentLoader {
+    pub(super) fn recovery_hash(&self, document: DocumentId) -> Option<recovery::ContentHash> {
+        self.recovery_hashes
+            .lock()
+            .ok()
+            .and_then(|hashes| hashes.get(&document).copied())
+    }
+
+    pub(super) fn hydrated_summary(
+        &self,
+        document: DocumentId,
+    ) -> Option<CanonicalDocumentSummary> {
+        self.hydrated_summaries
+            .lock()
+            .ok()
+            .and_then(|summaries| summaries.get(&document).cloned())
+    }
+}
+
+impl DocumentSnapshotLoader for CanonicalDocumentLoader {
+    fn load(&self, document: DocumentId) -> Result<DocumentSnapshot, ApplicationError> {
+        let path = self
+            .paths
+            .get(&document)
+            .ok_or(ApplicationError::MissingDocument { document })?;
+        let bytes = NativeProjectFileSystem::new()
+            .read(&self.root, path)
+            .map_err(|error| ApplicationError::DocumentLoad {
+                document,
+                reason: error.to_string(),
+            })?;
+        if let Some(summary) = self.summaries.get(&document) {
+            let actual = ContentHash::from_bytes(Sha256::digest(&bytes).into());
+            if actual != summary.content_hash {
+                return Err(ApplicationError::DocumentLoad {
+                    document,
+                    reason: "canonical body changed outside the persisted save frontier".into(),
+                });
+            }
+        }
+        let body = ProjectFormatCodec::default()
+            .decode_document(&bytes)
+            .map_err(|error| ApplicationError::DocumentLoad {
+                document,
+                reason: error.to_string(),
+            })?
+            .as_html()
+            .to_owned();
+        let recovery_hash = recovery_document_content_hash(
+            &bytes,
+            self.annotation_bytes.get(&document).map(Vec::as_slice),
+        );
+        self.recovery_hashes
+            .lock()
+            .map_err(|_| ApplicationError::StateUnavailable)?
+            .insert(document, recovery_hash);
+        let revision = self
+            .summaries
+            .get(&document)
+            .map_or(0, |summary| summary.revision);
+        self.hydrated_summaries
+            .lock()
+            .map_err(|_| ApplicationError::StateUnavailable)?
+            .insert(
+                document,
+                CanonicalDocumentSummary {
+                    revision,
+                    content_hash: ContentHash::from_bytes(Sha256::digest(&bytes).into()),
+                    word_count: body.split_whitespace().count(),
+                },
+            );
+        Ok(DocumentSnapshot {
+            document_id: document,
+            body,
+            comments: self.annotations.get(&document).cloned().unwrap_or_default(),
+            revision: self
+                .summaries
+                .get(&document)
+                .map(|summary| EditorRevision::from(summary.revision))
+                .unwrap_or_default(),
+            visibility: DocumentVisibility::Closed,
+        })
+    }
+}
+
+struct CanonicalSearchSource {
+    project: Project,
+    documents: Vec<DocumentId>,
+    loader: Arc<CanonicalDocumentLoader>,
+    frontier: Option<parchmint_search_api::SearchFrontierId>,
+}
+
+type CanonicalApplicationState = (
+    Project,
+    Vec<LazyDocumentSummary>,
+    Arc<CanonicalDocumentLoader>,
+    CanonicalSearchSource,
+    CanonicalProjectPathMap,
+    parchmint_project_format::CanonicalPersistenceFrontier,
+);
+
+impl SearchProjectionSource for CanonicalSearchSource {
+    fn visit_projections(
+        &self,
+        visitor: &mut dyn SearchProjectionVisitor,
+    ) -> Result<(), parchmint_search_api::SearchError> {
+        for document in &self.documents {
+            let snapshot = self.loader.load(*document).map_err(|error| {
+                parchmint_search_api::SearchError::Source {
+                    reason: error.to_string(),
+                }
+            })?;
+            visitor.visit(SearchDocumentProjection {
+                document_id: *document,
+                revision: RevisionId::from(snapshot.revision.value()),
+                texts: search_texts(&self.project, *document, &snapshot.body),
+            })?;
+        }
+        Ok(())
+    }
+
+    fn frontier_identity(&self) -> Option<parchmint_search_api::SearchFrontierId> {
+        self.frontier
+    }
+}
+
+fn application_state(
+    project_id: ProjectId,
+    root: parchmint_project_fs::ProjectRootCapability,
+    resources: &CanonicalOpenResources,
+) -> Result<CanonicalApplicationState, ProjectFilesystemError> {
+    let codec = ProjectFormatCodec::default();
+    let mut project = Project::new(project_id);
+    let mut canonical_paths = CanonicalProjectPathMap::default();
+    let mut persistence_frontier =
+        parchmint_project_format::CanonicalPersistenceFrontier::default();
+    if let Some(manifest) = resources
+        .metadata
+        .get(&CanonicalRelativePath::parse("project.toml").expect("static path"))
+    {
+        let manifest = codec.decode_manifest(manifest).map_err(|error| {
+            ProjectFilesystemError::failed("decode project manifest", error.to_string())
+        })?;
+        persistence_frontier = codec
+            .decode_persistence_frontier(&manifest)
+            .map_err(|error| {
+                ProjectFilesystemError::failed("decode persistence frontier", error.to_string())
+            })?;
+        let styles = resources
+            .metadata
+            .get(&CanonicalRelativePath::parse("styles.css").expect("static path"))
+            .map(|bytes| codec.decode_styles(bytes))
+            .transpose()
+            .map_err(|error| {
+                ProjectFilesystemError::failed("decode project styles", error.to_string())
+            })?;
+        if let Some((decoded, paths)) = codec
+            .decode_domain_project_with_styles(&manifest, styles.as_ref(), project_id)
+            .map_err(|error| {
+                ProjectFilesystemError::failed("decode project structure", error.to_string())
+            })?
+        {
+            project = decoded;
+            canonical_paths = paths;
+        } else {
+            let project_table = manifest.value().get("project");
+            project.display_title = project_table
+                .and_then(|project| project.get("title"))
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            project.author = project_table
+                .and_then(|project| project.get("author"))
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+        }
+    }
+    let discovered = resources
+        .document_paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if canonical_paths.documents.is_empty() {
+        let mut section_counts = BTreeMap::from([
+            (NodeId::manuscript_root(), 0usize),
+            (NodeId::research_root(), 0usize),
+        ]);
+        for path in &resources.document_paths {
+            let document_id =
+                DocumentId::from_bytes(stable_id(b"document", path.as_str().as_bytes()));
+            canonical_paths.documents.insert(document_id, path.clone());
+            let node_id = NodeId::from_bytes(stable_id(b"node", path.as_str().as_bytes()));
+            let parent = if path.as_str().starts_with("research/") {
+                NodeId::research_root()
+            } else {
+                NodeId::manuscript_root()
+            };
+            let index = section_counts.get_mut(&parent).expect("section counter");
+            let stem = Path::new(path.as_str())
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("untitled-document");
+            let title = if stem == "untitled-document" {
+                "Untitled Document".to_owned()
+            } else {
+                stem.to_owned()
+            };
+            project = apply_project_command(
+                &project,
+                project.revision,
+                ProjectCommand::create_document(node_id, document_id, parent, *index, title),
+            )
+            .map_err(|error| {
+                ProjectFilesystemError::failed("assemble project model", error.to_string())
+            })?
+            .project;
+            *index += 1;
+        }
+        project.revision = Default::default();
+    } else {
+        for path in canonical_paths.documents.values() {
+            if !discovered.contains(path) {
+                return Err(ProjectFilesystemError::failed(
+                    "decode project structure",
+                    format!("manifest document is missing: {}", path.as_str()),
+                ));
+            }
+        }
+    }
+
+    let mut annotations = BTreeMap::new();
+    let mut annotation_bytes = BTreeMap::new();
+    for document_id in canonical_paths.documents.keys() {
+        let annotation_path = CanonicalRelativePath::parse(format!(
+            "annotations/{}.json",
+            stable_id_text(document_id.as_bytes())
+        ))
+        .expect("stable annotation path");
+        let comments = match resources.metadata.get(&annotation_path) {
+            Some(bytes) => {
+                annotation_bytes.insert(*document_id, bytes.clone());
+                codec
+                    .decode_annotations(bytes)
+                    .and_then(|sidecar| {
+                        if sidecar.document_id() != stable_id_text(document_id.as_bytes()) {
+                            return Err(parchmint_project_format::FormatError::InvalidAnnotations(
+                                "sidecar document ID does not match its path".into(),
+                            ));
+                        }
+                        sidecar
+                            .typed_threads()
+                            .map(|threads| threads.into_iter().map(editor_thread).collect())
+                    })
+                    .map_err(|error| {
+                        ProjectFilesystemError::failed(
+                            "decode annotation sidecar",
+                            error.to_string(),
+                        )
+                    })?
+            }
+            None => Vec::new(),
+        };
+        annotations.insert(*document_id, comments);
+    }
+    let mut document_order = Vec::new();
+    append_document_ids(&project, NodeId::manuscript_root(), &mut document_order);
+    append_document_ids(&project, NodeId::research_root(), &mut document_order);
+    let summaries = document_order
+        .iter()
+        .enumerate()
+        .map(|(index, document)| LazyDocumentSummary {
+            document_id: *document,
+            revision: persistence_frontier
+                .document_revisions
+                .get(document)
+                .copied()
+                .unwrap_or_default()
+                .into(),
+            visibility: if index == 0 {
+                DocumentVisibility::Open
+            } else {
+                DocumentVisibility::Closed
+            },
+        })
+        .collect::<Vec<_>>();
+    let loader = Arc::new(CanonicalDocumentLoader {
+        root,
+        paths: canonical_paths.documents.clone(),
+        summaries: persistence_frontier.document_summaries.clone(),
+        annotations,
+        annotation_bytes,
+        recovery_hashes: Mutex::new(BTreeMap::new()),
+        hydrated_summaries: Mutex::new(BTreeMap::new()),
+    });
+    let search_source = CanonicalSearchSource {
+        project: project.clone(),
+        documents: document_order,
+        loader: loader.clone(),
+        frontier: persistence_frontier.save_identity.map(|identity| {
+            parchmint_search_api::SearchFrontierId::from_bytes(*identity.as_bytes())
+        }),
+    };
+    Ok((
+        project,
+        summaries,
+        loader,
+        search_source,
+        canonical_paths,
+        persistence_frontier,
+    ))
+}
+
+fn append_document_ids(project: &Project, node: NodeId, documents: &mut Vec<DocumentId>) {
+    if let Some(node) = project.nodes.get(node)
+        && let NodeKind::Document(document) = node.kind
+    {
+        documents.push(document);
+    }
+    for child in project.nodes.children(node) {
+        append_document_ids(project, *child, documents);
+    }
+}
+
+fn new_project_manifest(title: &str, author: Option<&str>) -> String {
+    let mut manifest = format!(
+        "[project]\ntitle = {}\nspellcheck-language = \"en-US\"\n",
+        toml_string(title)
+    );
+    if let Some(author) = author {
+        manifest.push_str(&format!("author = {}\n", toml_string(author)));
+    }
+    manifest
+}
+
+fn toml_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn recovery_base(
+    documents: &[LazyDocumentSummary],
+    resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    paths: &CanonicalProjectPathMap,
+    frontier: &parchmint_project_format::CanonicalPersistenceFrontier,
+) -> recovery::RecoveryBaseSnapshot {
+    let revisions = documents
+        .iter()
+        .map(|document| {
+            (
+                document.document_id,
+                recovery::DocumentRevision::from(document.revision.value()),
+            )
+        })
+        .collect();
+    let mut hashes = BTreeMap::new();
+    for (path, bytes) in resources {
+        let resource = match path.as_str() {
+            ".parchmint/format-version" => recovery::ResourceId::FormatControl,
+            "project.toml" => recovery::ResourceId::Manifest,
+            "styles.css" => recovery::ResourceId::Styles,
+            "dictionary.txt" => recovery::ResourceId::Dictionary,
+            path if (path.starts_with("manuscript/") || path.starts_with("research/"))
+                && path.ends_with(".html") =>
+            {
+                let document_id = paths
+                    .documents
+                    .iter()
+                    .find_map(|(document, canonical)| {
+                        (canonical.as_str() == path).then_some(*document)
+                    })
+                    .map(|document| stable_id_text(document.as_bytes()))
+                    .unwrap_or_else(|| stable_id_text(&stable_id(b"document", path.as_bytes())));
+                recovery::ResourceId::DocumentById { document_id }
+            }
+            path if path.starts_with("annotations/") && path.ends_with(".json") => {
+                recovery::ResourceId::Annotations {
+                    document_id: path
+                        .trim_start_matches("annotations/")
+                        .trim_end_matches(".json")
+                        .to_owned(),
+                }
+            }
+            _ => continue,
+        };
+        hashes.insert(
+            resource,
+            recovery::ContentHash::from_bytes(Sha256::digest(bytes).into()),
+        );
+    }
+    recovery::RecoveryBaseSnapshot {
+        revisions: recovery::RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::from(frontier.recovery_project_revision),
+            revisions,
+        ),
+        hashes,
+    }
+}
+
+fn recovery_document_content_hash(
+    body: &[u8],
+    annotations: Option<&[u8]>,
+) -> recovery::ContentHash {
+    let mut digest = Sha256::new();
+    digest.update(b"parchmint recovery document v1\0");
+    digest.update((body.len() as u64).to_be_bytes());
+    digest.update(body);
+    match annotations {
+        Some(annotations) => {
+            digest.update([1]);
+            digest.update((annotations.len() as u64).to_be_bytes());
+            digest.update(annotations);
+        }
+        None => digest.update([0]),
+    }
+    recovery::ContentHash::from_bytes(digest.finalize().into())
+}
+
+fn editor_thread(thread: AnnotationThread) -> CanonicalComment {
+    CanonicalComment {
+        id: CommentId::from_bytes(thread.id),
+        messages: thread
+            .messages
+            .into_iter()
+            .map(|message| CanonicalCommentMessage {
+                id: CommentId::from_bytes(message.id),
+                body: message.body,
+                unknown_fields: message.unknown_fields,
+            })
+            .collect(),
+        resolved: thread.resolved,
+        anchor: match thread.anchor {
+            AnnotationAnchor::Document { unknown_fields } => {
+                CanonicalCommentAnchor::Document { unknown_fields }
+            }
+            AnnotationAnchor::Text {
+                block,
+                start,
+                end,
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields,
+            } => CanonicalCommentAnchor::Text {
+                block: EditorBlockId::from_bytes(block),
+                range: EditorSelection::new(
+                    DocumentPosition::from(start),
+                    DocumentPosition::from(end),
+                ),
+                quote,
+                context_before,
+                context_after,
+                orphaned,
+                unknown_fields,
+            },
+        },
+        unknown_fields: thread.unknown_fields,
+    }
+}
+
+fn is_document_resource(path: &CanonicalRelativePath) -> bool {
+    let path = path.as_str();
+    (path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html")
+}
+
+fn searchable_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for character in html.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    text
+}
+
+fn project_id(
+    root: &parchmint_project_fs::ProjectRootCapability,
+    resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+) -> ProjectId {
+    let root_id = CanonicalRelativePath::parse(".parchmint/root-id").expect("fixed path");
+    let files = NativeProjectFileSystem::new();
+    let identity = files.read(root, &root_id).unwrap_or_else(|_| {
+        resources
+            .get(&CanonicalRelativePath::parse("project.toml").expect("fixed path"))
+            .cloned()
+            .unwrap_or_default()
+    });
+    ProjectId::from_bytes(stable_id(b"project", &identity))
+}
+
+fn search_texts(
+    project: &Project,
+    document_id: DocumentId,
+    body: &str,
+) -> Vec<SearchTextProjection> {
+    let mut texts = vec![SearchTextProjection {
+        block_id: BlockId::from_bytes(*document_id.as_bytes()),
+        field: SearchField::Body,
+        text: searchable_text(body),
+    }];
+    let Some((_, node)) = project.nodes.iter().find(
+        |(_, node)| matches!(node.kind, NodeKind::Document(candidate) if candidate == document_id),
+    ) else {
+        return texts;
+    };
+    texts.push(SearchTextProjection {
+        block_id: BlockId::from_bytes(stable_id(b"search-title", document_id.as_bytes())),
+        field: SearchField::DisplayTitle,
+        text: node.title.clone(),
+    });
+    texts.push(SearchTextProjection {
+        block_id: BlockId::from_bytes(stable_id(b"search-synopsis", document_id.as_bytes())),
+        field: SearchField::Synopsis,
+        text: node.synopsis.clone(),
+    });
+    texts.extend(node.metadata.iter().map(|(field, value)| {
+        let mut identity = Vec::with_capacity(32);
+        identity.extend_from_slice(document_id.as_bytes());
+        identity.extend_from_slice(field.as_bytes());
+        SearchTextProjection {
+            block_id: BlockId::from_bytes(stable_id(b"search-metadata", &identity)),
+            field: SearchField::Metadata(*field),
+            text: value.clone(),
+        }
+    }));
+    texts
+}
+
+fn stable_id(namespace: &[u8], value: &[u8]) -> [u8; 16] {
+    let mut digest = Sha256::new();
+    digest.update(namespace);
+    digest.update([0]);
+    digest.update(value);
+    let digest = digest.finalize();
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
+    id
+}
+
+fn stable_id_text(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn history_root_id(project: ProjectId) -> u64 {
+    let mut bytes = [0; 8];
+    bytes.copy_from_slice(&project.as_bytes()[..8]);
+    u64::from_be_bytes(bytes)
+}
+
+fn map_repository_error(error: RepositoryError) -> ProjectFilesystemError {
+    match error {
+        RepositoryError::Locked { path } => ProjectFilesystemError::Locked {
+            path: path.as_path().to_path_buf(),
+        },
+        other => ProjectFilesystemError::failed("open", other.to_string()),
+    }
+}
+
+fn injected_failure(operation: &'static str, kind: ProductionFaultKind) -> ProjectFilesystemError {
+    ProjectFilesystemError::failed(operation, format!("injected {kind:?} fault"))
+}

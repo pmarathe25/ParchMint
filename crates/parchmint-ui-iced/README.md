@@ -46,6 +46,14 @@ recovery work.
 The mounted editor handles keystrokes directly. It can draw the result while
 serialization, file access, and analysis continue in the background.
 
+Background UI tasks use detached native threads. Closing a window or making a
+request stale drops its receiver and suppresses publication, but a native call
+already running continues to completion. Search and export cancel only where
+their service APIs expose cancellation; workers owned by a service that joins
+them retain that separate lifecycle. The driver records bounded aggregate
+worker duration, active/peak concurrency, and accepted or dropped delivery for
+operations; it does not queue, limit, or otherwise schedule them.
+
 The editor workspace keeps one presentation record per pane and one local
 search/decorations record per mounted view. Tabs identify documents, while the
 mounted `ViewId` identifies independent cursor, selection, scroll, focus, and

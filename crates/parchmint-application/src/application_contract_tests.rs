@@ -276,6 +276,201 @@ fn production_editor_coordinator_routes_projections_and_tracks_newer_dirty_front
 }
 
 #[test]
+fn production_editor_coordinator_resumes_the_exact_unacknowledged_batch() {
+    let journal = Arc::new(ProductionJournal::default());
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([(ResourceId::Document, hash("base"))]),
+    };
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+    let first = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(1),
+        "one",
+        vec![],
+        vec![],
+        1,
+    );
+    let second = CanonicalProjection::new(
+        document_id(),
+        EditorRevision::from(2),
+        "one two",
+        vec![],
+        vec![],
+        2,
+    );
+    coordinator
+        .acknowledge_recovery(
+            coordinator
+                .persist_projection(&first, &save_vector(1), payload("one"))
+                .unwrap(),
+        )
+        .unwrap();
+    let unacknowledged = coordinator
+        .persist_projection(&second, &save_vector(2), payload("one two"))
+        .unwrap();
+    let receipt = unacknowledged.receipt().clone();
+
+    let reopened = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let resumed = reopened
+        .resume_recovery_acknowledgement(base.clone(), unacknowledged)
+        .unwrap();
+    let replay = reopened.reconcile_recovery(base).unwrap();
+
+    assert_eq!(replay.accepted.len(), 2);
+    assert!(replay.isolated.is_empty());
+    assert_eq!(replay.accepted[0].payload, payload("one"));
+    assert_eq!(replay.accepted[1].payload, payload("one two"));
+    assert_eq!(
+        replay.accepted[0].result_hashes,
+        replay.accepted[1].base_hashes
+    );
+    assert_eq!(
+        receipt.durable_through,
+        replay.accepted[1].revision_vector()
+    );
+    assert_eq!(resumed, replay.accepted[1].revision_vector());
+    assert_eq!(reopened.frontier().unwrap(), resumed);
+}
+
+#[test]
+fn production_editor_coordinator_keeps_document_recovery_hashes_distinct() {
+    let journal = Arc::new(ProductionJournal::default());
+    let first = document_id();
+    let second = DocumentId::from_bytes([2; 16]);
+    let first_resource = recovery_document_resource_id(first);
+    let second_resource = recovery_document_resource_id(second);
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([
+            (first_resource.clone(), hash("first base")),
+            (second_resource.clone(), hash("second base")),
+        ]),
+    };
+    let coordinator = EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base);
+    let persist = |document, revision, body, generation| {
+        let projection = CanonicalProjection::new(
+            document,
+            EditorRevision::from(revision),
+            body,
+            vec![],
+            vec![],
+            2,
+        );
+        let revisions = parchmint_save::SaveRevisionVector {
+            project_revision: parchmint_domain::ProjectRevision::default(),
+            open_documents: BTreeMap::from([(
+                document,
+                parchmint_recovery_api::DocumentRevision::from(revision),
+            )]),
+            closed_resources: BTreeMap::new(),
+            canonical_hashes: BTreeMap::new(),
+            generation: parchmint_save::SaveGeneration::from(generation),
+        };
+        coordinator
+            .persist_projection(&projection, &revisions, payload(body))
+            .unwrap()
+    };
+    coordinator
+        .acknowledge_recovery(persist(first, 1, "first edit", 1))
+        .unwrap();
+    coordinator
+        .acknowledge_recovery(persist(second, 1, "second edit", 2))
+        .unwrap();
+
+    let records = journal.records.lock().unwrap();
+    let RecoveryRecord::Complete(first_batch) = &records[0] else {
+        panic!("production journal records complete batches")
+    };
+    let RecoveryRecord::Complete(second_batch) = &records[1] else {
+        panic!("production journal records complete batches")
+    };
+    assert_eq!(first_batch.base_hashes.len(), 1);
+    assert_eq!(second_batch.base_hashes.len(), 1);
+    assert!(first_batch.base_hashes.contains_key(&first_resource));
+    assert!(second_batch.base_hashes.contains_key(&second_resource));
+    assert_ne!(
+        first_batch.result_hashes[&first_resource],
+        second_batch.result_hashes[&second_resource]
+    );
+}
+
+#[test]
+fn production_editor_coordinator_merges_partial_document_frontiers() {
+    let journal = Arc::new(ProductionJournal::default());
+    let first = document_id();
+    let second = DocumentId::from_bytes([2; 16]);
+    let base = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            parchmint_domain::ProjectRevision::default(),
+            BTreeMap::new(),
+        ),
+        hashes: BTreeMap::from([
+            (recovery_document_resource_id(first), hash("first base")),
+            (recovery_document_resource_id(second), hash("second base")),
+        ]),
+    };
+    let coordinator =
+        EditorPersistenceCoordinator::new_recovery_only(journal.clone(), base.clone());
+    let persist = |document, revision, body, generation| {
+        let projection = CanonicalProjection::new(
+            document,
+            EditorRevision::from(revision),
+            body,
+            vec![],
+            vec![],
+            1,
+        );
+        let revisions = parchmint_save::SaveRevisionVector {
+            project_revision: parchmint_domain::ProjectRevision::default(),
+            open_documents: BTreeMap::from([(
+                document,
+                parchmint_recovery_api::DocumentRevision::from(revision),
+            )]),
+            closed_resources: BTreeMap::new(),
+            canonical_hashes: BTreeMap::new(),
+            generation: parchmint_save::SaveGeneration::from(generation),
+        };
+        coordinator
+            .persist_projection(&projection, &revisions, payload(body))
+            .unwrap()
+    };
+    coordinator
+        .acknowledge_recovery(persist(first, 1, "first one", 1))
+        .unwrap();
+    coordinator
+        .acknowledge_recovery(persist(second, 7, "second seven", 2))
+        .unwrap();
+    let third = persist(first, 2, "first two", 3);
+    assert_eq!(
+        third.batch().documents[&first].first,
+        parchmint_recovery_api::DocumentRevision::from(2)
+    );
+    coordinator.acknowledge_recovery(third).unwrap();
+
+    let expected = RecoveryRevisionVector::new(
+        parchmint_domain::ProjectRevision::from(3),
+        BTreeMap::from([
+            (first, parchmint_recovery_api::DocumentRevision::from(2)),
+            (second, parchmint_recovery_api::DocumentRevision::from(7)),
+        ]),
+    );
+    assert_eq!(coordinator.frontier().unwrap(), expected);
+    let reopened = EditorPersistenceCoordinator::new_recovery_only(journal, base.clone());
+    let replay = reopened.reconcile_recovery(base).unwrap();
+    assert_eq!(replay.accepted.len(), 3);
+    assert!(replay.isolated.is_empty());
+    assert_eq!(reopened.frontier().unwrap(), expected);
+}
+
+#[test]
 fn production_reconciliation_exposes_retained_inventory_and_exact_isolation_reason() {
     let journal = Arc::new(ProductionJournal::default());
     let base = RecoveryBaseSnapshot {
@@ -493,10 +688,19 @@ struct ProductionJournal {
 impl RecoveryJournal for ProductionJournal {
     fn append(&self, batch: RecoveryBatch) -> Result<RecoveryReceipt, RecoveryError> {
         let mut records = self.records.lock().unwrap();
-        batch.validate_after(records.last().and_then(|record| match record {
+        let previous = records.last().and_then(|record| match record {
             RecoveryRecord::Complete(batch) => Some(batch),
             _ => None,
-        }))?;
+        });
+        batch.validate()?;
+        if let Some(previous) = previous
+            && batch.project_revision != previous.project_revision.next()
+        {
+            return Err(RecoveryError::NonConsecutiveProjectRevision {
+                expected: previous.project_revision.next(),
+                actual: batch.project_revision,
+            });
+        }
         let receipt = RecoveryReceipt::for_batch(&batch);
         records.push(RecoveryRecord::Complete(batch));
         Ok(receipt)
@@ -581,6 +785,15 @@ impl RecoveryJournal for ProductionJournal {
 
 fn document_id() -> DocumentId {
     DocumentId::from_bytes([44; 16])
+}
+
+fn recovery_document_resource_id(document: DocumentId) -> ResourceId {
+    let document_id = document
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    ResourceId::DocumentById { document_id }
 }
 
 fn hash(value: &str) -> ContentHash {

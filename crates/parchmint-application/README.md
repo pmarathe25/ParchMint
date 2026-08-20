@@ -101,8 +101,9 @@ instead of types from the storage libraries.
 
 `EditorPersistenceCoordinator` owns projection-to-recovery routing, the
 receipt/frontier acknowledgement boundary, bounded repeated-save coalescing,
-and the public Saved/Dirty/Error frontier. It does not assemble the desktop
-service graph; `parchmint-desktop` does.
+the recovery journal and save coordinator handles, and the public
+Saved/Dirty/Error frontier. It does not assemble the desktop service graph;
+`parchmint-desktop` does.
 
 ## Implementation
 

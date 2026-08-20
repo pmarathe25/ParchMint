@@ -24,7 +24,7 @@ use iced::{
     widget::{Space, button, column, container, opaque, row, stack, svg, text, text_input},
     window,
 };
-use parchmint_application::{ReplacementEdit, ReplacementSelection};
+use parchmint_application::{ProjectPersistenceError, ReplacementEdit, ReplacementSelection};
 use parchmint_design_system::production_icon_svg;
 use parchmint_diagnostics as diagnostics;
 use parchmint_editor_api::{
@@ -550,7 +550,7 @@ enum Message {
     CreateProject,
     ProjectOpenFinished {
         project: PathBuf,
-        result: Result<NativeProjectOpenResult, String>,
+        result: NativeTaskResult<NativeProjectOpenResult>,
     },
     ProjectSurface {
         window: window::Id,
@@ -558,8 +558,9 @@ enum Message {
     },
     EditorProjectionPersisted {
         window: window::Id,
+        session: ProjectSessionCapability,
         ticket: AutosaveTicket,
-        result: Result<ProjectionRun<AutosaveCompletion>, String>,
+        result: NativeTaskResult<ProjectionRun<AutosaveCompletion, NativeTaskOutcome>>,
     },
     ClipboardWriteFinished {
         window: window::Id,
@@ -582,8 +583,9 @@ enum Message {
     SystemAppearanceStreamFailed(String),
     SaveFinished {
         window: window::Id,
+        session: ProjectSessionCapability,
         purpose: SavePurpose,
-        result: Result<u64, String>,
+        result: NativeTaskResult<u64>,
     },
     ProjectEffectFinished {
         window: window::Id,
@@ -723,6 +725,13 @@ enum NativeTaskOutcome {
 }
 
 impl NativeTaskOutcome {
+    fn from_persistence_error(operation: &'static str, error: ProjectPersistenceError) -> Self {
+        match error {
+            ProjectPersistenceError::StateUnavailable => Self::Unavailable,
+            error => Self::failed(operation, "persistence", error.to_string()),
+        }
+    }
+
     fn from_service_error(operation: &'static str, error: ServiceFeedError) -> Self {
         let category = match &error {
             ServiceFeedError::StaleSession { .. }
@@ -776,6 +785,21 @@ impl NativeTaskOutcome {
             Self::StaleSession | Self::Canceled => None,
             Self::Unavailable => Some("The requested project service is unavailable.".to_owned()),
             Self::Failed { message } => Some(message),
+        }
+    }
+
+    fn save_failure_message(self) -> Option<String> {
+        match self {
+            Self::StaleSession | Self::Canceled => None,
+            Self::Unavailable => Some("Project saving is currently unavailable.".to_owned()),
+            Self::Failed { message } => Some(message),
+        }
+    }
+
+    fn for_current_session_save(self) -> Self {
+        match self {
+            Self::StaleSession | Self::Canceled => Self::Unavailable,
+            outcome => outcome,
         }
     }
 }
@@ -1034,6 +1058,14 @@ impl ProjectMutationState {
         None
     }
 
+    fn discard_active(&mut self, ticket: &ProjectMutationTicket) -> bool {
+        if self.active.as_ref() != Some(ticket) {
+            return false;
+        }
+        self.active = None;
+        true
+    }
+
     fn fail_effect(&mut self, ticket: ProjectMutationTicket) {
         if self.active.as_ref() == Some(&ticket) {
             self.active = None;
@@ -1152,6 +1184,16 @@ impl OpaqueMutationState {
         }
     }
 
+    fn discard_active(&mut self, token: OpaqueMutationToken) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.token == token)
+        {
+            self.active.take();
+        }
+    }
+
     fn fail_save(&mut self, token: OpaqueMutationToken) {
         if self
             .active
@@ -1222,9 +1264,11 @@ fn next_persistent_mutation_lane(
 #[derive(Debug, Clone)]
 enum PersistentMutationTerminal {
     ProjectSucceeded(ProjectMutationTicket),
+    ProjectDiscarded(ProjectMutationTicket),
     ProjectEffectFailed(ProjectMutationTicket),
     ProjectSaveFailed(ProjectMutationTicket),
     OpaqueSucceeded(OpaqueMutationToken),
+    OpaqueDiscarded(OpaqueMutationToken),
     OpaqueSaveFailed(OpaqueMutationToken),
     OpaqueFailed(OpaqueMutationToken),
 }
@@ -1453,9 +1497,9 @@ struct CloseCompletion {
 }
 
 #[derive(Debug, Clone)]
-struct ProjectionRun<T> {
+struct ProjectionRun<T, E = String> {
     projected: BTreeMap<SharedEditorSession, EditorRevision>,
-    result: Result<T, String>,
+    result: Result<T, E>,
 }
 
 fn deduplicated_editor_sessions(
@@ -1488,11 +1532,11 @@ fn editor_projection_plans(
         .collect()
 }
 
-fn run_projection_sequence<T>(
+fn run_projection_sequence<T, E>(
     plans: &[EditorProjectionPlan],
-    mut project: impl FnMut(&EditorProjectionPlan) -> Result<(), String>,
-    finish: impl FnOnce() -> Result<T, String>,
-) -> ProjectionRun<T> {
+    mut project: impl FnMut(&EditorProjectionPlan) -> Result<(), E>,
+    finish: impl FnOnce() -> Result<T, E>,
+) -> ProjectionRun<T, E> {
     let mut projected = BTreeMap::new();
     for plan in plans {
         if let Err(error) = project(plan) {
@@ -1763,17 +1807,21 @@ impl NativeDesktop {
             }
             Message::EditorProjectionPersisted {
                 window,
+                session,
                 ticket,
                 result,
             } => {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
+                if state.project.session != session {
+                    return Task::none();
+                }
                 let run = match result {
                     Ok(run) => run,
                     Err(error) => ProjectionRun {
                         projected: BTreeMap::new(),
-                        result: Err(error),
+                        result: Err(error.for_current_session_save()),
                     },
                 };
                 state.autosave.record_projected(run.projected);
@@ -1804,7 +1852,15 @@ impl NativeDesktop {
                             return self.start_projection_save(window, ProjectSaveKind::Explicit);
                         }
                     }
-                    Err(error) => {
+                    Err(outcome) => {
+                        let outcome = outcome.for_current_session_save();
+                        let unavailable = matches!(outcome, NativeTaskOutcome::Unavailable);
+                        let Some(error) = outcome.save_failure_message() else {
+                            if close_after_save {
+                                self.closing_windows.remove(&window);
+                            }
+                            return Task::none();
+                        };
                         self.status = Some(error.clone());
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.update(ProjectMessage::SaveFailed(error.clone()));
@@ -1813,7 +1869,8 @@ impl NativeDesktop {
                             self.status = None;
                             self.closing_windows.remove(&window);
                             self.close_failures.insert(state.project.window, error);
-                        } else if state.autosave.explicit_save_waiting
+                        } else if !unavailable
+                            && state.autosave.explicit_save_waiting
                             && !state.project_mutations.blocks_close()
                             && !state.opaque_mutations.blocks_close()
                         {
@@ -1865,18 +1922,22 @@ impl NativeDesktop {
             }
             Message::SaveFinished {
                 window,
+                session,
                 purpose,
                 result,
             } => {
                 let mut terminal = None;
                 let mut terminal_error = None;
-                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
-                    && let Some(workspace) = state.workspace.as_mut()
-                {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    if state.project.session != session {
+                        return Task::none();
+                    }
                     state.autosave.save_in_flight = false;
                     match result {
                         Ok(revision) => {
-                            workspace.update(ProjectMessage::SaveCompleted(revision));
+                            if let Some(workspace) = state.workspace.as_mut() {
+                                workspace.update(ProjectMessage::SaveCompleted(revision));
+                            }
                             self.status = None;
                             terminal = match purpose {
                                 SavePurpose::ProjectMutation(ticket) => {
@@ -1888,9 +1949,7 @@ impl NativeDesktop {
                                 SavePurpose::Untracked => None,
                             };
                         }
-                        Err(error) => {
-                            workspace.update(ProjectMessage::SaveFailed(error.clone()));
-                            self.status = Some(error.clone());
+                        Err(outcome) => {
                             terminal = match purpose {
                                 SavePurpose::ProjectMutation(ticket) => {
                                     Some(PersistentMutationTerminal::ProjectSaveFailed(ticket))
@@ -1900,6 +1959,14 @@ impl NativeDesktop {
                                 }
                                 SavePurpose::Untracked => None,
                             };
+                            let error = outcome
+                                .for_current_session_save()
+                                .save_failure_message()
+                                .expect("current-session save failures are retryable");
+                            if let Some(workspace) = state.workspace.as_mut() {
+                                workspace.update(ProjectMessage::SaveFailed(error.clone()));
+                            }
+                            self.status = Some(error.clone());
                             terminal_error = Some(error);
                         }
                     }
@@ -2391,6 +2458,7 @@ impl NativeDesktop {
                 let mut recovered_document = None;
                 let mut activate = false;
                 let mut failed = None;
+                let mut canceled = false;
                 {
                     let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                         return Task::none();
@@ -2433,23 +2501,33 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(outcome) => {
-                            let Some(error) = outcome.failure_message() else {
-                                return Task::none();
-                            };
-                            failed = Some(error.clone());
-                            let completion_accepted =
+                            if matches!(
+                                outcome,
+                                NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled
+                            ) {
+                                canceled = true;
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
-                                    ProjectTaskPayload::Failed(error.clone()),
+                                    ProjectTaskPayload::RecoveryCanceled,
                                 ));
-                            if completion_accepted {
-                                self.status = Some(error);
+                            } else if let Some(error) = outcome.failure_message() {
+                                failed = Some(error.clone());
+                                let completion_accepted =
+                                    workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                                        ticket,
+                                        ProjectTaskPayload::Failed(error.clone()),
+                                    ));
+                                if completion_accepted {
+                                    self.status = Some(error);
+                                }
                             }
                         }
                     }
                 }
                 let continuation = if let Some(token) = mutation {
-                    let terminal = if failed.is_some() {
+                    let terminal = if canceled {
+                        PersistentMutationTerminal::OpaqueDiscarded(token)
+                    } else if failed.is_some() {
                         PersistentMutationTerminal::OpaqueFailed(token)
                     } else {
                         PersistentMutationTerminal::OpaqueSucceeded(token)
@@ -2477,6 +2555,7 @@ impl NativeDesktop {
             } => {
                 let mut activate = false;
                 let mut failed = None;
+                let mut canceled = false;
                 {
                     let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                         return Task::none();
@@ -2517,23 +2596,33 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(outcome) => {
-                            let Some(error) = outcome.failure_message() else {
-                                return Task::none();
-                            };
-                            failed = Some(error.clone());
-                            let completion_accepted =
+                            if matches!(
+                                outcome,
+                                NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled
+                            ) {
+                                canceled = true;
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
-                                    ProjectTaskPayload::Failed(error.clone()),
+                                    ProjectTaskPayload::RecoveryCanceled,
                                 ));
-                            if completion_accepted {
-                                self.status = Some(error);
+                            } else if let Some(error) = outcome.failure_message() {
+                                failed = Some(error.clone());
+                                let completion_accepted =
+                                    workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                                        ticket,
+                                        ProjectTaskPayload::Failed(error.clone()),
+                                    ));
+                                if completion_accepted {
+                                    self.status = Some(error);
+                                }
                             }
                         }
                     }
                 }
                 let continuation = if let Some(token) = mutation {
-                    let terminal = if failed.is_some() {
+                    let terminal = if canceled {
+                        PersistentMutationTerminal::OpaqueDiscarded(token)
+                    } else if failed.is_some() {
                         PersistentMutationTerminal::OpaqueFailed(token)
                     } else {
                         PersistentMutationTerminal::OpaqueSucceeded(token)
@@ -4621,6 +4710,13 @@ impl NativeDesktop {
                         });
                     }
                 }
+                PersistentMutationTerminal::ProjectDiscarded(ticket) => {
+                    if state.project_mutations.discard_active(&ticket)
+                        && let Some(commit) = ticket.synopsis_commit.as_ref()
+                    {
+                        state.synopsis_commits.finish(commit, false);
+                    }
+                }
                 PersistentMutationTerminal::ProjectEffectFailed(ticket) => {
                     Self::record_failed_project_mutation(state, ticket);
                 }
@@ -4629,6 +4725,9 @@ impl NativeDesktop {
                 }
                 PersistentMutationTerminal::OpaqueSucceeded(token) => {
                     state.opaque_mutations.finish(token);
+                }
+                PersistentMutationTerminal::OpaqueDiscarded(token) => {
+                    state.opaque_mutations.discard_active(token);
                 }
                 PersistentMutationTerminal::OpaqueFailed(token) => {
                     state.opaque_mutations.fail_effect(token);
@@ -5685,6 +5784,18 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            Err(ProjectRuntimeError::StaleSession { .. }) => {
+                if state.autosave.close_after_save {
+                    state.autosave.close_after_save = false;
+                    self.closing_windows.remove(&window);
+                }
+                let terminal = mutation
+                    .map(PersistentMutationTerminal::ProjectDiscarded)
+                    .or_else(|| opaque_mutation.map(PersistentMutationTerminal::OpaqueDiscarded));
+                terminal.map_or_else(Task::none, |terminal| {
+                    self.after_persistent_mutation_terminal(window, terminal, None)
+                })
+            }
             Err(error) => {
                 let error = format!("Project action could not complete: {error}");
                 if let Some(workspace) = state.workspace.as_mut() {
@@ -5889,6 +6000,21 @@ impl NativeDesktop {
                     Err(error) => self.status = Some(error),
                 }
                 Task::none()
+            }
+            Err(ProjectRuntimeError::StaleSession { .. }) => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                    && state.autosave.close_after_save
+                {
+                    state.autosave.close_after_save = false;
+                    self.closing_windows.remove(&window);
+                }
+                mutation.map_or_else(Task::none, |token| {
+                    self.after_persistent_mutation_terminal(
+                        window,
+                        PersistentMutationTerminal::OpaqueDiscarded(token),
+                        None,
+                    )
+                })
             }
             Err(error) => {
                 let error = format!("Editor action could not complete: {error}");
@@ -6507,6 +6633,30 @@ impl NativeDesktop {
             .map_err(|error| error.to_string())
     }
 
+    fn persist_native_projection(
+        ports: &ProjectUiPorts,
+        adapter: &EditorIcedAdapter,
+        plan: &EditorProjectionPlan,
+    ) -> NativeTaskResult<()> {
+        let projection =
+            iced::futures::executor::block_on(adapter.project(plan.session.clone(), plan.revision))
+                .map_err(|error| {
+                    NativeTaskOutcome::failed(
+                        "autosave project",
+                        "editor-projection",
+                        error.to_string(),
+                    )
+                })?;
+        let access = ports
+            .access()
+            .map_err(|_| NativeTaskOutcome::StaleSession)?;
+        access
+            .persistence(|persistence| persistence.persist_editor_projection(projection))
+            .map_err(|_| NativeTaskOutcome::StaleSession)?
+            .map(|_| ())
+            .map_err(|error| NativeTaskOutcome::from_persistence_error("autosave project", error))
+    }
+
     fn autosave_task(
         window: window::Id,
         ports: ProjectUiPorts,
@@ -6515,23 +6665,33 @@ impl NativeDesktop {
         ticket: AutosaveTicket,
         kind: ProjectSaveKind,
     ) -> Task<Message> {
+        let session = ports.session();
         Task::perform(
-            Self::run_blocking_operation("autosave project", move || {
+            Self::run_native_blocking_operation("autosave project", move || {
                 Ok(run_projection_sequence(
                     &plans,
-                    |plan| Self::persist_projection(&ports, adapter.as_ref(), plan),
+                    |plan| Self::persist_native_projection(&ports, adapter.as_ref(), plan),
                     || {
-                        let access = ports.access().map_err(|error| error.to_string())?;
+                        let access = ports
+                            .access()
+                            .map_err(|_| NativeTaskOutcome::StaleSession)?;
                         let save = access
                             .persistence(|persistence| persistence.request_save_if_changed(kind))
-                            .map_err(|error| error.to_string())?
-                            .map_err(|error| error.to_string())?;
+                            .map_err(|_| NativeTaskOutcome::StaleSession)?
+                            .map_err(|error| {
+                                NativeTaskOutcome::from_persistence_error("autosave project", error)
+                            })?;
                         let saved_revision = match save {
                             Some((handle, _)) => Some(
                                 access
                                     .persistence(|persistence| persistence.await_save(handle))
-                                    .map_err(|error| error.to_string())?
-                                    .map_err(|error| error.to_string())?
+                                    .map_err(|_| NativeTaskOutcome::StaleSession)?
+                                    .map_err(|error| {
+                                        NativeTaskOutcome::from_persistence_error(
+                                            "autosave project",
+                                            error,
+                                        )
+                                    })?
                                     .written
                                     .project_revision
                                     .value(),
@@ -6542,8 +6702,14 @@ impl NativeDesktop {
                         };
                         let snapshot = access
                             .snapshot(|query| query.snapshot())
-                            .map_err(|error| error.to_string())?
-                            .map_err(|error| error.to_string())?;
+                            .map_err(|_| NativeTaskOutcome::StaleSession)?
+                            .map_err(|error| {
+                                NativeTaskOutcome::failed(
+                                    "autosave project",
+                                    "snapshot",
+                                    error.to_string(),
+                                )
+                            })?;
                         Ok(AutosaveCompletion {
                             saved_revision: saved_revision
                                 .unwrap_or_else(|| snapshot.project.revision.value()),
@@ -6554,6 +6720,7 @@ impl NativeDesktop {
             }),
             move |result| Message::EditorProjectionPersisted {
                 window,
+                session,
                 ticket: ticket.clone(),
                 result,
             },
@@ -6594,28 +6761,38 @@ impl NativeDesktop {
         kind: ProjectSaveKind,
         purpose: SavePurpose,
     ) -> Task<Message> {
+        let session = ports.session();
         Task::perform(
-            Self::run_blocking_operation("save project", move || {
-                let access = ports.access().map_err(|error| error.to_string())?;
+            Self::run_native_blocking_operation("save project", move || {
+                let access = ports
+                    .access()
+                    .map_err(|_| NativeTaskOutcome::StaleSession)?;
                 let save = access
                     .persistence(|persistence| persistence.request_save_if_changed(kind))
-                    .map_err(|error| error.to_string())?
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|_| NativeTaskOutcome::StaleSession)?
+                    .map_err(|error| {
+                        NativeTaskOutcome::from_persistence_error("save project", error)
+                    })?;
                 match save {
                     Some((handle, _)) => access
                         .persistence(|persistence| persistence.await_save(handle))
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())
+                        .map_err(|_| NativeTaskOutcome::StaleSession)?
+                        .map_err(|error| {
+                            NativeTaskOutcome::from_persistence_error("save project", error)
+                        })
                         .map(|saved| saved.written.project_revision.value()),
                     None => access
                         .snapshot(|query| query.snapshot())
-                        .map_err(|error| error.to_string())?
-                        .map_err(|error| error.to_string())
+                        .map_err(|_| NativeTaskOutcome::StaleSession)?
+                        .map_err(|error| {
+                            NativeTaskOutcome::failed("save project", "snapshot", error.to_string())
+                        })
                         .map(|snapshot| snapshot.project.revision.value()),
                 }
             }),
             move |result| Message::SaveFinished {
                 window,
+                session,
                 purpose: purpose.clone(),
                 result,
             },
@@ -6890,15 +7067,14 @@ impl NativeDesktop {
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
-        D: FnOnce(T) + Send + 'static,
+        D: FnOnce(T) -> diagnostics::WorkerDelivery + Send + 'static,
     {
         std::thread::Builder::new()
             .name(format!("parchmint-{}", operation.replace(' ', "-")))
             .spawn(move || {
-                let started = Instant::now();
+                let activity = diagnostics::blocking_worker(operation);
                 let result = work();
-                deliver(result);
-                diagnostics::timing(operation, "blocking-worker", started.elapsed());
+                activity.complete(deliver(result));
             })
             .map(|_| ())
             .map_err(|error| worker_launch_failure(operation, &error))
@@ -6914,7 +7090,11 @@ impl NativeDesktop {
                     .map_err(|error| NativeTaskOutcome::from_service_error(operation, error))
             },
             move |result| {
-                let _ = sender.send(result);
+                if sender.send(result).is_ok() {
+                    diagnostics::WorkerDelivery::Accepted
+                } else {
+                    diagnostics::WorkerDelivery::Dropped
+                }
             },
         )
         .map_err(|error| NativeTaskOutcome::failed(operation, "worker-launch", error))?;
@@ -6937,11 +7117,41 @@ impl NativeDesktop {
     {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         Self::launch_worker(operation_name, operation, move |result| {
-            let _ = sender.send(result);
+            if sender.send(result).is_ok() {
+                diagnostics::WorkerDelivery::Accepted
+            } else {
+                diagnostics::WorkerDelivery::Dropped
+            }
         })?;
         receiver
             .await
             .map_err(|_| format!("{operation_name} worker stopped without a result"))?
+    }
+
+    async fn run_native_blocking_operation<T, F>(
+        operation_name: &'static str,
+        operation: F,
+    ) -> NativeTaskResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> NativeTaskResult<T> + Send + 'static,
+    {
+        let (sender, receiver) = iced::futures::channel::oneshot::channel();
+        Self::launch_worker(operation_name, operation, move |result| {
+            if sender.send(result).is_ok() {
+                diagnostics::WorkerDelivery::Accepted
+            } else {
+                diagnostics::WorkerDelivery::Dropped
+            }
+        })
+        .map_err(|error| NativeTaskOutcome::failed(operation_name, "worker-launch", error))?;
+        receiver.await.map_err(|_| {
+            NativeTaskOutcome::failed(
+                operation_name,
+                "worker-communication",
+                format!("{operation_name} worker stopped without a result"),
+            )
+        })?
     }
 
     fn export_task(
@@ -7017,7 +7227,14 @@ impl NativeDesktop {
                     result
                 },
                 move |result| {
-                    let _ = terminal_sender.unbounded_send(ExportWorkerEvent::Finished(result));
+                    if terminal_sender
+                        .unbounded_send(ExportWorkerEvent::Finished(result))
+                        .is_ok()
+                    {
+                        diagnostics::WorkerDelivery::Accepted
+                    } else {
+                        diagnostics::WorkerDelivery::Dropped
+                    }
                 },
             );
             if let Err(error) = spawn {
@@ -7065,7 +7282,11 @@ impl NativeDesktop {
                     })
             },
             move |result| {
-                let _ = sender.send(result);
+                if sender.send(result).is_ok() {
+                    diagnostics::WorkerDelivery::Accepted
+                } else {
+                    diagnostics::WorkerDelivery::Dropped
+                }
             },
         )
         .map_err(|error| NativeTaskOutcome::failed("run global search", "worker-launch", error))?;
@@ -7600,17 +7821,16 @@ impl NativeDesktop {
         }
         self.opening_project = true;
         let callbacks = Arc::clone(&self.callbacks);
+        let worker_project = project.clone();
         Task::perform(
-            Self::run_blocking_operation("open project", move || {
-                let result = callbacks.open_project(project.clone());
-                Ok((project, result))
+            Self::run_native_blocking_operation("open project", move || {
+                callbacks
+                    .open_project(worker_project)
+                    .map_err(|error| NativeTaskOutcome::failed("open project", "callback", error))
             }),
-            |result| match result {
-                Ok((project, result)) => Message::ProjectOpenFinished { project, result },
-                Err(error) => Message::ProjectOpenFinished {
-                    project: PathBuf::new(),
-                    result: Err(error),
-                },
+            move |result| Message::ProjectOpenFinished {
+                project: project.clone(),
+                result,
             },
         )
     }
@@ -7637,15 +7857,14 @@ impl NativeDesktop {
         self.opening_project = true;
         let callbacks = Arc::clone(&self.callbacks);
         Task::perform(
-            Self::run_blocking_operation("create project", move || {
-                Ok((project, callbacks.create_project(request)))
+            Self::run_native_blocking_operation("create project", move || {
+                callbacks
+                    .create_project(request)
+                    .map_err(|error| NativeTaskOutcome::failed("create project", "callback", error))
             }),
-            |result| match result {
-                Ok((project, result)) => Message::ProjectOpenFinished { project, result },
-                Err(error) => Message::ProjectOpenFinished {
-                    project: PathBuf::new(),
-                    result: Err(error),
-                },
+            move |result| Message::ProjectOpenFinished {
+                project: project.clone(),
+                result,
             },
         )
     }
@@ -7653,7 +7872,7 @@ impl NativeDesktop {
     fn finish_project_open(
         &mut self,
         project: PathBuf,
-        result: Result<NativeProjectOpenResult, String>,
+        result: NativeTaskResult<NativeProjectOpenResult>,
     ) -> Task<Message> {
         match result {
             Ok(NativeProjectOpenResult::Opened(window)) => {
@@ -7696,8 +7915,13 @@ impl NativeDesktop {
                 self.status = Some(format!("Project is already open: {}", project.display()));
                 Task::none()
             }
-            Err(error) => {
-                self.status = Some(error);
+            Err(NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled) => Task::none(),
+            Err(NativeTaskOutcome::Unavailable) => {
+                self.status = Some("Project opening is currently unavailable.".to_owned());
+                Task::none()
+            }
+            Err(NativeTaskOutcome::Failed { message }) => {
+                self.status = Some(message);
                 Task::none()
             }
         }
@@ -8885,8 +9109,8 @@ mod tests {
         cell::RefCell,
         pin::Pin,
         sync::{
-            Mutex,
-            atomic::{AtomicU64, Ordering},
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicU64, Ordering},
         },
         task::{Context, Poll},
     };
@@ -9239,6 +9463,372 @@ mod tests {
             project_ui: None,
             editor: None,
         }
+    }
+
+    fn install_fixture_workspace(
+        desktop: &mut NativeDesktop,
+        window: window::Id,
+    ) -> &mut NativeProjectState {
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        state.workspace = Some(Box::new(ProjectWorkspace::from_fixture(
+            crate::ProjectFixture::Explorer,
+        )));
+        state.as_mut()
+    }
+
+    #[test]
+    fn locked_project_open_remains_a_distinct_successful_result() {
+        let project = PathBuf::from("/tmp/locked.parchmint");
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+
+        let _ = desktop.update(Message::ProjectOpenFinished {
+            project: project.clone(),
+            result: Ok(NativeProjectOpenResult::Locked),
+        });
+
+        let expected = format!("Project is already open: {}", project.display());
+        assert_eq!(desktop.status.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn unavailable_project_open_has_specific_feedback() {
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+
+        let _ = desktop.update(Message::ProjectOpenFinished {
+            project: PathBuf::from("/tmp/unavailable.parchmint"),
+            result: Err(NativeTaskOutcome::Unavailable),
+        });
+
+        assert_eq!(
+            desktop.status.as_deref(),
+            Some("Project opening is currently unavailable.")
+        );
+    }
+
+    #[test]
+    fn old_session_save_completion_does_not_change_the_current_mutation() {
+        let project = legacy_project(PathBuf::from("/tmp/stale-save.parchmint"), 151);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let ticket = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".to_owned(),
+                title: "Current title".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let state = install_fixture_workspace(&mut desktop, window);
+        state.project_mutations.active = Some(ticket.clone());
+        state.autosave.save_in_flight = true;
+        state
+            .workspace
+            .as_mut()
+            .expect("fixture workspace")
+            .update(ProjectMessage::StartSave(2));
+
+        let _ = desktop.update(Message::SaveFinished {
+            window,
+            session: parchmint_ui_api::ProjectSessionRegistry::new().register(999),
+            purpose: SavePurpose::ProjectMutation(ticket.clone()),
+            result: Err(NativeTaskOutcome::StaleSession),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(matches!(
+            state.workspace.as_ref().expect("workspace").save().state(),
+            crate::SaveState::Saving { .. }
+        ));
+        assert_eq!(state.project_mutations.active, Some(ticket));
+        assert!(state.project_mutations.failed_effect.is_none());
+        assert!(state.project_mutations.failed_save.is_none());
+        assert!(state.project_mutations.blocks_close());
+        assert!(state.autosave.save_in_flight);
+        assert!(desktop.status.is_none());
+    }
+
+    #[test]
+    fn generic_save_failure_keeps_retry_and_close_state() {
+        let project = legacy_project(PathBuf::from("/tmp/failed-save.parchmint"), 152);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let ticket = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".to_owned(),
+                title: "Current title".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let state = install_fixture_workspace(&mut desktop, window);
+        state.project_mutations.active = Some(ticket.clone());
+        state.autosave.save_in_flight = true;
+        state.autosave.close_after_save = true;
+        desktop.closing_windows.insert(window);
+
+        let _ = desktop.update(Message::SaveFinished {
+            window,
+            session: project.session,
+            purpose: SavePurpose::ProjectMutation(ticket.clone()),
+            result: Err(NativeTaskOutcome::Failed {
+                message: "disk full".to_owned(),
+            }),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert_eq!(state.project_mutations.failed_save, Some(ticket));
+        assert!(matches!(
+            state.workspace.as_ref().expect("workspace").save().state(),
+            crate::SaveState::Error(ref error) if error == "disk full"
+        ));
+        assert!(!desktop.closing_windows.contains(&window));
+        assert_eq!(
+            desktop
+                .close_failures
+                .get(&project.window)
+                .map(String::as_str),
+            Some("disk full")
+        );
+    }
+
+    #[test]
+    fn current_session_stale_save_becomes_unavailable_and_remains_retryable() {
+        let project = legacy_project(PathBuf::from("/tmp/unavailable-save.parchmint"), 154);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let ticket = ProjectMutationTicket {
+            effect: ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".to_owned(),
+                title: "Current title".to_owned(),
+            },
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let state = install_fixture_workspace(&mut desktop, window);
+        state.project_mutations.active = Some(ticket.clone());
+        state.autosave.save_in_flight = true;
+
+        let _ = desktop.update(Message::SaveFinished {
+            window,
+            session: project.session,
+            purpose: SavePurpose::ProjectMutation(ticket.clone()),
+            result: Err(NativeTaskOutcome::StaleSession),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert_eq!(state.project_mutations.failed_save, Some(ticket));
+        assert!(matches!(
+            state.workspace.as_ref().expect("workspace").save().state(),
+            crate::SaveState::Error(ref error)
+                if error == "Project saving is currently unavailable."
+        ));
+        assert_eq!(
+            desktop.status.as_deref(),
+            Some("Project saving is currently unavailable.")
+        );
+    }
+
+    #[test]
+    fn canceled_recovery_accept_releases_its_mutation_and_can_retry() {
+        let project = legacy_project(PathBuf::from("/tmp/canceled-accept.parchmint"), 155);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let ticket = {
+            let workspace = state.workspace.as_mut().expect("fixture workspace");
+            workspace.begin_session(project.session.generation(), 1);
+            workspace.update(ProjectMessage::SetContentState(
+                crate::ContentState::Recovery,
+            ));
+            workspace.update(ProjectMessage::AcceptRecovery);
+            workspace.begin_task(ProjectTask::AcceptRecovery)
+        };
+        let mutation = state
+            .opaque_mutations
+            .begin(OpaqueMutationKind::RecoveryAccept);
+        state.opaque_mutations.active = Some(PendingOpaqueMutation {
+            token: mutation,
+            prior_projects: 0,
+            launch: Arc::new(|_| Task::none()),
+        });
+
+        let _ = desktop.update(Message::RecoveryAccepted {
+            window,
+            session: project.session,
+            ticket,
+            mutation: Some(mutation),
+            result: Err(NativeTaskOutcome::StaleSession),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        assert!(!state.opaque_mutations.blocks_close());
+        let workspace = state.workspace.as_mut().expect("workspace");
+        assert_eq!(workspace.content_state(), &crate::ContentState::Recovery);
+        assert!(!workspace.recovery().is_resolving());
+        assert_eq!(
+            workspace.update(ProjectMessage::RetryRecovery),
+            vec![ProjectEffect::ReconcileRecovery]
+        );
+        assert!(desktop.status.is_none());
+    }
+
+    #[test]
+    fn canceled_recovery_discard_releases_its_mutation_and_can_retry() {
+        let project = legacy_project(PathBuf::from("/tmp/canceled-discard.parchmint"), 156);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let ticket = {
+            let workspace = state.workspace.as_mut().expect("fixture workspace");
+            workspace.begin_session(project.session.generation(), 1);
+            workspace.update(ProjectMessage::SetContentState(
+                crate::ContentState::Recovery,
+            ));
+            workspace.update(ProjectMessage::DiscardRecovery);
+            workspace.begin_task(ProjectTask::DiscardRecovery)
+        };
+        let mutation = state
+            .opaque_mutations
+            .begin(OpaqueMutationKind::RecoveryDiscard);
+        state.opaque_mutations.active = Some(PendingOpaqueMutation {
+            token: mutation,
+            prior_projects: 0,
+            launch: Arc::new(|_| Task::none()),
+        });
+
+        let _ = desktop.update(Message::RecoveryDiscarded {
+            window,
+            session: project.session,
+            ticket,
+            mutation: Some(mutation),
+            result: Err(NativeTaskOutcome::Canceled),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        assert!(!state.opaque_mutations.blocks_close());
+        let workspace = state.workspace.as_mut().expect("workspace");
+        assert_eq!(workspace.content_state(), &crate::ContentState::Recovery);
+        assert!(!workspace.recovery().is_resolving());
+        assert_eq!(
+            workspace.update(ProjectMessage::RetryRecovery),
+            vec![ProjectEffect::ReconcileRecovery]
+        );
+        assert!(desktop.status.is_none());
+    }
+
+    #[test]
+    fn recovery_unavailable_still_activates_the_project_without_an_error() {
+        let project = legacy_project(PathBuf::from("/tmp/no-recovery.parchmint"), 153);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let generation = project.session.generation();
+        let workspace = state.workspace.as_mut().expect("fixture workspace");
+        workspace.begin_session(generation, 1);
+        let ticket = workspace.begin_recovery_reconciliation();
+
+        let _ = desktop.update(Message::RecoveryReconciled {
+            window,
+            session: project.session,
+            ticket,
+            result: Err(NativeTaskOutcome::Unavailable),
+        });
+
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert_eq!(
+            state.workspace.as_ref().expect("workspace").content_state(),
+            &crate::ContentState::Ready
+        );
+        assert!(desktop.status.is_none());
     }
 
     #[test]
@@ -9736,12 +10326,43 @@ mod tests {
             "test worker",
             || 42_u8,
             move |result| {
-                let _ = sender.send(result);
+                if sender.send(result).is_ok() {
+                    diagnostics::WorkerDelivery::Accepted
+                } else {
+                    diagnostics::WorkerDelivery::Dropped
+                }
             },
         )
         .expect("worker launches");
 
         assert_eq!(block_on(receiver), Ok(42));
+    }
+
+    #[test]
+    fn worker_launch_helper_finishes_after_a_dropped_delivery() {
+        let (sender, receiver) = iced::futures::channel::oneshot::channel::<u8>();
+        drop(receiver);
+        let (completed_sender, completed_receiver) = iced::futures::channel::oneshot::channel();
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_in_worker = Arc::clone(&completed);
+        NativeDesktop::launch_worker(
+            "dropped test worker",
+            || 42_u8,
+            move |result| {
+                let delivery = if sender.send(result).is_ok() {
+                    diagnostics::WorkerDelivery::Accepted
+                } else {
+                    diagnostics::WorkerDelivery::Dropped
+                };
+                completed_in_worker.store(true, Ordering::Relaxed);
+                let _ = completed_sender.send(());
+                delivery
+            },
+        )
+        .expect("worker launches");
+
+        assert_eq!(block_on(completed_receiver), Ok(()));
+        assert!(completed.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -9901,7 +10522,7 @@ mod tests {
         ];
         let events = RefCell::new(Vec::new());
 
-        let run = run_projection_sequence(
+        let run: ProjectionRun<(), String> = run_projection_sequence(
             &plans,
             |plan| {
                 events
@@ -9961,7 +10582,7 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(retry, vec![plans[1].clone()]);
-        let succeeded = run_projection_sequence(
+        let succeeded: ProjectionRun<(), String> = run_projection_sequence(
             &retry,
             |_| Ok(()),
             || {
@@ -10396,7 +11017,7 @@ mod tests {
             },
         ];
         let events = RefCell::new(Vec::new());
-        let run = run_projection_sequence(
+        let run: ProjectionRun<u64, String> = run_projection_sequence(
             &plans,
             |plan| {
                 events
