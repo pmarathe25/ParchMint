@@ -1224,6 +1224,14 @@ fn durable_delete_points_reopened_tombstone_at_exact_pre_delete_checkpoint() {
     assert_eq!(requests.len(), 2);
     assert!(
         requests[0]
+            .writes
+            .writes
+            .iter()
+            .any(|write| write.path == "project.toml"),
+        "the clean pre-delete state must still become a durable checkpoint"
+    );
+    assert!(
+        requests[0]
             .checkpoint
             .resources
             .keys()
@@ -1254,6 +1262,52 @@ fn durable_delete_points_reopened_tombstone_at_exact_pre_delete_checkpoint() {
         reopened.deleted[&deleted_node].restoring_checkpoint,
         Some(deleted.restoring_checkpoint)
     );
+}
+
+#[test]
+fn created_document_has_a_recovery_base_before_its_first_autosave() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(CompletedSave::default()),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands,
+        owner.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let document = DocumentId::from_bytes([0x77; 16]);
+    coordinator
+        .create_document(CreateDocumentWorkflow {
+            node: parchmint_domain::NodeId::from_bytes([0x66; 16]),
+            document,
+            parent: group_id(),
+            index: 1,
+            title: "New chapter".to_owned(),
+        })
+        .expect("create document should persist its canonical recovery base");
+
+    let created = owner.snapshot(document).expect("created document snapshot");
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            created.revision.next(),
+            "<p>new draft</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("first autosave for a created document should have a recovery base");
 }
 
 fn project_with_recoverable_comment() -> (

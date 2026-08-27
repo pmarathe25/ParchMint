@@ -3200,6 +3200,10 @@ pub enum ProjectMessage {
         parent_id: String,
         kind: HierarchyItemKind,
     },
+    /// Creates an item from the current Cards context. The parent is resolved
+    /// at dispatch time so a retained Iced button cannot use an earlier card
+    /// selection after a rename or persistence refresh.
+    RequestCardsCreation(HierarchyItemKind),
     DeleteSelection,
     OpenHierarchyNode(String),
     OpenHierarchyNodeInCompanion(String),
@@ -3211,6 +3215,8 @@ pub enum ProjectMessage {
     SetHierarchyRenameDraft(String),
     CommitHierarchyRename,
     CancelHierarchyRename,
+    BeginCardsEdit(String),
+    EndCardsEdit,
     SetSynopsis {
         node_id: String,
         synopsis: String,
@@ -3355,6 +3361,8 @@ pub enum ProjectMessage {
     ExportCommitting,
     ExportCancelled,
     ExportFailed(String),
+    /// A mounted editor changed without changing the project-tree revision.
+    MarkEditorDirty,
     MarkDirty(u64),
     StartSave(u64),
     SaveCompleted(u64),
@@ -3482,6 +3490,7 @@ pub struct ProjectWorkspace {
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
     hierarchy_rename: Option<HierarchyRename>,
+    cards_editing: Option<String>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
@@ -3572,6 +3581,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            cards_editing: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -3630,6 +3640,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            cards_editing: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -3727,6 +3738,10 @@ impl ProjectWorkspace {
             .hierarchy_rename
             .take()
             .filter(|rename| self.explorer.nodes.contains_key(&rename.node_id));
+        self.cards_editing = self
+            .cards_editing
+            .take()
+            .filter(|node| self.explorer.nodes.contains_key(node));
         if self
             .last_activated_document
             .as_deref()
@@ -3935,6 +3950,10 @@ impl ProjectWorkspace {
             field_order: &self.settings.metadata_order,
             values: &self.metadata_values,
         }
+    }
+
+    pub fn cards_editing_node(&self) -> Option<&str> {
+        self.cards_editing.as_deref()
     }
 
     pub fn explorer_active_panes(&self, node_id: &str) -> (bool, bool) {
@@ -4167,6 +4186,13 @@ impl ProjectWorkspace {
         self.project_revision
     }
 
+    /// Accepts the revision from a completed persistence refresh while keeping
+    /// local editor and Inspector drafts intact. Full snapshot reconciliation
+    /// is intentionally reserved for structural workflows.
+    pub(crate) fn accept_persisted_revision(&mut self, revision: u64) {
+        self.project_revision = self.project_revision.max(revision);
+    }
+
     pub const fn shell_context_is_retained(&self) -> bool {
         true
     }
@@ -4224,6 +4250,13 @@ impl ProjectWorkspace {
                     .filter_map(|id| stable_id_bytes(id))
                     .map(parchmint_domain::NodeId::from_bytes)
                     .collect(),
+                selected_nodes: self
+                    .explorer
+                    .selected
+                    .iter()
+                    .filter_map(|id| stable_id_bytes(id))
+                    .map(parchmint_domain::NodeId::from_bytes)
+                    .collect(),
             },
             tabs,
             active_view: Some(self.editor.pane(self.editor.focused_pane()).view()),
@@ -4233,6 +4266,8 @@ impl ProjectWorkspace {
             } else {
                 WorkspaceMode::Editor
             },
+            cards_section: stable_id_bytes(&self.cards_section)
+                .map(parchmint_domain::NodeId::from_bytes),
         }
     }
 
@@ -4244,6 +4279,31 @@ impl ProjectWorkspace {
             .map(|node| stable_id_string(node.as_bytes()))
             .filter(|node| self.explorer.nodes.contains_key(node))
             .collect();
+        self.explorer.selected = snapshot
+            .explorer
+            .selected_nodes
+            .iter()
+            .map(|node| stable_id_string(node.as_bytes()))
+            .filter(|node| self.explorer.nodes.contains_key(node))
+            .collect();
+        self.explorer.normalize_selection();
+        self.explorer.selection_anchor = self
+            .explorer
+            .selected_ids()
+            .last()
+            .map(|id| (*id).to_owned());
+        if let Some(section) = snapshot.cards_section {
+            let section = stable_id_string(section.as_bytes());
+            if self
+                .explorer
+                .nodes
+                .get(&section)
+                .is_some_and(|node| node.kind == HierarchyNodeKind::Root)
+            {
+                self.cards_section = section;
+            }
+        }
+        self.sync_inspector_context_from_selection();
         let tabs = snapshot
             .tabs
             .iter()
@@ -4283,6 +4343,48 @@ impl ProjectWorkspace {
             WorkspaceMode::Editor => RibbonDestination::Editor,
             WorkspaceMode::Cards => RibbonDestination::Cards,
         }
+    }
+
+    /// The container used by the Cards quick-create controls. A single
+    /// selected group in the displayed section receives the item; otherwise
+    /// creation is unambiguously rooted in the displayed section.
+    pub fn cards_creation_parent(&self) -> &str {
+        let selected = self.explorer.selected_ids();
+        if let [node_id] = selected.as_slice()
+            && self.explorer.nodes.get(*node_id).is_some_and(|node| {
+                node.kind == HierarchyNodeKind::Group && node.section_id == self.cards_section
+            })
+        {
+            return node_id;
+        }
+        &self.cards_section
+    }
+
+    fn sync_inspector_context_from_selection(&mut self) {
+        let Some(node_id) = self
+            .explorer
+            .selected_ids()
+            .first()
+            .map(|id| (*id).to_owned())
+        else {
+            return;
+        };
+        let Some(node) = self.explorer.nodes.get(&node_id) else {
+            return;
+        };
+        let context = match node.kind {
+            HierarchyNodeKind::Document => InspectorContext::Document {
+                document_id: node
+                    .document_id
+                    .clone()
+                    .expect("document hierarchy nodes have document ids"),
+            },
+            HierarchyNodeKind::Root | HierarchyNodeKind::Group => {
+                InspectorContext::Group { group_id: node_id }
+            }
+        };
+        self.editor
+            .update(EditorMessage::SetInspectorContext(context));
     }
 
     pub fn begin_session(&mut self, session: u64, project_revision: u64) {
@@ -4391,23 +4493,7 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
                 self.explorer.select(&node_id, gesture);
-                if let Some(node) = self.explorer.nodes.get(&node_id) {
-                    let context = match node.kind {
-                        HierarchyNodeKind::Document => InspectorContext::Document {
-                            document_id: node
-                                .document_id
-                                .clone()
-                                .expect("document hierarchy nodes have document ids"),
-                        },
-                        HierarchyNodeKind::Root | HierarchyNodeKind::Group => {
-                            InspectorContext::Group {
-                                group_id: node_id.clone(),
-                            }
-                        }
-                    };
-                    self.editor
-                        .update(EditorMessage::SetInspectorContext(context));
-                }
+                self.sync_inspector_context_from_selection();
                 Vec::new()
             }
             ProjectMessage::ToggleHierarchyExpanded(node_id) => {
@@ -4430,6 +4516,10 @@ impl ProjectWorkspace {
                     kind,
                 });
                 vec![ProjectEffect::CreateHierarchy { parent_id, kind }]
+            }
+            ProjectMessage::RequestCardsCreation(kind) => {
+                let parent_id = self.cards_creation_parent().to_owned();
+                self.update(ProjectMessage::RequestCreateHierarchy { parent_id, kind })
             }
             ProjectMessage::DeleteSelection => {
                 let selected = self.explorer.normalized_selected_ids();
@@ -4498,6 +4588,19 @@ impl ProjectWorkspace {
             }
             ProjectMessage::CancelHierarchyRename => {
                 self.hierarchy_rename = None;
+                Vec::new()
+            }
+            ProjectMessage::BeginCardsEdit(node_id) => {
+                if self.explorer.nodes.contains_key(&node_id) {
+                    self.explorer.select(&node_id, SelectionGesture::Replace);
+                    self.sync_inspector_context_from_selection();
+                    self.hierarchy_rename = None;
+                    self.cards_editing = Some(node_id);
+                }
+                Vec::new()
+            }
+            ProjectMessage::EndCardsEdit => {
+                self.cards_editing = None;
                 Vec::new()
             }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
@@ -5288,6 +5391,12 @@ impl ProjectWorkspace {
             ProjectMessage::ExportFailed(error) => {
                 self.export.state = ExportState::Failed(error.clone());
                 self.report_error("export", error);
+                Vec::new()
+            }
+            ProjectMessage::MarkEditorDirty => {
+                self.save.state = SaveState::Dirty {
+                    current_revision: self.project_revision,
+                };
                 Vec::new()
             }
             ProjectMessage::MarkDirty(revision) => {
@@ -6090,6 +6199,33 @@ fn is_research_section(section_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistence_revision_advances_without_reconciling_live_presentation() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let initial = workspace.project_revision();
+
+        workspace.accept_persisted_revision(initial + 2);
+        workspace.accept_persisted_revision(initial + 1);
+
+        assert_eq!(workspace.project_revision(), initial + 2);
+    }
+
+    #[test]
+    fn editor_dirty_state_does_not_repurpose_the_project_revision() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let initial = workspace.project_revision();
+
+        workspace.update(ProjectMessage::MarkEditorDirty);
+
+        assert_eq!(workspace.project_revision(), initial);
+        assert_eq!(
+            workspace.save().state(),
+            SaveState::Dirty {
+                current_revision: initial
+            }
+        );
+    }
 
     fn history_row(
         checkpoint_id: &str,
@@ -7142,6 +7278,74 @@ mod tests {
                 .active_document(),
             Some("chapter-three")
         );
+    }
+
+    #[test]
+    fn cards_quick_create_uses_a_selected_group_or_the_displayed_section_root() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        assert_eq!(workspace.cards_creation_parent(), "manuscript");
+
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "part-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(workspace.cards_creation_parent(), "part-one");
+        assert_eq!(
+            workspace.update(ProjectMessage::RequestCardsCreation(
+                HierarchyItemKind::Document
+            )),
+            [ProjectEffect::CreateHierarchy {
+                parent_id: "part-one".to_owned(),
+                kind: HierarchyItemKind::Document,
+            }]
+        );
+
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(workspace.cards_creation_parent(), "manuscript");
+    }
+
+    #[test]
+    fn cards_editing_reuses_the_shared_title_and_synopsis_contracts() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardsEdit("chapter-one".to_owned()));
+        assert_eq!(workspace.cards_editing_node(), Some("chapter-one"));
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
+
+        assert_eq!(
+            workspace.update(ProjectMessage::RenameNode {
+                node_id: "chapter-one".to_owned(),
+                title: "A Better Opening".to_owned(),
+            }),
+            [ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "A Better Opening".to_owned(),
+            }]
+        );
+        assert_eq!(
+            workspace.explorer().title("chapter-one"),
+            Some("A Better Opening")
+        );
+
+        assert_eq!(
+            workspace.update(ProjectMessage::SetSynopsis {
+                node_id: "chapter-one".to_owned(),
+                synopsis: "The river introduces the central conflict.".to_owned(),
+            }),
+            [ProjectEffect::CommitSynopsis {
+                node_id: "chapter-one".to_owned(),
+                synopsis: "The river introduces the central conflict.".to_owned(),
+            }]
+        );
+        assert_eq!(
+            workspace.explorer().synopsis("chapter-one"),
+            Some("The river introduces the central conflict.")
+        );
+
+        workspace.update(ProjectMessage::EndCardsEdit);
+        assert_eq!(workspace.cards_editing_node(), None);
     }
 
     #[test]

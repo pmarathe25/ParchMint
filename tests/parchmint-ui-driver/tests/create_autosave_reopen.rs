@@ -1,7 +1,7 @@
 use std::fs;
 
 use parchmint_desktop::{
-    DesktopInteractionHarness, HarnessWindow, LaunchRequest, ProductionObservation,
+    DesktopInteractionHarness, HarnessTarget, HarnessWindow, LaunchRequest, ProductionObservation,
 };
 use parchmint_ui_driver::IsolatedRun;
 
@@ -39,7 +39,7 @@ fn user_can_create_edit_autosave_close_and_reopen_a_project() {
     );
 
     harness
-        .type_at(HarnessWindow::Project, (500.0, 300.0), marker)
+        .type_into_target(HarnessWindow::Project, HarnessTarget::EditorPrimary, marker)
         .expect("type in mounted editor");
     assert!(
         harness

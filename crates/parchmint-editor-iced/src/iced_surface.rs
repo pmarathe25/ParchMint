@@ -186,6 +186,8 @@ pub enum MountedEditorClipboardIntent {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MountedEditorMessage {
     Focus(DocumentPosition),
+    /// A pointer interaction moved keyboard ownership to another control.
+    Blur,
     SetSelection(EditorSelection),
     Scroll {
         delta_y: f32,
@@ -321,7 +323,15 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 None
             }
             iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                let position = cursor.position_in(bounds)?;
+                let Some(position) = cursor.position_in(bounds) else {
+                    if state.focused {
+                        state.focused = false;
+                        state.drag_anchor = None;
+                        self.set_focus(false);
+                        return Some(Action::publish(MountedEditorMessage::Blur));
+                    }
+                    return None;
+                };
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
                 self.set_focus(true);
@@ -387,6 +397,17 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     Action::publish(MountedEditorMessage::Clipboard(
                         clipboard_shortcut(key.as_ref(), *modifiers)
                             .expect("guard resolved a clipboard shortcut"),
+                    ))
+                    .and_capture(),
+                )
+            }
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. })
+                if state.focused && formatting_shortcut(key.as_ref(), *modifiers).is_some() =>
+            {
+                Some(
+                    Action::publish(MountedEditorMessage::ToggleInlineMark(
+                        formatting_shortcut(key.as_ref(), *modifiers)
+                            .expect("guard resolved a formatting shortcut"),
                     ))
                     .and_capture(),
                 )
@@ -792,6 +813,17 @@ fn apply_surface_message(
                 },
             )
         }
+        MountedEditorMessage::Blur => {
+            let snapshot = adapter.view_snapshot(session.clone(), view)?;
+            adapter.set_view_presentation(
+                session,
+                view,
+                crate::MountedViewPresentation {
+                    focused: false,
+                    ..snapshot.presentation
+                },
+            )
+        }
         MountedEditorMessage::SetSelection(selection) => {
             set_selection(adapter, session.clone(), view, selection)?;
             let snapshot = adapter.view_snapshot(session.clone(), view)?;
@@ -1179,6 +1211,30 @@ fn clipboard_shortcut(
     }
 }
 
+fn formatting_shortcut(
+    key: keyboard::Key<&str>,
+    modifiers: keyboard::Modifiers,
+) -> Option<InlineMarkKind> {
+    match key {
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("b") =>
+        {
+            Some(InlineMarkKind::Bold)
+        }
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("i") =>
+        {
+            Some(InlineMarkKind::Italic)
+        }
+        keyboard::Key::Character(value)
+            if modifiers == keyboard::Modifiers::COMMAND && value.eq_ignore_ascii_case("u") =>
+        {
+            Some(InlineMarkKind::Underline)
+        }
+        _ => None,
+    }
+}
+
 /// A retained, ParchMint-owned host for one adapter-mounted Iced manuscript.
 ///
 /// The only renderer type exposed is the final `Element` needed by the
@@ -1518,6 +1574,18 @@ mod tests {
             clipboard_shortcut(keyboard::Key::Character("b"), keyboard::Modifiers::COMMAND,),
             None
         );
+        assert_eq!(
+            formatting_shortcut(keyboard::Key::Character("B"), keyboard::Modifiers::COMMAND),
+            Some(InlineMarkKind::Bold)
+        );
+        assert_eq!(
+            formatting_shortcut(keyboard::Key::Character("i"), keyboard::Modifiers::COMMAND),
+            Some(InlineMarkKind::Italic)
+        );
+        assert_eq!(
+            formatting_shortcut(keyboard::Key::Character("u"), keyboard::Modifiers::COMMAND),
+            Some(InlineMarkKind::Underline)
+        );
     }
 
     #[test]
@@ -1550,12 +1618,18 @@ mod tests {
             vec![iced::event::Status::Captured],
             "the focused canvas owns supported editor key commands"
         );
+        assert_eq!(
+            simulator.simulate([key_pressed("b", keyboard::Modifiers::COMMAND, Some("b"),)]),
+            vec![iced::event::Status::Captured],
+            "the focused canvas owns standard formatting shortcuts"
+        );
 
         assert_eq!(
             simulator.into_messages().collect::<Vec<_>>(),
             vec![
                 MountedEditorMessage::Clipboard(MountedEditorClipboardIntent::Copy),
                 MountedEditorMessage::KeyCommand(MountedEditorKeyCommand::SelectAll),
+                MountedEditorMessage::ToggleInlineMark(InlineMarkKind::Bold),
             ],
             "clipboard and editor commands emit once; command text is never manuscript input"
         );
@@ -1825,6 +1899,20 @@ mod tests {
                 3.into(),
             )))
         );
+
+        let blur = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            mouse::Cursor::Available(Point::new(-1.0, -1.0)),
+        );
+        let (message, _, _) = blur
+            .expect("outside pointer press blurs the editor")
+            .into_inner();
+        assert_eq!(message, Some(MountedEditorMessage::Blur));
+        assert!(!state.focused);
+        assert!(!content.lock().expect("content").focused);
     }
 
     fn assert_tiny_skia_golden(snapshot: &Snapshot, stem: &str) {

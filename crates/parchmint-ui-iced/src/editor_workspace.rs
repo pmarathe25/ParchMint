@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use parchmint_application::DocumentVisibility;
 use parchmint_domain::{NodeKind, ProjectSection};
-use parchmint_editor_api::ViewId;
+use parchmint_editor_api::{CanonicalComment, CanonicalCommentAnchor, ViewId};
 use parchmint_preferences::ResolvedAppearance;
 use parchmint_ui_api::ProjectSnapshot;
 
@@ -1751,6 +1751,69 @@ impl EditorWorkspace {
             .collect()
     }
 
+    /// Reflects a mounted document's comment projection before its next
+    /// autosave refresh. This keeps the Inspector responsive after creating,
+    /// replying to, resolving, or deleting a comment.
+    pub fn reconcile_document_comments(
+        &mut self,
+        document_id: &str,
+        comments: &[CanonicalComment],
+    ) {
+        self.comments
+            .retain(|_, anchor| anchor.document_id() != document_id);
+        self.comment_threads
+            .retain(|_, thread| thread.document_id != document_id);
+
+        for thread in comments {
+            let id = stable_id_string(thread.id.as_bytes());
+            let anchor = comment_anchor(document_id, thread);
+            self.comments.insert(id.clone(), anchor.clone());
+            self.comment_threads.insert(
+                id.clone(),
+                CommentThreadView {
+                    id,
+                    document_id: document_id.to_owned(),
+                    messages: thread
+                        .messages
+                        .iter()
+                        .map(|message| CommentMessageView {
+                            id: stable_id_string(message.id.as_bytes()),
+                            body: message.body.clone(),
+                        })
+                        .collect(),
+                    resolved: thread.resolved,
+                    anchor,
+                },
+            );
+        }
+        self.comment_reply_drafts
+            .retain(|thread, _| self.comment_threads.contains_key(thread));
+        self.collapsed_comment_replies
+            .retain(|thread| self.comment_threads.contains_key(thread));
+        if self
+            .editing_comment_message
+            .as_ref()
+            .is_some_and(|(thread, message)| {
+                self.comment_threads.get(thread).is_none_or(|current| {
+                    !current
+                        .messages
+                        .iter()
+                        .any(|candidate| candidate.id == *message)
+                })
+            })
+        {
+            self.editing_comment_message = None;
+        }
+        if self
+            .pending_delete_comment
+            .as_ref()
+            .is_some_and(|thread| !self.comment_threads.contains_key(thread))
+        {
+            self.pending_delete_comment = None;
+        }
+        self.comment_feedback = None;
+    }
+
     pub fn comment_draft(&self) -> &str {
         &self.comment_draft
     }
@@ -2727,40 +2790,10 @@ fn snapshot_comment_anchors(snapshot: &ProjectSnapshot) -> BTreeMap<String, Comm
         .flat_map(|document| {
             let document_id = stable_id_string(document.document_id.as_bytes());
             document.comments.iter().map(move |thread| {
-                let anchor = match &thread.anchor {
-                    parchmint_editor_api::CanonicalCommentAnchor::Document { .. } => {
-                        CommentAnchor::Document {
-                            document_id: document_id.clone(),
-                        }
-                    }
-                    parchmint_editor_api::CanonicalCommentAnchor::Text {
-                        orphaned: true,
-                        quote,
-                        context_before,
-                        context_after,
-                        ..
-                    } => CommentAnchor::Orphaned {
-                        document_id: document_id.clone(),
-                        quote: quote.clone(),
-                        context_before: context_before.clone(),
-                        context_after: context_after.clone(),
-                    },
-                    parchmint_editor_api::CanonicalCommentAnchor::Text { range, .. }
-                        if range.is_collapsed() =>
-                    {
-                        CommentAnchor::Position {
-                            document_id: document_id.clone(),
-                            position: range.start().value(),
-                        }
-                    }
-                    parchmint_editor_api::CanonicalCommentAnchor::Text { range, .. } => {
-                        CommentAnchor::Range {
-                            document_id: document_id.clone(),
-                            range: FindMatch::new(range.start().value(), range.end().value()),
-                        }
-                    }
-                };
-                (stable_id_string(thread.id.as_bytes()), anchor)
+                (
+                    stable_id_string(thread.id.as_bytes()),
+                    comment_anchor(&document_id, thread),
+                )
             })
         })
         .collect()
@@ -2796,6 +2829,36 @@ fn snapshot_comment_threads(snapshot: &ProjectSnapshot) -> BTreeMap<String, Comm
             })
         })
         .collect()
+}
+
+fn comment_anchor(document_id: &str, thread: &CanonicalComment) -> CommentAnchor {
+    match &thread.anchor {
+        CanonicalCommentAnchor::Document { .. } => CommentAnchor::Document {
+            document_id: document_id.to_owned(),
+        },
+        CanonicalCommentAnchor::Text {
+            orphaned: true,
+            quote,
+            context_before,
+            context_after,
+            ..
+        } => CommentAnchor::Orphaned {
+            document_id: document_id.to_owned(),
+            quote: quote.clone(),
+            context_before: context_before.clone(),
+            context_after: context_after.clone(),
+        },
+        CanonicalCommentAnchor::Text { range, .. } if range.is_collapsed() => {
+            CommentAnchor::Position {
+                document_id: document_id.to_owned(),
+                position: range.start().value(),
+            }
+        }
+        CanonicalCommentAnchor::Text { range, .. } => CommentAnchor::Range {
+            document_id: document_id.to_owned(),
+            range: FindMatch::new(range.start().value(), range.end().value()),
+        },
+    }
 }
 
 fn search_active(search: Option<&LocalSearchState>) -> Option<FindMatch> {
@@ -3238,6 +3301,38 @@ mod tests {
             workspace.update(EditorMessage::ConfirmDeleteCommentThread).as_slice(),
             [EditorEffect::Command { command: EditorCommand::DeleteCommentThread { thread_id }, .. }] if thread_id == "thread"
         ));
+    }
+
+    #[test]
+    fn live_comment_projection_updates_the_inspector_before_autosave() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let mut thread = CanonicalComment::new(
+            parchmint_editor_api::CommentId::from_bytes([7; 16]),
+            parchmint_editor_api::EditorSelection::new(1.into(), 4.into()),
+            "Check the weather.",
+            parchmint_editor_api::BlockId::from_bytes([3; 16]),
+        );
+
+        workspace.reconcile_document_comments("chapter-one", &[thread.clone()]);
+        let comments = workspace.inspector_comments();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].messages()[0].body(), "Check the weather.");
+
+        thread.resolved = true;
+        thread
+            .messages
+            .push(parchmint_editor_api::CanonicalCommentMessage {
+                id: parchmint_editor_api::CommentId::from_bytes([8; 16]),
+                body: "Confirmed.".to_owned(),
+                unknown_fields: BTreeMap::new(),
+            });
+        workspace.reconcile_document_comments("chapter-one", &[thread]);
+        let comments = workspace.inspector_comments();
+        assert!(comments[0].resolved());
+        assert_eq!(comments[0].messages().len(), 2);
+
+        workspace.reconcile_document_comments("chapter-one", &[]);
+        assert!(workspace.inspector_comments().is_empty());
     }
 
     #[test]

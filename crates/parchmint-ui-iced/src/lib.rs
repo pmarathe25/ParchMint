@@ -5,6 +5,7 @@ pub mod components;
 pub mod design_tokens;
 mod editor_workspace;
 mod focus;
+mod harness_target;
 mod hierarchy_drag;
 #[allow(
     dead_code,
@@ -25,6 +26,7 @@ mod stationary_tooltip;
 mod visual_verification;
 
 pub use editor_workspace::*;
+pub use harness_target::HarnessTarget;
 pub use native::*;
 pub use project_workspace::*;
 pub use visual_verification::*;

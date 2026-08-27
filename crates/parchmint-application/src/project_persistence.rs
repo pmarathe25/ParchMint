@@ -21,10 +21,10 @@ use parchmint_history_api::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, RestorePlan, SnapshotName,
 };
 use parchmint_project_format::{
-    CanonicalAnnotations, CanonicalCodec, CanonicalDocumentUpdate, CanonicalDomainUpdate,
-    CanonicalPersistenceFrontier, CanonicalProjectEncoding, CanonicalProjectPatch,
-    CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource, CanonicalResourceMetadata,
-    ContentHash, FormatError, ProjectFormatCodec,
+    CanonicalAnnotations, CanonicalBytes, CanonicalCodec, CanonicalDocumentUpdate,
+    CanonicalDomainUpdate, CanonicalPersistenceFrontier, CanonicalProjectEncoding,
+    CanonicalProjectPatch, CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource,
+    CanonicalResourceMetadata, ContentHash, FormatError, ProjectFormatCodec,
 };
 use parchmint_project_repository::{AtomicWritePlan, StagedResource};
 use parchmint_recovery_api::{
@@ -322,6 +322,29 @@ impl ProjectPersistenceCoordinator {
         Ok(())
     }
 
+    fn register_current_document_base(
+        &self,
+        document: DocumentId,
+    ) -> Result<(), ProjectPersistenceError> {
+        let snapshot = self.documents.snapshot(document)?;
+        let annotations = CanonicalAnnotations::from_typed(
+            stable_id_text(document.as_bytes()),
+            &snapshot
+                .comments
+                .iter()
+                .map(contract_thread)
+                .collect::<Vec<_>>(),
+        )?;
+        let annotation_bytes = ProjectFormatCodec::default()
+            .encode(&CanonicalResource::Annotations(annotations))?
+            .bytes;
+        self.register_loaded_document_base(
+            document,
+            snapshot.revision,
+            recovery_document_content_hash(snapshot.body.as_bytes(), Some(&annotation_bytes)),
+        )
+    }
+
     pub fn persist_editor_projection(
         &self,
         projection: CanonicalProjection,
@@ -521,7 +544,7 @@ impl ProjectPersistenceCoordinator {
             &canonical.frontier,
             &persistence_frontier,
         );
-        let patch = match patch {
+        let mut patch = match patch {
             Ok(patch) => patch,
             Err(FormatError::InvalidDocument(_)) => {
                 let documents = project
@@ -560,6 +583,39 @@ impl ProjectPersistenceCoordinator {
             }
             Err(error) => return Err(error.into()),
         };
+        // A named or structural checkpoint can intentionally capture an
+        // already-clean project. The filesystem writer requires at least one
+        // atomic operation, so rewrite the unchanged manifest to establish
+        // the otherwise no-op checkpoint as a durable boundary.
+        if patch.resources.is_empty() && patch.deletions.is_empty() {
+            let manifest_path = CanonicalRelativePath::parse("project.toml")?;
+            let metadata = patch
+                .complete_resources
+                .get(&manifest_path)
+                .ok_or_else(|| {
+                    ProjectPersistenceError::Application(
+                        "canonical manifest is unavailable for a checkpoint".to_owned(),
+                    )
+                })?;
+            let bytes = canonical
+                .resources
+                .get(&manifest_path)
+                .cloned()
+                .ok_or_else(|| {
+                    ProjectPersistenceError::Application(
+                        "canonical manifest bytes are unavailable for a checkpoint".to_owned(),
+                    )
+                })?;
+            patch.resources.insert(
+                manifest_path.clone(),
+                CanonicalBytes {
+                    resource: metadata.resource.clone(),
+                    path: manifest_path,
+                    bytes,
+                    hash: metadata.hash,
+                },
+            );
+        }
         drop(canonical);
         let revisions = save_revisions_from_patch(&capture, &patch);
         let projection = dirty_documents
@@ -694,6 +750,7 @@ impl ProjectPersistenceCoordinator {
         self.commands.execute_now(command)?;
         let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
         let revision = self.await_save(handle)?;
+        self.register_current_document_base(request.document)?;
         Ok(CreatedDocumentRevision {
             document: request.document,
             revision,

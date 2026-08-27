@@ -1204,6 +1204,14 @@ fn workspace_snapshot_restores_panes_tabs_views_split_scroll_and_mode() {
     workspace
         .editor_mut()
         .set_scroll_offset(EditorPane::Primary, 247.0);
+    let research_node = id_string(fixture.research_node.as_bytes());
+    workspace.update(ProjectMessage::SelectHierarchy {
+        node_id: research_node.clone(),
+        gesture: SelectionGesture::Replace,
+    });
+    workspace.update(ProjectMessage::SetCardsSection(id_string(
+        NodeId::research_root().as_bytes(),
+    )));
     let mut layout = ShellLayout::for_window(1440, 900);
     layout.restore_panes(334, 418, true, false);
 
@@ -1215,6 +1223,8 @@ fn workspace_snapshot_restores_panes_tabs_views_split_scroll_and_mode() {
     assert!(!saved.tabs.is_empty());
     assert!(saved.active_view.is_some());
     assert!(!saved.views.is_empty());
+    assert_eq!(saved.explorer.selected_nodes.len(), 1);
+    assert_eq!(saved.cards_section, Some(NodeId::research_root()));
 
     let mut restored = ProjectWorkspace::from_snapshot(&fixture.snapshot);
     assert_eq!(
@@ -1236,6 +1246,11 @@ fn workspace_snapshot_restores_panes_tabs_views_split_scroll_and_mode() {
     assert_eq!(
         restored.editor().pane(EditorPane::Primary).scroll_offset(),
         247.0
+    );
+    assert_eq!(restored.explorer().selected_ids(), [research_node]);
+    assert_eq!(
+        restored.cards().section_id(),
+        id_string(NodeId::research_root().as_bytes())
     );
 }
 

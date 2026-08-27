@@ -1027,6 +1027,9 @@ struct NativeProjectState {
     active_export: Option<ExportOperationToken>,
     export_destination: Option<parchmint_platform_api::UntrustedPathSelection>,
     autosave: AutosaveState,
+    /// The most recent project-wide search entered while a mounted draft is
+    /// being persisted. The search starts from the freshly indexed snapshot.
+    pending_global_search: Option<SearchRequest>,
     next_spellcheck_generation: u64,
     spellcheck_generation: BTreeMap<ViewId, u64>,
     pending_spellchecks: BTreeMap<ViewId, Instant>,
@@ -1638,6 +1641,20 @@ fn completes_spellcheck_word(message: &parchmint_editor_iced::MountedEditorMessa
     }
 }
 
+fn updates_comment_threads(command: &crate::EditorCommand) -> bool {
+    matches!(
+        command,
+        crate::EditorCommand::CreateComment { .. }
+            | crate::EditorCommand::ReplyToComment { .. }
+            | crate::EditorCommand::SetCommentResolved { .. }
+            | crate::EditorCommand::DeleteCommentThread { .. }
+            | crate::EditorCommand::DeleteCommentMessage { .. }
+            | crate::EditorCommand::EditCommentMessage { .. }
+            | crate::EditorCommand::ReattachComment { .. }
+            | crate::EditorCommand::ConvertCommentToDocument { .. }
+    )
+}
+
 impl NativeDesktop {
     fn boot(startup: NativeDesktopStartup) -> (Self, Task<Message>) {
         let capture_error = startup
@@ -1864,6 +1881,15 @@ impl NativeDesktop {
                             && !state.opaque_mutations.blocks_close()
                         {
                             return self.start_projection_save(window, ProjectSaveKind::Explicit);
+                        } else if let Some(request) = state.pending_global_search.take()
+                            && let Some(workspace) = state.workspace.as_mut()
+                        {
+                            return Self::start_global_search(
+                                window,
+                                workspace,
+                                state.service_feeds.as_ref(),
+                                request,
+                            );
                         }
                     }
                     Err(outcome) => {
@@ -1878,6 +1904,11 @@ impl NativeDesktop {
                         self.status = Some(error.clone());
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.update(ProjectMessage::SaveFailed(error.clone()));
+                            Self::fail_pending_global_search(
+                                workspace,
+                                &mut state.pending_global_search,
+                                format!("Project search could not save the latest draft: {error}"),
+                            );
                         }
                         if close_after_save {
                             self.status = None;
@@ -2237,11 +2268,46 @@ impl NativeDesktop {
                     Ok(snapshot) => {
                         let revision = snapshot.project.revision.value();
                         let snapshot = Arc::new(snapshot);
+                        let replaced_documents = state
+                            .project
+                            .project_ui
+                            .as_ref()
+                            .map(|project_ui| {
+                                snapshot
+                                    .documents
+                                    .iter()
+                                    .filter(|replacement| {
+                                        project_ui
+                                            .snapshot
+                                            .documents
+                                            .iter()
+                                            .find(|current| {
+                                                current.document_id == replacement.document_id
+                                            })
+                                            .is_none_or(|current| {
+                                                current.body != replacement.body
+                                                    || current.comments != replacement.comments
+                                            })
+                                    })
+                                    .map(|document| document.document_id)
+                                    .collect::<BTreeSet<_>>()
+                            })
+                            .unwrap_or_default();
                         if let Some(project_ui) = state.project.project_ui.as_mut() {
                             project_ui.snapshot = Arc::clone(&snapshot);
                             state.effect_executor = Some(NativeProjectEffectExecutor::new(
                                 project_ui.ports.clone(),
                                 Arc::clone(&snapshot),
+                            ));
+                        }
+                        if let Err(error) = Self::remount_replaced_documents(
+                            state,
+                            snapshot.as_ref(),
+                            &replaced_documents,
+                            self.appearance,
+                        ) {
+                            self.status = Some(format!(
+                                "Could not refresh replaced document in the editor: {error}"
                             ));
                         }
                         if let Some(workspace) = state.workspace.as_mut() {
@@ -3002,15 +3068,15 @@ impl NativeDesktop {
             event,
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
         ) && self.windows.get(&id).is_some_and(|window| {
-            matches!(window, NativeWindow::Project(state) if state
+            matches!(window, NativeWindow::Project(state) if state.spelling_menu.is_some()
+                || state
                     .workspace
                     .as_ref()
                     .is_some_and(|workspace| workspace.hierarchy_context_menu().is_some()))
         }) {
-            // The Explorer menu is composed over the entire project surface.
-            // Its backdrop receives outside left clicks, while its buttons
-            // receive action clicks. Scheduling a second window-wide dismissal
-            // here races those buttons and can discard their action.
+            // Explorer and spelling menus each compose their own backdrop.
+            // Scheduling a second window-wide dismissal races an action button
+            // and can discard its command before it reaches the reducer.
             return Task::none();
         }
         if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
@@ -3780,47 +3846,101 @@ impl NativeDesktop {
                             whole_word,
                             generation,
                         } => {
-                            if let Some(feeds) = state.service_feeds.as_ref() {
-                                let ticket =
-                                    workspace.begin_task(ProjectTask::GlobalSearch { generation });
-                                let start = feeds.search().start(SearchRequest {
-                                    text: query,
-                                    case_sensitive,
-                                    whole_word,
-                                    generation,
-                                    metadata_fields: state
-                                        .project
-                                        .project_ui
-                                        .as_ref()
-                                        .map(|project| {
-                                            project
-                                                .snapshot
-                                                .project
-                                                .metadata
-                                                .iter()
-                                                .map(|field| field.id)
-                                                .collect()
-                                        })
-                                        .unwrap_or_default(),
-                                });
-                                tasks.push(Task::perform(Self::run_search(start), move |result| {
-                                    Message::SearchFinished {
-                                        window: id,
-                                        ticket,
-                                        result,
-                                    }
-                                }));
-                            } else {
-                                let ticket =
-                                    workspace.begin_task(ProjectTask::GlobalSearch { generation });
-                                workspace.accept_completion(ProjectTaskCompletion::for_ticket(
-                                    ticket,
-                                    ProjectTaskPayload::Failed(
-                                        "Project search is unavailable for this session."
-                                            .to_owned(),
-                                    ),
+                            let request = SearchRequest {
+                                text: query,
+                                case_sensitive,
+                                whole_word,
+                                generation,
+                                metadata_fields: state
+                                    .project
+                                    .project_ui
+                                    .as_ref()
+                                    .map(|project| {
+                                        project
+                                            .snapshot
+                                            .project
+                                            .metadata
+                                            .iter()
+                                            .map(|field| field.id)
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                            };
+                            if state.autosave.dirty_sessions.is_empty()
+                                && !state.autosave.save_in_flight
+                            {
+                                tasks.push(Self::start_global_search(
+                                    id,
+                                    workspace,
+                                    state.service_feeds.as_ref(),
+                                    request,
                                 ));
+                                continue;
                             }
+
+                            state.pending_global_search = Some(request);
+                            if state.autosave.save_in_flight
+                                || state.project_mutations.blocks_close()
+                                || state.opaque_mutations.blocks_close()
+                            {
+                                self.status =
+                                    Some("Saving the latest draft before searching…".into());
+                                continue;
+                            }
+                            let Some(ports) = state.project.ports().cloned() else {
+                                Self::fail_pending_global_search(
+                                    workspace,
+                                    &mut state.pending_global_search,
+                                    "Project search cannot save this draft because persistence is unavailable."
+                                        .into(),
+                                );
+                                continue;
+                            };
+                            let Some(adapter) = state.project.editor_adapter().cloned() else {
+                                Self::fail_pending_global_search(
+                                    workspace,
+                                    &mut state.pending_global_search,
+                                    "Project search cannot read the latest draft because the editor is unavailable."
+                                        .into(),
+                                );
+                                continue;
+                            };
+                            let plans = match editor_projection_plans(
+                                adapter.as_ref(),
+                                deduplicated_editor_sessions(
+                                    state
+                                        .editor_bindings
+                                        .values()
+                                        .map(MountedEditorBinding::session),
+                                    state.retained_editor_sessions.values().cloned(),
+                                ),
+                                &state.autosave.projected_sessions,
+                            ) {
+                                Ok(plans) => plans,
+                                Err(error) => {
+                                    Self::fail_pending_global_search(
+                                        workspace,
+                                        &mut state.pending_global_search,
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            };
+                            let ticket = AutosaveTicket {
+                                dirty_sessions: state.autosave.dirty_sessions.clone(),
+                            };
+                            state.autosave.save_in_flight = true;
+                            workspace
+                                .update(ProjectMessage::StartSave(workspace.project_revision()));
+                            tasks.push(Self::autosave_task(
+                                id,
+                                ports,
+                                adapter,
+                                plans,
+                                ticket,
+                                ProjectSaveKind::Autosave,
+                            ));
+                            self.status = Some("Saving the latest draft before searching…".into());
                         }
                         ProjectEffect::PreviewHistory(checkpoint_id) => {
                             let current = state.project.project_ui.as_ref().and_then(|project| {
@@ -4480,7 +4600,7 @@ impl NativeDesktop {
                                 );
                                 return Task::none();
                             };
-                            workspace.update(ProjectMessage::MarkDirty(revision.value()));
+                            workspace.update(ProjectMessage::MarkEditorDirty);
                             state.autosave.mark_dirty(session, revision, Instant::now());
                             let delay = if completed_word { 150 } else { 400 };
                             state
@@ -5042,6 +5162,16 @@ impl NativeDesktop {
             let Some(workspace) = state.workspace.as_mut() else {
                 return Task::none();
             };
+            if let Some(document) = state.mounted_documents.get(&context.pane)
+                && let Some(node_id) = workspace
+                    .explorer()
+                    .node_id_for_document(&stable_id_string(document.as_bytes()))
+            {
+                workspace.update(ProjectMessage::SelectHierarchy {
+                    node_id: node_id.to_owned(),
+                    gesture: SelectionGesture::Replace,
+                });
+            }
             workspace
                 .editor_mut()
                 .update(crate::EditorMessage::BeginCommentAtSelection);
@@ -5367,7 +5497,7 @@ impl NativeDesktop {
                 .editor_mut()
                 .update(crate::EditorMessage::SetActiveParagraphStyle(style_name));
         }
-        workspace.update(ProjectMessage::MarkDirty(mutation.revision.value()));
+        workspace.update(ProjectMessage::MarkEditorDirty);
         state
             .autosave
             .mark_dirty(mutation.editor_session, mutation.revision, Instant::now());
@@ -5514,6 +5644,15 @@ impl NativeDesktop {
                         .map(|(node_id, _)| node_id.to_owned())
                 })
                 .flatten();
+                let cards_created_node = (state.shell.destination() == RibbonDestination::Cards)
+                    .then(|| hierarchy_rename.clone())
+                    .flatten();
+                let focus_card_title = cards_created_node.is_some();
+                if let Some(node_id) = cards_created_node.as_ref()
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    workspace.update(ProjectMessage::BeginCardsEdit(node_id.clone()));
+                }
                 state.effect_executor = state
                     .project
                     .ports()
@@ -5580,9 +5719,12 @@ impl NativeDesktop {
                     )
                 });
                 let rename_focus = hierarchy_rename.map_or_else(Task::none, |node_id| {
-                    iced::widget::operation::focus(
-                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
-                    )
+                    let target = if focus_card_title {
+                        crate::harness_target::card_title_input_id(&node_id)
+                    } else {
+                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id)
+                    };
+                    iced::widget::operation::focus(target)
                 });
                 Task::batch([reopen, refresh, terminal, rename_focus])
             }
@@ -5604,6 +5746,24 @@ impl NativeDesktop {
                         workspace.reconcile_snapshot(&snapshot);
                     }
                     workspace.update(ProjectMessage::MarkDirty(snapshot.project.revision.value()));
+                }
+                let cards_created_node = (state.shell.destination() == RibbonDestination::Cards
+                    && matches!(
+                        mutation.as_ref().map(|ticket| &ticket.effect),
+                        Some(ProjectEffect::CreateHierarchy { .. })
+                    ))
+                .then(|| {
+                    state
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.hierarchy_rename())
+                        .map(|(node_id, _)| node_id.to_owned())
+                })
+                .flatten();
+                if let Some(node_id) = cards_created_node.as_ref()
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    workspace.update(ProjectMessage::BeginCardsEdit(node_id.clone()));
                 }
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::new(snapshot.clone());
@@ -5641,7 +5801,13 @@ impl NativeDesktop {
                     || opaque_mutation.map_or(SavePurpose::Untracked, SavePurpose::OpaqueMutation),
                     SavePurpose::ProjectMutation,
                 );
-                Self::save_task(window, ports, ProjectSaveKind::Structural, purpose)
+                let save = Self::save_task(window, ports, ProjectSaveKind::Structural, purpose);
+                let focus = cards_created_node.map_or_else(Task::none, |node_id| {
+                    iced::widget::operation::focus(crate::harness_target::card_title_input_id(
+                        &node_id,
+                    ))
+                });
+                Task::batch([save, focus])
             }
             Ok(ProjectEffectCompletion::TreePaste {
                 snapshot,
@@ -5993,12 +6159,27 @@ impl NativeDesktop {
                     Self::accept_hydrated_snapshot(state, snapshot.as_ref().clone());
                 }
                 let spellcheck_view = editor_intent_view(&intent);
+                let comment_threads_changed = matches!(
+                    &intent,
+                    EditorRuntimeIntent::Command { command, .. } if updates_comment_threads(command)
+                );
                 match Self::apply_editor_intent(state, intent, self.appearance) {
                     Ok(Some((session, revision))) => {
                         let Some(workspace) = state.workspace.as_mut() else {
                             return Task::none();
                         };
-                        workspace.update(ProjectMessage::MarkDirty(revision.value()));
+                        if comment_threads_changed
+                            && let Some(adapter) = state.project.editor_adapter()
+                            && let Ok(projection) = iced::futures::executor::block_on(
+                                adapter.project(session.clone(), revision),
+                            )
+                        {
+                            workspace.editor_mut().reconcile_document_comments(
+                                &stable_id_string(projection.document_id().as_bytes()),
+                                projection.comments(),
+                            );
+                        }
+                        workspace.update(ProjectMessage::MarkEditorDirty);
                         state.autosave.mark_dirty(session, revision, Instant::now());
                         let spellcheck = spellcheck_view
                             .map(|view| Self::spellcheck_task(window, state, view))
@@ -6195,6 +6376,68 @@ impl NativeDesktop {
                 .update(crate::EditorMessage::SetActiveParagraphStyle(style_name));
         }
         Self::prune_durable_unmounted_sessions(state);
+        Ok(())
+    }
+
+    /// A global replacement mutates canonical document state atomically. Any
+    /// mounted editor session for an affected document must then be reopened
+    /// from that canonical body, otherwise its retained Canvas keeps showing
+    /// the pre-replacement draft.
+    fn remount_replaced_documents(
+        state: &mut NativeProjectState,
+        snapshot: &ProjectSnapshot,
+        replaced_documents: &BTreeSet<parchmint_domain::DocumentId>,
+        appearance: ResolvedAppearance,
+    ) -> Result<(), String> {
+        if replaced_documents.is_empty() {
+            return Ok(());
+        }
+        let panes = state
+            .mounted_documents
+            .iter()
+            .filter_map(|(pane, document)| {
+                replaced_documents
+                    .contains(document)
+                    .then_some((*pane, *document))
+            })
+            .collect::<Vec<_>>();
+        if panes.is_empty() {
+            return Ok(());
+        }
+
+        let mut sessions = BTreeSet::new();
+        for document in replaced_documents {
+            if let Some(session) = state.retained_editor_sessions.remove(document) {
+                sessions.insert(session);
+            }
+        }
+        for (pane, _) in &panes {
+            state.mounted_documents.remove(pane);
+            state.editor_hosts.remove(*pane);
+            if let Some(binding) = state.editor_bindings.remove(pane) {
+                sessions.insert(binding.session());
+                binding.detach().map_err(|error| error.to_string())?;
+            }
+        }
+        for session in sessions {
+            state.autosave.dirty_sessions.remove(&session);
+            state.autosave.projected_sessions.remove(&session);
+            if let Some(adapter) = state.project.editor_adapter() {
+                iced::futures::executor::block_on(adapter.close(session));
+            }
+        }
+
+        for (pane, document) in panes {
+            let view = state
+                .workspace
+                .as_ref()
+                .ok_or_else(|| "project workspace is unavailable".to_owned())?
+                .editor()
+                .pane(pane)
+                .view();
+            let load = canonical_load(snapshot, document).map_err(|error| error.to_string())?;
+            Self::mount_editor_load(state, pane, view, load, appearance)?;
+        }
         Ok(())
     }
 
@@ -6750,6 +6993,9 @@ impl NativeDesktop {
         if !is_current {
             return;
         }
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.accept_persisted_revision(snapshot.project.revision.value());
+        }
         let snapshot = Arc::new(snapshot);
         if let Some(project_ui) = state.project.project_ui.as_mut() {
             project_ui.snapshot = Arc::clone(&snapshot);
@@ -7297,6 +7543,51 @@ impl NativeDesktop {
         })?
     }
 
+    fn start_global_search(
+        window: window::Id,
+        workspace: &mut ProjectWorkspace,
+        feeds: Option<&AsyncServiceFeeds>,
+        request: SearchRequest,
+    ) -> Task<Message> {
+        let ticket = workspace.begin_task(ProjectTask::GlobalSearch {
+            generation: request.generation,
+        });
+        let Some(feeds) = feeds else {
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket,
+                ProjectTaskPayload::Failed(
+                    "Project search is unavailable for this session.".into(),
+                ),
+            ));
+            return Task::none();
+        };
+        let start = feeds.search().start(request);
+        Task::perform(Self::run_search(start), move |result| {
+            Message::SearchFinished {
+                window,
+                ticket,
+                result,
+            }
+        })
+    }
+
+    fn fail_pending_global_search(
+        workspace: &mut ProjectWorkspace,
+        pending_search: &mut Option<SearchRequest>,
+        reason: String,
+    ) {
+        let Some(request) = pending_search.take() else {
+            return;
+        };
+        let ticket = workspace.begin_task(ProjectTask::GlobalSearch {
+            generation: request.generation,
+        });
+        workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+            ticket,
+            ProjectTaskPayload::Failed(reason),
+        ));
+    }
+
     fn autosave_tick(&mut self, now: Instant) -> Task<Message> {
         let mut tasks = Vec::new();
         for (window, native) in &mut self.windows {
@@ -7699,6 +7990,7 @@ impl NativeDesktop {
                 active_export: None,
                 export_destination: None,
                 autosave: AutosaveState::default(),
+                pending_global_search: None,
                 next_spellcheck_generation: 0,
                 spellcheck_generation: BTreeMap::new(),
                 pending_spellchecks: BTreeMap::new(),
@@ -8428,6 +8720,46 @@ fn is_word_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
 
+/// Translates one indexed plain-text range back to the matching canonical
+/// HTML range. The search projection inserts a space for every closing tag,
+/// so its byte offsets cannot be applied directly to the canonical body.
+///
+/// Only ranges contained in a single text run are replaceable. Replacing a
+/// match that crosses markup would discard inline formatting, so callers
+/// treat those candidates as stale rather than silently changing structure.
+fn canonical_body_range_for_plain_text(
+    body: &str,
+    plain_start: usize,
+    plain_end: usize,
+) -> Option<(usize, usize)> {
+    let mut boundaries = vec![None];
+    let mut plain_offset = 0;
+    let mut in_tag = false;
+
+    for (canonical_offset, character) in body.char_indices() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                plain_offset += character.len_utf8();
+                boundaries.push(None);
+            }
+            _ if !in_tag => {
+                boundaries[plain_offset] = Some(canonical_offset);
+                plain_offset += character.len_utf8();
+                boundaries.resize(plain_offset + 1, None);
+                boundaries[plain_offset] = Some(canonical_offset + character.len_utf8());
+            }
+            _ => {}
+        }
+    }
+
+    Some((
+        boundaries.get(plain_start).copied().flatten()?,
+        boundaries.get(plain_end).copied().flatten()?,
+    ))
+}
+
 fn replacement_selection(
     snapshot: &parchmint_ui_api::ProjectSnapshot,
     results: &[crate::GlobalSearchResult],
@@ -8438,7 +8770,7 @@ fn replacement_selection(
     if included.is_empty() {
         return Err("replacement requires at least one included match".into());
     }
-    let mut ranges = BTreeMap::<String, Vec<(usize, usize)>>::new();
+    let mut ranges = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
     for match_id in included {
         let result = results
             .iter()
@@ -8462,10 +8794,11 @@ fn replacement_selection(
         if revision != result.indexed_revision || start > end {
             return Err("replacement match identity is inconsistent".into());
         }
-        ranges
-            .entry(result.document_id.clone())
-            .or_default()
-            .push((start, end));
+        ranges.entry(result.document_id.clone()).or_default().push((
+            start,
+            end,
+            result.matching_text.clone(),
+        ));
     }
 
     let mut edits = Vec::new();
@@ -8475,24 +8808,47 @@ fn replacement_selection(
             .iter()
             .find(|document| stable_id_string(document.document_id.as_bytes()) == document_id)
             .ok_or_else(|| "replacement document is no longer available".to_owned())?;
-        if document_ranges.iter().any(|(start, end)| {
-            source.body.get(*start..*end).is_none()
-                || source.revision.value()
-                    != results
-                        .iter()
-                        .find(|result| result.document_id == document_id)
-                        .map_or(u64::MAX, |result| result.indexed_revision)
-        }) {
+        if source.revision.value()
+            != results
+                .iter()
+                .find(|result| result.document_id == document_id)
+                .map_or(u64::MAX, |result| result.indexed_revision)
+        {
             return Err("replacement source changed after the search completed".into());
         }
-        document_ranges.sort_unstable_by(|left, right| right.cmp(left));
-        for pair in document_ranges.windows(2) {
+        let mut canonical_ranges = document_ranges
+            .drain(..)
+            .map(|(start, end, matching_text)| {
+                let (canonical_start, canonical_end) =
+                    canonical_body_range_for_plain_text(&source.body, start, end).ok_or_else(
+                        || {
+                            "replacement match crosses document markup or is no longer valid"
+                                .to_owned()
+                        },
+                    )?;
+                let matched_body =
+                    source
+                        .body
+                        .get(canonical_start..canonical_end)
+                        .ok_or_else(|| {
+                            "replacement source changed after the search completed".to_owned()
+                        })?;
+                if matched_body != matching_text {
+                    return Err(
+                        "replacement match crosses document markup or is no longer valid".into(),
+                    );
+                }
+                Ok((canonical_start, canonical_end))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        canonical_ranges.sort_unstable_by(|left, right| right.cmp(left));
+        for pair in canonical_ranges.windows(2) {
             if pair[1].1 > pair[0].0 {
                 return Err("replacement matches overlap".into());
             }
         }
         let mut body = source.body.clone();
-        for (start, end) in document_ranges {
+        for (start, end) in canonical_ranges {
             body.replace_range(start..end, replacement);
         }
         edits.push(ReplacementEdit {
@@ -11369,7 +11725,7 @@ mod tests {
     }
 
     #[test]
-    fn global_replacement_revalidates_body_matches_and_builds_one_atomic_edit() {
+    fn global_replacement_maps_indexed_plain_text_ranges_back_into_html() {
         let document = parchmint_domain::DocumentId::from_bytes([4; 16]);
         let node = parchmint_domain::NodeId::from_bytes([3; 16]);
         let mut project =
@@ -11390,7 +11746,7 @@ mod tests {
             documents: vec![parchmint_application::DocumentSnapshot {
                 comments: Vec::new(),
                 document_id: document,
-                body: "harbor harbor".to_owned(),
+                body: "<p>harbor harbor</p>".to_owned(),
                 revision: EditorRevision::from(3),
                 visibility: parchmint_application::DocumentVisibility::Open,
             }],
@@ -11398,23 +11754,25 @@ mod tests {
         };
         let document_id = stable_id_string(document.as_bytes());
         let block_id = stable_id_string(&[9; 16]);
-        let first = format!("{document_id}:{block_id}:Body:0:6:3");
-        let second = format!("{document_id}:{block_id}:Body:7:13:3");
+        // The indexed projection inserts a space for the opening and closing
+        // tags, so these positions deliberately differ from HTML offsets.
+        let first = format!("{document_id}:{block_id}:Body:1:7:3");
+        let second = format!("{document_id}:{block_id}:Body:8:14:3");
         let results = vec![
             crate::GlobalSearchResult {
                 document_id: document_id.clone(),
                 match_id: first.clone(),
-                prefix: String::new(),
+                prefix: " ".to_owned(),
                 matching_text: "harbor".to_owned(),
-                suffix: " harbor".to_owned(),
+                suffix: " harbor ".to_owned(),
                 indexed_revision: 3,
             },
             crate::GlobalSearchResult {
                 document_id,
                 match_id: second.clone(),
-                prefix: "harbor ".to_owned(),
+                prefix: " harbor ".to_owned(),
                 matching_text: "harbor".to_owned(),
-                suffix: String::new(),
+                suffix: " ".to_owned(),
                 indexed_revision: 3,
             },
         ];
@@ -11423,8 +11781,8 @@ mod tests {
             .expect("current body matches build a replacement selection");
 
         assert_eq!(selection.edits.len(), 1);
-        assert_eq!(selection.edits[0].expected_body, "harbor harbor");
-        assert_eq!(selection.edits[0].replacement_body, "port port");
+        assert_eq!(selection.edits[0].expected_body, "<p>harbor harbor</p>");
+        assert_eq!(selection.edits[0].replacement_body, "<p>port port</p>");
     }
 
     #[test]

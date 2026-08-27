@@ -64,6 +64,7 @@ fn snapshot() -> WorkspaceSnapshot {
         },
         explorer: ExplorerWorkspaceState {
             expanded_sections: BTreeSet::from([node(1), node(2)]),
+            selected_nodes: BTreeSet::from([node(2)]),
         },
         tabs: vec![OpenTabState {
             view: open_view,
@@ -78,6 +79,7 @@ fn snapshot() -> WorkspaceSnapshot {
             },
         )]),
         mode: WorkspaceMode::Cards,
+        cards_section: Some(node(2)),
     }
 }
 

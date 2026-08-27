@@ -92,6 +92,8 @@ impl Default for PaneLayout {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExplorerWorkspaceState {
     pub expanded_sections: BTreeSet<NodeId>,
+    /// The hierarchy selection that supplies the Inspector context on reopen.
+    pub selected_nodes: BTreeSet<NodeId>,
 }
 
 /// One open tab and the view it displays.
@@ -125,6 +127,8 @@ pub struct WorkspaceSnapshot {
     pub active_view: Option<ViewId>,
     pub views: BTreeMap<ViewId, SavedViewState>,
     pub mode: WorkspaceMode,
+    /// The root section currently projected in Cards, when it still exists.
+    pub cards_section: Option<NodeId>,
 }
 
 impl WorkspaceSnapshot {
@@ -133,6 +137,9 @@ impl WorkspaceSnapshot {
         self.explorer
             .expanded_sections
             .retain(|node| nodes.contains(node));
+        self.explorer
+            .selected_nodes
+            .retain(|node| nodes.contains(node));
         self.tabs.retain(|tab| nodes.contains(&tab.node));
         self.views.retain(|_, view| nodes.contains(&view.node));
         if self
@@ -140,6 +147,12 @@ impl WorkspaceSnapshot {
             .is_some_and(|active| !self.tabs.iter().any(|tab| tab.view == active))
         {
             self.active_view = None;
+        }
+        if self
+            .cards_section
+            .is_some_and(|section| !nodes.contains(&section))
+        {
+            self.cards_section = None;
         }
     }
 }
@@ -223,12 +236,16 @@ struct StoredWorkspace {
     active_view: Option<String>,
     views: Vec<StoredViewState>,
     mode: WorkspaceMode,
+    #[serde(default)]
+    cards_section: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredExplorerState {
     expanded_sections: Vec<String>,
+    #[serde(default)]
+    selected_nodes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -479,6 +496,12 @@ fn encode_snapshot(snapshot: &WorkspaceSnapshot, revision: WorkspaceRevision) ->
                 .iter()
                 .map(|node| encode_id(node.as_bytes()))
                 .collect(),
+            selected_nodes: snapshot
+                .explorer
+                .selected_nodes
+                .iter()
+                .map(|node| encode_id(node.as_bytes()))
+                .collect(),
         },
         tabs: snapshot
             .tabs
@@ -499,6 +522,9 @@ fn encode_snapshot(snapshot: &WorkspaceSnapshot, revision: WorkspaceRevision) ->
             })
             .collect(),
         mode: snapshot.mode,
+        cards_section: snapshot
+            .cards_section
+            .map(|section| encode_id(section.as_bytes())),
     }
 }
 
@@ -506,6 +532,12 @@ fn decode_snapshot(stored: StoredWorkspace) -> Result<WorkspaceSnapshot, String>
     let expanded_sections = stored
         .explorer
         .expanded_sections
+        .iter()
+        .map(|node| decode_node_id(node))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let selected_nodes = stored
+        .explorer
+        .selected_nodes
         .iter()
         .map(|node| decode_node_id(node))
         .collect::<Result<BTreeSet<_>, _>>()?;
@@ -537,13 +569,22 @@ fn decode_snapshot(stored: StoredWorkspace) -> Result<WorkspaceSnapshot, String>
             ))
         })
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let cards_section = stored
+        .cards_section
+        .as_deref()
+        .map(decode_node_id)
+        .transpose()?;
     Ok(WorkspaceSnapshot {
         layout: stored.layout,
-        explorer: ExplorerWorkspaceState { expanded_sections },
+        explorer: ExplorerWorkspaceState {
+            expanded_sections,
+            selected_nodes,
+        },
         tabs,
         active_view,
         views,
         mode: stored.mode,
+        cards_section,
     })
 }
 

@@ -22,10 +22,10 @@ use parchmint_editor_iced::{
 
 use crate::{
     EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, F6Region, FindDirection,
-    FormattingCommand, LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
+    FormattingCommand, HarnessTarget, LocalSearchState, SpellingMenu, SpellingMenuAction, TabSpec,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
-    focus, hierarchy_drag,
+    focus, harness_target, hierarchy_drag,
     icons::{Icon, icon_sized},
     stationary_tooltip,
 };
@@ -184,7 +184,7 @@ impl EditorCenterMessage {
                 vec![EditorMessage::FocusPane(*pane), message.clone()]
             }
             Self::Mounted {
-                message: MountedEditorMessage::ViewportChanged(_),
+                message: MountedEditorMessage::Blur | MountedEditorMessage::ViewportChanged(_),
                 ..
             } => Vec::new(),
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
@@ -603,11 +603,18 @@ fn editor_pane_surface(
                 .expect("sensor clamps editor viewport dimensions"),
         ),
     };
-    let body: Element<'static, EditorCenterMessage> = sensor(pane_body(state, pane, theme, slots))
-        .key((pane, view))
-        .on_show(viewport_message)
-        .on_resize(viewport_message)
-        .into();
+    let target = match pane {
+        EditorPane::Primary => HarnessTarget::EditorPrimary,
+        EditorPane::Companion => HarnessTarget::EditorCompanion,
+    };
+    let body: Element<'static, EditorCenterMessage> = sensor(harness_target::target(
+        target,
+        pane_body(state, pane, theme, slots),
+    ))
+    .key((pane, view))
+    .on_show(viewport_message)
+    .on_resize(viewport_message)
+    .into();
     let body = if let Some(menu) = spelling_menu.filter(|menu| menu.pane() == pane) {
         spelling_menu_overlay(body, menu, theme)
     } else {
@@ -843,6 +850,7 @@ fn local_search_bar(
     let whole_word = search.whole_word();
     let replace_visible = search.replace_visible();
     let query = text_input("Find", &query_value)
+        .id(HarnessTarget::LocalFind(pane).id())
         .on_input(move |query| EditorCenterMessage::PaneWorkspace {
             pane,
             message: EditorMessage::SetFindQuery(query),
@@ -927,6 +935,7 @@ fn local_search_bar(
             controls,
             row![
                 text_input("Replace with", &draft)
+                    .id(HarnessTarget::LocalReplace(pane).id())
                     .on_input(move |value| EditorCenterMessage::SetReplaceDraft { pane, value })
                     .padding([5, 8])
                     .style(move |_, status| components::field_style(
@@ -1077,7 +1086,9 @@ mod tests {
     use parchmint_preferences::ResolvedAppearance;
 
     use super::*;
-    use crate::{EditorFixture, FindMatch, design_tokens::ParchMintTheme};
+    use crate::{
+        EditorFixture, FindMatch, Rect, SpellingMenuRequest, design_tokens::ParchMintTheme,
+    };
 
     fn apply_surface_messages(
         workspace: &mut EditorWorkspace,
@@ -1287,6 +1298,49 @@ mod tests {
                 .expect("headless center snapshot");
             assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
         }
+    }
+
+    #[test]
+    fn spelling_menu_popover_emits_add_comment_without_dismissing_it() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let effects = workspace.update(EditorMessage::OpenSpellingMenu(
+            SpellingMenuRequest::new(
+                EditorPane::Primary,
+                "Comment",
+                Rect::new(100.0, 100.0, 1.0, 18.0),
+                Rect::new(0.0, 0.0, 500.0, 400.0),
+            )
+            .with_spelling_actions(false),
+        ));
+        let [crate::EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
+            panic!("expected the comment context menu")
+        };
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        slots.insert(
+            EditorPane::Companion,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, Some(menu)),
+        );
+
+        simulator
+            .click("Add Comment")
+            .expect("comment action target");
+
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            [EditorCenterMessage::ChooseSpellingAction(
+                SpellingMenuAction::AddComment
+            )]
+        );
     }
 
     #[test]
