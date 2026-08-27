@@ -2682,6 +2682,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parchmint-ui-driver"
+version = "0.1.0"
+dependencies = [
+ "parchmint-desktop",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "parchmint-ui-iced"
 version = "0.1.0"
 dependencies = [

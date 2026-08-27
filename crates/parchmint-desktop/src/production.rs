@@ -27,6 +27,7 @@ mod dependencies {
         NativeProjectCommandDispatcher, PersistenceSaveKind, ProjectPersistenceCoordinator,
     };
     pub(super) use parchmint_contracts::{AnnotationAnchor, AnnotationThread};
+    #[cfg(feature = "diagnostics")]
     pub(super) use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
     pub(super) use parchmint_domain::{
         BlockId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectExportSetting,
@@ -112,12 +113,16 @@ mod dependencies {
 use dependencies::*;
 
 mod composition;
+#[cfg(feature = "interaction-harness")]
+mod interaction_harness;
 mod native_callbacks;
 mod project_session;
 mod workflow_adapters;
 
 pub use composition::ProductionApplicationGraph;
 pub(crate) use composition::{assemble, assemble_with_controls};
+#[cfg(feature = "interaction-harness")]
+pub use interaction_harness::{DesktopInteractionHarness, InteractionHarnessError};
 pub use project_session::{ProductionHistoryStatus, ProductionProjectSession};
 
 /// Named production boundaries that an integration driver may fail once.

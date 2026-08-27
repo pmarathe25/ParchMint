@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+diagnostics = ["dep:parchmint-diagnostics", "parchmint-diagnostics/capture", "parchmint-ui-iced/diagnostics"]
+interaction-harness = ["diagnostics", "parchmint-platform-native/interaction-harness", "parchmint-ui-iced/interaction-harness"]
+
 [[bin]]
 name = "parchmint"
 path = "src/main.rs"
@@ -18,7 +22,7 @@ workspace = true
 parchmint-application = { path = "../parchmint-application" }
 parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
-parchmint-diagnostics = { path = "../parchmint-diagnostics" }
+parchmint-diagnostics = { path = "../parchmint-diagnostics", optional = true }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
 parchmint-editor-iced = { path = "../parchmint-editor-iced" }
 parchmint-export-api = { path = "../parchmint-export-api" }

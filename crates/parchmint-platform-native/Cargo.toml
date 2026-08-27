@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+interaction-harness = []
+
 [lints]
 workspace = true
 

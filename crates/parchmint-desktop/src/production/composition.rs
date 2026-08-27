@@ -222,8 +222,26 @@ pub(crate) fn assemble_with_controls(
 ) -> Result<DesktopBootstrap, StartupError> {
     let platform = NativePlatform::initialize()
         .map_err(|error| StartupError::production("native platform", error))?;
+    assemble_with_platform(controls, platform, Arc::new(IcedDesktopDriver))
+}
+
+#[cfg(feature = "interaction-harness")]
+pub(super) fn assemble_interaction_harness(
+    controls: ProductionControls,
+    platform: NativePlatform,
+    driver: Arc<dyn super::native_callbacks::NativeDesktopDriver>,
+) -> Result<DesktopBootstrap, StartupError> {
+    assemble_with_platform(controls, platform, driver)
+}
+
+fn assemble_with_platform(
+    controls: ProductionControls,
+    platform: NativePlatform,
+    driver: Arc<dyn super::native_callbacks::NativeDesktopDriver>,
+) -> Result<DesktopBootstrap, StartupError> {
     let paths = block_on(platform.application_paths.application_paths())
         .map_err(|error| StartupError::production("application paths", error))?;
+    #[cfg(feature = "diagnostics")]
     match diagnostics::configure_file(paths.data()) {
         Ok(path) => diagnostics::event(
             DiagnosticLevel::Info,
@@ -305,7 +323,7 @@ pub(crate) fn assemble_with_controls(
         appearance: appearance.clone(),
         platform: shared.platform.clone(),
         controls,
-        driver: Arc::new(IcedDesktopDriver),
+        driver,
     });
     let platform_services: PlatformServices = platform.appearance.clone();
 

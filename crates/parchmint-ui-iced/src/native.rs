@@ -1,5 +1,11 @@
 //! Native Iced event-loop integration for the desktop executable.
 
+#[cfg(feature = "interaction-harness")]
+mod interaction_harness;
+
+#[cfg(feature = "interaction-harness")]
+pub use interaction_harness::*;
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -26,6 +32,7 @@ use iced::{
 };
 use parchmint_application::{ProjectPersistenceError, ReplacementEdit, ReplacementSelection};
 use parchmint_design_system::production_icon_svg;
+#[cfg(feature = "diagnostics")]
 use parchmint_diagnostics as diagnostics;
 use parchmint_editor_api::{
     AtomicBlockKind, BlockFormatKind, BlockId, CanonicalComment, CanonicalCommentAnchor,
@@ -733,6 +740,7 @@ impl NativeTaskOutcome {
     }
 
     fn from_service_error(operation: &'static str, error: ServiceFeedError) -> Self {
+        #[cfg(feature = "diagnostics")]
         let category = match &error {
             ServiceFeedError::StaleSession { .. }
             | ServiceFeedError::StaleSearchGeneration { .. } => "stale-session",
@@ -746,6 +754,8 @@ impl NativeTaskOutcome {
             ServiceFeedError::OutputUnavailable => "output-unavailable",
             ServiceFeedError::InvalidState { .. } => "invalid-state",
         };
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = operation;
         let message = error.to_string();
         let outcome = match error {
             ServiceFeedError::StaleSession { .. }
@@ -759,6 +769,7 @@ impl NativeTaskOutcome {
             },
         };
         if matches!(outcome, Self::Failed { .. }) {
+            #[cfg(feature = "diagnostics")]
             diagnostics::event(
                 diagnostics::Level::Error,
                 "ui.native-task",
@@ -771,6 +782,9 @@ impl NativeTaskOutcome {
 
     fn failed(operation: &'static str, category: &'static str, message: impl Into<String>) -> Self {
         let message = message.into();
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = (operation, category);
+        #[cfg(feature = "diagnostics")]
         diagnostics::event(
             diagnostics::Level::Error,
             "ui.native-task",
@@ -7067,14 +7081,23 @@ impl NativeDesktop {
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
-        D: FnOnce(T) -> diagnostics::WorkerDelivery + Send + 'static,
+        D: FnOnce(T) -> bool + Send + 'static,
     {
         std::thread::Builder::new()
             .name(format!("parchmint-{}", operation.replace(' ', "-")))
             .spawn(move || {
+                #[cfg(feature = "diagnostics")]
                 let activity = diagnostics::blocking_worker(operation);
                 let result = work();
-                activity.complete(deliver(result));
+                let delivered = deliver(result);
+                #[cfg(feature = "diagnostics")]
+                activity.complete(if delivered {
+                    diagnostics::WorkerDelivery::Accepted
+                } else {
+                    diagnostics::WorkerDelivery::Dropped
+                });
+                #[cfg(not(feature = "diagnostics"))]
+                let _ = delivered;
             })
             .map(|_| ())
             .map_err(|error| worker_launch_failure(operation, &error))
@@ -7089,13 +7112,7 @@ impl NativeDesktop {
                 job.run()
                     .map_err(|error| NativeTaskOutcome::from_service_error(operation, error))
             },
-            move |result| {
-                if sender.send(result).is_ok() {
-                    diagnostics::WorkerDelivery::Accepted
-                } else {
-                    diagnostics::WorkerDelivery::Dropped
-                }
-            },
+            move |result| sender.send(result).is_ok(),
         )
         .map_err(|error| NativeTaskOutcome::failed(operation, "worker-launch", error))?;
         receiver.await.map_err(|_| {
@@ -7117,11 +7134,7 @@ impl NativeDesktop {
     {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         Self::launch_worker(operation_name, operation, move |result| {
-            if sender.send(result).is_ok() {
-                diagnostics::WorkerDelivery::Accepted
-            } else {
-                diagnostics::WorkerDelivery::Dropped
-            }
+            sender.send(result).is_ok()
         })?;
         receiver
             .await
@@ -7138,11 +7151,7 @@ impl NativeDesktop {
     {
         let (sender, receiver) = iced::futures::channel::oneshot::channel();
         Self::launch_worker(operation_name, operation, move |result| {
-            if sender.send(result).is_ok() {
-                diagnostics::WorkerDelivery::Accepted
-            } else {
-                diagnostics::WorkerDelivery::Dropped
-            }
+            sender.send(result).is_ok()
         })
         .map_err(|error| NativeTaskOutcome::failed(operation_name, "worker-launch", error))?;
         receiver.await.map_err(|_| {
@@ -7227,14 +7236,9 @@ impl NativeDesktop {
                     result
                 },
                 move |result| {
-                    if terminal_sender
+                    terminal_sender
                         .unbounded_send(ExportWorkerEvent::Finished(result))
                         .is_ok()
-                    {
-                        diagnostics::WorkerDelivery::Accepted
-                    } else {
-                        diagnostics::WorkerDelivery::Dropped
-                    }
                 },
             );
             if let Err(error) = spawn {
@@ -7281,13 +7285,7 @@ impl NativeDesktop {
                         NativeTaskOutcome::from_service_error("run global search", error)
                     })
             },
-            move |result| {
-                if sender.send(result).is_ok() {
-                    diagnostics::WorkerDelivery::Accepted
-                } else {
-                    diagnostics::WorkerDelivery::Dropped
-                }
-            },
+            move |result| sender.send(result).is_ok(),
         )
         .map_err(|error| NativeTaskOutcome::failed("run global search", "worker-launch", error))?;
         receiver.await.map_err(|_| {
@@ -10325,13 +10323,7 @@ mod tests {
         NativeDesktop::launch_worker(
             "test worker",
             || 42_u8,
-            move |result| {
-                if sender.send(result).is_ok() {
-                    diagnostics::WorkerDelivery::Accepted
-                } else {
-                    diagnostics::WorkerDelivery::Dropped
-                }
-            },
+            move |result| sender.send(result).is_ok(),
         )
         .expect("worker launches");
 
@@ -10349,14 +10341,10 @@ mod tests {
             "dropped test worker",
             || 42_u8,
             move |result| {
-                let delivery = if sender.send(result).is_ok() {
-                    diagnostics::WorkerDelivery::Accepted
-                } else {
-                    diagnostics::WorkerDelivery::Dropped
-                };
+                let delivered = sender.send(result).is_ok();
                 completed_in_worker.store(true, Ordering::Relaxed);
                 let _ = completed_sender.send(());
-                delivery
+                delivered
             },
         )
         .expect("worker launches");

@@ -13,13 +13,17 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(feature = "diagnostics")]
+use std::time::Instant;
 
 use parchmint_application::{
     ApplicationError, CreateDocumentWorkflow, DeleteSubtreesWorkflow, DuplicateSubtreesWorkflow,
     MoveNodeWorkflow, MoveNodesWorkflow,
 };
+#[cfg(feature = "diagnostics")]
 use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
 use parchmint_domain::{
     DocumentId, MetadataFieldId, NodeId, NodeKind, ProjectCommand, ProjectRevision, StyleId,
@@ -74,9 +78,13 @@ impl NativeProjectEffectExecutor {
         self,
         effect: ProjectEffect,
     ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
+        #[cfg(feature = "diagnostics")]
         let effect_name = project_effect_name(&effect);
+        #[cfg(feature = "diagnostics")]
         let started = Instant::now();
+        #[cfg(feature = "diagnostics")]
         let revision = self.snapshot.project.revision.value().to_string();
+        #[cfg(feature = "diagnostics")]
         diagnostics::event(
             DiagnosticLevel::Trace,
             "ui.project-effect",
@@ -84,6 +92,7 @@ impl NativeProjectEffectExecutor {
             &[("effect", effect_name), ("snapshot_revision", &revision)],
         );
         let result = self.execute_project_effect_inner(effect).await;
+        #[cfg(feature = "diagnostics")]
         match &result {
             Ok(_) => diagnostics::event(
                 DiagnosticLevel::Trace,
@@ -98,6 +107,7 @@ impl NativeProjectEffectExecutor {
                 &[("effect", effect_name), ("error", &error.to_string())],
             ),
         }
+        #[cfg(feature = "diagnostics")]
         diagnostics::timing(effect_name, "project-effect", started.elapsed());
         result
     }
@@ -398,8 +408,11 @@ impl NativeProjectEffectExecutor {
         self,
         effect: EditorEffect,
     ) -> Result<EditorEffectCompletion, ProjectRuntimeError> {
+        #[cfg(feature = "diagnostics")]
         let effect_name = editor_effect_name(&effect);
+        #[cfg(feature = "diagnostics")]
         let started = Instant::now();
+        #[cfg(feature = "diagnostics")]
         diagnostics::event(
             DiagnosticLevel::Trace,
             "ui.editor-effect",
@@ -407,6 +420,7 @@ impl NativeProjectEffectExecutor {
             &[("effect", effect_name)],
         );
         let result = self.execute_editor_effect_inner(effect).await;
+        #[cfg(feature = "diagnostics")]
         match &result {
             Ok(_) => diagnostics::event(
                 DiagnosticLevel::Trace,
@@ -421,6 +435,7 @@ impl NativeProjectEffectExecutor {
                 &[("effect", effect_name), ("error", &error.to_string())],
             ),
         }
+        #[cfg(feature = "diagnostics")]
         diagnostics::timing(effect_name, "editor-effect", started.elapsed());
         result
     }
@@ -822,6 +837,7 @@ impl fmt::Display for ProjectRuntimeError {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 fn project_effect_name(effect: &ProjectEffect) -> &'static str {
     match effect {
         ProjectEffect::OpenDocumentInPrimary(_) => "open-document-primary",
@@ -863,6 +879,7 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 fn editor_effect_name(effect: &EditorEffect) -> &'static str {
     match effect {
         EditorEffect::Command { .. } => "command",

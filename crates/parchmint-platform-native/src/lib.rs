@@ -58,6 +58,7 @@ impl fmt::Display for PlatformStartupError {
 impl Error for PlatformStartupError {}
 
 /// Concrete native service implementations used by the desktop executable.
+#[cfg_attr(feature = "interaction-harness", derive(Clone))]
 pub struct NativePlatform {
     pub dialogs: Arc<dyn DialogService>,
     pub menus: Arc<dyn MenuService>,

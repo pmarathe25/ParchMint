@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Diagnostics are available in debug builds, or explicitly in release builds
+# with `--features capture`. They are intentionally absent from the default
+# production build.
+capture = []
+
 [lints]
 workspace = true
 

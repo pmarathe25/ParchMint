@@ -80,7 +80,16 @@ pub struct NativeFixture {
 
 impl NativeFixture {
     pub fn new() -> Self {
-        let backend = Arc::new(FixtureBackend::default());
+        Self::build(fixture_application_paths())
+    }
+
+    #[cfg(feature = "interaction-harness")]
+    pub fn with_application_paths(application_paths: ApplicationPaths) -> Self {
+        Self::build(application_paths)
+    }
+
+    fn build(application_paths: ApplicationPaths) -> Self {
+        let backend = Arc::new(FixtureBackend::new(application_paths));
         let window_work_pauses = Arc::new(WindowWorkPauses::default());
         let pauses = Arc::clone(&window_work_pauses);
         let (platform, services) = NativePlatform::with_backend_and_before_window_work(
@@ -95,6 +104,11 @@ impl NativeFixture {
             registry,
             window_work_pauses,
         }
+    }
+
+    #[cfg(feature = "interaction-harness")]
+    pub fn platform(&self) -> NativePlatform {
+        self._platform.clone()
     }
 
     pub fn registry(&self) -> IcedWindowRegistry {
@@ -284,6 +298,7 @@ struct FixtureBackend {
     dialog_invocations: AtomicU64,
     opened_external_urls: Mutex<Vec<String>>,
     next_menu_pause: Mutex<Option<BackendMenuPause>>,
+    application_paths: ApplicationPaths,
 }
 
 struct BackendMenuPause {
@@ -317,6 +332,12 @@ struct WindowWorkPause {
 
 impl Default for FixtureBackend {
     fn default() -> Self {
+        Self::new(fixture_application_paths())
+    }
+}
+
+impl FixtureBackend {
+    fn new(application_paths: ApplicationPaths) -> Self {
         Self {
             menus: Mutex::new(HashMap::new()),
             clipboard: Mutex::new(UntrustedClipboardContent::empty()),
@@ -325,8 +346,31 @@ impl Default for FixtureBackend {
             dialog_invocations: AtomicU64::new(0),
             opened_external_urls: Mutex::new(Vec::new()),
             next_menu_pause: Mutex::new(None),
+            application_paths,
         }
     }
+}
+
+fn fixture_application_paths() -> ApplicationPaths {
+    #[cfg(target_os = "windows")]
+    let paths = ApplicationPaths::new(
+        r"C:\Users\tester\AppData\Roaming\ParchMint",
+        r"C:\Users\tester\AppData\Local\ParchMint\Data",
+        r"C:\Users\tester\AppData\Local\ParchMint\Cache",
+    );
+    #[cfg(target_os = "macos")]
+    let paths = ApplicationPaths::new(
+        "/Users/tester/Library/Application Support/ParchMint",
+        "/Users/tester/Library/Application Support/ParchMint",
+        "/Users/tester/Library/Caches/ParchMint",
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let paths = ApplicationPaths::new(
+        "/home/tester/.config/parchmint",
+        "/home/tester/.local/share/parchmint",
+        "/home/tester/.cache/parchmint",
+    );
+    paths
 }
 
 impl NativeBackend for FixtureBackend {
@@ -423,25 +467,7 @@ impl NativeBackend for FixtureBackend {
     }
 
     fn application_paths(&self) -> Result<ApplicationPaths, PlatformError> {
-        #[cfg(target_os = "windows")]
-        let paths = ApplicationPaths::new(
-            r"C:\Users\tester\AppData\Roaming\ParchMint",
-            r"C:\Users\tester\AppData\Local\ParchMint\Data",
-            r"C:\Users\tester\AppData\Local\ParchMint\Cache",
-        );
-        #[cfg(target_os = "macos")]
-        let paths = ApplicationPaths::new(
-            "/Users/tester/Library/Application Support/ParchMint",
-            "/Users/tester/Library/Application Support/ParchMint",
-            "/Users/tester/Library/Caches/ParchMint",
-        );
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let paths = ApplicationPaths::new(
-            "/home/tester/.config/parchmint",
-            "/home/tester/.local/share/parchmint",
-            "/home/tester/.cache/parchmint",
-        );
-        Ok(paths)
+        Ok(self.application_paths.clone())
     }
 
     fn appearance(&self) -> Result<SystemAppearance, PlatformError> {

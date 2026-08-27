@@ -5,6 +5,10 @@
 
 mod production;
 
+#[cfg(feature = "interaction-harness")]
+pub use parchmint_ui_iced::{HarnessTraceEntry, HarnessWindow};
+#[cfg(feature = "interaction-harness")]
+pub use production::{DesktopInteractionHarness, InteractionHarnessError};
 pub use production::{
     ProductionApplicationGraph, ProductionControls, ProductionFaultKind, ProductionFaultPoint,
     ProductionHistoryStatus, ProductionMeasurement, ProductionObservation,

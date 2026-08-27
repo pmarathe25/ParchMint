@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::text_editor;
+#[cfg(feature = "diagnostics")]
 use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
 use parchmint_domain::{
     MetadataApplicability as DomainMetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
@@ -4071,9 +4072,15 @@ impl ProjectWorkspace {
     /// Records the technical cause locally and opens the shared modal language
     /// with safe, actionable copy for the author.
     pub fn report_error(&mut self, operation: &'static str, error: impl Into<String>) {
+        #[cfg(feature = "diagnostics")]
         let error = error.into();
+        #[cfg(not(feature = "diagnostics"))]
+        let _ = error;
+        #[cfg(feature = "diagnostics")]
         let session = self.session.to_string();
+        #[cfg(feature = "diagnostics")]
         let revision = self.project_revision.to_string();
+        #[cfg(feature = "diagnostics")]
         diagnostics::event(
             DiagnosticLevel::Error,
             "ui.user-error",
@@ -4285,8 +4292,11 @@ impl ProjectWorkspace {
         self.next_request = 0;
         self.tree_clipboard = None;
         self.explorer.cancel_cut();
+        #[cfg(feature = "diagnostics")]
         let session = session.to_string();
+        #[cfg(feature = "diagnostics")]
         let revision = project_revision.to_string();
+        #[cfg(feature = "diagnostics")]
         diagnostics::event(
             DiagnosticLevel::Info,
             "ui.project-session",
@@ -4328,6 +4338,7 @@ impl ProjectWorkspace {
             || !project_payload_claim_is_exact(&ticket.task, completion.payload())
             || !self.ticket_revision_is_live(ticket)
         {
+            #[cfg(feature = "diagnostics")]
             diagnostics::event(
                 DiagnosticLevel::Warn,
                 "ui.project-task",
