@@ -99,6 +99,10 @@ use crate::{
 
 const LAUNCHER_CAPABILITY: WindowCapability = WindowCapability::new(u64::MAX, 1);
 const INSPECTOR_COMMIT_DELAY: Duration = Duration::from_millis(700);
+/// A calm, immediately useful initial timeline. Older checkpoints remain
+/// available through the explicit continuation rather than competing with the
+/// current work as soon as History opens.
+const HISTORY_PAGE_SIZE: usize = 20;
 
 fn worker_launch_failure(operation: &str, error: &std::io::Error) -> String {
     format!("could not start {operation} worker: {error}")
@@ -918,6 +922,10 @@ fn keyboard_accelerator(key: &str, modifiers: keyboard::Modifiers) -> Option<&'s
             "x" => Some("edit.cut"),
             "v" => Some("edit.paste"),
             "z" => Some("edit.undo"),
+            "b" => Some("format.bold"),
+            "i" => Some("format.italic"),
+            "u" => Some("format.underline"),
+            "k" => Some("format.link"),
             #[cfg(not(target_os = "macos"))]
             "y" => Some("edit.redo"),
             _ => None,
@@ -930,8 +938,39 @@ fn keyboard_accelerator(key: &str, modifiers: keyboard::Modifiers) -> Option<&'s
     None
 }
 
+/// Applies the platform's range/additive selection modifiers before an
+/// Explorer pointer intent reaches the workspace reducer. Documents normally
+/// open as temporary preview tabs, but a modifier gesture must only extend the
+/// tree selection.
+fn apply_hierarchy_pointer_modifiers(message: &mut ProjectMessage, modifiers: keyboard::Modifiers) {
+    if let ProjectMessage::PreviewHierarchyNode(node_id) = message
+        && (modifiers.shift() || modifiers.command())
+    {
+        *message = ProjectMessage::SelectHierarchy {
+            node_id: node_id.clone(),
+            gesture: if modifiers.shift() {
+                SelectionGesture::ContiguousRange
+            } else {
+                SelectionGesture::Additive
+            },
+        };
+    }
+    if let ProjectMessage::SelectHierarchy { gesture, .. }
+    | ProjectMessage::BeginHierarchyDrag { gesture, .. } = message
+        && *gesture == SelectionGesture::Replace
+    {
+        *gesture = if modifiers.shift() {
+            SelectionGesture::ContiguousRange
+        } else if modifiers.command() {
+            SelectionGesture::Additive
+        } else {
+            SelectionGesture::Replace
+        };
+    }
+}
+
 fn should_activate_shortcut(command: &str, accelerator_fallback: bool) -> bool {
-    command.starts_with("file.") || accelerator_fallback
+    command.starts_with("file.") || command.starts_with("format.") || accelerator_fallback
 }
 
 #[derive(Debug, Clone)]
@@ -1028,6 +1067,7 @@ struct NativeProjectState {
     /// A created Explorer row must first be rendered before Iced can focus its
     /// inline text field. The surface consumes this one-shot request on show.
     pending_hierarchy_rename_focus: Option<String>,
+    pending_metadata_field_creation_focus: bool,
     effect_executor: Option<NativeProjectEffectExecutor>,
     synopsis_commits: SynopsisCommitQueue,
     deferred_inspector_commits: DeferredInspectorCommitQueue,
@@ -1435,6 +1475,12 @@ impl DeferredInspectorCommitQueue {
             ProjectEffect::CommitMetadataValue {
                 node_id, field_id, ..
             } => format!("metadata:{node_id}:{field_id}"),
+            ProjectEffect::UpsertMetadataField(definition) => {
+                format!(
+                    "metadata-definition:{}",
+                    stable_id_string(definition.id.as_bytes())
+                )
+            }
             _ => unreachable!("only Inspector text effects may be deferred"),
         }
     }
@@ -3009,12 +3055,20 @@ impl NativeDesktop {
             Some(NativeWindow::Launcher) | None => "ParchMint".to_owned(),
             Some(NativeWindow::Project(state)) => state
                 .project
-                .project
-                .file_name()
-                .and_then(|name| name.to_str())
+                .project_ui
+                .as_ref()
+                .map(|project| project.snapshot.project.display_title.as_str())
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| {
+                    state
+                        .project
+                        .project
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                })
                 .map_or_else(
                     || "ParchMint".to_owned(),
-                    |name| format!("{name} — ParchMint"),
+                    |title| format!("{title} — ParchMint"),
                 ),
         }
     }
@@ -3226,6 +3280,31 @@ impl NativeDesktop {
                     )
                 }
             }
+            "format.bold" | "format.italic" | "format.underline" | "format.link" => {
+                let editor_has_focus = self.windows.get(&id).is_some_and(|window| {
+                    matches!(
+                        window,
+                        NativeWindow::Project(state)
+                            if matches!(state.shell.focus_target(), crate::FocusTarget::EditorDocument(_))
+                    )
+                });
+                if !editor_has_focus {
+                    return Task::none();
+                }
+                let command = match command {
+                    "format.bold" => crate::FormattingCommand::Bold,
+                    "format.italic" => crate::FormattingCommand::Italic,
+                    "format.underline" => crate::FormattingCommand::Underline,
+                    "format.link" => crate::FormattingCommand::Link,
+                    _ => unreachable!("formatting shortcut was matched above"),
+                };
+                self.update_project_surface(
+                    id,
+                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        crate::EditorMessage::Format(command),
+                    )),
+                )
+            }
             _ => {
                 self.status = Some(format!("Unknown keyboard shortcut command: {command}"));
                 Task::none()
@@ -3303,6 +3382,34 @@ impl NativeDesktop {
                         .update(crate::EditorMessage::CancelTabDrag);
                 }
                 return Task::none();
+            }
+            let explorer_navigation = {
+                let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
+                    return Task::none();
+                };
+                (state.shell.focus_target() == crate::FocusTarget::Explorer)
+                    .then(|| match key {
+                        keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                            Some(crate::ExplorerNavigation::Previous)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                            Some(crate::ExplorerNavigation::Next)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
+                            Some(crate::ExplorerNavigation::ExpandOrFirstChild)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
+                            Some(crate::ExplorerNavigation::CollapseOrParent)
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+            };
+            if let Some(navigation) = explorer_navigation {
+                return self.update_project_surface(
+                    id,
+                    ProjectSurfaceMessage::Project(ProjectMessage::NavigateExplorer(navigation)),
+                );
             }
             let enter_node = matches!(key, keyboard::Key::Named(keyboard::key::Named::Enter))
                 .then(|| {
@@ -3832,7 +3939,7 @@ impl NativeDesktop {
                 if destination == RibbonDestination::History {
                     let ticket = workspace.begin_task(ProjectTask::LoadHistory);
                     if let Some(feeds) = state.service_feeds.as_ref() {
-                        let job = feeds.history_list(None, 100, None);
+                        let job = feeds.history_list(None, HISTORY_PAGE_SIZE, None);
                         let load = Task::perform(Self::run_service_job(job), move |result| {
                             Message::HistoryFinished {
                                 window: id,
@@ -3959,7 +4066,11 @@ impl NativeDesktop {
                     .active_document_filter()
                     .and_then(|document| stable_id_bytes(document).ok())
                     .map(parchmint_domain::DocumentId::from_bytes);
-                let job = feeds.history_list(Some(HistoryCursor::new(cursor)), 100, affected);
+                let job = feeds.history_list(
+                    Some(HistoryCursor::new(cursor)),
+                    HISTORY_PAGE_SIZE,
+                    affected,
+                );
                 Task::perform(Self::run_service_job(job), move |result| {
                     Message::HistoryFinished {
                         window: id,
@@ -3978,18 +4089,27 @@ impl NativeDesktop {
                 iced::widget::operation::focus(input_id.clone())
                     .chain(iced::widget::operation::select_all(input_id))
             }
+            ProjectSurfaceMessage::MetadataFieldCreationShown => {
+                if !state.pending_metadata_field_creation_focus {
+                    return Task::none();
+                }
+                state.pending_metadata_field_creation_focus = false;
+                iced::widget::operation::focus(
+                    crate::iced_project_surface::metadata_field_name_input_id(),
+                )
+            }
             ProjectSurfaceMessage::Project(mut message) => {
-                if let ProjectMessage::SelectHierarchy { gesture, .. }
-                | ProjectMessage::BeginHierarchyDrag { gesture, .. } = &mut message
-                    && *gesture == SelectionGesture::Replace
-                {
-                    *gesture = if state.modifiers.shift() {
-                        SelectionGesture::ContiguousRange
-                    } else if state.modifiers.command() {
-                        SelectionGesture::Additive
-                    } else {
-                        SelectionGesture::Replace
-                    };
+                apply_hierarchy_pointer_modifiers(&mut message, state.modifiers);
+                if matches!(
+                    &message,
+                    ProjectMessage::SelectHierarchy { .. }
+                        | ProjectMessage::ToggleHierarchyExpanded(_)
+                        | ProjectMessage::NavigateExplorer(_)
+                        | ProjectMessage::PreviewHierarchyNode(_)
+                        | ProjectMessage::OpenHierarchyNode(_)
+                        | ProjectMessage::OpenHierarchyNodeInCompanion(_)
+                ) {
+                    state.shell.focus(crate::FocusTarget::Explorer);
                 }
                 let modal_before = workspace.modal().is_some();
                 let opens_hierarchy_context =
@@ -3998,6 +4118,8 @@ impl NativeDesktop {
                     ProjectMessage::BeginHierarchyRename(node_id) => Some(node_id.clone()),
                     _ => None,
                 };
+                let begins_metadata_field_creation =
+                    matches!(&message, ProjectMessage::CreateMetadataField);
                 let appearance = match &message {
                     ProjectMessage::SetAppearance(mode) => Some(*mode),
                     _ => None,
@@ -4018,6 +4140,7 @@ impl NativeDesktop {
                     ProjectMessage::RenameNode { .. }
                         | ProjectMessage::SetSynopsis { .. }
                         | ProjectMessage::SetMetadataValue { .. }
+                        | ProjectMessage::UpdateMetadataField { .. }
                 );
                 if matches!(message, ProjectMessage::ShowGlobalSearch) {
                     state.shell.open_global_search();
@@ -4025,6 +4148,9 @@ impl NativeDesktop {
                     state.shell.close_global_search();
                 }
                 let effects = workspace.update(message);
+                if begins_metadata_field_creation {
+                    state.pending_metadata_field_creation_focus = true;
+                }
                 if opens_hierarchy_context {
                     state.suppress_next_context_menu_dismissal = true;
                 }
@@ -4064,6 +4190,11 @@ impl NativeDesktop {
                             .chain(iced::widget::operation::select_all(input_id)),
                     );
                 }
+                if begins_metadata_field_creation {
+                    tasks.push(iced::widget::operation::focus(
+                        crate::iced_project_surface::metadata_field_name_input_id(),
+                    ));
+                }
                 if let Some(document) = history_filter {
                     let ticket = workspace.begin_task(ProjectTask::LoadHistory);
                     if let Some(feeds) = state.service_feeds.as_ref() {
@@ -4071,7 +4202,7 @@ impl NativeDesktop {
                             .as_deref()
                             .and_then(|document| stable_id_bytes(document).ok())
                             .map(parchmint_domain::DocumentId::from_bytes);
-                        let job = feeds.history_list(None, 100, affected);
+                        let job = feeds.history_list(None, HISTORY_PAGE_SIZE, affected);
                         tasks.push(Task::perform(Self::run_service_job(job), move |result| {
                             Message::HistoryFinished {
                                 window: id,
@@ -4093,7 +4224,8 @@ impl NativeDesktop {
                     match effect {
                         effect @ (ProjectEffect::CommitNodeTitle { .. }
                         | ProjectEffect::CommitSynopsis { .. }
-                        | ProjectEffect::CommitMetadataValue { .. })
+                        | ProjectEffect::CommitMetadataValue { .. }
+                        | ProjectEffect::UpsertMetadataField(_))
                             if defer_inspector_commit =>
                         {
                             state
@@ -5395,7 +5527,8 @@ impl NativeDesktop {
                 );
             }
             effect @ (ProjectEffect::CommitNodeTitle { .. }
-            | ProjectEffect::CommitMetadataValue { .. }) => {
+            | ProjectEffect::CommitMetadataValue { .. }
+            | ProjectEffect::UpsertMetadataField(_)) => {
                 state.project_mutations.enqueue(ProjectMutationTicket {
                     effect,
                     history_action: None,
@@ -6090,7 +6223,7 @@ impl NativeDesktop {
                     match (state.service_feeds.as_ref(), state.workspace.as_mut()) {
                         (Some(feeds), Some(workspace)) => {
                             let ticket = workspace.begin_task(ProjectTask::LoadHistory);
-                            let job = feeds.history_list(None, 100, None);
+                            let job = feeds.history_list(None, HISTORY_PAGE_SIZE, None);
                             Task::perform(Self::run_service_job(job), move |result| {
                                 Message::HistoryFinished {
                                     window,
@@ -8367,6 +8500,7 @@ impl NativeDesktop {
                 mounted_documents,
                 retained_editor_sessions,
                 pending_hierarchy_rename_focus: None,
+                pending_metadata_field_creation_focus: false,
                 effect_executor,
                 synopsis_commits: SynopsisCommitQueue::default(),
                 deferred_inspector_commits: DeferredInspectorCommitQueue::default(),
@@ -11110,6 +11244,10 @@ mod tests {
             keyboard_accelerator("v", keyboard::Modifiers::COMMAND),
             Some("edit.paste")
         );
+        assert_eq!(
+            keyboard_accelerator("b", keyboard::Modifiers::COMMAND),
+            Some("format.bold")
+        );
         assert_eq!(keyboard_accelerator("s", keyboard::Modifiers::NONE), None);
         #[cfg(target_os = "macos")]
         assert_eq!(
@@ -11123,6 +11261,29 @@ mod tests {
         assert_eq!(
             keyboard_accelerator("y", keyboard::Modifiers::COMMAND),
             Some("edit.redo")
+        );
+    }
+
+    #[test]
+    fn modified_document_preview_intents_extend_explorer_selection_without_opening_a_tab() {
+        let mut command = ProjectMessage::PreviewHierarchyNode("chapter-two".to_owned());
+        apply_hierarchy_pointer_modifiers(&mut command, keyboard::Modifiers::COMMAND);
+        assert_eq!(
+            command,
+            ProjectMessage::SelectHierarchy {
+                node_id: "chapter-two".to_owned(),
+                gesture: SelectionGesture::Additive,
+            }
+        );
+
+        let mut range = ProjectMessage::PreviewHierarchyNode("chapter-three".to_owned());
+        apply_hierarchy_pointer_modifiers(&mut range, keyboard::Modifiers::SHIFT);
+        assert_eq!(
+            range,
+            ProjectMessage::SelectHierarchy {
+                node_id: "chapter-three".to_owned(),
+                gesture: SelectionGesture::ContiguousRange,
+            }
         );
     }
 
@@ -11141,6 +11302,7 @@ mod tests {
     fn captured_editor_shortcuts_do_not_duplicate_clipboard_or_text_input_actions() {
         assert!(should_activate_shortcut("file.save", false));
         assert!(should_activate_shortcut("file.close", false));
+        assert!(should_activate_shortcut("format.bold", false));
         assert!(should_activate_shortcut("edit.undo", true));
         assert!(should_activate_shortcut("edit.redo", true));
         assert!(!should_activate_shortcut("edit.undo", false));

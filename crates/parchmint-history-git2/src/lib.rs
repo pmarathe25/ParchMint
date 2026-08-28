@@ -1234,16 +1234,29 @@ fn resolve_checkpoint(
     repository: &Repository,
     checkpoint: CheckpointId,
 ) -> Result<HistoryRecord, HistoryError> {
-    let mut found = None;
-    for record in history_records(repository)? {
-        if checkpoint_id(record.oid) == checkpoint {
-            if found.is_some() {
-                return Err(corrupt("two commits share one checkpoint identifier"));
-            }
-            found = Some(record);
-        }
+    // A CheckpointId is the first 128 bits of the immutable Git object ID.
+    // Resolving that prefix avoids walking and decoding the entire history
+    // chain every time an author selects one entry in the timeline. Git
+    // rejects an ambiguous prefix; the 128-bit prefix also makes that
+    // exceptionally unlikely in a local project repository.
+    let prefix = encode_hex(checkpoint.as_bytes());
+    let commit = repository
+        .find_commit_by_prefix(&prefix)
+        .map_err(|error| corrupt_git("resolve selected checkpoint", error))?;
+    let head = head_oid(repository)?.ok_or(HistoryError::UnknownCheckpoint { checkpoint })?;
+    if commit.id() != head
+        && !repository
+            .graph_descendant_of(head, commit.id())
+            .map_err(|error| corrupt_git("validate checkpoint ancestry", error))?
+    {
+        return Err(HistoryError::UnknownCheckpoint { checkpoint });
     }
-    found.ok_or(HistoryError::UnknownCheckpoint { checkpoint })
+    let metadata = decode_metadata(commit.message_bytes())?;
+    Ok(HistoryRecord {
+        oid: commit.id(),
+        tree_id: commit.tree_id(),
+        metadata,
+    })
 }
 
 struct SnapshotData {

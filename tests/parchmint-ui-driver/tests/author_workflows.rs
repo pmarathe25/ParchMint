@@ -240,9 +240,24 @@ fn author_can_configure_metadata_to_appear_on_cards() {
         .click_text(HarnessWindow::Project, "Metadata fields")
         .expect("open metadata settings");
     harness
-        .click_text(HarnessWindow::Project, "Create metadata field")
-        .expect("create a metadata field");
-    assert!(visible(&harness, "New field"));
+        .click_text(HarnessWindow::Project, "+ New field")
+        .expect("start metadata field creation");
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::MetadataFieldName)
+            .expect("focus the new metadata field name")
+    );
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::MetadataFieldName,
+            "Point of view",
+        )
+        .expect("name the metadata field without clearing a placeholder");
+    harness
+        .click_text(HarnessWindow::Project, "Add field")
+        .expect("persist the named metadata field");
+    assert!(visible(&harness, "Point of view"));
     harness
         .click_text(HarnessWindow::Project, "Visible on cards")
         .expect("show the metadata field on cards");
@@ -252,7 +267,7 @@ fn author_can_configure_metadata_to_appear_on_cards() {
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("review the configured card projection");
-    assert!(visible(&harness, "New field"));
+    assert!(visible(&harness, "Point of view"));
     harness
         .close(HarnessWindow::Project)
         .expect("close settings project");
@@ -447,6 +462,80 @@ fn explorer_creation_replaces_the_selected_default_title() {
 }
 
 #[test]
+fn explorer_add_menu_creates_a_group_and_document_in_the_current_context() {
+    let run = IsolatedRun::new("explorer-add-menu").expect("isolated run");
+    let project = run.root().join("explorer-add-menu.parchmint");
+    let harness = create_project(&run, &project, "Explorer Add Menu");
+
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
+        .expect("open the Explorer-local creation menu");
+    harness
+        .redraw(HarnessWindow::Project)
+        .expect("render the Explorer creation menu");
+    assert!(visible(&harness, "Add to Manuscript"));
+    harness
+        .click_text(HarnessWindow::Project, "Group")
+        .expect("create a group from the Explorer menu");
+    harness
+        .redraw(HarnessWindow::Project)
+        .expect("render the created group-name field");
+    let group_name_is_focused = harness
+        .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+        .expect("focus the new group title");
+    let titles_after_group = harness
+        .hierarchy_titles()
+        .expect("read hierarchy after group creation");
+    assert!(
+        group_name_is_focused,
+        "the Explorer menu must select the default title for replacement; hierarchy: {titles_after_group:?}"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Part One")
+        .expect("replace the new group title");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit the group title");
+
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
+        .expect("open the creation menu for the selected group");
+    assert!(visible(&harness, "Add to Part One"));
+    harness
+        .click_text(HarnessWindow::Project, "Document")
+        .expect("create a document within the selected group");
+    harness
+        .redraw(HarnessWindow::Project)
+        .expect("render the created document-name field");
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("focus the new document title"),
+        "the Explorer menu must select the document default title"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Chapter One")
+        .expect("replace the new document title");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit the document title");
+
+    let titles = harness
+        .hierarchy_titles()
+        .expect("read hierarchy after Explorer-local creation");
+    assert!(titles.iter().any(|title| title == "Part One"), "{titles:?}");
+    assert!(
+        titles.iter().any(|title| title == "Chapter One"),
+        "{titles:?}"
+    );
+
+    harness
+        .close(HarnessWindow::Project)
+        .expect("close Explorer menu project");
+    harness.shutdown().expect("stop Explorer menu project");
+}
+
+#[test]
 fn explorer_f2_rename_replaces_the_selected_title() {
     let run = IsolatedRun::new("explorer-f2-rename").expect("isolated run");
     let project = run.root().join("explorer-f2-rename.parchmint");
@@ -509,8 +598,18 @@ fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
         .click_text(HarnessWindow::Project, "Metadata fields")
         .expect("open metadata settings");
     harness
-        .click_text(HarnessWindow::Project, "Create metadata field")
-        .expect("create a metadata field");
+        .click_text(HarnessWindow::Project, "+ New field")
+        .expect("start metadata field creation");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::MetadataFieldName,
+            "Draft status",
+        )
+        .expect("name the metadata field");
+    harness
+        .click_text(HarnessWindow::Project, "Add field")
+        .expect("persist metadata field before deletion");
     harness
         .click_text(HarnessWindow::Project, "Delete metadata field")
         .expect("request field deletion");
@@ -939,26 +1038,32 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
             .expect("read comment composer feedback")
     );
     harness
-        .type_into(
-            HarnessWindow::Project,
-            "Write a comment",
-            "Verify the weather detail.",
-        )
+        .click_target(HarnessWindow::Project, HarnessTarget::CommentDraft)
+        .expect("focus the comment draft");
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::CommentDraft)
+            .expect("inspect comment-draft focus"),
+        "the comment draft must receive keyboard focus"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Verify the weather detail.")
         .expect("write a comment draft");
     harness
         .click_text(HarnessWindow::Project, "Add at selection")
         .expect("attach the comment to the selection");
+    assert!(visible(&harness, "Unresolved"));
     assert!(
-        visible(&harness, "Unresolved: Verify the weather detail."),
+        visible(&harness, "Verify the weather detail."),
         "comment feedback after creation: {}",
         harness
             .comment_feedback()
             .expect("read comment creation feedback")
     );
     harness
-        .type_into(
+        .type_into_target(
             HarnessWindow::Project,
-            "Reply to thread",
+            HarnessTarget::CommentReply,
             "Confirmed against the log.",
         )
         .expect("reply to the comment thread");
@@ -969,7 +1074,8 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_text(HarnessWindow::Project, "Resolve")
         .expect("resolve the comment thread");
-    assert!(visible(&harness, "Resolved: Verify the weather detail."));
+    assert!(visible(&harness, "Resolved"));
+    assert!(visible(&harness, "Verify the weather detail."));
     harness
         .click_text(HarnessWindow::Project, "Delete thread")
         .expect("request comment deletion");

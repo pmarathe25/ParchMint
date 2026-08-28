@@ -13,6 +13,8 @@ pub(crate) enum Icon {
     RecentlyDeleted,
     Export,
     Settings,
+    ExplorerFolderClosed,
+    ExplorerFolderOpen,
     BulletedList,
     BlockQuote,
     Link,
@@ -28,6 +30,8 @@ impl Icon {
             Self::RecentlyDeleted => "workspace-deleted",
             Self::Export => "workspace-export",
             Self::Settings => "workspace-settings",
+            Self::ExplorerFolderClosed => "explorer-folder-closed",
+            Self::ExplorerFolderOpen => "explorer-folder-open",
             Self::BulletedList => "format-bulleted-list",
             Self::BlockQuote => "format-block-quote",
             Self::Link => "format-link",
@@ -67,6 +71,14 @@ mod tests {
         assert_eq!(Icon::RecentlyDeleted.catalog_name(), "workspace-deleted");
         assert_eq!(Icon::Export.catalog_name(), "workspace-export");
         assert_eq!(Icon::Settings.catalog_name(), "workspace-settings");
+        assert_eq!(
+            Icon::ExplorerFolderClosed.catalog_name(),
+            "explorer-folder-closed"
+        );
+        assert_eq!(
+            Icon::ExplorerFolderOpen.catalog_name(),
+            "explorer-folder-open"
+        );
         assert_eq!(Icon::BulletedList.catalog_name(), "format-bulleted-list");
         assert_eq!(Icon::BlockQuote.catalog_name(), "format-block-quote");
         assert_eq!(Icon::Link.catalog_name(), "format-link");
@@ -79,6 +91,8 @@ mod tests {
             Icon::RecentlyDeleted,
             Icon::Export,
             Icon::Settings,
+            Icon::ExplorerFolderClosed,
+            Icon::ExplorerFolderOpen,
             Icon::BulletedList,
             Icon::BlockQuote,
             Icon::Link,

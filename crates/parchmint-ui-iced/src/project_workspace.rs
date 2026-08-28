@@ -131,6 +131,15 @@ pub enum HierarchyRowKind {
     Document,
 }
 
+/// Standard keyboard movement within the visible Explorer tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplorerNavigation {
+    Previous,
+    Next,
+    ExpandOrFirstChild,
+    CollapseOrParent,
+}
+
 #[derive(Debug, Clone)]
 struct HierarchyNode {
     id: String,
@@ -383,6 +392,71 @@ impl ExplorerState {
             .collect()
     }
 
+    fn visible_ids(&self) -> Vec<&str> {
+        self.preorder_ids()
+            .into_iter()
+            .filter(|id| self.ancestors_are_expanded(id))
+            .collect()
+    }
+
+    fn navigate_visible(&mut self, navigation: ExplorerNavigation) -> bool {
+        let visible = self
+            .visible_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let selected = self.selected_ids().into_iter().next().map(str::to_owned);
+        let Some(current) = selected.or_else(|| visible.first().cloned()) else {
+            return false;
+        };
+        let current_index = visible
+            .iter()
+            .position(|candidate| candidate == &current)
+            .unwrap_or_default();
+        let target = match navigation {
+            ExplorerNavigation::Previous => current_index
+                .checked_sub(1)
+                .and_then(|index| visible.get(index).cloned()),
+            ExplorerNavigation::Next => visible.get(current_index + 1).cloned(),
+            ExplorerNavigation::ExpandOrFirstChild => {
+                let Some((can_expand, first_child)) = self.nodes.get(&current).map(|node| {
+                    (
+                        matches!(
+                            node.kind,
+                            HierarchyNodeKind::Root | HierarchyNodeKind::Group
+                        ),
+                        node.children.first().cloned(),
+                    )
+                }) else {
+                    return false;
+                };
+                if !can_expand {
+                    return false;
+                }
+                if !self.expanded.contains(&current) {
+                    self.expanded.insert(current);
+                    return true;
+                }
+                first_child
+            }
+            ExplorerNavigation::CollapseOrParent => {
+                let Some(node) = self.nodes.get(&current) else {
+                    return false;
+                };
+                let parent = node.parent.clone();
+                if self.expanded.remove(&current) {
+                    return true;
+                }
+                parent
+            }
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        self.select(&target, SelectionGesture::Replace);
+        true
+    }
+
     /// A single hierarchy row by its serialized typed node ID.
     pub fn row(&self, node_id: &str) -> Option<ExplorerRow<'_>> {
         let node = self.nodes.get(node_id)?;
@@ -571,7 +645,17 @@ impl ExplorerState {
         if !is_container {
             return;
         }
-        if !self.expanded.remove(node_id) {
+        if self.expanded.remove(node_id) {
+            // A collapsed branch cannot leave keyboard focus on an invisible
+            // descendant: F2 and Enter must always act on a rendered row.
+            if self
+                .selected
+                .iter()
+                .any(|selected| selected != node_id && self.is_ancestor(node_id, selected))
+            {
+                self.select(node_id, SelectionGesture::Replace);
+            }
+        } else {
             self.expanded.insert(node_id.to_owned());
         }
     }
@@ -985,6 +1069,10 @@ pub struct MetadataFieldSummary<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsDetail {
     MetadataField(String),
+    /// A local, not-yet-persisted metadata field. A name is required before it
+    /// becomes part of the project, so opening the creation surface never
+    /// leaves an abandoned "New field" in Settings or History.
+    NewMetadataField,
     Style(String),
 }
 
@@ -1118,6 +1206,7 @@ pub struct SettingsState {
     dictionaries: DictionarySettingsState,
     metadata_definitions: BTreeMap<String, MetadataDefinition>,
     metadata_order: Vec<String>,
+    new_metadata_field: Option<MetadataDefinition>,
     style_definitions: BTreeMap<String, StyleDefinition>,
     style_order: Vec<String>,
     selected_detail: Option<SettingsDetail>,
@@ -1156,6 +1245,7 @@ impl SettingsState {
                 ),
             ]),
             metadata_order: vec!["field-17".to_owned(), "field-18".to_owned()],
+            new_metadata_field: None,
             style_definitions: StyleCatalog::default()
                 .iter()
                 .map(|definition| {
@@ -1225,6 +1315,7 @@ impl SettingsState {
             dictionaries: DictionarySettingsState::from_project(project),
             metadata_definitions,
             metadata_order,
+            new_metadata_field: None,
             style_definitions,
             style_order,
             selected_detail: None,
@@ -1341,6 +1432,14 @@ impl SettingsState {
                 applicability: field.applicability,
                 text_kind: field.text_kind,
             })
+    }
+
+    /// The local name being entered for a new metadata field, if field
+    /// creation is active. This draft deliberately has no project ID yet.
+    pub fn new_metadata_field_label(&self) -> Option<&str> {
+        self.new_metadata_field
+            .as_ref()
+            .map(|field| field.label.as_str())
     }
 
     pub fn style(&self, id: &str) -> Option<StyleSummary<'_>> {
@@ -3217,10 +3316,13 @@ pub enum ProjectMessage {
         gesture: SelectionGesture,
     },
     ToggleHierarchyExpanded(String),
+    NavigateExplorer(ExplorerNavigation),
     RequestCreateHierarchy {
         parent_id: String,
         kind: HierarchyItemKind,
     },
+    ToggleExplorerCreationMenu,
+    CloseExplorerCreationMenu,
     DeleteSelection,
     PreviewHierarchyNode(String),
     OpenHierarchyNode(String),
@@ -3255,7 +3357,11 @@ pub enum ProjectMessage {
         applies_to_documents: bool,
     },
     SelectMetadataField(String),
+    /// Opens an unsaved field-name draft. See `CommitNewMetadataField`.
     CreateMetadataField,
+    SetNewMetadataFieldLabel(String),
+    CommitNewMetadataField,
+    CancelNewMetadataField,
     UpdateMetadataField {
         field_id: String,
         label: String,
@@ -3501,11 +3607,13 @@ pub struct ProjectWorkspace {
     source: ProjectWorkspaceSource,
     session: u64,
     project_revision: u64,
+    project_title: String,
     sidebar: SidebarSurface,
     explorer: ExplorerState,
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
     cards_drag_destination: Option<DragDestination>,
+    explorer_creation_menu_open: bool,
     pointer_drag: Option<HierarchyPointerDrag>,
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
@@ -3589,6 +3697,7 @@ impl ProjectWorkspace {
             source: ProjectWorkspaceSource::Fixture(fixture),
             session: 37,
             project_revision: 1,
+            project_title: "The Glass Harbor".to_owned(),
             sidebar,
             explorer,
             tree_clipboard: None,
@@ -3596,6 +3705,7 @@ impl ProjectWorkspace {
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
+            explorer_creation_menu_open: false,
             pointer_drag: None,
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
@@ -3649,11 +3759,13 @@ impl ProjectWorkspace {
             source: ProjectWorkspaceSource::Production,
             session: 0,
             project_revision: snapshot.project.revision.value(),
+            project_title: snapshot.project.display_title.clone(),
             sidebar: SidebarSurface::Explorer,
             explorer,
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_drag_destination: None,
+            explorer_creation_menu_open: false,
             pointer_drag: None,
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
@@ -3705,18 +3817,22 @@ impl ProjectWorkspace {
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
+        self.project_title = snapshot.project.display_title.clone();
         self.explorer.reconcile_project(&snapshot.project);
         self.begin_rename_for_created_hierarchy(&prior_node_ids);
         self.reconcile_synopsis_editors();
         self.metadata_values = metadata_values_from_project(&snapshot.project);
         let selected_category = self.settings.selected_category;
         let selected_detail = self.settings.selected_detail.clone();
+        let new_metadata_field = self.settings.new_metadata_field.clone();
         self.settings = SettingsState::from_project(&snapshot.project, self.settings.appearance);
         self.settings.selected_category = selected_category;
+        self.settings.new_metadata_field = new_metadata_field;
         self.settings.selected_detail = selected_detail.filter(|detail| match detail {
             SettingsDetail::MetadataField(id) => {
                 self.settings.metadata_definitions.contains_key(id)
             }
+            SettingsDetail::NewMetadataField => self.settings.new_metadata_field.is_some(),
             SettingsDetail::Style(id) => self.settings.style_definitions.contains_key(id),
         });
         self.recently_deleted.reconcile_snapshot(snapshot);
@@ -3797,6 +3913,12 @@ impl ProjectWorkspace {
         }
         self.pending
             .retain(|_, ticket| ticket.captured_project_revision == self.project_revision);
+    }
+
+    pub fn project_title(&self) -> &str {
+        (!self.project_title.trim().is_empty())
+            .then_some(self.project_title.as_str())
+            .unwrap_or("Untitled Project")
     }
 
     pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
@@ -3912,6 +4034,28 @@ impl ProjectWorkspace {
 
     pub const fn hierarchy_context_point(&self) -> Point {
         self.hierarchy_context_point
+    }
+
+    pub const fn explorer_creation_menu_open(&self) -> bool {
+        self.explorer_creation_menu_open
+    }
+
+    /// The Explorer-local creation menu follows the current structure context:
+    /// a selected container, the selected document's parent, or Manuscript.
+    pub fn explorer_creation_parent_id(&self) -> Option<&str> {
+        if let Some(selected) = self.explorer.selected_ids().into_iter().next()
+            && let Some(row) = self.explorer.row(selected)
+        {
+            return match row.kind {
+                HierarchyRowKind::Root | HierarchyRowKind::Group => Some(row.id),
+                HierarchyRowKind::Document => row.parent_id,
+            };
+        }
+        let manuscript = stable_id_string(ProjectSection::Manuscript.root_id().as_bytes());
+        self.explorer
+            .row(&manuscript)
+            .map(|row| row.id)
+            .or_else(|| self.explorer.root_ids().into_iter().next())
     }
 
     pub fn hierarchy_rename(&self) -> Option<(&str, &str)> {
@@ -4491,6 +4635,14 @@ impl ProjectWorkspace {
         ) {
             self.hierarchy_context_menu = None;
         }
+        if !matches!(
+            &message,
+            ProjectMessage::ToggleExplorerCreationMenu
+                | ProjectMessage::CloseExplorerCreationMenu
+                | ProjectMessage::RequestCreateHierarchy { .. }
+        ) {
+            self.explorer_creation_menu_open = false;
+        }
         match message {
             ProjectMessage::ShowExplorer => {
                 self.sidebar = SidebarSurface::Explorer;
@@ -4509,7 +4661,22 @@ impl ProjectWorkspace {
                 self.explorer.toggle_expanded(&node_id);
                 Vec::new()
             }
+            ProjectMessage::NavigateExplorer(navigation) => {
+                if self.explorer.navigate_visible(navigation) {
+                    self.sync_inspector_context_from_selection();
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleExplorerCreationMenu => {
+                self.explorer_creation_menu_open = !self.explorer_creation_menu_open;
+                Vec::new()
+            }
+            ProjectMessage::CloseExplorerCreationMenu => {
+                self.explorer_creation_menu_open = false;
+                Vec::new()
+            }
             ProjectMessage::RequestCreateHierarchy { parent_id, kind } => {
+                self.explorer_creation_menu_open = false;
                 let can_contain_children =
                     self.explorer.nodes.get(&parent_id).is_some_and(|node| {
                         matches!(
@@ -4675,21 +4842,46 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::CreateMetadataField => {
+                self.settings.selected_category = SettingsCategory::Metadata;
+                self.settings.new_metadata_field = Some(MetadataDefinition {
+                    label: String::new(),
+                    description: None,
+                    applicability: MetadataFieldApplicability::Documents,
+                    text_kind: MetadataFieldTextKind::SingleLine,
+                    default_value: None,
+                    visible_on_cards: false,
+                });
+                self.settings.selected_detail = Some(SettingsDetail::NewMetadataField);
+                Vec::new()
+            }
+            ProjectMessage::SetNewMetadataFieldLabel(label) => {
+                if let Some(field) = self.settings.new_metadata_field.as_mut() {
+                    field.label = label;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CommitNewMetadataField => {
+                let Some(mut field) = self.settings.new_metadata_field.take() else {
+                    return Vec::new();
+                };
+                let label = field.label.trim();
+                if label.is_empty() {
+                    self.settings.new_metadata_field = Some(field);
+                    return Vec::new();
+                }
+                field.label = label.to_owned();
                 let id = self.new_metadata_field_id();
                 self.settings.metadata_order.push(id.clone());
-                self.settings.metadata_definitions.insert(
-                    id.clone(),
-                    MetadataDefinition {
-                        label: "New field".to_owned(),
-                        description: None,
-                        applicability: MetadataFieldApplicability::Documents,
-                        text_kind: MetadataFieldTextKind::SingleLine,
-                        default_value: None,
-                        visible_on_cards: false,
-                    },
-                );
+                self.settings.metadata_definitions.insert(id.clone(), field);
                 self.settings.selected_detail = Some(SettingsDetail::MetadataField(id.clone()));
                 self.metadata_effect(&id).into_iter().collect()
+            }
+            ProjectMessage::CancelNewMetadataField => {
+                self.settings.new_metadata_field = None;
+                if self.settings.selected_detail == Some(SettingsDetail::NewMetadataField) {
+                    self.settings.selected_detail = None;
+                }
+                Vec::new()
             }
             ProjectMessage::UpdateMetadataField {
                 field_id,
@@ -6232,6 +6424,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_field_creation_stays_local_until_a_nonempty_name_is_confirmed() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let original_count = workspace.settings().metadata_fields().len();
+
+        assert!(
+            workspace
+                .update(ProjectMessage::CreateMetadataField)
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.settings().selected_detail(),
+            Some(&SettingsDetail::NewMetadataField)
+        );
+        assert_eq!(workspace.settings().new_metadata_field_label(), Some(""));
+        assert_eq!(workspace.settings().metadata_fields().len(), original_count);
+
+        assert!(
+            workspace
+                .update(ProjectMessage::SetNewMetadataFieldLabel("  ".to_owned()))
+                .is_empty()
+        );
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitNewMetadataField)
+                .is_empty()
+        );
+        assert_eq!(workspace.settings().metadata_fields().len(), original_count);
+
+        workspace.update(ProjectMessage::SetNewMetadataFieldLabel(
+            "Timeline".to_owned(),
+        ));
+        let effects = workspace.update(ProjectMessage::CommitNewMetadataField);
+        assert_eq!(
+            workspace.settings().metadata_fields().len(),
+            original_count + 1
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [ProjectEffect::UpsertMetadataField(definition)] if definition.label == "Timeline"
+        ));
+    }
+
+    #[test]
+    fn cancelling_metadata_field_creation_does_not_change_settings() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let original_count = workspace.settings().metadata_fields().len();
+
+        workspace.update(ProjectMessage::CreateMetadataField);
+        workspace.update(ProjectMessage::SetNewMetadataFieldLabel(
+            "Discard me".to_owned(),
+        ));
+        assert!(
+            workspace
+                .update(ProjectMessage::CancelNewMetadataField)
+                .is_empty()
+        );
+
+        assert_eq!(workspace.settings().metadata_fields().len(), original_count);
+        assert_eq!(workspace.settings().selected_detail(), None);
+        assert_eq!(workspace.settings().new_metadata_field_label(), None);
+    }
+
+    #[test]
+    fn explorer_creation_menu_uses_the_selected_document_parent_and_closes_on_create() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+
+        workspace.update(ProjectMessage::ToggleExplorerCreationMenu);
+        assert!(workspace.explorer_creation_menu_open());
+        assert_eq!(workspace.explorer_creation_parent_id(), Some("part-one"));
+
+        assert_eq!(
+            workspace.update(ProjectMessage::RequestCreateHierarchy {
+                parent_id: "part-one".to_owned(),
+                kind: HierarchyItemKind::Document,
+            }),
+            [ProjectEffect::CreateHierarchy {
+                parent_id: "part-one".to_owned(),
+                kind: HierarchyItemKind::Document,
+            }]
+        );
+        assert!(!workspace.explorer_creation_menu_open());
+    }
+
+    #[test]
     fn persistence_revision_advances_without_reconciling_live_presentation() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         let initial = workspace.project_revision();
@@ -7388,6 +7668,60 @@ mod tests {
 
         assert_eq!(workspace.explorer().selected_ids(), ["chapter-two"]);
         assert!(workspace.explorer().is_expanded("part-one"));
+    }
+
+    #[test]
+    fn collapsing_a_group_moves_hidden_selection_to_the_visible_group() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+
+        workspace.update(ProjectMessage::ToggleHierarchyExpanded(
+            "part-one".to_owned(),
+        ));
+
+        assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
+        assert!(
+            !workspace
+                .explorer()
+                .row("part-one")
+                .expect("collapsed group row")
+                .expanded
+        );
+    }
+
+    #[test]
+    fn explorer_arrow_navigation_moves_only_through_visible_rows_and_enters_groups() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "part-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::ToggleHierarchyExpanded(
+            "part-one".to_owned(),
+        ));
+
+        workspace.update(ProjectMessage::NavigateExplorer(ExplorerNavigation::Next));
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-three"]);
+
+        workspace.update(ProjectMessage::NavigateExplorer(
+            ExplorerNavigation::Previous,
+        ));
+        assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
+        workspace.update(ProjectMessage::NavigateExplorer(
+            ExplorerNavigation::ExpandOrFirstChild,
+        ));
+        assert!(workspace.explorer().is_expanded("part-one"));
+        workspace.update(ProjectMessage::NavigateExplorer(
+            ExplorerNavigation::ExpandOrFirstChild,
+        ));
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
+        workspace.update(ProjectMessage::NavigateExplorer(
+            ExplorerNavigation::CollapseOrParent,
+        ));
+        assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
     }
 
     #[test]

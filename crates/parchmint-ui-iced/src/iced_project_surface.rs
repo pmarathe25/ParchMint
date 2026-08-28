@@ -39,6 +39,8 @@ pub(crate) enum ProjectSurfaceMessage {
     LoadMoreHistory,
     /// The newly-created Explorer rename field has entered the rendered tree.
     HierarchyRenameShown(String),
+    /// The transient metadata-field name control is ready to receive typing.
+    MetadataFieldCreationShown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,10 @@ pub(crate) enum SidebarPanel {
 pub(crate) fn hierarchy_rename_input_id(_node_id: &str) -> iced::widget::Id {
     // Only one Explorer entry can be edited at a time.
     crate::harness_target::HarnessTarget::ExplorerRename.id()
+}
+
+pub(crate) fn metadata_field_name_input_id() -> iced::widget::Id {
+    HarnessTarget::MetadataFieldName.id()
 }
 
 // Divider lines belong to the adjacent sidebar's reference width; they must
@@ -123,7 +129,7 @@ pub(crate) fn native_project_surface<'a>(
         destination,
         theme,
         editor_child,
-        "ParchMint",
+        workspace.project_title(),
         layout,
         inspector_expansion,
     )
@@ -156,7 +162,7 @@ fn project_surface_with_layout<'a>(
     destination: RibbonDestination,
     theme: ParchMintTheme,
     editor_child: Element<'a, ProjectSurfaceMessage>,
-    project_title: &'static str,
+    project_title: &'a str,
     layout: &ShellLayout,
     inspector_expansion: [bool; 3],
 ) -> Element<'a, ProjectSurfaceMessage> {
@@ -315,11 +321,11 @@ fn sidebar_splitter(
     .into()
 }
 
-fn ribbon(
-    project_title: &'static str,
+fn ribbon<'a>(
+    project_title: &'a str,
     destination: RibbonDestination,
     theme: ParchMintTheme,
-) -> Element<'static, ProjectSurfaceMessage> {
+) -> Element<'a, ProjectSurfaceMessage> {
     let destinations = [
         (Icon::Editor, "Editor", RibbonDestination::Editor),
         (Icon::Cards, "Cards", RibbonDestination::Cards),
@@ -337,7 +343,7 @@ fn ribbon(
             .into_iter()
             .fold(row![].spacing(4), |row, (icon_kind, label, item)| {
                 let selected = item == destination;
-                let control: Element<'static, ProjectSurfaceMessage> = harness_target::target(
+                let control: Element<'a, ProjectSurfaceMessage> = harness_target::target(
                     HarnessTarget::Ribbon(item),
                     column![
                         button(icon(icon_kind))
@@ -407,7 +413,7 @@ fn explorer_rail<'a>(
         .fold(column![].spacing(1), |column, item| {
             let depth = hierarchy_depth(explorer, item.parent_id);
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Root | HierarchyRowKind::Group => button(
+                HierarchyRowKind::Root => button(
                     text(if item.expanded { "▾" } else { "▸" })
                         .size(12)
                         .align_x(iced::alignment::Horizontal::Center),
@@ -420,6 +426,17 @@ fn explorer_rail<'a>(
                 .style(move |_, status| {
                     components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
                 })
+                .into(),
+                HierarchyRowKind::Group => container(icon_sized(
+                    if item.expanded {
+                        Icon::ExplorerFolderOpen
+                    } else {
+                        Icon::ExplorerFolderClosed
+                    },
+                    16,
+                ))
+                .width(20)
+                .align_x(iced::alignment::Horizontal::Center)
                 .into(),
                 HierarchyRowKind::Document => container(text("·").size(12))
                     .width(20)
@@ -434,6 +451,20 @@ fn explorer_rail<'a>(
             let is_renaming = workspace
                 .hierarchy_rename()
                 .is_some_and(|(node_id, _)| node_id == item.id);
+            let hierarchy_press = (!is_renaming
+                && matches!(
+                    item.kind,
+                    HierarchyRowKind::Group | HierarchyRowKind::Document
+                ))
+            .then(|| match item.kind {
+                HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
+                    ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
+                ),
+                HierarchyRowKind::Group => ProjectSurfaceMessage::Project(
+                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                ),
+                HierarchyRowKind::Root => unreachable!("roots retain their disclosure control"),
+            });
             let select: Element<'a, ProjectSurfaceMessage> = if is_renaming {
                 let draft = workspace
                     .hierarchy_rename()
@@ -486,36 +517,42 @@ fn explorer_rail<'a>(
                             ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
                         ))
                     }
-                    HierarchyRowKind::Root | HierarchyRowKind::Group => {
-                        row.on_double_click(ProjectSurfaceMessage::Project(
-                            ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-                        ))
-                    }
+                    HierarchyRowKind::Root | HierarchyRowKind::Group => row,
                 };
-                let on_press = match item.kind {
-                    HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
-                        ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
-                    ),
-                    HierarchyRowKind::Root | HierarchyRowKind::Group => {
+                if item.kind == HierarchyRowKind::Root {
+                    hierarchy_drag::source(
+                        row,
                         ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
                             node_id: item.id.to_owned(),
                             gesture: SelectionGesture::Replace,
-                        })
-                    }
-                };
-                hierarchy_drag::source(
-                    row,
+                        }),
+                        ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
+                            source_id: item.id.to_owned(),
+                            gesture: SelectionGesture::Replace,
+                        }),
+                        ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
+                    )
+                } else {
+                    row.into()
+                }
+            };
+            let item_row: Element<'a, ProjectSurfaceMessage> =
+                row![Space::new().width((depth * 14) as f32), disclosure, select]
+                    .spacing(1)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .into();
+            let item_row = match hierarchy_press {
+                Some(on_press) => hierarchy_drag::source(
+                    item_row,
                     on_press,
                     ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                         source_id: item.id.to_owned(),
                         gesture: SelectionGesture::Replace,
                     }),
                     ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
-                )
+                ),
+                None => item_row,
             };
-            let item_row = row![Space::new().width((depth * 14) as f32), disclosure, select]
-                .spacing(1)
-                .align_y(iced::alignment::Vertical::Center);
             let node_id = item.id.to_owned();
             let drag_destination = workspace.hierarchy_drag_destination();
             let indicator = hierarchy_row_indicator(item.kind, &node_id, drag_destination, theme);
@@ -549,10 +586,69 @@ fn explorer_rail<'a>(
             );
             column.push(row_target)
         });
+    let creation_menu: Element<'a, ProjectSurfaceMessage> = if workspace
+        .explorer_creation_menu_open()
+    {
+        workspace
+            .explorer_creation_parent_id()
+            .map(|parent_id| {
+                let parent_title = explorer.title(parent_id).unwrap_or("Manuscript");
+                let document_parent = parent_id.to_owned();
+                let group_parent = parent_id.to_owned();
+                container(
+                    column![
+                        text(format!("Add to {parent_title}")).size(11),
+                        row![
+                            explorer_creation_action(
+                                "Document",
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::RequestCreateHierarchy {
+                                        parent_id: document_parent,
+                                        kind: HierarchyItemKind::Document,
+                                    },
+                                ),
+                                theme,
+                            ),
+                            explorer_creation_action(
+                                "Group",
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::RequestCreateHierarchy {
+                                        parent_id: group_parent,
+                                        kind: HierarchyItemKind::Group,
+                                    },
+                                ),
+                                theme,
+                            ),
+                        ]
+                        .spacing(6),
+                    ]
+                    .spacing(6),
+                )
+                .padding(8)
+                .style(move |_| components::surface(theme, Surface::Panel, Interaction::Focused))
+                .into()
+            })
+            .unwrap_or_else(|| Space::new().height(0).into())
+    } else {
+        Space::new().height(0).into()
+    };
     let rail = column![
         row![
             text("EXPLORER").size(12),
             Space::new().width(Length::Fill),
+            harness_target::target(
+                HarnessTarget::ExplorerAdd,
+                button(text("+").size(20))
+                    .padding([2, 6])
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleExplorerCreationMenu
+                    ))
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        interaction(status, workspace.explorer_creation_menu_open())
+                    )),
+            ),
             harness_target::target(
                 HarnessTarget::ExplorerSearch,
                 button(text("⌕").size(20))
@@ -568,6 +664,7 @@ fn explorer_rail<'a>(
             )
         ]
         .spacing(4),
+        creation_menu,
         scrollable(rows).height(Length::Fill),
     ]
     .spacing(8)
@@ -789,6 +886,36 @@ fn context_menu_button(
         .style(move |_, status| {
             components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
         })
+}
+
+fn explorer_creation_action<'a>(
+    label: &'static str,
+    message: ProjectSurfaceMessage,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    mouse_area(
+        container(text(label).size(12))
+            .padding([6, 8])
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+    )
+    .on_press(message)
+    .interaction(iced::mouse::Interaction::Pointer)
+    .into()
+}
+
+fn comment_action<'a>(
+    label: &'static str,
+    message: ProjectSurfaceMessage,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    mouse_area(
+        container(text(label).size(12))
+            .padding([6, 8])
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+    )
+    .on_press(message)
+    .interaction(iced::mouse::Interaction::Pointer)
+    .into()
 }
 
 fn hierarchy_row_is_visible<'a>(
@@ -2344,67 +2471,98 @@ fn settings_center<'a>(
                     }),
                 )
             });
-    let metadata =
-        settings.metadata_fields().into_iter().enumerate().fold(
-            column![button(text("Create metadata field")).on_press(
-                ProjectSurfaceMessage::Project(ProjectMessage::CreateMetadataField)
-            )]
-            .spacing(6),
-            |column, (index, field)| {
-                let id = field.id.to_owned();
-                let move_up_id = id.clone();
-                let move_down_id = id.clone();
-                let delete_id = id.clone();
-                let column = column.push(
+    let metadata = settings.metadata_fields().into_iter().enumerate().fold(
+        column![
+            row![
+                text("Fields").size(16),
+                Space::new().width(Length::Fill),
+                button(text("+ New field").size(12))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::CreateMetadataField
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Primary,
+                            interaction(status, false),
+                        )
+                    }),
+            ]
+            .align_y(iced::alignment::Vertical::Center),
+            text("Choose a field to edit its type, default, and card visibility.").size(11),
+        ]
+        .spacing(8),
+        |column, (index, field)| {
+            let id = field.id.to_owned();
+            let move_up_id = id.clone();
+            let move_down_id = id.clone();
+            let delete_id = id.clone();
+            let selected = matches!(
+                settings.selected_detail(),
+                Some(SettingsDetail::MetadataField(selected_id)) if selected_id == field.id
+            );
+            let summary = format!(
+                "{} · {}{}",
+                metadata_applicability_label(field.applicability),
+                match field.text_kind {
+                    MetadataFieldTextKind::SingleLine => "Single line",
+                    MetadataFieldTextKind::Multiline => "Multiline",
+                },
+                if field.visible_on_cards {
+                    " · Cards"
+                } else {
+                    ""
+                },
+            );
+            column.push(
+                row![
                     button(
-                        row![
-                            column![
-                                text(field.label).size(13),
-                                text(field.description.unwrap_or("No description")).size(11)
-                            ]
-                            .spacing(2),
-                            Space::new().width(Length::Fill),
-                            text(metadata_applicability_label(field.applicability)).size(11),
+                        column![
+                            text(field.label).size(13),
+                            text(summary).size(11),
+                            text(field.description.unwrap_or("No description")).size(11),
                         ]
-                        .spacing(14),
+                        .spacing(3),
                     )
                     .width(Length::Fill)
                     .padding(10)
                     .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::SelectMetadataField(id),
+                        ProjectMessage::SelectMetadataField(id)
                     ))
                     .style(move |_, status| {
                         components::button_style(
                             theme,
                             ButtonKind::Secondary,
-                            interaction(status, false),
+                            interaction(status, selected),
                         )
                     }),
-                );
-                column.push(
-                    row![
-                        text("⠿").size(14),
-                        button(text("↑")).on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::ReorderMetadataField {
+                    column![
+                        button(text("↑").size(11)).on_press_maybe((index > 0).then_some(
+                            ProjectSurfaceMessage::Project(ProjectMessage::ReorderMetadataField {
                                 field_id: move_up_id,
                                 target_index: index.saturating_sub(1),
-                            }
+                            },)
                         )),
-                        button(text("↓")).on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::ReorderMetadataField {
-                                field_id: move_down_id,
-                                target_index: index + 1,
-                            }
-                        )),
-                        Space::new().width(Length::Fill),
-                        button(text("Trash").size(11)).on_press(ProjectSurfaceMessage::Project(
+                        button(text("↓").size(11)).on_press_maybe(
+                            (index + 1 < settings.metadata_fields().len()).then_some(
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::ReorderMetadataField {
+                                        field_id: move_down_id,
+                                        target_index: index + 1,
+                                    }
+                                ),
+                            ),
+                        ),
+                        button(text("Delete").size(11)).on_press(ProjectSurfaceMessage::Project(
                             ProjectMessage::RequestDeleteMetadataField(delete_id)
-                        )),
+                        ),),
                     ]
-                    .spacing(6),
-                )
-            },
-        );
+                    .spacing(3),
+                ]
+                .spacing(6),
+            )
+        },
+    );
     let styles = settings.styles().into_iter().fold(
         column![
             button(text("Create custom style"))
@@ -2508,6 +2666,9 @@ fn settings_center<'a>(
                 Some(SettingsDetail::MetadataField(id)) => settings
                     .metadata_field(id)
                     .map(|field| metadata_field_detail(field, theme)),
+                Some(SettingsDetail::NewMetadataField) => settings
+                    .new_metadata_field_label()
+                    .map(metadata_field_creation_detail),
                 _ => None,
             }
             .unwrap_or_else(|| {
@@ -2636,9 +2797,41 @@ fn metadata_applicability_label(value: MetadataFieldApplicability) -> &'static s
     }
 }
 
+fn metadata_field_creation_detail<'a>(label: &'a str) -> Element<'a, ProjectSurfaceMessage> {
+    let name = sensor(
+        text_input("Name this field", label)
+            .id(metadata_field_name_input_id())
+            .on_input(|value| {
+                ProjectSurfaceMessage::Project(ProjectMessage::SetNewMetadataFieldLabel(value))
+            })
+            .on_submit(ProjectSurfaceMessage::Project(
+                ProjectMessage::CommitNewMetadataField,
+            )),
+    )
+    .key("metadata-field-creation")
+    .on_show(|_| ProjectSurfaceMessage::MetadataFieldCreationShown);
+    column![
+        text("New metadata field").size(15),
+        text("Start with a clear name. You can choose where it appears and how it behaves after adding it.")
+            .size(12),
+        name,
+        row![
+            button(text("Cancel")).on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::CancelNewMetadataField
+            )),
+            button(text("Add field")).on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::CommitNewMetadataField
+            )),
+        ]
+        .spacing(8),
+    ]
+    .spacing(10)
+    .into()
+}
+
 fn metadata_field_detail<'a>(
     field: crate::MetadataFieldSummary<'a>,
-    _theme: ParchMintTheme,
+    theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let make_update = |label: String,
                        description: Option<String>,
@@ -2660,22 +2853,24 @@ fn metadata_field_detail<'a>(
     let description = field.description.unwrap_or_default().to_owned();
     let default_value = field.default_value.unwrap_or_default().to_owned();
     let label = field.label.to_owned();
-    let label_input = text_input("Label", field.label).on_input({
-        let id = id.clone();
-        let description = description.clone();
-        let default_value = default_value.clone();
-        move |value| {
-            ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
-                field_id: id.clone(),
-                label: value,
-                description: (!description.is_empty()).then_some(description.clone()),
-                applicability: field.applicability,
-                text_kind: field.text_kind,
-                default_value: (!default_value.is_empty()).then_some(default_value.clone()),
-                visible_on_cards: field.visible_on_cards,
-            })
-        }
-    });
+    let label_input = text_input("Name", field.label)
+        .id(metadata_field_name_input_id())
+        .on_input({
+            let id = id.clone();
+            let description = description.clone();
+            let default_value = default_value.clone();
+            move |value| {
+                ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
+                    field_id: id.clone(),
+                    label: value,
+                    description: (!description.is_empty()).then_some(description.clone()),
+                    applicability: field.applicability,
+                    text_kind: field.text_kind,
+                    default_value: (!default_value.is_empty()).then_some(default_value.clone()),
+                    visible_on_cards: field.visible_on_cards,
+                })
+            }
+        });
     let description_input = text_input("Description", &description).on_input({
         let id = id.clone();
         let label = label.clone();
@@ -2718,17 +2913,24 @@ fn metadata_field_detail<'a>(
         let label = label.clone();
         let description = description.clone();
         let default_value = default_value.clone();
+        let selected = field.applicability == applicability;
         row.push(
-            button(text(metadata_applicability_label(applicability))).on_press(
-                ProjectSurfaceMessage::Project(make_update(
+            button(text(metadata_applicability_label(applicability)))
+                .on_press(ProjectSurfaceMessage::Project(make_update(
                     label,
                     (!description.is_empty()).then_some(description),
                     applicability,
                     field.text_kind,
                     (!default_value.is_empty()).then_some(default_value),
                     field.visible_on_cards,
-                )),
-            ),
+                )))
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Secondary,
+                        interaction(status, selected),
+                    )
+                }),
         )
     });
     let kind = [
@@ -2740,6 +2942,7 @@ fn metadata_field_detail<'a>(
         let label = label.clone();
         let description = description.clone();
         let default_value = default_value.clone();
+        let selected = field.text_kind == text_kind;
         row.push(
             button(text(match text_kind {
                 MetadataFieldTextKind::SingleLine => "Single line",
@@ -2752,7 +2955,14 @@ fn metadata_field_detail<'a>(
                 text_kind,
                 (!default_value.is_empty()).then_some(default_value),
                 field.visible_on_cards,
-            ))),
+            )))
+            .style(move |_, status| {
+                components::button_style(
+                    theme,
+                    ButtonKind::Secondary,
+                    interaction(status, selected),
+                )
+            }),
         )
     });
     column![
@@ -3163,12 +3373,12 @@ fn inspector<'a>(
             comments = comments.push(
                 column![
                     text("No comments").size(13),
-                    text("Right-click selected text to add a comment.").size(12),
+                    text("Add a document comment below, or select text to anchor one.").size(12),
                 ]
                 .spacing(2),
             );
         }
-        for thread in threads {
+        for (thread_index, thread) in threads.into_iter().enumerate() {
             let thread_id = thread.id().to_owned();
             let state = if thread.resolved() {
                 "Resolved"
@@ -3176,14 +3386,30 @@ fn inspector<'a>(
                 "Unresolved"
             };
             let root = thread.messages().first();
+            let root_body = root.map(|message| message.body()).unwrap_or("Comment");
             let mut card = column![
-                button(text(format!(
-                    "{state}: {}",
-                    root.map(|message| message.body()).unwrap_or("Comment")
-                )))
+                button(
+                    row![
+                        text(state).size(11).font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::DEFAULT
+                        }),
+                        text(root_body).size(13),
+                    ]
+                    .spacing(8)
+                )
+                .width(Length::Fill)
+                .padding([6, 8])
                 .on_press(ProjectSurfaceMessage::EditorCenter(
                     EditorCenterMessage::Workspace(EditorMessage::SelectComment(thread_id.clone()))
                 ))
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Secondary,
+                        interaction(status, false),
+                    )
+                })
             ]
             .spacing(6);
             if let Some(root) = root {
@@ -3193,18 +3419,22 @@ fn inspector<'a>(
                     let edit_thread = thread_id.clone();
                     card = card
                         .push(
-                            text_input(
-                                "Edit comment message",
-                                editor.comment_reply_draft(&thread_id),
+                            text_editor(
+                                editor
+                                    .comment_reply_draft(&thread_id)
+                                    .expect("every rendered comment thread has a reply draft"),
                             )
-                            .on_input(move |body| {
+                            .placeholder("Edit comment message")
+                            .on_action(move |action| {
                                 ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                                    EditorMessage::SetCommentReplyDraft {
+                                    EditorMessage::EditCommentReplyDraft {
                                         thread_id: edit_thread.clone(),
-                                        body,
+                                        action,
                                     },
                                 ))
-                            }),
+                            })
+                            .height(Length::Fixed(72.0))
+                            .style(move |_, status| multiline_field_style(theme, status)),
                         )
                         .push(
                             row![
@@ -3286,18 +3516,22 @@ fn inspector<'a>(
                     let edit_thread = thread_id.clone();
                     card = card
                         .push(
-                            text_input(
-                                "Edit comment message",
-                                editor.comment_reply_draft(&thread_id),
+                            text_editor(
+                                editor
+                                    .comment_reply_draft(&thread_id)
+                                    .expect("every rendered comment thread has a reply draft"),
                             )
-                            .on_input(move |body| {
+                            .placeholder("Edit comment message")
+                            .on_action(move |action| {
                                 ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                                    EditorMessage::SetCommentReplyDraft {
+                                    EditorMessage::EditCommentReplyDraft {
                                         thread_id: edit_thread.clone(),
-                                        body,
+                                        action,
                                     },
                                 ))
-                            }),
+                            })
+                            .height(Length::Fixed(72.0))
+                            .style(move |_, status| multiline_field_style(theme, status)),
                         )
                         .push(
                             row![
@@ -3358,113 +3592,179 @@ fn inspector<'a>(
                 ..
             } = thread.anchor()
             {
-                card = card
-                    .push(
-                        text(format!(
-                            "Orphaned anchor: {context_before}[{quote}]{context_after}"
-                        ))
-                        .size(12),
+                card = card.push(
+                    container(
+                        column![
+                            text("Anchor needs attention").size(12).font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::DEFAULT
+                            }),
+                            text(format!("{context_before}[{quote}]{context_after}")).size(12),
+                            row![
+                                button(text("Reattach to selection")).on_press(
+                                    ProjectSurfaceMessage::EditorCenter(
+                                        EditorCenterMessage::Workspace(
+                                            EditorMessage::ReattachComment(thread_id.clone())
+                                        )
+                                    )
+                                ),
+                                button(text("Make document comment")).on_press(
+                                    ProjectSurfaceMessage::EditorCenter(
+                                        EditorCenterMessage::Workspace(
+                                            EditorMessage::ConvertCommentToDocument(
+                                                thread_id.clone()
+                                            )
+                                        )
+                                    )
+                                ),
+                            ]
+                            .spacing(6),
+                        ]
+                        .spacing(6),
                     )
-                    .push(button(text("Reattach to selection")).on_press(
-                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                            EditorMessage::ReattachComment(thread_id.clone()),
-                        )),
-                    ))
-                    .push(button(text("Convert to document comment")).on_press(
-                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                            EditorMessage::ConvertCommentToDocument(thread_id.clone()),
-                        )),
-                    ));
+                    .padding(8)
+                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
+                );
             }
             if editor
                 .editing_comment_message()
                 .is_none_or(|(editing_thread, _)| editing_thread != thread_id)
             {
                 let reply_id = thread_id.clone();
-                card = card.push(
-                    text_input("Reply to thread", editor.comment_reply_draft(&thread_id)).on_input(
-                        move |body| {
-                            ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                                EditorMessage::SetCommentReplyDraft {
-                                    thread_id: reply_id.clone(),
-                                    body,
-                                },
-                            ))
+                let reply_editor = text_editor(
+                    editor
+                        .comment_reply_draft(&thread_id)
+                        .expect("every rendered comment thread has a reply draft"),
+                )
+                .placeholder("Reply to thread")
+                .on_action(move |action| {
+                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        EditorMessage::EditCommentReplyDraft {
+                            thread_id: reply_id.clone(),
+                            action,
                         },
-                    ),
+                    ))
+                })
+                .height(Length::Fixed(68.0));
+                let reply_editor = if thread_index == 0 {
+                    reply_editor.id(HarnessTarget::CommentReply.id())
+                } else {
+                    reply_editor
+                };
+                card = card.push(
+                    reply_editor.style(move |_, status| multiline_field_style(theme, status)),
                 );
             }
             card = card.push(
                 row![
-                    button(text("Reply")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::SubmitCommentReply {
-                            thread_id: thread_id.clone()
-                        })
-                    )),
-                    button(text(if thread.resolved() {
-                        "Reopen"
-                    } else {
-                        "Resolve"
-                    }))
-                    .on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::ToggleCommentResolved {
-                            thread_id: thread_id.clone(),
-                            resolved: !thread.resolved()
-                        })
-                    )),
-                    button(text("Delete thread")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::RequestDeleteCommentThread(
-                            thread_id.clone()
-                        ))
-                    )),
+                    comment_action(
+                        "Reply",
+                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                            EditorMessage::SubmitCommentReply {
+                                thread_id: thread_id.clone(),
+                            },
+                        )),
+                        theme,
+                    ),
+                    comment_action(
+                        if thread.resolved() {
+                            "Reopen"
+                        } else {
+                            "Resolve"
+                        },
+                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                            EditorMessage::ToggleCommentResolved {
+                                thread_id: thread_id.clone(),
+                                resolved: !thread.resolved(),
+                            },
+                        )),
+                        theme,
+                    ),
+                    comment_action(
+                        "Delete thread",
+                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                            EditorMessage::RequestDeleteCommentThread(thread_id.clone()),
+                        )),
+                        theme,
+                    ),
                 ]
                 .spacing(6),
             );
-            comments = comments.push(container(card).padding(8));
-        }
-        // An empty inspector is a status view, not a permanently open comment
-        // composer or action tray. Comment creation remains available from the
-        // editor selection context; once a thread or draft exists, retain the
-        // normal editor controls here.
-        if has_threads || !editor.comment_draft().is_empty() || editor.comment_feedback().is_some()
-        {
+            if editor.pending_delete_comment() == Some(thread_id.as_str()) {
+                card = card.push(
+                    container(
+                        row![
+                            text("Delete this thread?").size(12),
+                            comment_action(
+                                "Confirm delete",
+                                ProjectSurfaceMessage::EditorCenter(
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::ConfirmDeleteCommentThread,
+                                    ),
+                                ),
+                                theme,
+                            ),
+                            comment_action(
+                                "Cancel",
+                                ProjectSurfaceMessage::EditorCenter(
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::CancelDeleteCommentThread,
+                                    ),
+                                ),
+                                theme,
+                            ),
+                        ]
+                        .spacing(6)
+                        .align_y(iced::alignment::Vertical::Center),
+                    )
+                    .padding(8)
+                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
+                );
+            }
             comments = comments.push(
-                text_input("Write a comment", editor.comment_draft()).on_input(|body| {
+                container(card)
+                    .padding(10)
+                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+            );
+        }
+        // A document-level comment is always available: authors often need to
+        // leave a note about a chapter before selecting specific prose.
+        comments = comments.push(text("New comment").size(12));
+        comments = comments.push(
+            text_editor(editor.comment_draft())
+                .id(HarnessTarget::CommentDraft.id())
+                .placeholder("Write a comment")
+                .on_action(|action| {
                     ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                        EditorMessage::SetCommentDraft(body),
+                        EditorMessage::EditCommentDraft(action),
                     ))
-                }),
-            );
-            comments = comments.push(
-                row![
-                    button(text("Add at selection")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::CreateComment {
-                            document_level: false
-                        })
+                })
+                .height(Length::Fixed(84.0))
+                .style(move |_, status| multiline_field_style(theme, status)),
+        );
+        comments = comments.push(
+            row![
+                comment_action(
+                    "Add at selection",
+                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        EditorMessage::CreateComment {
+                            document_level: false,
+                        },
                     )),
-                    button(text("Add to document")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::CreateComment {
-                            document_level: true
-                        })
+                    theme,
+                ),
+                comment_action(
+                    "Add to document",
+                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        EditorMessage::CreateComment {
+                            document_level: true,
+                        },
                     )),
-                ]
-                .spacing(6),
-            );
-        }
-        if editor.pending_delete_comment().is_some() {
-            comments = comments.push(
-                row![
-                    text("Delete this thread?").size(12),
-                    button(text("Confirm delete")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::ConfirmDeleteCommentThread)
-                    )),
-                    button(text("Cancel")).on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::CancelDeleteCommentThread)
-                    )),
-                ]
-                .spacing(6),
-            );
-        }
+                    theme,
+                ),
+            ]
+            .spacing(6),
+        );
         if let Some(feedback) = editor.comment_feedback() {
             comments = comments.push(text(feedback).size(12));
         }
@@ -4309,7 +4609,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_inspector_exposes_accessible_empty_and_creation_controls() {
+    fn comment_inspector_keeps_document_comment_creation_available_when_empty() {
         let (mut workspace, ids) = production_workspace();
         workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -4330,12 +4630,12 @@ mod tests {
         assert!(simulator.find("No comments").is_ok());
         assert!(
             simulator
-                .find("Right-click selected text to add a comment.")
+                .find("Add a document comment below, or select text to anchor one.")
                 .is_ok()
         );
-        assert!(simulator.find("Write a comment").is_err());
-        assert!(simulator.find("Add at selection").is_err());
-        assert!(simulator.find("Add to document").is_err());
+        assert!(simulator.find("New comment").is_ok());
+        assert!(simulator.find("Add at selection").is_ok());
+        assert!(simulator.find("Add to document").is_ok());
     }
 
     #[test]
@@ -4361,7 +4661,7 @@ mod tests {
             ),
         );
 
-        assert!(simulator.find("Write a comment").is_ok());
+        assert!(simulator.find("New comment").is_ok());
         assert!(simulator.find("Add at selection").is_ok());
         assert!(simulator.find("Add to document").is_ok());
     }
@@ -4589,6 +4889,41 @@ mod tests {
             ),
         );
         assert!(clipboard_surface.find("Paste").is_err());
+    }
+
+    #[test]
+    fn explorer_add_menu_publishes_contextual_creation_commands() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::ToggleExplorerCreationMenu);
+
+        let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
+            assert!(explorer.find("Add to Part One").is_ok());
+            explorer
+                .click("Document")
+                .expect("visible document creation action");
+            explorer
+                .click("Group")
+                .expect("visible group creation action");
+        });
+
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
+                parent_id,
+                kind: HierarchyItemKind::Document,
+            }) if parent_id == "part-one"
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
+                parent_id,
+                kind: HierarchyItemKind::Group,
+            }) if parent_id == "part-one"
+        )));
     }
 
     #[test]
@@ -4838,7 +5173,7 @@ mod tests {
     }
 
     #[test]
-    fn group_click_selects_and_double_click_toggles_in_explorer_and_cards() {
+    fn explorer_group_click_toggles_while_cards_keep_selection_and_double_click_toggle() {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
 
         let mut explorer = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
@@ -4856,12 +5191,12 @@ mod tests {
         let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
         assert!(explorer_messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
+            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
                 if node_id == "part-one"
         )));
         assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
         assert!(
-            explorer
+            !explorer
                 .explorer()
                 .rows()
                 .into_iter()
@@ -4882,10 +5217,7 @@ mod tests {
         );
         explorer_surface
             .click("Part One")
-            .expect("first Explorer group click");
-        explorer_surface
-            .click("Part One")
-            .expect("second Explorer group click");
+            .expect("Explorer group click");
         let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
         assert!(explorer_messages.iter().any(|message| matches!(
             message,
@@ -4894,7 +5226,7 @@ mod tests {
         )));
         assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
         assert!(
-            !explorer
+            explorer
                 .explorer()
                 .rows()
                 .into_iter()
