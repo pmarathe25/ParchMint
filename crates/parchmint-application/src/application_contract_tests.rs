@@ -1265,6 +1265,63 @@ fn durable_delete_points_reopened_tombstone_at_exact_pre_delete_checkpoint() {
 }
 
 #[test]
+fn restoring_a_reopened_tombstone_rehydrates_its_missing_document_before_publishing_tree() {
+    let deleted_node = parchmint_domain::NodeId::from_bytes(stable_id(5));
+    let original = sample_project();
+    let project = parchmint_domain::apply_project_command(
+        &original,
+        original.revision,
+        ProjectCommand::delete_node_from_checkpoint(
+            deleted_node,
+            42,
+            parchmint_domain::CheckpointId::from_bytes([9; 16]),
+        ),
+    )
+    .expect("fixture deletion is valid")
+    .project;
+    let owner = Arc::new(NativeDocumentStateOwner::new([DocumentSnapshot {
+        document_id: closed_document(),
+        body: "closed needle".into(),
+        comments: Vec::new(),
+        revision: EditorRevision::default(),
+        visibility: DocumentVisibility::Closed,
+    }]));
+    let dispatcher = NativeProjectCommandDispatcher::new(project, owner.clone());
+
+    let restored = dispatcher
+        .restore_deleted_with_documents(
+            deleted_node,
+            vec![DocumentSnapshot {
+                document_id: open_document(),
+                body: "restored body".into(),
+                comments: Vec::new(),
+                revision: EditorRevision::from(3),
+                visibility: DocumentVisibility::Closed,
+            }],
+        )
+        .expect("rehydrated tombstone restoration succeeds");
+
+    assert!(
+        restored
+            .dirty_resources
+            .contains(Resource::Document(open_document()))
+    );
+    assert_eq!(
+        owner.snapshot(open_document()).unwrap().body,
+        "restored body"
+    );
+    assert!(
+        dispatcher
+            .complete_authored_snapshot()
+            .unwrap()
+            .project
+            .nodes
+            .iter()
+            .any(|(_, node)| node.kind == parchmint_domain::NodeKind::Document(open_document()))
+    );
+}
+
+#[test]
 fn created_document_has_a_recovery_base_before_its_first_autosave() {
     let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
     let owner = Arc::new(NativeDocumentStateOwner::new(documents));

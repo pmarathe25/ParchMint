@@ -16,7 +16,7 @@ use std::{
 };
 
 pub use parchmint_domain::{
-    DocumentId, DomainError, Project, ProjectCommand, ProjectId, ProjectOperationId,
+    DocumentId, DomainError, NodeId, Project, ProjectCommand, ProjectId, ProjectOperationId,
     ProjectRevision, Resource, ResourceSet,
 };
 pub use parchmint_editor_api::{
@@ -272,6 +272,7 @@ pub trait DocumentStateOwner: Send + Sync {
         comments: Vec<CanonicalComment>,
     ) -> Result<bool, ApplicationError>;
     fn insert_document(&self, document: DocumentSnapshot) -> Result<(), ApplicationError>;
+    fn restore_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError>;
     fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError>;
     fn state_snapshot(&self, complete: bool) -> Result<DocumentStateSnapshot, ApplicationError>;
 }
@@ -942,6 +943,35 @@ impl DocumentStateOwner for NativeDocumentStateOwner {
         Ok(())
     }
 
+    fn restore_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError> {
+        let mut replacement = BTreeMap::new();
+        for document in documents {
+            let document_id = document.document_id;
+            if replacement.insert(document_id, document).is_some() {
+                return Err(ApplicationError::DuplicateDocument {
+                    document: document_id,
+                });
+            }
+        }
+        let mut state = lock(&self.state)?;
+        for (document_id, document) in replacement {
+            state.unloaded.remove(&document_id);
+            state.documents.insert(
+                document_id,
+                DocumentRecord {
+                    body: document.body,
+                    comments: document.comments,
+                    revision: document.revision,
+                    visibility: document.visibility,
+                    undo: Vec::new(),
+                    redo: Vec::new(),
+                    project_boundaries: Vec::new(),
+                },
+            );
+        }
+        Ok(())
+    }
+
     fn replace_documents(&self, documents: Vec<DocumentSnapshot>) -> Result<(), ApplicationError> {
         let mut replacement = BTreeMap::new();
         for document in documents {
@@ -1341,9 +1371,28 @@ impl NativeProjectCommandDispatcher {
         Ok(())
     }
 
+    /// Restores document state and its tombstoned hierarchy at one dispatcher
+    /// boundary. The document snapshots must come from the tombstone's
+    /// immutable pre-delete checkpoint, not from the current project files.
+    pub fn restore_deleted_with_documents(
+        &self,
+        node: NodeId,
+        documents: Vec<DocumentSnapshot>,
+    ) -> Result<ProjectCommandResult, ApplicationError> {
+        self.execute_now_with_restored_documents(ProjectCommand::restore_deleted(node), documents)
+    }
+
     fn execute_now(
         &self,
         command: ProjectCommand,
+    ) -> Result<ProjectCommandResult, ApplicationError> {
+        self.execute_now_with_restored_documents(command, Vec::new())
+    }
+
+    fn execute_now_with_restored_documents(
+        &self,
+        command: ProjectCommand,
+        restored_documents: Vec<DocumentSnapshot>,
     ) -> Result<ProjectCommandResult, ApplicationError> {
         let mut state = lock(&self.state)?;
         let before = state.project.revision;
@@ -1372,8 +1421,16 @@ impl NativeProjectCommandDispatcher {
                 visibility: DocumentVisibility::Open,
             })?;
         }
+        if !restored_documents.is_empty() {
+            self.documents
+                .restore_documents(restored_documents.clone())?;
+        }
+        let mut changed_resources = applied.changed_resources.clone();
+        for document in restored_documents {
+            changed_resources.insert(Resource::Document(document.document_id));
+        }
         let operation_id = state.operation_id();
-        let mutation = state.mark_dirty(&applied.changed_resources);
+        let mutation = state.mark_dirty(&changed_resources);
         let checkpoint_group = state.stage_checkpoint(mutation);
         let label = command_label(&forward).to_owned();
         let inverse = applied.inverse.clone();
@@ -1387,7 +1444,7 @@ impl NativeProjectCommandDispatcher {
                 before,
                 after: applied.project.revision,
             },
-            affected: applied.changed_resources.clone(),
+            affected: changed_resources.clone(),
             byte_cost,
             checkpoint_group,
         };
@@ -1397,7 +1454,7 @@ impl NativeProjectCommandDispatcher {
         Ok(ProjectCommandResult {
             operation_id,
             revision: state.project.revision,
-            dirty_resources: applied.changed_resources,
+            dirty_resources: changed_resources,
             events: vec![ProjectEvent::Executed],
             checkpoint_group: Some(checkpoint_group),
         })

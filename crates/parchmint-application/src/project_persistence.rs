@@ -587,7 +587,12 @@ impl ProjectPersistenceCoordinator {
         // already-clean project. The filesystem writer requires at least one
         // atomic operation, so rewrite the unchanged manifest to establish
         // the otherwise no-op checkpoint as a durable boundary.
-        if patch.resources.is_empty() && patch.deletions.is_empty() {
+        if matches!(
+            kind,
+            PersistenceSaveKind::Structural | PersistenceSaveKind::NamedSnapshot
+        ) && patch.resources.is_empty()
+            && patch.deletions.is_empty()
+        {
             let manifest_path = CanonicalRelativePath::parse("project.toml")?;
             let metadata = patch
                 .complete_resources
@@ -621,7 +626,6 @@ impl ProjectPersistenceCoordinator {
         let projection = dirty_documents
             .values()
             .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
-            .or_else(|| dirty_documents.values().next())
             .cloned()
             .or_else(|| {
                 loaded_documents
@@ -629,11 +633,16 @@ impl ProjectPersistenceCoordinator {
                     .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
                     .cloned()
             })
-            .or_else(|| loaded_documents.values().next().cloned())
             // A project can become document-empty after deletion. The editor
             // save bridge still needs a projection token, so use a retained
-            // undo record without reintroducing it into authored snapshots.
-            .or_else(|| self.documents.snapshots().ok()?.into_iter().next())
+            // open record without reintroducing it into authored snapshots.
+            .or_else(|| {
+                self.documents
+                    .snapshots()
+                    .ok()?
+                    .into_iter()
+                    .find(|snapshot| capture.open_documents.contains_key(&snapshot.document_id))
+            })
             .ok_or_else(|| {
                 ProjectPersistenceError::Application(
                     "project has no document available for a revisioned save".into(),
@@ -802,6 +811,79 @@ impl ProjectPersistenceCoordinator {
             restoring_checkpoint,
             revision,
         })
+    }
+
+    /// Restores one tombstoned subtree without rewinding unrelated project
+    /// work. Its document bodies are rehydrated from the exact immutable
+    /// pre-delete checkpoint before the tree becomes live again.
+    pub fn restore_deleted_subtree(
+        &self,
+        node: NodeId,
+        plan: RestorePlan,
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let current = self.commands.project()?;
+        let tombstone = current.deleted.get(&node).ok_or_else(|| {
+            ProjectPersistenceError::Application("deleted item is no longer available".into())
+        })?;
+        let checkpoint = tombstone.restoring_checkpoint.ok_or_else(|| {
+            ProjectPersistenceError::History(
+                "deleted item has no recoverable pre-delete checkpoint".into(),
+            )
+        })?;
+        if plan.source() != checkpoint {
+            return Err(ProjectPersistenceError::History(
+                "History returned a checkpoint that does not match the deleted item".into(),
+            ));
+        }
+
+        let historical_resources = validated_restore_resources(&plan)?;
+        let (_, _, historical_frontier, historical_bodies, historical_comments) =
+            decode_restored_project(current.id, &historical_resources)?;
+        let restored = tombstone
+            .subtree
+            .iter()
+            .filter_map(|snapshot| match snapshot.node.kind {
+                NodeKind::Document(document) => Some(document),
+                NodeKind::Root(_) | NodeKind::Group => None,
+            })
+            .map(|document| {
+                let body = historical_bodies.get(&document).ok_or_else(|| {
+                    ProjectPersistenceError::History(format!(
+                        "pre-delete checkpoint does not contain restored document {document:?}"
+                    ))
+                })?;
+                let historical_revision = historical_frontier
+                    .document_revisions
+                    .get(&document)
+                    .copied()
+                    .unwrap_or_default();
+                let current_revision = self
+                    .documents
+                    .snapshot(document)
+                    .map(|snapshot| snapshot.revision.value())
+                    .unwrap_or_default();
+                Ok(crate::DocumentSnapshot {
+                    document_id: document,
+                    body: body.clone(),
+                    comments: historical_comments
+                        .get(&document)
+                        .cloned()
+                        .unwrap_or_default(),
+                    revision: EditorRevision::from(
+                        historical_revision.max(current_revision).saturating_add(1),
+                    ),
+                    visibility: crate::DocumentVisibility::Closed,
+                })
+            })
+            .collect::<Result<Vec<_>, ProjectPersistenceError>>()?;
+        self.commands
+            .restore_deleted_with_documents(node, restored)?;
+        let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        self.await_save(handle)
     }
 
     /// Applies preflighted domain `MoveNode` commands and durably commits the

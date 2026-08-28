@@ -332,6 +332,11 @@ pub trait ProjectWorkflowPort: Send + Sync {
         request: DeleteSubtreesWorkflow,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
 
+    fn restore_deleted_subtree(
+        &self,
+        node: parchmint_domain::NodeId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
     fn move_nodes(
         &self,
         request: MoveNodesWorkflow,

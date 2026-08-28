@@ -454,6 +454,32 @@ impl ProjectWorkflowPort for ProductionProjectWorkflows {
         })
     }
 
+    fn restore_deleted_subtree(
+        &self,
+        node: parchmint_domain::NodeId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let snapshot = self.query.snapshot()?;
+        let checkpoint = snapshot
+            .project
+            .deleted
+            .get(&node)
+            .and_then(|tombstone| tombstone.restoring_checkpoint)
+            .ok_or_else(|| ProjectQueryError::new("deleted item is no longer recoverable"))?;
+        let plan = self
+            .history
+            .restore(checkpoint)
+            .map_err(|error| ProjectQueryError::new(error.to_string()))?;
+        let restored = self
+            .persistence
+            .restore_deleted_subtree(node, plan)
+            .map_err(map_project_workflow_error)?;
+        self.refresh_search();
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: restored.checkpoint,
+        })
+    }
+
     fn move_nodes(
         &self,
         request: MoveNodesWorkflow,

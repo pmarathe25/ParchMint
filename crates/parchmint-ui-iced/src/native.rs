@@ -3563,6 +3563,9 @@ impl NativeDesktop {
                         workspace.update(ProjectMessage::DismissModal);
                     }
                     state.shell.dismiss_dialog();
+                } else if state.spelling_menu.is_some() {
+                    state.pending_spelling_menu = None;
+                    state.spelling_menu = None;
                 } else if let Some(workspace) = state.workspace.as_mut() {
                     workspace.update(ProjectMessage::CancelCut);
                 }

@@ -275,8 +275,10 @@ impl NativeProjectEffectExecutor {
             ProjectEffect::RestoreDeletedSubtree { node_id, location } => {
                 let node = resolvers.deleted_node(&node_id)?;
                 validate_restore_location(&current, &resolvers, node, &location)?;
-                self.execute_commands([ProjectCommand::restore_deleted(node)])
-                    .await
+                let snapshot = self.ports.restore_deleted_subtree(node).await?;
+                Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                    snapshot,
+                )))
             }
             ProjectEffect::ApplyAppearanceToAllWindows(mode) => {
                 let theme = self.ports.set_appearance(mode).await?;
@@ -1019,6 +1021,17 @@ trait RuntimeProjectPorts: Send + Sync {
             })
         })
     }
+    fn restore_deleted_subtree(
+        &self,
+        _node: NodeId,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::restore_deleted_subtree",
+                message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
     fn duplicate_subtrees(
         &self,
         _request: DuplicateSubtreesWorkflow,
@@ -1374,6 +1387,30 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::delete_subtrees",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn restore_deleted_subtree(
+        &self,
+        node: NodeId,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .workflows(|workflows| workflows.restore_deleted_subtree(node))
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .map(|result| result.snapshot)
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::restore_deleted_subtree",
                     message: error.to_string(),
                 })
         })
