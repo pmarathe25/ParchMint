@@ -58,6 +58,7 @@ enum HarnessAction {
     HasWindow(HarnessWindow),
     ClickText(HarnessWindow, String),
     ClickTarget(HarnessWindow, HarnessTarget),
+    CloseEditorTab(HarnessWindow, EditorPane, String),
     RightClickText(HarnessWindow, String),
     RightClickTarget(HarnessWindow, HarnessTarget),
     RightClickTargetAt(HarnessWindow, HarnessTarget, (f32, f32)),
@@ -80,6 +81,8 @@ enum HarnessAction {
     SelectEditorText(HarnessWindow, EditorPane, String),
     HierarchyNode(String),
     ClickHierarchyNode(HarnessWindow, HarnessNode),
+    RightClickHierarchyNode(HarnessWindow, HarnessNode),
+    HierarchyNodeIsVisible(HarnessWindow, HarnessNode),
     ClickHistoryCheckpoint(HarnessWindow, usize),
     DragHierarchyNode(
         HarnessWindow,
@@ -97,6 +100,7 @@ enum HarnessAction {
     ActiveEditorTabTitle,
     ActiveEditorDocumentId(EditorPane),
     ReplacementStatus,
+    GlobalSearchStatus,
     HierarchyTitles,
     TabTitles,
     CommentFeedback,
@@ -172,6 +176,9 @@ fn execute_action(
         }
         HarnessAction::ClickText(window, label) => harness.click_text(window, &label),
         HarnessAction::ClickTarget(window, target) => harness.click_target(window, target),
+        HarnessAction::CloseEditorTab(window, pane, document_id) => {
+            harness.close_editor_tab(window, pane, &document_id)
+        }
         HarnessAction::RightClickText(window, label) => harness.right_click_text(window, &label),
         HarnessAction::RightClickTarget(window, target) => {
             harness.right_click_target(window, target)
@@ -234,6 +241,15 @@ fn execute_action(
         HarnessAction::ClickHierarchyNode(window, node) => {
             harness.click_hierarchy_node(window, &node)
         }
+        HarnessAction::RightClickHierarchyNode(window, node) => {
+            harness.right_click_hierarchy_node(window, &node)
+        }
+        HarnessAction::HierarchyNodeIsVisible(window, node) => {
+            return harness
+                .hierarchy_node_is_visible(window, &node)
+                .map(HarnessValue::Bool)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::ClickHistoryCheckpoint(window, position) => {
             harness.click_history_checkpoint(window, position)
         }
@@ -277,6 +293,12 @@ fn execute_action(
         HarnessAction::ReplacementStatus => {
             return harness
                 .replacement_status()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::GlobalSearchStatus => {
+            return harness
+                .global_search_status()
                 .map(HarnessValue::Text)
                 .map_err(|error| error.to_string());
         }
@@ -411,6 +433,21 @@ impl DesktopInteractionHarness {
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickTarget(window, target))?
             .into_unit()
+    }
+
+    /// Closes a particular author-visible tab by its stable document ID.
+    pub fn close_editor_tab(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: impl Into<String>,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::CloseEditorTab(
+            window,
+            pane,
+            document_id.into(),
+        ))?
+        .into_unit()
     }
 
     pub fn right_click_text(
@@ -658,6 +695,26 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    /// Opens the context menu for one resolved Explorer row.
+    pub fn right_click_hierarchy_node(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::RightClickHierarchyNode(window, node))?
+            .into_unit()
+    }
+
+    /// Returns whether one resolved Explorer row is rendered at the moment.
+    pub fn hierarchy_node_is_visible(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::HierarchyNodeIsVisible(window, node))?
+            .into_bool()
+    }
+
     /// Selects one loaded History row without relying on its repeated label.
     pub fn click_history_checkpoint(
         &self,
@@ -740,6 +797,11 @@ impl DesktopInteractionHarness {
     /// Returns the live state of the project-wide replacement preview.
     pub fn replacement_status(&self) -> Result<String, InteractionHarnessError> {
         self.request(HarnessAction::ReplacementStatus)?.into_text()
+    }
+
+    /// Returns the live project-wide search state for workflow diagnostics.
+    pub fn global_search_status(&self) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::GlobalSearchStatus)?.into_text()
     }
 
     pub fn hierarchy_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {

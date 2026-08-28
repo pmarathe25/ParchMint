@@ -4650,6 +4650,7 @@ impl ProjectWorkspace {
             }
             ProjectMessage::ShowGlobalSearch => {
                 self.sidebar = SidebarSurface::GlobalSearch;
+                self.editor.update(EditorMessage::CloseLocalFind);
                 Vec::new()
             }
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
@@ -7652,6 +7653,19 @@ mod tests {
                 .any(|item| item.node_id == "part-one" && item.selected)
         );
         assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
+    }
+
+    #[test]
+    fn opening_project_search_closes_the_focused_document_find_bar() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let view = workspace.editor().pane(EditorPane::Primary).view();
+        workspace.editor_mut().update(EditorMessage::OpenLocalFind);
+        assert!(workspace.editor().local_search(view).is_open());
+
+        workspace.update(ProjectMessage::ShowGlobalSearch);
+
+        assert_eq!(workspace.sidebar_surface(), SidebarSurface::GlobalSearch);
+        assert!(!workspace.editor().local_search(view).is_open());
     }
 
     #[test]

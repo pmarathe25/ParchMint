@@ -1108,11 +1108,10 @@ fn global_search_rail<'a>(
         controls,
         query,
         row![replace, replace_action].spacing(8),
-        text(if result_count == 1 {
-            "1 match in 1 document".to_owned()
-        } else {
-            format!("{result_count} matches in {document_count} documents")
-        })
+        text(global_search_result_count_label(
+            result_count,
+            document_count
+        ))
         .size(12),
         scrollable(results)
             .on_scroll(|viewport| ProjectSurfaceMessage::Project(
@@ -1135,6 +1134,18 @@ fn global_replacement_input_id() -> iced::widget::Id {
 
 fn search_match_count_label(count: usize) -> String {
     format!("{count} {}", if count == 1 { "match" } else { "matches" })
+}
+
+fn global_search_result_count_label(result_count: usize, document_count: usize) -> String {
+    format!(
+        "{} in {document_count} {}",
+        search_match_count_label(result_count),
+        if document_count == 1 {
+            "document"
+        } else {
+            "documents"
+        }
+    )
 }
 
 fn center_view<'a>(
@@ -4571,6 +4582,22 @@ mod tests {
         assert_eq!(search_match_count_label(1), "1 match");
         assert_eq!(search_match_count_label(2), "2 matches");
         assert_eq!(search_match_count_label(4), "4 matches");
+    }
+
+    #[test]
+    fn global_search_summary_uses_singular_document_label_for_one_document() {
+        assert_eq!(
+            global_search_result_count_label(1, 1),
+            "1 match in 1 document"
+        );
+        assert_eq!(
+            global_search_result_count_label(2, 1),
+            "2 matches in 1 document"
+        );
+        assert_eq!(
+            global_search_result_count_label(2, 2),
+            "2 matches in 2 documents"
+        );
     }
 
     #[test]

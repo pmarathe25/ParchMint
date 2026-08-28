@@ -1082,6 +1082,28 @@ fn production_snapshot_hydrates_ordered_hierarchy_metadata_deleted_items_and_edi
 }
 
 #[test]
+fn snapshot_refresh_does_not_reopen_a_tab_the_author_closed() {
+    let fixture = production_snapshot();
+    let research_document = id_string(fixture.research_document.as_bytes());
+    let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
+
+    workspace.editor_mut().update(EditorMessage::CloseTab {
+        pane: EditorPane::Primary,
+        document_id: research_document.clone(),
+    });
+    workspace.reconcile_snapshot(&fixture.snapshot);
+
+    assert!(
+        workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .tabs()
+            .iter()
+            .all(|tab| tab.id() != research_document)
+    );
+}
+
+#[test]
 fn production_snapshot_stays_loading_until_startup_recovery_reports_no_records() {
     let fixture = production_snapshot();
     let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);

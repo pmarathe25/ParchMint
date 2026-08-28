@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::text_editor;
-use parchmint_application::DocumentVisibility;
 use parchmint_domain::{NodeKind, ProjectSection};
 use parchmint_editor_api::{CanonicalComment, CanonicalCommentAnchor, ViewId};
 use parchmint_preferences::ResolvedAppearance;
@@ -1493,14 +1492,16 @@ impl EditorWorkspace {
         let primary_view = production_view_id(snapshot, EditorPane::Primary);
         let companion_view = production_view_id(snapshot, EditorPane::Companion);
         let primary_tabs = hydrated
-            .ordered
-            .iter()
-            .filter(|document| {
-                hydrated.visibility.get(&document.id) == Some(&DocumentVisibility::Open)
-                    || hydrated.initial_document.as_deref() == Some(document.id.as_str())
+            .initial_document
+            .as_deref()
+            .and_then(|initial| {
+                hydrated
+                    .ordered
+                    .iter()
+                    .find(|document| document.id == initial)
             })
-            .map(|document| TabSpec::new(document.id.clone(), document.title.clone()))
-            .collect::<Vec<_>>();
+            .map(|document| vec![TabSpec::new(document.id.clone(), document.title.clone())])
+            .unwrap_or_default();
         let primary = if primary_tabs.is_empty() {
             EditorPaneState::empty(EditorPane::Primary, primary_view)
         } else {
@@ -1602,20 +1603,6 @@ impl EditorWorkspace {
                 .any(|tab| tab.id() == drag.document_id)
         });
 
-        for document in &hydrated.ordered {
-            if hydrated.visibility.get(&document.id) == Some(&DocumentVisibility::Open)
-                && !self.primary.tabs.iter().any(|tab| tab.id == document.id)
-                && !self.companion.tabs.iter().any(|tab| tab.id == document.id)
-            {
-                self.primary
-                    .tabs
-                    .push(TabSpec::new(document.id.clone(), document.title.clone()));
-                if self.primary.active_tab.is_none() {
-                    self.primary.active_tab = Some(self.primary.tabs.len() - 1);
-                    self.primary.mount_generation = self.primary.mount_generation.saturating_add(1);
-                }
-            }
-        }
         if self.primary.tabs.is_empty()
             && self.companion.tabs.is_empty()
             && let Some(initial) = hydrated.initial_document.as_deref()
@@ -2831,7 +2818,6 @@ struct HydratedDocument {
 struct HydratedDocuments {
     ordered: Vec<HydratedDocument>,
     initial_document: Option<String>,
-    visibility: BTreeMap<String, DocumentVisibility>,
     word_counts: BTreeMap<String, usize>,
     revisions: BTreeMap<String, u64>,
     manuscript_total: usize,
@@ -2885,10 +2871,6 @@ impl HydratedDocuments {
             .first()
             .or_else(|| research_documents.first())
             .cloned();
-        let visibility = summaries
-            .iter()
-            .map(|(id, document)| (id.clone(), document.visibility))
-            .collect();
         let word_counts = summaries
             .iter()
             .filter_map(|(id, document)| match document.word_count {
@@ -2913,7 +2895,6 @@ impl HydratedDocuments {
         Self {
             ordered,
             initial_document,
-            visibility,
             word_counts,
             revisions,
             manuscript_total,

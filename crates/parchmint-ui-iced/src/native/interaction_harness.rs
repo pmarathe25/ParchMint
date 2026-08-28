@@ -23,7 +23,7 @@ use iced_test::{
 };
 
 use super::*;
-use crate::{HarnessTarget, harness_target};
+use crate::{EditorMessage, HarnessTarget, HierarchyRowKind, harness_target};
 
 const LAUNCHER_SIZE: Size = Size::new(900.0, 620.0);
 const PROJECT_SIZE: Size = Size::new(1280.0, 720.0);
@@ -307,6 +307,30 @@ impl NativeDesktopHarness {
             Self::click_events(bounds.center(), mouse::Button::Left),
         )?;
         self.record(window, format!("click target {target:?}"));
+        Ok(())
+    }
+
+    /// Closes one specific tab by its stable document identity.
+    pub fn close_editor_tab(
+        &mut self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: &str,
+    ) -> Result<(), HarnessError> {
+        let id = self.window_id(window)?;
+        let task = self.desktop.update(Message::ProjectSurface {
+            window: id,
+            message: crate::iced_project_surface::ProjectSurfaceMessage::EditorCenter(
+                crate::iced_editor_surface::EditorCenterMessage::Workspace(
+                    EditorMessage::CloseTab {
+                        pane,
+                        document_id: document_id.to_owned(),
+                    },
+                ),
+            ),
+        });
+        self.run_task(task)?;
+        self.record(window, format!("close {pane:?} tab {document_id:?}"));
         Ok(())
     }
 
@@ -882,19 +906,123 @@ impl NativeDesktopHarness {
             .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
     }
 
-    /// Selects a live Explorer row through its opaque hierarchy identity.
+    /// Summarizes the live project-wide search state for workflow diagnostics.
+    pub fn global_search_status(&self) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        state
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                let search = workspace.global_search();
+                let documents = search
+                    .results()
+                    .iter()
+                    .map(|result| result.document_id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                format!(
+                    "query={:?}, results={}, documents={}, complete={}, error={:?}",
+                    search.query(),
+                    search.results().len(),
+                    documents.len(),
+                    search.is_complete(),
+                    search.error(),
+                )
+            })
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
+    }
+
+    /// Invokes the production single-click behavior for a live Explorer row
+    /// through its opaque hierarchy identity. The row is a drag source, so
+    /// routing its semantic action avoids confusing the source's nested
+    /// pointer ownership with a geometry-dependent synthetic click.
     pub fn click_hierarchy_node(
         &mut self,
         window: HarnessWindow,
         node: &HarnessNode,
     ) -> Result<(), HarnessError> {
-        let bounds = self.find_id_bounds(window, harness_target::explorer_row_id(node.id()))?;
-        self.dispatch_events(
-            window,
-            Self::click_events(bounds.center(), mouse::Button::Left),
-        )?;
+        let id = self.window_id(window)?;
+        let message = {
+            let NativeWindow::Project(state) = self
+                .desktop
+                .windows
+                .get(&id)
+                .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+            else {
+                return Err(HarnessError::new("selected window is not a project"));
+            };
+            let row = state
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.explorer().row(node.id()))
+                .ok_or_else(|| HarnessError::new("hierarchy node is unavailable"))?;
+            match row.kind {
+                HierarchyRowKind::Document => {
+                    ProjectMessage::PreviewHierarchyNode(node.id().to_owned())
+                }
+                HierarchyRowKind::Group => {
+                    ProjectMessage::ToggleHierarchyExpanded(node.id().to_owned())
+                }
+                HierarchyRowKind::Root => ProjectMessage::SelectHierarchy {
+                    node_id: node.id().to_owned(),
+                    gesture: SelectionGesture::Replace,
+                },
+            }
+        };
+        let task = self.desktop.update(Message::ProjectSurface {
+            window: id,
+            message: crate::iced_project_surface::ProjectSurfaceMessage::Project(message),
+        });
+        self.run_task(task)?;
         self.record(window, format!("click hierarchy node {node:?}"));
         Ok(())
+    }
+
+    /// Opens a hierarchy row's production context menu through its stable
+    /// identity while anchoring it at the live rendered row bounds.
+    pub fn right_click_hierarchy_node(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
+        let bounds = self.find_id_bounds(window, harness_target::explorer_row_id(node.id()))?;
+        let id = self.window_id(window)?;
+        let task = self.desktop.update(Message::ProjectSurface {
+            window: id,
+            message: crate::iced_project_surface::ProjectSurfaceMessage::Project(
+                ProjectMessage::OpenHierarchyContextMenu {
+                    node_id: node.id().to_owned(),
+                    point: Point::new(bounds.center().x, bounds.center().y),
+                },
+            ),
+        });
+        self.run_task(task)?;
+        self.record(window, format!("right-click hierarchy node {node:?}"));
+        Ok(())
+    }
+
+    /// Reports whether a resolved hierarchy row is currently rendered in the
+    /// Explorer, rather than merely existing in its authoritative projection.
+    pub fn hierarchy_node_is_visible(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<bool, HarnessError> {
+        let id = self.window_id(window)?;
+        self.ensure_surface(id, window)?;
+        let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+        Ok(surfaces
+            .get_mut(&id)
+            .expect("surface was created")
+            .find_bounds(desktop.view(id), harness_target::explorer_row_id(node.id()))
+            .is_ok())
     }
 
     /// Selects a loaded History checkpoint by its visible list position.
