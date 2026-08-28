@@ -149,6 +149,14 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
     assert_eq!(page.checkpoints[1].sequence, 1);
     let preview = store.preview(save).expect("checkpoint should preview");
     assert_eq!(preview.resources, version.hashes());
+    let paths = store
+        .preview_resource_paths(save)
+        .expect("checkpoint paths should preview without materializing every resource");
+    assert_eq!(paths.checkpoint.id, save);
+    assert_eq!(
+        paths.resource_paths,
+        version.hashes().into_keys().collect::<Vec<_>>()
+    );
     let restore = store.restore(save).expect("checkpoint should restore");
     let restore_paths: Vec<_> = restore
         .writes()
@@ -163,6 +171,45 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
             && !path.contains("appearance")
             && !path.contains("global-dictionary")
     }));
+}
+
+#[test]
+fn unchanged_ordinary_saves_reuse_the_current_checkpoint() {
+    let project = LockedProject::new("unchanged-save");
+    let version = ProjectVersion::named("Stable draft");
+    project.write(&version);
+    let store = project.initialize();
+
+    let initial = checkpoint(&store, 1, &version, CheckpointCategory::ExplicitSave)
+        .expect("initial checkpoint should commit");
+    let unchanged_autosave = checkpoint(&store, 2, &version, CheckpointCategory::Autosave)
+        .expect("unchanged autosave should reuse the current checkpoint");
+    let unchanged_structural =
+        checkpoint(&store, 3, &version, CheckpointCategory::StructuralChange)
+            .expect("unchanged structural save should reuse the current checkpoint");
+
+    assert_eq!(unchanged_autosave, initial);
+    assert_eq!(unchanged_structural, initial);
+    assert_eq!(
+        store
+            .list(HistoryPageQuery::newest_first(10))
+            .expect("History should list")
+            .checkpoints
+            .len(),
+        1
+    );
+
+    let milestone = named_checkpoint(&store, 4, &version, "Ready to share")
+        .expect("named milestone should remain an intentional marker");
+    assert_ne!(milestone, initial);
+    assert_eq!(
+        store
+            .list(HistoryPageQuery::newest_first(10))
+            .expect("History should list")
+            .checkpoints
+            .len(),
+        2
+    );
 }
 
 #[test]

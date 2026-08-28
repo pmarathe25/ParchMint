@@ -166,6 +166,14 @@ pub struct SnapshotPreview {
     pub resources: BTreeMap<CanonicalRelativePath, ContentHash>,
 }
 
+/// The resource paths needed to locate one checkpoint document without
+/// materializing hashes for every file in a large project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotResourcePaths {
+    pub checkpoint: CheckpointSummary,
+    pub resource_paths: Vec<CanonicalRelativePath>,
+}
+
 /// Immutable bytes for one exact canonical resource in one checkpoint.
 ///
 /// Implementations verify `content_hash` against `bytes` before returning so
@@ -394,6 +402,19 @@ pub trait HistoryStore: Send + Sync {
     fn checkpoint(&self, input: CheckpointInput) -> Result<CheckpointId, HistoryError>;
     fn list(&self, query: HistoryPageQuery) -> Result<HistoryPage, HistoryError>;
     fn preview(&self, checkpoint: CheckpointId) -> Result<SnapshotPreview, HistoryError>;
+    /// Lists checkpoint resources for a focused document comparison. Providers
+    /// may implement this without reading every checkpoint blob; the default
+    /// keeps existing History implementations compatible.
+    fn preview_resource_paths(
+        &self,
+        checkpoint: CheckpointId,
+    ) -> Result<SnapshotResourcePaths, HistoryError> {
+        let preview = self.preview(checkpoint)?;
+        Ok(SnapshotResourcePaths {
+            checkpoint: preview.checkpoint,
+            resource_paths: preview.resources.into_keys().collect(),
+        })
+    }
     fn read_resource(
         &self,
         checkpoint: CheckpointId,

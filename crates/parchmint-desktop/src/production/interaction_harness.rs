@@ -71,9 +71,6 @@ enum HarnessAction {
     PressCommandShiftKey(HarnessWindow, char),
     ReplaceText(HarnessWindow, String, String),
     ReplaceTarget(HarnessWindow, HarnessTarget, String),
-    BeginCardsEdit(HarnessWindow, HarnessNode),
-    ReplaceCardTitle(HarnessWindow, HarnessNode, String),
-    ReplaceCardSynopsis(HarnessWindow, HarnessNode, String),
     ReplaceTextAndSubmit(HarnessWindow, String, String),
     DragTextToText(HarnessWindow, String, String),
     DragTextToTextAt(HarnessWindow, String, String, HarnessDropPosition),
@@ -95,7 +92,6 @@ enum HarnessAction {
     ActiveEditorBody,
     ReplacementStatus,
     HierarchyTitles,
-    CardsCreationParent,
     CommentFeedback,
     HistoryStatus,
     Snapshot(HarnessWindow, PathBuf),
@@ -201,13 +197,6 @@ fn execute_action(
         HarnessAction::ReplaceTarget(window, target, replacement) => {
             harness.replace_target(window, target, &replacement)
         }
-        HarnessAction::BeginCardsEdit(window, node) => harness.begin_cards_edit(window, &node),
-        HarnessAction::ReplaceCardTitle(window, node, replacement) => {
-            harness.replace_card_title(window, &node, &replacement)
-        }
-        HarnessAction::ReplaceCardSynopsis(window, node, replacement) => {
-            harness.replace_card_synopsis(window, &node, &replacement)
-        }
         HarnessAction::ReplaceTextAndSubmit(window, current_value, replacement) => {
             harness.replace_text_and_submit(window, &current_value, &replacement)
         }
@@ -262,12 +251,6 @@ fn execute_action(
             return harness
                 .hierarchy_titles()
                 .map(HarnessValue::Texts)
-                .map_err(|error| error.to_string());
-        }
-        HarnessAction::CardsCreationParent => {
-            return harness
-                .cards_creation_parent()
-                .map(HarnessValue::Text)
                 .map_err(|error| error.to_string());
         }
         HarnessAction::CommentFeedback => {
@@ -593,36 +576,6 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
-    /// Replaces a title through the active Cards editor for one opaque node.
-    pub fn replace_card_title(
-        &self,
-        window: HarnessWindow,
-        node: HarnessNode,
-        replacement: impl Into<String>,
-    ) -> Result<(), InteractionHarnessError> {
-        self.request(HarnessAction::ReplaceCardTitle(
-            window,
-            node,
-            replacement.into(),
-        ))?
-        .into_unit()
-    }
-
-    /// Replaces a Synopsis through the active Cards editor for one opaque node.
-    pub fn replace_card_synopsis(
-        &self,
-        window: HarnessWindow,
-        node: HarnessNode,
-        replacement: impl Into<String>,
-    ) -> Result<(), InteractionHarnessError> {
-        self.request(HarnessAction::ReplaceCardSynopsis(
-            window,
-            node,
-            replacement.into(),
-        ))?
-        .into_unit()
-    }
-
     pub fn hierarchy_node(
         &self,
         title: impl Into<String>,
@@ -648,16 +601,6 @@ impl DesktopInteractionHarness {
         position: usize,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickHistoryCheckpoint(window, position))?
-            .into_unit()
-    }
-
-    /// Opens the direct Cards editor for one opaque hierarchy node.
-    pub fn begin_cards_edit(
-        &self,
-        window: HarnessWindow,
-        node: HarnessNode,
-    ) -> Result<(), InteractionHarnessError> {
-        self.request(HarnessAction::BeginCardsEdit(window, node))?
             .into_unit()
     }
 
@@ -707,12 +650,6 @@ impl DesktopInteractionHarness {
 
     pub fn hierarchy_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {
         self.request(HarnessAction::HierarchyTitles)?.into_texts()
-    }
-
-    /// Returns the current target parent for Cards quick-create controls.
-    pub fn cards_creation_parent(&self) -> Result<String, InteractionHarnessError> {
-        self.request(HarnessAction::CardsCreationParent)?
-            .into_text()
     }
 
     /// Returns the active comment-composer feedback, if any.

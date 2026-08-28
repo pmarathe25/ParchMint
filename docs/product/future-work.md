@@ -4,9 +4,9 @@ The product specification's [Included and Explicitly deferred sections](scope.md
 
 ## Likely directions
 
-- **Workspace and planning:** recursive pane layouts, alternative Cards arrangements, saved views, richer metadata, goals, and writing analytics.
+- **Workspace and planning:** recursive pane layouts, alternative Cards arrangements, saved views, richer metadata, goals, and writing analytics. Future workspace preferences may include a remembered two-up workbench layout that minimizes the Inspector while an author works beside a companion document; it must remain an explicit, reversible preference rather than an automatic feature reduction.
 - **Import and Research:** text/Markdown/HTML/DOCX import, managed attachments, images/PDFs, previews, and annotations.
-- **Editing and review:** footnotes, tables, embedded media, richer styling, track changes, comment search, and review exchange.
+- **Editing and review:** footnotes, tables, embedded media, richer styling, track changes, comment search, and review exchange. Reader-presentation preferences such as comfortable reading width, text scale, line spacing, and Focus mode are application/workspace presentation only: they must not alter authored prose or export output.
 - **Search and language:** scoped or regex search, saved/structural queries, additional spellcheck languages, per-document or mixed-language spellcheck, CJK IME, bidirectional and Arabic editing, grammar, and writing analysis.
 - **Export and publishing:** partial export, generated contents, additional document/ebook/print formats, profiles, and front/back matter.
 - **History and backup:** partial checkpoint restore, remote backup, integrity tools, and explicitly governed retention or compaction.

@@ -20,6 +20,7 @@ use parchmint_history_api::{
     CheckpointSummary, HistoryCursor, HistoryError, HistoryIntegrityReport, HistoryPage,
     HistoryPageQuery, HistoryReinitializeAvailability, HistoryReinitializeReport, HistoryState,
     HistoryStore, MaintenanceBudget, MaintenanceReport, RestorePlan, SnapshotName, SnapshotPreview,
+    SnapshotResourcePaths,
 };
 use parchmint_project_format::{CanonicalRelativePath, ContentHash};
 use parchmint_project_fs::{
@@ -219,6 +220,24 @@ impl HistoryStore for Git2HistoryStore {
             }
 
             let tree_id = build_tree(&repository, &self.root, &input)?;
+            // Autosave, explicit save, and structural persistence can all be
+            // requested after a prior operation has already made the exact
+            // same canonical tree durable. A new commit would be visually
+            // indistinguishable in History and turns an active session into a
+            // wall of empty versions. A named milestone remains an intentional
+            // marker, and restoration remains an auditable event, even when
+            // their tree happens to match the current one.
+            if !matches!(
+                input.category,
+                CheckpointCategory::NamedSnapshot | CheckpointCategory::Restoration
+            ) && records
+                .first()
+                .is_some_and(|current| current.tree_id == tree_id)
+            {
+                return Ok(checkpoint_id(
+                    records.first().expect("current record was observed").oid,
+                ));
+            }
             let sequence = u64::try_from(records.len())
                 .ok()
                 .and_then(|count| count.checked_add(1))
@@ -290,6 +309,20 @@ impl HistoryStore for Git2HistoryStore {
         })
     }
 
+    fn preview_resource_paths(
+        &self,
+        checkpoint: CheckpointId,
+    ) -> Result<SnapshotResourcePaths, HistoryError> {
+        self.run_serialized("preview resource paths", |root| {
+            let repository = open_repository(root)?;
+            let record = resolve_checkpoint(&repository, checkpoint)?;
+            Ok(SnapshotResourcePaths {
+                checkpoint: record.summary(),
+                resource_paths: snapshot_resource_paths(&repository, record.tree_id)?,
+            })
+        })
+    }
+
     fn read_resource(
         &self,
         checkpoint: CheckpointId,
@@ -298,27 +331,8 @@ impl HistoryStore for Git2HistoryStore {
         self.run_serialized("read resource", |root| {
             let repository = open_repository(root)?;
             let record = resolve_checkpoint(&repository, checkpoint)?;
-            let snapshot = load_snapshot(&repository, record.tree_id)?;
-            let content_hash = snapshot.resources.get(path).copied().ok_or_else(|| {
-                HistoryError::UnknownResource {
-                    checkpoint,
-                    path: path.clone(),
-                }
-            })?;
-            let bytes =
-                snapshot
-                    .bytes
-                    .get(path)
-                    .cloned()
-                    .ok_or_else(|| HistoryError::CorruptHistory {
-                        reason: format!("checkpoint resource {} has no bytes", path.as_str()),
-                    })?;
-            let actual = ContentHash::of_bytes(&bytes);
-            if actual != content_hash {
-                return Err(HistoryError::CorruptHistory {
-                    reason: format!("checkpoint resource {} has the wrong hash", path.as_str()),
-                });
-            }
+            let (content_hash, bytes) =
+                load_snapshot_resource(&repository, checkpoint, record.tree_id, path)?;
             Ok(CheckpointResource {
                 checkpoint,
                 path: path.clone(),
@@ -1237,7 +1251,67 @@ struct SnapshotData {
     bytes: BTreeMap<CanonicalRelativePath, Vec<u8>>,
 }
 
+/// Reads one resource without materializing every blob in the checkpoint.
+/// History preview already inspects the checkpoint manifest; repeating that
+/// complete traversal just to load one selected manuscript made comparisons
+/// scale with the whole project twice.
+fn load_snapshot_resource(
+    repository: &Repository,
+    checkpoint: CheckpointId,
+    tree_id: Oid,
+    path: &CanonicalRelativePath,
+) -> Result<(ContentHash, Vec<u8>), HistoryError> {
+    let tree = repository
+        .find_tree(tree_id)
+        .map_err(|error| corrupt_git("load checkpoint tree", error))?;
+    let entry =
+        tree.get_path(Path::new(path.as_str()))
+            .map_err(|_| HistoryError::UnknownResource {
+                checkpoint,
+                path: path.clone(),
+            })?;
+    if entry.kind() != Some(ObjectType::Blob) || entry.filemode() != 0o100644 {
+        return Err(corrupt("checkpoint resource is not a regular file"));
+    }
+    let blob = repository
+        .find_blob(entry.id())
+        .map_err(|error| corrupt_git("load checkpoint resource", error))?;
+    let bytes = blob.content().to_vec();
+    Ok((ContentHash::of_bytes(&bytes), bytes))
+}
+
+fn snapshot_resource_paths(
+    repository: &Repository,
+    tree_id: Oid,
+) -> Result<Vec<CanonicalRelativePath>, HistoryError> {
+    Ok(snapshot_tree_entries(repository, tree_id)?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
 fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, HistoryError> {
+    let mut resources = BTreeMap::new();
+    let mut bytes_by_path = BTreeMap::new();
+    for (path, blob_id) in snapshot_tree_entries(repository, tree_id)? {
+        let blob = repository
+            .find_blob(blob_id)
+            .map_err(|error| corrupt_git("load checkpoint resource", error))?;
+        let bytes = blob.content().to_vec();
+        let hash = ContentHash::of_bytes(&bytes);
+        resources.insert(path.clone(), hash);
+        bytes_by_path.insert(path, bytes);
+    }
+    Ok(SnapshotData {
+        resources,
+        bytes: bytes_by_path,
+    })
+}
+
+fn snapshot_tree_entries(
+    repository: &Repository,
+    tree_id: Oid,
+) -> Result<Vec<(CanonicalRelativePath, Oid)>, HistoryError> {
     let tree = repository
         .find_tree(tree_id)
         .map_err(|error| corrupt_git("load checkpoint tree", error))?;
@@ -1246,8 +1320,7 @@ fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, 
     index
         .read_tree(&tree)
         .map_err(|error| corrupt_git("read checkpoint tree", error))?;
-    let mut resources = BTreeMap::new();
-    let mut bytes_by_path = BTreeMap::new();
+    let mut entries = Vec::new();
     let mut portable_paths = BTreeSet::new();
     for entry in index.iter() {
         if entry.mode != 0o100644 {
@@ -1265,18 +1338,9 @@ fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, 
                 "checkpoint tree paths collide on a portable filesystem",
             ));
         }
-        let blob = repository
-            .find_blob(entry.id)
-            .map_err(|error| corrupt_git("load checkpoint resource", error))?;
-        let bytes = blob.content().to_vec();
-        let hash = ContentHash::of_bytes(&bytes);
-        resources.insert(path.clone(), hash);
-        bytes_by_path.insert(path, bytes);
+        entries.push((path, entry.id));
     }
-    Ok(SnapshotData {
-        resources,
-        bytes: bytes_by_path,
-    })
+    Ok(entries)
 }
 
 fn validate_resource_paths<'a>(

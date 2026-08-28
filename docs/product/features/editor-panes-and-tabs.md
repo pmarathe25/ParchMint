@@ -11,4 +11,5 @@
 - **EDIT-009:** Undo invoked from either view undoes the latest document operation in shared document history, regardless of origin.
 - **EDIT-010:** All supported documents, including documents near 250,000 words, retain the same two-view and editing capabilities.
 - **EDIT-011:** Project History opens from workspace navigation. The status bar does not contain a document-specific History action.
-- **EDIT-012:** Every populated editor pane keeps its tab strip present and distinguishes active tab, focused pane, dirty tabs, and named close controls. Tabs shrink uniformly on overflow while preserving the first title character, ellipsis, and close control; full titles remain available in the tooltip.
+- **EDIT-012:** Every populated editor pane keeps its tab strip present and distinguishes active tab, focused pane, replaceable preview tabs, dirty tabs, and named close controls. Tabs retain a readable minimum width; an open-documents menu presents overflow tabs and selecting one brings it into the visible tab window without changing tab order. Truncated full titles remain available in a tooltip.
+- **EDIT-013:** Standard Undo and Redo shortcuts apply to the focused editor document. When focus is in a project surface such as Explorer, Cards, Inspector, or Settings, the same shortcuts use the durable project undo history instead.

@@ -189,9 +189,6 @@ fn cards_project_the_same_hierarchy_selection_and_document_activation_without_im
     assert_eq!(workspace.cards().section_id(), "manuscript");
     assert!(workspace.cards().shows_hierarchy());
     assert!(workspace.cards().drag_destination().is_some());
-    assert!(workspace.cards().title_is_editable("chapter-one"));
-    assert!(workspace.cards().synopsis_is_editable("chapter-one"));
-    assert!(workspace.cards().metadata_is_read_only());
     assert!(
         !workspace
             .cards()
@@ -596,6 +593,8 @@ fn history_restore_requires_a_whole_project_confirmation_before_emitting_work() 
         workspace.modal(),
         Some(ProjectModal::HistoryRestore {
             checkpoint_id: "snapshot-draft-two".into(),
+            checkpoint_label: "Draft Two".into(),
+            affected_summary: "1 document".into(),
             scope: HistoryRestoreScope::EntireProject,
         })
     );

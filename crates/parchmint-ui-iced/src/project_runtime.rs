@@ -213,6 +213,8 @@ impl NativeProjectEffectExecutor {
                 let commands = plan_moves(&current, &resolvers, nodes, destination)?;
                 self.execute_commands(commands).await
             }
+            ProjectEffect::UndoProject => self.undo_project().await,
+            ProjectEffect::RedoProject => self.redo_project().await,
             ProjectEffect::CommitNodeTitle { node_id, title } => {
                 let node = resolvers.node(&node_id)?;
                 self.execute_commands([ProjectCommand::rename_node(node, title)])
@@ -638,6 +640,22 @@ impl NativeProjectEffectExecutor {
         )))
     }
 
+    async fn undo_project(&self) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
+        self.ports.undo().await?;
+        let snapshot = self.ports.snapshot().await?;
+        Ok(ProjectEffectCompletion::RefreshedSnapshot(Box::new(
+            snapshot,
+        )))
+    }
+
+    async fn redo_project(&self) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
+        self.ports.redo().await?;
+        let snapshot = self.ports.snapshot().await?;
+        Ok(ProjectEffectCompletion::RefreshedSnapshot(Box::new(
+            snapshot,
+        )))
+    }
+
     async fn open_documents(
         &self,
         snapshot: &ProjectSnapshot,
@@ -847,6 +865,8 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::MoveHierarchy { .. } => "move-hierarchy",
         ProjectEffect::PasteCopiedSubtrees { .. } => "paste-copied-subtrees",
         ProjectEffect::PasteCutSubtrees { .. } => "paste-cut-subtrees",
+        ProjectEffect::UndoProject => "undo-project",
+        ProjectEffect::RedoProject => "redo-project",
         ProjectEffect::CommitNodeTitle { .. } => "commit-node-title",
         ProjectEffect::CommitSynopsis { .. } => "commit-synopsis",
         ProjectEffect::CommitMetadataValue { .. } => "commit-metadata-value",
@@ -933,6 +953,22 @@ trait RuntimeProjectPorts: Send + Sync {
         document: DocumentId,
     ) -> RuntimeFuture<Result<parchmint_application::DocumentSnapshot, PortError>>;
     fn execute(&self, command: ProjectCommand) -> RuntimeFuture<Result<(), PortError>>;
+    fn undo(&self) -> RuntimeFuture<Result<(), PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectCommandDispatcher::undo",
+                message: "project undo is unavailable for this session".to_owned(),
+            })
+        })
+    }
+    fn redo(&self) -> RuntimeFuture<Result<(), PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectCommandDispatcher::redo",
+                message: "project redo is unavailable for this session".to_owned(),
+            })
+        })
+    }
     fn save(&self, kind: ProjectSaveKind) -> RuntimeFuture<Result<u64, PortError>>;
     fn set_appearance(
         &self,
@@ -1087,6 +1123,46 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                     generation: error.session().generation(),
                 })?
                 .execute(command)
+                .await
+                .map(|_| ())
+                .map_err(application_error)
+        })
+    }
+
+    fn undo(&self) -> RuntimeFuture<Result<(), PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .commands_service()
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .undo()
+                .await
+                .map(|_| ())
+                .map_err(application_error)
+        })
+    }
+
+    fn redo(&self) -> RuntimeFuture<Result<(), PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(|error| PortError::Stale {
+                session_id: error.session().session_id(),
+                generation: error.session().generation(),
+            })?;
+            access
+                .commands_service()
+                .map_err(|error| PortError::Stale {
+                    session_id: error.session().session_id(),
+                    generation: error.session().generation(),
+                })?
+                .redo()
                 .await
                 .map(|_| ())
                 .map_err(application_error)
@@ -1907,6 +1983,8 @@ mod tests {
         snapshot: Mutex<ProjectSnapshot>,
         lazy_documents: Mutex<BTreeMap<DocumentId, DocumentSnapshot>>,
         duplicate_requests: Mutex<Vec<DuplicateSubtreesWorkflow>>,
+        project_undo_calls: Mutex<u8>,
+        project_redo_calls: Mutex<u8>,
     }
 
     impl FakePorts {
@@ -1916,6 +1994,8 @@ mod tests {
                 snapshot: Mutex::new(snapshot),
                 lazy_documents: Mutex::new(BTreeMap::new()),
                 duplicate_requests: Mutex::new(Vec::new()),
+                project_undo_calls: Mutex::new(0),
+                project_redo_calls: Mutex::new(0),
             }
         }
 
@@ -1998,6 +2078,28 @@ mod tests {
                         })?;
                 snapshot.project = applied.project;
                 Ok(())
+            });
+            Box::pin(async move { result })
+        }
+
+        fn undo(&self) -> RuntimeFuture<Result<(), PortError>> {
+            let result = self.authorize().map(|_| {
+                let mut calls = self
+                    .project_undo_calls
+                    .lock()
+                    .expect("project undo calls mutex poisoned");
+                *calls = calls.saturating_add(1);
+            });
+            Box::pin(async move { result })
+        }
+
+        fn redo(&self) -> RuntimeFuture<Result<(), PortError>> {
+            let result = self.authorize().map(|_| {
+                let mut calls = self
+                    .project_redo_calls
+                    .lock()
+                    .expect("project redo calls mutex poisoned");
+                *calls = calls.saturating_add(1);
             });
             Box::pin(async move { result })
         }
@@ -2471,6 +2573,40 @@ mod tests {
             Some("Authoritative Title")
         );
         assert_eq!(snapshot.project.revision, ProjectRevision::from(1));
+    }
+
+    #[test]
+    fn project_undo_and_redo_refresh_the_authoritative_snapshot() {
+        let (snapshot, _, _, _) = fixture();
+        let (executor, ports) = executor(snapshot);
+
+        assert!(matches!(
+            block_on(
+                executor
+                    .clone()
+                    .execute_project_effect(ProjectEffect::UndoProject)
+            ),
+            Ok(ProjectEffectCompletion::RefreshedSnapshot(_))
+        ));
+        assert_eq!(
+            *ports
+                .project_undo_calls
+                .lock()
+                .expect("project undo calls mutex poisoned"),
+            1
+        );
+
+        assert!(matches!(
+            block_on(executor.execute_project_effect(ProjectEffect::RedoProject)),
+            Ok(ProjectEffectCompletion::RefreshedSnapshot(_))
+        ));
+        assert_eq!(
+            *ports
+                .project_redo_calls
+                .lock()
+                .expect("project redo calls mutex poisoned"),
+            1
+        );
     }
 
     #[test]

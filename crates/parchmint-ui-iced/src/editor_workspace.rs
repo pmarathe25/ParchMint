@@ -10,8 +10,9 @@ use crate::stable_id_string;
 
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
-const TAB_MIN_WIDTH: f32 = 64.0;
+const TAB_MIN_WIDTH: f32 = 128.0;
 const TAB_CLOSE_WIDTH: f32 = 24.0;
+const TAB_OVERFLOW_WIDTH: f32 = 52.0;
 const TAB_TITLE_INSET: f32 = 16.0;
 const APPROXIMATE_TITLE_SCALAR_WIDTH: f32 = 8.0;
 const SPELLING_MENU_WIDTH: f32 = 180.0;
@@ -37,6 +38,7 @@ pub struct TabSpec {
     id: String,
     title: String,
     dirty: bool,
+    preview: bool,
 }
 
 impl TabSpec {
@@ -45,11 +47,18 @@ impl TabSpec {
             id: id.into(),
             title: title.into(),
             dirty: false,
+            preview: false,
         }
     }
 
     pub fn dirty(mut self, dirty: bool) -> Self {
         self.dirty = dirty;
+        self
+    }
+
+    /// Marks a tab as the single replaceable preview for its pane.
+    pub fn preview(mut self) -> Self {
+        self.preview = true;
         self
     }
 
@@ -63,6 +72,10 @@ impl TabSpec {
 
     pub const fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub const fn is_preview(&self) -> bool {
+        self.preview
     }
 }
 
@@ -142,13 +155,47 @@ impl EditorPaneState {
         Some(changed)
     }
 
-    fn open(&mut self, tab: TabSpec) -> bool {
-        if let Some(changed) = self.activate(&tab.id) {
+    fn open(&mut self, mut tab: TabSpec) -> bool {
+        if let Some(index) = self.tabs.iter().position(|existing| existing.id == tab.id) {
+            let changed = self.active_tab != Some(index);
+            self.tabs[index].preview = false;
+            if changed {
+                self.active_tab = Some(index);
+                self.mount_generation = self.mount_generation.saturating_add(1);
+            }
             return changed;
         }
+        tab.preview = false;
         self.tabs.push(tab);
         self.active_tab = Some(self.tabs.len() - 1);
         self.mount_generation = self.mount_generation.saturating_add(1);
+        true
+    }
+
+    fn open_preview(&mut self, mut tab: TabSpec) -> bool {
+        if let Some(changed) = self.activate(&tab.id) {
+            return changed;
+        }
+        tab.preview = true;
+        if let Some(index) = self.tabs.iter().position(TabSpec::is_preview) {
+            self.tabs[index] = tab;
+            self.active_tab = Some(index);
+        } else {
+            self.tabs.push(tab);
+            self.active_tab = Some(self.tabs.len() - 1);
+        }
+        self.mount_generation = self.mount_generation.saturating_add(1);
+        true
+    }
+
+    fn promote(&mut self, id: &str) -> bool {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else {
+            return false;
+        };
+        if !tab.preview {
+            return false;
+        }
+        tab.preview = false;
         true
     }
 
@@ -697,6 +744,7 @@ impl SpellingMenu {
 /// One laid-out tab with separate title, tooltip, and close geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabLayout {
+    source_index: usize,
     id: String,
     full_title: String,
     display_title: String,
@@ -708,6 +756,10 @@ pub struct TabLayout {
 }
 
 impl TabLayout {
+    pub const fn source_index(&self) -> usize {
+        self.source_index
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -741,16 +793,48 @@ impl TabLayout {
     }
 }
 
+/// A hidden tab presented by the tab-strip's open-documents menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabOverflowItem {
+    id: String,
+    title: String,
+    dirty: bool,
+    preview: bool,
+}
+
+impl TabOverflowItem {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl std::fmt::Display for TabOverflowItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = match (self.preview, self.dirty) {
+            (true, true) => " · Preview · Unsaved",
+            (true, false) => " · Preview",
+            (false, true) => " · Unsaved",
+            (false, false) => "",
+        };
+        write!(formatter, "{}{state}", self.title)
+    }
+}
+
 /// Deterministic geometry for one populated pane's 32 px tab strip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TabStripLayout {
     tabs: Vec<TabLayout>,
     active_index: Option<usize>,
+    overflow_tabs: Vec<TabOverflowItem>,
 }
 
 impl TabStripLayout {
     pub fn tabs(&self) -> &[TabLayout] {
         &self.tabs
+    }
+
+    pub fn overflow_tabs(&self) -> &[TabOverflowItem] {
+        &self.overflow_tabs
     }
 
     pub fn active_tab(&self) -> &TabLayout {
@@ -1094,6 +1178,14 @@ pub enum EditorMessage {
     OpenTab {
         pane: EditorPane,
         tab: TabSpec,
+    },
+    OpenPreviewTab {
+        pane: EditorPane,
+        tab: TabSpec,
+    },
+    PromoteTab {
+        pane: EditorPane,
+        document_id: String,
     },
     ActivateTab {
         pane: EditorPane,
@@ -1911,6 +2003,7 @@ impl EditorWorkspace {
             return TabStripLayout {
                 tabs: Vec::new(),
                 active_index: None,
+                overflow_tabs: Vec::new(),
             };
         }
         let available = if width.is_finite() {
@@ -1918,11 +2011,38 @@ impl EditorWorkspace {
         } else {
             0.0
         };
-        let width_per_tab = (available / tabs.len() as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+        let active_source_index = tabs.iter().position(|tab| tab.id == active_id).unwrap_or(0);
+        let all_tabs_fit = available >= TAB_MIN_WIDTH * tabs.len() as f32;
+        let visible_count = if all_tabs_fit {
+            tabs.len()
+        } else {
+            ((available - TAB_OVERFLOW_WIDTH) / TAB_MIN_WIDTH)
+                .floor()
+                .max(1.0) as usize
+        }
+        .min(tabs.len());
+        let first_visible = if visible_count == tabs.len() {
+            0
+        } else {
+            active_source_index
+                .saturating_add(1)
+                .saturating_sub(visible_count)
+                .min(tabs.len() - visible_count)
+        };
+        let last_visible = first_visible + visible_count;
+        let tab_width_available = if visible_count == tabs.len() {
+            available
+        } else {
+            (available - TAB_OVERFLOW_WIDTH).max(TAB_MIN_WIDTH)
+        };
+        let width_per_tab =
+            (tab_width_available / visible_count as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
         let mut x = 0.0;
         let layouts = tabs
             .iter()
-            .map(|tab| {
+            .enumerate()
+            .filter(|(index, _)| (*index >= first_visible) && (*index < last_visible))
+            .map(|(source_index, tab)| {
                 let bounds = Rect::new(x, 0.0, width_per_tab, TAB_HEIGHT);
                 let close_bounds = Rect::new(
                     bounds.right() - TAB_CLOSE_WIDTH,
@@ -1933,6 +2053,7 @@ impl EditorWorkspace {
                 let (display_title, tooltip) = fit_tab_title(&tab.title, width_per_tab);
                 x += width_per_tab;
                 TabLayout {
+                    source_index,
                     id: tab.id.clone(),
                     full_title: tab.title.clone(),
                     display_title,
@@ -1944,10 +2065,22 @@ impl EditorWorkspace {
                 }
             })
             .collect::<Vec<_>>();
+        let overflow_tabs = tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (*index < first_visible) || (*index >= last_visible))
+            .map(|(_, tab)| TabOverflowItem {
+                id: tab.id.clone(),
+                title: tab.title.clone(),
+                dirty: tab.dirty,
+                preview: tab.preview,
+            })
+            .collect();
         let active_index = layouts.iter().position(|tab| tab.active).or(Some(0));
         TabStripLayout {
             tabs: layouts,
             active_index,
+            overflow_tabs,
         }
     }
 
@@ -2009,6 +2142,11 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::OpenTab { pane, tab } => self.open_tab(pane, tab),
+            EditorMessage::OpenPreviewTab { pane, tab } => self.open_preview_tab(pane, tab),
+            EditorMessage::PromoteTab { pane, document_id } => {
+                self.pane_mut(pane).promote(&document_id);
+                Vec::new()
+            }
             EditorMessage::ActivateTab { pane, document_id } => {
                 self.activate_tab(pane, &document_id)
             }
@@ -2369,6 +2507,25 @@ impl EditorWorkspace {
         let document_id = tab.id.clone();
         let view = self.pane(pane).view;
         let changed = self.pane_mut(pane).open(tab);
+        self.document_revisions
+            .entry(document_id.clone())
+            .or_default();
+        self.focus_pane(pane);
+        if !changed {
+            return Vec::new();
+        }
+        self.invalidate_view_tasks(view);
+        vec![EditorEffect::MountDocument {
+            pane,
+            view,
+            document_id,
+        }]
+    }
+
+    fn open_preview_tab(&mut self, pane: EditorPane, tab: TabSpec) -> Vec<EditorEffect> {
+        let document_id = tab.id.clone();
+        let view = self.pane(pane).view;
+        let changed = self.pane_mut(pane).open_preview(tab);
         self.document_revisions
             .entry(document_id.clone())
             .or_default();
@@ -3010,6 +3167,89 @@ mod tests {
                 ticket,
                 AsyncEditorPayload::WordCount(413),
             ))
+        );
+    }
+
+    #[test]
+    fn preview_tabs_are_replaced_until_an_explicit_open_or_edit_pins_them() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+
+        workspace.update(EditorMessage::OpenPreviewTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("chapter-three", "Chapter Three"),
+        });
+        workspace.update(EditorMessage::OpenPreviewTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("chapter-four", "Chapter Four"),
+        });
+
+        let tabs = workspace.pane(EditorPane::Primary).tabs();
+        assert_eq!(
+            tabs.iter().map(TabSpec::id).collect::<Vec<_>>(),
+            ["chapter-one", "chapter-four"]
+        );
+        assert!(tabs[1].is_preview());
+
+        workspace.update(EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("chapter-four", "Chapter Four"),
+        });
+        workspace.update(EditorMessage::OpenPreviewTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("chapter-five", "Chapter Five"),
+        });
+
+        let tabs = workspace.pane(EditorPane::Primary).tabs();
+        assert_eq!(
+            tabs.iter().map(TabSpec::id).collect::<Vec<_>>(),
+            ["chapter-one", "chapter-four", "chapter-five"]
+        );
+        assert!(!tabs[1].is_preview());
+        assert!(tabs[2].is_preview());
+
+        workspace.update(EditorMessage::PromoteTab {
+            pane: EditorPane::Primary,
+            document_id: "chapter-five".to_owned(),
+        });
+        assert!(!workspace.pane(EditorPane::Primary).tabs()[2].is_preview());
+    }
+
+    #[test]
+    fn tab_overflow_keeps_the_active_tab_visible_without_reordering_tabs() {
+        let tabs = [
+            TabSpec::new("one", "Chapter One"),
+            TabSpec::new("two", "Chapter Two"),
+            TabSpec::new("three", "Chapter Three"),
+            TabSpec::new("four", "Chapter Four"),
+            TabSpec::new("five", "Chapter Five"),
+        ];
+
+        let layout = EditorWorkspace::tab_strip_layout(320.0, &tabs, "five");
+        assert_eq!(
+            layout.tabs().iter().map(TabLayout::id).collect::<Vec<_>>(),
+            ["four", "five"]
+        );
+        assert_eq!(
+            layout
+                .overflow_tabs()
+                .iter()
+                .map(TabOverflowItem::id)
+                .collect::<Vec<_>>(),
+            ["one", "two", "three"]
+        );
+
+        let layout = EditorWorkspace::tab_strip_layout(320.0, &tabs, "one");
+        assert_eq!(
+            layout.tabs().iter().map(TabLayout::id).collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert_eq!(
+            layout
+                .overflow_tabs()
+                .iter()
+                .map(TabOverflowItem::id)
+                .collect::<Vec<_>>(),
+            ["three", "four", "five"]
         );
     }
 

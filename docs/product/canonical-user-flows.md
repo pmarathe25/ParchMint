@@ -4,7 +4,7 @@
 2. **Organize:** create nested groups/documents, multi-select, drag, duplicate, cut/paste move, cross-section move.
 3. **Compare:** open Manuscript in primary and Research or another Manuscript document in companion; focus changes Inspector and toolbar target.
 4. **Same document twice:** open one document in both panes, use independent scroll/selection, edit and undo from either view.
-5. **Plan in Cards:** edit Synopsis, inspect metadata, expand/collapse, reorder, open a document in Editor.
+5. **Plan in Cards:** inspect the read-only outline, select a card to edit its Synopsis and metadata in Inspector, expand/collapse, reorder, and open a document in Editor.
 6. **Comment:** select text, use editor context menu, reply, resolve, navigate, reopen.
 7. **Search/replace:** local search in one view; whole-project global search; preview and apply body replacement as one project operation.
 8. **Recover:** force termination after unsaved input, replay recovery, verify canonical and history consistency.

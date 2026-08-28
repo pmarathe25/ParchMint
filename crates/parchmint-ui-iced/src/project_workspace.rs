@@ -425,6 +425,20 @@ impl ExplorerState {
             .map(|node| node.id.as_str())
     }
 
+    fn reveal_document(&mut self, document_id: &str) -> bool {
+        let Some(node_id) = self.node_id_for_document(document_id).map(str::to_owned) else {
+            return false;
+        };
+        let ancestors = self
+            .ancestors(&node_id)
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        self.expanded.extend(ancestors);
+        self.select(&node_id, SelectionGesture::Replace);
+        true
+    }
+
     /// Selected nodes in deterministic visible hierarchy order.
     pub fn selected_ids(&self) -> Vec<&str> {
         self.preorder_ids()
@@ -701,6 +715,7 @@ pub struct CardItem<'a> {
     pub depth: usize,
     pub expanded: bool,
     pub visible: bool,
+    pub selected: bool,
     pub metadata: Vec<(&'a str, &'a str, Option<&'a str>)>,
 }
 
@@ -715,18 +730,6 @@ impl<'a> CardsState<'a> {
 
     pub fn drag_destination(&self) -> Option<&DragDestination> {
         self.drag_destination
-    }
-
-    pub fn title_is_editable(&self, node_id: &str) -> bool {
-        self.explorer.nodes.contains_key(node_id)
-    }
-
-    pub fn synopsis_is_editable(&self, node_id: &str) -> bool {
-        self.explorer.nodes.contains_key(node_id)
-    }
-
-    pub const fn metadata_is_read_only(&self) -> bool {
-        true
     }
 
     pub fn visible_metadata_labels(&self) -> Vec<&str> {
@@ -788,6 +791,7 @@ impl<'a> CardsState<'a> {
                     depth: self.explorer.depth(id).saturating_sub(1),
                     expanded: self.explorer.expanded.contains(id),
                     visible: self.explorer.ancestors_are_expanded(id),
+                    selected: self.explorer.selected.contains(id),
                     metadata,
                 })
             })
@@ -1834,6 +1838,8 @@ pub enum HistoryRestoreScope {
 pub enum ProjectModal {
     HistoryRestore {
         checkpoint_id: String,
+        checkpoint_label: String,
+        affected_summary: String,
         scope: HistoryRestoreScope,
     },
     DeleteMetadataField {
@@ -2015,6 +2021,7 @@ pub struct HistoryState {
     selected_checkpoint_id: Option<String>,
     preview: Option<HistoryPreviewData>,
     current_document: Option<HistoryCurrentDocument>,
+    comparison: Option<HistoryComparison>,
     named_snapshot_draft: String,
     creating_named_snapshot: bool,
     error: Option<String>,
@@ -2093,18 +2100,32 @@ impl HistoryState {
 
     /// Builds a typed comparison only when the selected checkpoint preview and
     /// current presentation facts refer to the same loaded document.
-    pub fn comparison(&self) -> Option<HistoryComparison> {
-        let preview = self.preview.as_ref()?;
-        let before = preview.document.as_ref()?;
-        let after = self.current_document.as_ref()?;
+    pub fn comparison(&self) -> Option<&HistoryComparison> {
+        self.comparison.as_ref()
+    }
+
+    fn refresh_comparison(&mut self) {
+        let Some(preview) = self.preview.as_ref() else {
+            self.comparison = None;
+            return;
+        };
+        let Some(before) = preview.document.as_ref() else {
+            self.comparison = None;
+            return;
+        };
+        let Some(after) = self.current_document.as_ref() else {
+            self.comparison = None;
+            return;
+        };
         if before.document_id != after.document_id {
-            return None;
+            self.comparison = None;
+            return;
         }
-        Some(compare_history_documents(
+        self.comparison = Some(compare_history_documents(
             &preview.checkpoint.checkpoint_id,
             before,
             after,
-        ))
+        ));
     }
 
     pub fn named_snapshot_draft(&self) -> &str {
@@ -2166,7 +2187,7 @@ fn semantic_lines<'a>(semantic: &SemanticDocument, text: &'a str) -> Vec<&'a str
 }
 
 fn history_line_edits(before: &[&str], after: &[&str]) -> Vec<HistoryLineEdit> {
-    const MAX_LCS_CELLS: usize = 1_000_000;
+    const MAX_LCS_CELLS: usize = 100_000;
     let rows = before.len().saturating_add(1);
     let columns = after.len().saturating_add(1);
     if rows
@@ -3200,11 +3221,8 @@ pub enum ProjectMessage {
         parent_id: String,
         kind: HierarchyItemKind,
     },
-    /// Creates an item from the current Cards context. The parent is resolved
-    /// at dispatch time so a retained Iced button cannot use an earlier card
-    /// selection after a rename or persistence refresh.
-    RequestCardsCreation(HierarchyItemKind),
     DeleteSelection,
+    PreviewHierarchyNode(String),
     OpenHierarchyNode(String),
     OpenHierarchyNodeInCompanion(String),
     RenameNode {
@@ -3215,8 +3233,6 @@ pub enum ProjectMessage {
     SetHierarchyRenameDraft(String),
     CommitHierarchyRename,
     CancelHierarchyRename,
-    BeginCardsEdit(String),
-    EndCardsEdit,
     SetSynopsis {
         node_id: String,
         synopsis: String,
@@ -3302,6 +3318,8 @@ pub enum ProjectMessage {
     CopySelection,
     CutSelection,
     CancelCut,
+    UndoProject,
+    RedoProject,
     PasteSelection {
         destination: DragDestination,
     },
@@ -3399,6 +3417,8 @@ pub enum ProjectEffect {
         node_ids: Vec<String>,
         destination: DragDestination,
     },
+    UndoProject,
+    RedoProject,
     CommitNodeTitle {
         node_id: String,
         title: String,
@@ -3490,7 +3510,6 @@ pub struct ProjectWorkspace {
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
     hierarchy_rename: Option<HierarchyRename>,
-    cards_editing: Option<String>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
@@ -3581,7 +3600,6 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
-            cards_editing: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -3640,7 +3658,6 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
-            cards_editing: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -3738,10 +3755,6 @@ impl ProjectWorkspace {
             .hierarchy_rename
             .take()
             .filter(|rename| self.explorer.nodes.contains_key(&rename.node_id));
-        self.cards_editing = self
-            .cards_editing
-            .take()
-            .filter(|node| self.explorer.nodes.contains_key(node));
         if self
             .last_activated_document
             .as_deref()
@@ -3952,10 +3965,6 @@ impl ProjectWorkspace {
         }
     }
 
-    pub fn cards_editing_node(&self) -> Option<&str> {
-        self.cards_editing.as_deref()
-    }
-
     pub fn explorer_active_panes(&self, node_id: &str) -> (bool, bool) {
         let Some(document_id) = self
             .explorer
@@ -4064,6 +4073,7 @@ impl ProjectWorkspace {
     /// while a History preview is being shown.
     pub fn set_history_current_document(&mut self, document: Option<HistoryCurrentDocument>) {
         self.history.current_document = document;
+        self.history.refresh_comparison();
     }
 
     pub fn complete_history_workflow(&mut self) {
@@ -4345,21 +4355,6 @@ impl ProjectWorkspace {
         }
     }
 
-    /// The container used by the Cards quick-create controls. A single
-    /// selected group in the displayed section receives the item; otherwise
-    /// creation is unambiguously rooted in the displayed section.
-    pub fn cards_creation_parent(&self) -> &str {
-        let selected = self.explorer.selected_ids();
-        if let [node_id] = selected.as_slice()
-            && self.explorer.nodes.get(*node_id).is_some_and(|node| {
-                node.kind == HierarchyNodeKind::Group && node.section_id == self.cards_section
-            })
-        {
-            return node_id;
-        }
-        &self.cards_section
-    }
-
     fn sync_inspector_context_from_selection(&mut self) {
         let Some(node_id) = self
             .explorer
@@ -4385,6 +4380,20 @@ impl ProjectWorkspace {
         };
         self.editor
             .update(EditorMessage::SetInspectorContext(context));
+    }
+
+    /// Reveals the active document from the focused editor pane in Explorer.
+    /// The containing hierarchy remains the shared selection, so Inspector and
+    /// Cards stay synchronized with editor navigation.
+    pub fn reveal_focused_editor_document(&mut self) {
+        let document_id = self
+            .editor
+            .pane(self.editor.focused_pane())
+            .active_document()
+            .map(str::to_owned);
+        if document_id.is_some_and(|document_id| self.explorer.reveal_document(&document_id)) {
+            self.sync_inspector_context_from_selection();
+        }
     }
 
     pub fn begin_session(&mut self, session: u64, project_revision: u64) {
@@ -4517,10 +4526,6 @@ impl ProjectWorkspace {
                 });
                 vec![ProjectEffect::CreateHierarchy { parent_id, kind }]
             }
-            ProjectMessage::RequestCardsCreation(kind) => {
-                let parent_id = self.cards_creation_parent().to_owned();
-                self.update(ProjectMessage::RequestCreateHierarchy { parent_id, kind })
-            }
             ProjectMessage::DeleteSelection => {
                 let selected = self.explorer.normalized_selected_ids();
                 let node_ids = selected
@@ -4538,9 +4543,14 @@ impl ProjectWorkspace {
                     .into_iter()
                     .collect()
             }
-            ProjectMessage::OpenHierarchyNode(node_id) => self.open_hierarchy_node(node_id, None),
+            ProjectMessage::PreviewHierarchyNode(node_id) => {
+                self.open_hierarchy_node(node_id, None, true)
+            }
+            ProjectMessage::OpenHierarchyNode(node_id) => {
+                self.open_hierarchy_node(node_id, None, false)
+            }
             ProjectMessage::OpenHierarchyNodeInCompanion(node_id) => {
-                self.open_hierarchy_node(node_id, Some(EditorPane::Companion))
+                self.open_hierarchy_node(node_id, Some(EditorPane::Companion), false)
             }
             ProjectMessage::RenameNode { node_id, title } => {
                 self.explorer.rename(&node_id, title.clone());
@@ -4588,19 +4598,6 @@ impl ProjectWorkspace {
             }
             ProjectMessage::CancelHierarchyRename => {
                 self.hierarchy_rename = None;
-                Vec::new()
-            }
-            ProjectMessage::BeginCardsEdit(node_id) => {
-                if self.explorer.nodes.contains_key(&node_id) {
-                    self.explorer.select(&node_id, SelectionGesture::Replace);
-                    self.sync_inspector_context_from_selection();
-                    self.hierarchy_rename = None;
-                    self.cards_editing = Some(node_id);
-                }
-                Vec::new()
-            }
-            ProjectMessage::EndCardsEdit => {
-                self.cards_editing = None;
                 Vec::new()
             }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
@@ -5047,6 +5044,8 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
+            ProjectMessage::UndoProject => vec![ProjectEffect::UndoProject],
+            ProjectMessage::RedoProject => vec![ProjectEffect::RedoProject],
             ProjectMessage::PasteSelection { destination } => {
                 let Some(clipboard) = self
                     .tree_clipboard
@@ -5177,6 +5176,7 @@ impl ProjectWorkspace {
                 self.history.selected_checkpoint_id = None;
                 self.history.preview = None;
                 self.history.current_document = None;
+                self.history.comparison = None;
                 self.history.next_cursor = None;
                 self.history.loading_more = false;
                 self.history.error = None;
@@ -5199,6 +5199,7 @@ impl ProjectWorkspace {
                 }
                 self.history.selected_checkpoint_id = Some(checkpoint_id.clone());
                 self.history.preview = None;
+                self.history.comparison = None;
                 self.history.error = None;
                 vec![ProjectEffect::PreviewHistory(checkpoint_id)]
             }
@@ -5219,8 +5220,22 @@ impl ProjectWorkspace {
                 vec![ProjectEffect::CreateNamedSnapshot(name)]
             }
             ProjectMessage::RequestHistoryRestore { checkpoint_id } => {
+                let (checkpoint_label, affected_summary) = self
+                    .history
+                    .checkpoints
+                    .iter()
+                    .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+                    .map(|checkpoint| (checkpoint.label(), checkpoint.affected_summary()))
+                    .unwrap_or_else(|| {
+                        (
+                            "Selected checkpoint".to_owned(),
+                            "Unknown changes".to_owned(),
+                        )
+                    });
                 self.modal = Some(ProjectModal::HistoryRestore {
                     checkpoint_id,
+                    checkpoint_label,
+                    affected_summary,
                     scope: HistoryRestoreScope::EntireProject,
                 });
                 Vec::new()
@@ -5229,6 +5244,7 @@ impl ProjectWorkspace {
                 let Some(ProjectModal::HistoryRestore {
                     checkpoint_id,
                     scope,
+                    ..
                 }) = self.modal.take()
                 else {
                     return Vec::new();
@@ -5551,26 +5567,30 @@ impl ProjectWorkspace {
     }
 
     fn activate_card(&mut self, node_id: String) -> Vec<ProjectEffect> {
-        let Some(node) = self.explorer.nodes.get(&node_id) else {
+        let Some((section_id, document_id, title)) =
+            self.explorer.nodes.get(&node_id).and_then(|node| {
+                (node.kind == HierarchyNodeKind::Document).then(|| {
+                    (
+                        node.section_id.clone(),
+                        node.document_id
+                            .clone()
+                            .expect("a document hierarchy node has a document ID"),
+                        node.title.clone(),
+                    )
+                })
+            })
+        else {
             return Vec::new();
         };
-        if node.kind != HierarchyNodeKind::Document {
-            self.explorer.toggle_expanded(&node_id);
-            return Vec::new();
-        }
-        let pane = if is_research_section(&node.section_id) {
+        let pane = if is_research_section(&section_id) {
             EditorPane::Companion
         } else {
             EditorPane::Primary
         };
-        let document_id = node
-            .document_id
-            .clone()
-            .expect("a document hierarchy node has a document ID");
         self.last_activated_document = Some(document_id.clone());
         let _ = self.editor.update(EditorMessage::OpenTab {
             pane,
-            tab: TabSpec::new(document_id.clone(), node.title.clone()),
+            tab: TabSpec::new(document_id.clone(), title),
         });
         match pane {
             EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(document_id)],
@@ -5582,28 +5602,37 @@ impl ProjectWorkspace {
         &mut self,
         node_id: String,
         requested_pane: Option<EditorPane>,
+        preview: bool,
     ) -> Vec<ProjectEffect> {
-        let Some(node) = self.explorer.nodes.get(&node_id) else {
+        let Some((section_id, document_id, title)) =
+            self.explorer.nodes.get(&node_id).and_then(|node| {
+                (node.kind == HierarchyNodeKind::Document).then(|| {
+                    (
+                        node.section_id.clone(),
+                        node.document_id
+                            .clone()
+                            .expect("a document hierarchy node has a document ID"),
+                        node.title.clone(),
+                    )
+                })
+            })
+        else {
             return Vec::new();
         };
-        if node.kind != HierarchyNodeKind::Document {
-            return Vec::new();
-        }
-        let document_id = node
-            .document_id
-            .clone()
-            .expect("a document hierarchy node has a document ID");
+        self.explorer.select(&node_id, SelectionGesture::Replace);
+        self.sync_inspector_context_from_selection();
         let pane = requested_pane.unwrap_or_else(|| {
-            if is_research_section(&node.section_id) {
+            if is_research_section(&section_id) {
                 EditorPane::Companion
             } else {
                 EditorPane::Primary
             }
         });
-        let title = node.title.clone();
-        let _ = self.editor.update(EditorMessage::OpenTab {
-            pane,
-            tab: TabSpec::new(document_id.clone(), title),
+        let tab = TabSpec::new(document_id.clone(), title);
+        let _ = self.editor.update(if preview {
+            EditorMessage::OpenPreviewTab { pane, tab }
+        } else {
+            EditorMessage::OpenTab { pane, tab }
         });
         match pane {
             EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(document_id)],
@@ -5809,12 +5838,14 @@ impl ProjectWorkspace {
                 {
                     self.history.selected_checkpoint_id = None;
                     self.history.preview = None;
+                    self.history.comparison = None;
                 }
                 self.history.error = None;
                 true
             }
             ProjectTaskPayload::HistoryPreviewReady { preview } => {
                 self.history.preview = Some(preview);
+                self.history.refresh_comparison();
                 self.history.error = None;
                 true
             }
@@ -6281,7 +6312,7 @@ mod tests {
             )
         }
 
-        let history = HistoryState {
+        let mut history = HistoryState {
             preview: Some(HistoryPreviewData {
                 checkpoint: history_row(
                     "checkpoint-7",
@@ -6305,6 +6336,7 @@ mod tests {
             }),
             ..HistoryState::default()
         };
+        history.refresh_comparison();
 
         let comparison = history.comparison().expect("same document is comparable");
         assert_eq!(comparison.checkpoint_id, "checkpoint-7");
@@ -6377,7 +6409,7 @@ mod tests {
 
     #[test]
     fn history_comparison_refuses_unrelated_loaded_documents() {
-        let history = HistoryState {
+        let mut history = HistoryState {
             preview: Some(HistoryPreviewData {
                 checkpoint: history_row(
                     "checkpoint-7",
@@ -6400,6 +6432,7 @@ mod tests {
             }),
             ..HistoryState::default()
         };
+        history.refresh_comparison();
 
         assert_eq!(history.comparison(), None);
     }
@@ -7102,6 +7135,20 @@ mod tests {
     }
 
     #[test]
+    fn project_undo_and_redo_are_explicit_project_effects() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        assert_eq!(
+            workspace.update(ProjectMessage::UndoProject),
+            [ProjectEffect::UndoProject]
+        );
+        assert_eq!(
+            workspace.update(ProjectMessage::RedoProject),
+            [ProjectEffect::RedoProject]
+        );
+    }
+
+    #[test]
     fn group_clipboard_survives_navigation_and_cut_clears_only_on_completion() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -7213,6 +7260,36 @@ mod tests {
     }
 
     #[test]
+    fn explorer_previews_replace_only_the_unpinned_primary_tab() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        workspace.update(ProjectMessage::PreviewHierarchyNode(
+            "chapter-three".to_owned(),
+        ));
+        workspace.update(ProjectMessage::PreviewHierarchyNode(
+            "chapter-two".to_owned(),
+        ));
+
+        let primary = workspace.editor().pane(EditorPane::Primary);
+        assert_eq!(primary.tabs().len(), 2);
+        assert_eq!(primary.active_document(), Some("chapter-two"));
+        assert!(primary.tabs()[1].is_preview());
+
+        workspace.update(ProjectMessage::OpenHierarchyNode("chapter-two".to_owned()));
+        workspace.update(ProjectMessage::PreviewHierarchyNode(
+            "chapter-three".to_owned(),
+        ));
+
+        let primary = workspace.editor().pane(EditorPane::Primary);
+        assert_eq!(
+            primary.tabs().iter().map(TabSpec::id).collect::<Vec<_>>(),
+            ["chapter-one", "chapter-two", "chapter-three"]
+        );
+        assert!(!primary.tabs()[1].is_preview());
+        assert!(primary.tabs()[2].is_preview());
+    }
+
+    #[test]
     fn save_completion_for_an_older_captured_revision_leaves_later_edits_dirty() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         let ticket = workspace.begin_task(ProjectTask::Save {
@@ -7281,71 +7358,36 @@ mod tests {
     }
 
     #[test]
-    fn cards_quick_create_uses_a_selected_group_or_the_displayed_section_root() {
+    fn cards_selection_is_shared_with_the_inspector_context() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        assert_eq!(workspace.cards_creation_parent(), "manuscript");
-
         workspace.update(ProjectMessage::SelectHierarchy {
             node_id: "part-one".to_owned(),
             gesture: SelectionGesture::Replace,
         });
-        assert_eq!(workspace.cards_creation_parent(), "part-one");
-        assert_eq!(
-            workspace.update(ProjectMessage::RequestCardsCreation(
-                HierarchyItemKind::Document
-            )),
-            [ProjectEffect::CreateHierarchy {
-                parent_id: "part-one".to_owned(),
-                kind: HierarchyItemKind::Document,
-            }]
+        assert!(
+            workspace
+                .cards()
+                .items()
+                .iter()
+                .any(|item| item.node_id == "part-one" && item.selected)
         );
-
-        workspace.update(ProjectMessage::SelectHierarchy {
-            node_id: "chapter-one".to_owned(),
-            gesture: SelectionGesture::Replace,
-        });
-        assert_eq!(workspace.cards_creation_parent(), "manuscript");
+        assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
     }
 
     #[test]
-    fn cards_editing_reuses_the_shared_title_and_synopsis_contracts() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        workspace.update(ProjectMessage::BeginCardsEdit("chapter-one".to_owned()));
-        assert_eq!(workspace.cards_editing_node(), Some("chapter-one"));
-        assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
+    fn focusing_an_editor_document_reveals_its_collapsed_explorer_ancestors() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ToggleHierarchyExpanded(
+            "part-one".to_owned(),
+        ));
+        workspace
+            .editor_mut()
+            .update(EditorMessage::FocusPane(EditorPane::Companion));
 
-        assert_eq!(
-            workspace.update(ProjectMessage::RenameNode {
-                node_id: "chapter-one".to_owned(),
-                title: "A Better Opening".to_owned(),
-            }),
-            [ProjectEffect::CommitNodeTitle {
-                node_id: "chapter-one".to_owned(),
-                title: "A Better Opening".to_owned(),
-            }]
-        );
-        assert_eq!(
-            workspace.explorer().title("chapter-one"),
-            Some("A Better Opening")
-        );
+        workspace.reveal_focused_editor_document();
 
-        assert_eq!(
-            workspace.update(ProjectMessage::SetSynopsis {
-                node_id: "chapter-one".to_owned(),
-                synopsis: "The river introduces the central conflict.".to_owned(),
-            }),
-            [ProjectEffect::CommitSynopsis {
-                node_id: "chapter-one".to_owned(),
-                synopsis: "The river introduces the central conflict.".to_owned(),
-            }]
-        );
-        assert_eq!(
-            workspace.explorer().synopsis("chapter-one"),
-            Some("The river introduces the central conflict.")
-        );
-
-        workspace.update(ProjectMessage::EndCardsEdit);
-        assert_eq!(workspace.cards_editing_node(), None);
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-two"]);
+        assert!(workspace.explorer().is_expanded("part-one"));
     }
 
     #[test]

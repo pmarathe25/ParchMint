@@ -15,7 +15,7 @@
 - **TREE-013:** `Cut`/`Paste` moves selected documents. Cut items remain until paste succeeds, appear visually pending, and can be cancelled with Escape.
 - **TREE-014:** Group copy and keyboard cut are deferred; groups remain movable through drag/drop.
 - **TREE-015:** Cross-project copy is deferred.
-- **TREE-016:** Single-clicking a group expands or collapses its children. Single-clicking a document selects it; double-clicking it or pressing Enter opens it. Groups do not open as prose editors.
+- **TREE-016:** Single-clicking a group selects it; its disclosure control or double-click expands/collapses it. Single-clicking a document selects it and opens one replaceable preview tab in the default pane. A subsequent Explorer selection replaces that preview until it is deliberately opened, edited, or opened in the companion. Double-clicking a document or pressing Enter opens/pins it. Groups do not open as prose editors.
 - **TREE-017:** Manuscript documents open in the primary pane by default; Research documents open in the companion by default.
 - **TREE-018:** Dragging a document onto a pane or tab strip opens it in that pane.
 - **TREE-019:** Explorer must reveal and distinguish the active document in each editor pane. The focused pane's document is exposed as the primary active context.

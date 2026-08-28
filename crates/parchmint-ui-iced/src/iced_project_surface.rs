@@ -471,22 +471,28 @@ fn explorer_rail<'a>(
                         }),
                 )
                 .interaction(iced::mouse::Interaction::Pointer);
-                let row = if item.kind == HierarchyRowKind::Document {
-                    row.on_double_click(ProjectSurfaceMessage::Project(
-                        ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
-                    ))
-                } else {
-                    row
+                let row = match item.kind {
+                    HierarchyRowKind::Document => {
+                        row.on_double_click(ProjectSurfaceMessage::Project(
+                            ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
+                        ))
+                    }
+                    HierarchyRowKind::Root | HierarchyRowKind::Group => {
+                        row.on_double_click(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                        ))
+                    }
                 };
-                let on_press = if item.kind == HierarchyRowKind::Group {
-                    ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(
-                        item.id.to_owned(),
-                    ))
-                } else {
-                    ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
-                        node_id: item.id.to_owned(),
-                        gesture: SelectionGesture::Replace,
-                    })
+                let on_press = match item.kind {
+                    HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
+                        ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
+                    ),
+                    HierarchyRowKind::Root | HierarchyRowKind::Group => {
+                        ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                            node_id: item.id.to_owned(),
+                            gesture: SelectionGesture::Replace,
+                        })
+                    }
                 };
                 hierarchy_drag::source(
                     row,
@@ -1055,12 +1061,6 @@ fn cards_center<'a>(
         .explorer()
         .title(cards.section_id())
         .unwrap_or("Project");
-    let creation_parent = workspace.cards_creation_parent().to_owned();
-    let creation_parent_title = workspace
-        .explorer()
-        .title(&creation_parent)
-        .unwrap_or(section_title)
-        .to_owned();
     let sections = workspace.explorer().root_ids().into_iter().fold(
         row![].spacing(4),
         |sections, section_id| {
@@ -1087,27 +1087,6 @@ fn cards_center<'a>(
             )
         },
     );
-    let create_controls = row![
-        text(format!("Add to {creation_parent_title}")).size(12),
-        harness_target::target(
-            HarnessTarget::CardsNewGroup,
-            button(text("New group").size(12)).padding([4, 7]).on_press(
-                ProjectSurfaceMessage::Project(ProjectMessage::RequestCardsCreation(
-                    HierarchyItemKind::Group,
-                ))
-            ),
-        ),
-        harness_target::target(
-            HarnessTarget::CardsNewDocument,
-            button(text("New document").size(12))
-                .padding([4, 7])
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::RequestCardsCreation(HierarchyItemKind::Document)
-                )),
-        ),
-    ]
-    .spacing(6)
-    .align_y(iced::alignment::Vertical::Center);
     let drag_source = workspace.hierarchy_drag_source().map(str::to_owned);
     let drag_destination = workspace.hierarchy_drag_destination().cloned();
     let items = cards.items().into_iter().filter(|item| item.visible).fold(
@@ -1136,54 +1115,17 @@ fn cards_center<'a>(
                 }
                 _ => Space::new().width(28).into(),
             };
-            let editing = workspace.cards_editing_node() == Some(node_id.as_str());
-            let card_content = if editing {
-                let title_node_id = node_id.clone();
-                let title = text_input("Card title", item.title)
-                    .on_input(move |title| {
-                        ProjectSurfaceMessage::Project(ProjectMessage::RenameNode {
-                            node_id: title_node_id.clone(),
-                            title,
-                        })
-                    })
-                    .width(Length::Fill);
-                let synopsis_node_id = node_id.clone();
-                let synopsis = text_editor(
-                    workspace
-                        .synopsis_editor(&node_id)
-                        .expect("every visible Cards node has a Synopsis editor"),
-                )
-                .on_action(move |action| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::EditSynopsis {
-                        node_id: synopsis_node_id.clone(),
-                        action,
-                    })
-                })
-                .height(72);
-                column![
-                    harness_target::target_id(harness_target::card_title_input_id(&node_id), title),
-                    harness_target::target_id(
-                        harness_target::card_synopsis_input_id(&node_id),
-                        synopsis,
-                    ),
-                    button(text("Done").size(12))
-                        .padding([4, 7])
-                        .on_press(ProjectSurfaceMessage::Project(ProjectMessage::EndCardsEdit)),
+            let card_content = column![
+                row![
+                    disclosure,
+                    text(item.title).size(16).width(Length::Fill),
+                    Space::new().width(Length::Fill),
+                    container(metadata).padding([0, 8]).width(220),
                 ]
-                .spacing(6)
-            } else {
-                column![
-                    row![
-                        disclosure,
-                        text(item.title).size(16).width(Length::Fill),
-                        Space::new().width(Length::Fill),
-                        container(metadata).padding([0, 8]).width(220),
-                    ]
-                    .align_y(iced::alignment::Vertical::Center),
-                    text(item.synopsis).size(13),
-                ]
-                .spacing(6)
-            };
+                .align_y(iced::alignment::Vertical::Center),
+                text(item.synopsis).size(13),
+            ]
+            .spacing(6);
             let before = DragDestination::BeforeSibling(node_id.clone());
             let after = DragDestination::AfterSibling(node_id.clone());
             let middle = if item.kind == HierarchyRowKind::Group {
@@ -1215,7 +1157,7 @@ fn cards_center<'a>(
                 .padding([10, 16])
                 .width(Length::Fill)
                 .style(move |_| {
-                    if source_active || middle_active {
+                    if source_active || middle_active || item.selected {
                         components::surface(theme, Surface::Panel, Interaction::Selected)
                     } else {
                         iced::widget::container::Style::default()
@@ -1225,50 +1167,28 @@ fn cards_center<'a>(
             .on_enter(ProjectSurfaceMessage::Project(
                 ProjectMessage::SetDragDestination(Some(middle)),
             ));
-            let card_body = if item.kind == HierarchyRowKind::Document {
-                card_body.on_double_click(ProjectSurfaceMessage::Project(
-                    ProjectMessage::ActivateCard(node_id.clone()),
-                ))
-            } else {
-                card_body
+            let card_body = match item.kind {
+                HierarchyRowKind::Document => card_body.on_double_click(
+                    ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(node_id.clone())),
+                ),
+                HierarchyRowKind::Root | HierarchyRowKind::Group => {
+                    card_body.on_double_click(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleHierarchyExpanded(node_id.clone()),
+                    ))
+                }
             };
-            let on_press = if item.kind == HierarchyRowKind::Group {
-                ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(
-                    node_id.clone(),
-                ))
-            } else {
+            let card: Element<'a, ProjectSurfaceMessage> = hierarchy_drag::source(
+                card_body,
                 ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
                     node_id: node_id.clone(),
                     gesture: SelectionGesture::Replace,
-                })
-            };
-            let card: Element<'a, ProjectSurfaceMessage> = if editing {
-                card_body.into()
-            } else {
-                let card = hierarchy_drag::source(
-                    card_body,
-                    on_press,
-                    ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
-                        source_id: node_id.clone(),
-                        gesture: SelectionGesture::Replace,
-                    }),
-                    ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
-                );
-                let edit_node_id = node_id.clone();
-                row![
-                    card,
-                    harness_target::target_id(
-                        harness_target::card_edit_button_id(&node_id),
-                        button(text("Edit").size(12)).padding([4, 7]).on_press(
-                            ProjectSurfaceMessage::Project(ProjectMessage::BeginCardsEdit(
-                                edit_node_id,
-                            ))
-                        ),
-                    ),
-                ]
-                .align_y(iced::alignment::Vertical::Center)
-                .into()
-            };
+                }),
+                ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
+                    source_id: node_id.clone(),
+                    gesture: SelectionGesture::Replace,
+                }),
+                ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
+            );
             let card = harness_target::target_id(harness_target::card_id(&node_id), card);
             column
                 .push(hierarchy_drop_strip(
@@ -1297,7 +1217,6 @@ fn cards_center<'a>(
         text(section_title).size(16),
         text("Manuscript outline").size(12),
         sections,
-        create_controls,
         scrollable(items).height(Length::Fill),
     ]
     .spacing(12);
@@ -1504,9 +1423,10 @@ fn history_center<'a>(
                                     )),
                             ),
                             text(format!(
-                                "{} · {}",
+                                "{} · {} · Version {}",
                                 checkpoint.category.label(),
                                 checkpoint.affected_summary(),
+                                checkpoint.sequence,
                             ))
                             .size(11),
                         ]
@@ -1523,8 +1443,15 @@ fn history_center<'a>(
     ];
     let restore: Element<'a, ProjectSurfaceMessage> = history
         .selected_checkpoint_id()
-        .map(|checkpoint_id| {
-            button(text("Restore selected checkpoint").size(12))
+        .and_then(|checkpoint_id| {
+            history
+                .checkpoints()
+                .iter()
+                .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+                .map(|checkpoint| (checkpoint_id, checkpoint.label()))
+        })
+        .map(|(checkpoint_id, label)| {
+            button(text(format!("Restore “{label}”")).size(12))
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::RequestHistoryRestore {
                         checkpoint_id: checkpoint_id.to_owned(),
@@ -1536,6 +1463,50 @@ fn history_center<'a>(
                 .into()
         })
         .unwrap_or_else(|| Space::new().height(0).into());
+    let milestone_draft = history.named_snapshot_draft();
+    let milestone_submit = ProjectSurfaceMessage::Project(ProjectMessage::RequestNamedSnapshot(
+        milestone_draft.to_owned(),
+    ));
+    let milestone = row![
+        text_input("Milestone name", milestone_draft)
+            .on_input(
+                |name| ProjectSurfaceMessage::Project(ProjectMessage::SetNamedSnapshotDraft(name))
+            )
+            .on_submit(milestone_submit.clone())
+            .padding([6, 8])
+            .width(Length::Fill),
+        button(
+            text(if history.is_creating_named_snapshot() {
+                "Creating…"
+            } else {
+                "Create milestone"
+            })
+            .size(12)
+        )
+        .on_press_maybe((!history.is_creating_named_snapshot()).then_some(milestone_submit)),
+    ]
+    .spacing(8);
+    let active_document = workspace
+        .editor()
+        .pane(workspace.editor().focused_pane())
+        .active_document()
+        .map(str::to_owned);
+    let filter: Element<'a, ProjectSurfaceMessage> = match history.active_document_filter() {
+        Some(_) => button(text("Show all documents").size(12))
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::SetHistoryDocumentFilter(None),
+            ))
+            .into(),
+        None => active_document
+            .map(|document_id| {
+                button(text("Filter to current document").size(12))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::SetHistoryDocumentFilter(Some(document_id)),
+                    ))
+                    .into()
+            })
+            .unwrap_or_else(|| Space::new().height(0).into()),
+    };
     let load_more: Element<'a, ProjectSurfaceMessage> = if history.next_cursor().is_some() {
         button(text(if history.is_loading_more() {
             "Loading more…"
@@ -1616,8 +1587,10 @@ fn history_center<'a>(
     };
     let list =
         column![
-            text("History").size(24),
-            text("All project checkpoints").size(14),
+            text("Writing timeline").size(24),
+            text("Milestones and recoverable project versions").size(14),
+            milestone,
+            filter,
             scrollable(checkpoints)
                 .on_scroll(|viewport| ProjectSurfaceMessage::Project(
                     ProjectMessage::SetHistoryScroll(viewport.absolute_offset().y)
@@ -1628,7 +1601,7 @@ fn history_center<'a>(
         .spacing(12);
     let detail = column![
         text("Checkpoint details").size(24),
-        text("Select a checkpoint to compare it with the current document.").size(14),
+        text("Compare a version with the current document or restore the whole project.").size(14),
         error,
         maintenance,
         scrollable(comparison).height(Length::Fill),
@@ -3726,9 +3699,15 @@ fn modal_view<'a>(
         .into();
     }
     let (title, detail) = match &modal {
-        ProjectModal::HistoryRestore { .. } => (
+        ProjectModal::HistoryRestore {
+            checkpoint_label,
+            affected_summary,
+            ..
+        } => (
             "Restore project history",
-            "Replace the entire current project with the selected checkpoint.".to_owned(),
+            format!(
+                "Restore “{checkpoint_label}”? This replaces the entire current project. That version recorded changes to {affected_summary}."
+            ),
         ),
         ProjectModal::DeleteMetadataField { field_id } => (
             "Delete metadata field",
@@ -4145,7 +4124,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_edit_control_publishes_the_shared_edit_message() {
+    fn cards_keep_hierarchy_mutation_in_the_explorer() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
@@ -4159,14 +4138,9 @@ mod tests {
             ),
         );
 
-        simulator
-            .click("Edit")
-            .expect("rendered Cards edit control");
-        assert!(simulator.into_messages().any(|message| matches!(
-            message,
-            ProjectSurfaceMessage::Project(ProjectMessage::BeginCardsEdit(node_id))
-                if node_id == "part-one"
-        )));
+        assert!(simulator.find("Edit").is_err());
+        assert!(simulator.find("New group").is_err());
+        assert!(simulator.find("New document").is_err());
     }
 
     #[test]
@@ -4474,7 +4448,7 @@ mod tests {
             (
                 ProjectFixture::History,
                 RibbonDestination::History,
-                "All project checkpoints",
+                "Milestones and recoverable project versions",
                 "Checkpoint details",
             ),
             (
@@ -4814,8 +4788,8 @@ mod tests {
     }
 
     #[test]
-    fn explorer_row_double_click_publishes_open_and_keeps_single_click_selection() {
-        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+    fn explorer_document_click_opens_a_replaceable_preview_and_selects_the_document() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
@@ -4828,24 +4802,34 @@ mod tests {
             ),
         );
 
-        simulator.click("Chapter One").expect("first row click");
-        simulator.click("Chapter One").expect("second row click");
+        simulator.click("Chapter Two").expect("document row click");
 
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
-                if node_id == "chapter-one"
+            ProjectSurfaceMessage::Project(ProjectMessage::PreviewHierarchyNode(node_id))
+                if node_id == "chapter-two"
         )));
-        assert!(messages.iter().any(|message| matches!(
-            message,
-            ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(node_id))
-                if node_id == "chapter-one"
-        )));
+        let effects = apply_project_messages(&mut workspace, messages);
+        assert_eq!(
+            effects,
+            [crate::ProjectEffect::OpenDocumentInPrimary(
+                "chapter-two".to_owned()
+            )]
+        );
+        assert_eq!(workspace.explorer().selected_ids(), ["chapter-two"]);
+        assert_eq!(
+            workspace
+                .editor()
+                .pane(crate::EditorPane::Primary)
+                .active_document(),
+            Some("chapter-two")
+        );
+        assert!(workspace.editor().pane(crate::EditorPane::Primary).tabs()[1].is_preview());
     }
 
     #[test]
-    fn single_group_click_toggles_in_explorer_and_cards() {
+    fn group_click_selects_and_double_click_toggles_in_explorer_and_cards() {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
 
         let mut explorer = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
@@ -4860,6 +4844,39 @@ mod tests {
             ),
         );
         explorer_surface.click("Part One").expect("Explorer group");
+        let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
+        assert!(explorer_messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
+                if node_id == "part-one"
+        )));
+        assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
+        assert!(
+            explorer
+                .explorer()
+                .rows()
+                .into_iter()
+                .find(|row| row.id == "part-one")
+                .expect("Explorer group row")
+                .expanded
+        );
+
+        let mut explorer_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &explorer,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+            ),
+        );
+        explorer_surface
+            .click("Part One")
+            .expect("first Explorer group click");
+        explorer_surface
+            .click("Part One")
+            .expect("second Explorer group click");
         let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
         assert!(explorer_messages.iter().any(|message| matches!(
             message,
@@ -4884,6 +4901,34 @@ mod tests {
             cards_center(&cards, theme),
         );
         cards_surface.click("Part One").expect("Cards group");
+        let card_messages = cards_surface.into_messages().collect::<Vec<_>>();
+        assert!(card_messages.iter().any(|message| matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
+                if node_id == "part-one"
+        )));
+        assert!(apply_project_messages(&mut cards, card_messages).is_empty());
+        assert!(
+            cards
+                .explorer()
+                .rows()
+                .into_iter()
+                .find(|row| row.id == "part-one")
+                .expect("Cards group row")
+                .expanded
+        );
+
+        let mut cards_surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            cards_center(&cards, theme),
+        );
+        cards_surface
+            .click("Part One")
+            .expect("first Cards group click");
+        cards_surface
+            .click("Part One")
+            .expect("second Cards group click");
         let card_messages = cards_surface.into_messages().collect::<Vec<_>>();
         assert!(card_messages.iter().any(|message| matches!(
             message,
@@ -4994,16 +5039,26 @@ mod tests {
             },
         );
         let (state, _) = emulator.into_state();
+        let moves = state
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, crate::ProjectEffect::MoveHierarchy { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(moves.len(), 1);
         assert!(matches!(
-            state.effects.as_slice(),
-            [
-                crate::ProjectEffect::MoveHierarchy { node_ids, destination },
-                crate::ProjectEffect::OpenDocumentInPrimary(document_id),
-            ]
+            moves[0],
+            crate::ProjectEffect::MoveHierarchy { node_ids, destination }
                 if node_ids == &vec!["chapter-one".to_owned()]
                     && destination == &DragDestination::IntoGroup("research".to_owned())
-                    && document_id == "chapter-one"
         ));
+        assert!(
+            state.effects.iter().any(|effect| matches!(
+                effect,
+                crate::ProjectEffect::OpenDocumentInPrimary(document_id)
+                    if document_id == "chapter-one"
+            )),
+            "a document click still opens its replaceable preview"
+        );
         assert_eq!(
             state
                 .workspace
@@ -5053,7 +5108,11 @@ mod tests {
         );
 
         let (state, _) = emulator.into_state();
-        assert!(state.effects.is_empty());
+        assert!(matches!(
+            state.effects.as_slice(),
+            [crate::ProjectEffect::OpenDocumentInPrimary(document_id)]
+                if document_id == "chapter-one"
+        ));
         assert_eq!(state.workspace.explorer().selected_ids(), ["chapter-one"]);
         assert!(state.workspace.hierarchy_drag_source().is_none());
     }
@@ -5394,7 +5453,12 @@ mod tests {
                 .click("Chapter One")
                 .expect("visible hierarchy item");
         });
-        assert!(apply_project_messages(&mut workspace, messages).is_empty());
+        assert_eq!(
+            apply_project_messages(&mut workspace, messages),
+            [crate::ProjectEffect::OpenDocumentInPrimary(
+                "chapter-one".to_owned()
+            )]
+        );
         assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
 
         let messages = interact(&workspace, RibbonDestination::Cards, |cards| {
@@ -5600,7 +5664,7 @@ mod tests {
 
         let messages = interact(&workspace, RibbonDestination::History, |history| {
             history
-                .click("Restore selected checkpoint")
+                .click("Restore “Draft Two”")
                 .expect("visible restore action");
         });
         assert!(apply_project_messages(&mut workspace, messages).is_empty());
@@ -5612,7 +5676,7 @@ mod tests {
         let messages = interact(&workspace, RibbonDestination::History, |confirmation| {
             assert!(
                 confirmation
-                    .find("Replace the entire current project with the selected checkpoint.")
+                    .find("Restore “Draft Two”? This replaces the entire current project. That version recorded changes to 1 document.")
                     .is_ok()
             );
             confirmation

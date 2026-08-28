@@ -1,7 +1,7 @@
 # Synopsis and metadata
 
 - **META-001:** Every group and document has a built-in multiline plain-text Synopsis.
-- **META-002:** Synopsis is editable in Inspector and Cards, globally searchable, and excluded from manuscript export.
+- **META-002:** Synopsis is editable in Inspector, globally searchable, and excluded from manuscript export. Cards projects the shared Synopsis read-only.
 - **META-003:** Users define arbitrary single-line or multiline plain-text metadata fields in Project Settings.
 - **META-004:** Field definitions have stable ID, label, optional description, applicability, optional default, Card visibility, and display order. Direct list reordering changes display order.
 - **META-005:** Cards may display only predefined fields; definitions cannot be created or edited from Cards.

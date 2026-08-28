@@ -21,8 +21,6 @@ pub enum HarnessTarget {
     ExplorerSearch,
     GlobalSearchQuery,
     GlobalReplacement,
-    CardsNewGroup,
-    CardsNewDocument,
     ModalCancel,
     ModalConfirm,
     EditorPrimary,
@@ -46,8 +44,6 @@ impl HarnessTarget {
             Self::ExplorerSearch => "harness.explorer.search",
             Self::GlobalSearchQuery => "global-search-query",
             Self::GlobalReplacement => "global-search-replacement",
-            Self::CardsNewGroup => "harness.cards.new-group",
-            Self::CardsNewDocument => "harness.cards.new-document",
             Self::ModalCancel => "parchmint-focus-modal-cancel",
             Self::ModalConfirm => "parchmint-focus-modal-confirm",
             Self::EditorPrimary => "harness.editor.primary",
@@ -99,18 +95,6 @@ pub(crate) fn card_drop_before_id(node_id: &str) -> Id {
 
 pub(crate) fn card_drop_after_id(node_id: &str) -> Id {
     format!("harness.cards.after.{node_id}").into()
-}
-
-pub(crate) fn card_title_input_id(node_id: &str) -> Id {
-    format!("harness.cards.title.{node_id}").into()
-}
-
-pub(crate) fn card_edit_button_id(node_id: &str) -> Id {
-    format!("harness.cards.edit.{node_id}").into()
-}
-
-pub(crate) fn card_synopsis_input_id(node_id: &str) -> Id {
-    format!("harness.cards.synopsis.{node_id}").into()
 }
 
 pub(crate) fn history_checkpoint_id(checkpoint_id: &str) -> Id {

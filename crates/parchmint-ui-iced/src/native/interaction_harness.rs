@@ -539,70 +539,6 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
-    /// Replaces the title in one Cards editor resolved through a live opaque
-    /// hierarchy node, avoiding title text and geometry selectors.
-    pub fn replace_card_title(
-        &mut self,
-        window: HarnessWindow,
-        node: &HarnessNode,
-        replacement: &str,
-    ) -> Result<(), HarnessError> {
-        let bounds = self.find_id_bounds(window, harness_target::card_title_input_id(node.id()))?;
-        self.dispatch_events(
-            window,
-            Self::click_events(bounds.center(), mouse::Button::Left),
-        )?;
-        self.replace_focused(window, replacement, false)?;
-        self.record(
-            window,
-            format!(
-                "replace Cards title for {node:?} with {} characters",
-                replacement.chars().count()
-            ),
-        );
-        Ok(())
-    }
-
-    /// Opens the compact Cards editor for one opaque hierarchy node.
-    pub fn begin_cards_edit(
-        &mut self,
-        window: HarnessWindow,
-        node: &HarnessNode,
-    ) -> Result<(), HarnessError> {
-        let bounds = self.find_id_bounds(window, harness_target::card_edit_button_id(node.id()))?;
-        self.dispatch_events(
-            window,
-            Self::click_events(bounds.center(), mouse::Button::Left),
-        )?;
-        self.record(window, format!("edit Cards node {node:?}"));
-        Ok(())
-    }
-
-    /// Replaces the Synopsis in one Cards editor resolved through a live
-    /// opaque hierarchy node.
-    pub fn replace_card_synopsis(
-        &mut self,
-        window: HarnessWindow,
-        node: &HarnessNode,
-        replacement: &str,
-    ) -> Result<(), HarnessError> {
-        let bounds =
-            self.find_id_bounds(window, harness_target::card_synopsis_input_id(node.id()))?;
-        self.dispatch_events(
-            window,
-            Self::click_events(bounds.center(), mouse::Button::Left),
-        )?;
-        self.replace_focused(window, replacement, false)?;
-        self.record(
-            window,
-            format!(
-                "replace Cards Synopsis for {node:?} with {} characters",
-                replacement.chars().count()
-            ),
-        );
-        Ok(())
-    }
-
     fn replace_text_with_submit(
         &mut self,
         window: HarnessWindow,
@@ -845,27 +781,6 @@ impl NativeDesktopHarness {
                 "hierarchy title {title:?} is ambiguous"
             ))),
         }
-    }
-
-    /// Returns the live destination chosen by Cards quick-create controls.
-    pub fn cards_creation_parent(&self) -> Result<String, HarnessError> {
-        let id = self.window_id(HarnessWindow::Project)?;
-        let NativeWindow::Project(state) = self
-            .desktop
-            .windows
-            .get(&id)
-            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
-        else {
-            return Err(HarnessError::new("selected window is not a project"));
-        };
-        state
-            .workspace
-            .as_ref()
-            .and_then(|workspace| {
-                let parent = workspace.cards_creation_parent();
-                workspace.explorer().title(parent).map(str::to_owned)
-            })
-            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
     }
 
     /// Returns the editor's live comment-composer feedback for diagnostics and

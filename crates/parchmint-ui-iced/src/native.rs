@@ -98,6 +98,7 @@ use crate::{
 };
 
 const LAUNCHER_CAPABILITY: WindowCapability = WindowCapability::new(u64::MAX, 1);
+const INSPECTOR_COMMIT_DELAY: Duration = Duration::from_millis(700);
 
 fn worker_launch_failure(operation: &str, error: &std::io::Error) -> String {
     format!("could not start {operation} worker: {error}")
@@ -539,6 +540,12 @@ enum Message {
     },
     WorkspacePersisted {
         result: Result<(), String>,
+    },
+    ToggleNotificationDrawer {
+        window: window::Id,
+    },
+    ClearNotifications {
+        window: window::Id,
     },
     CloseRequested(window::Id),
     ShowNewProject,
@@ -1020,6 +1027,9 @@ struct NativeProjectState {
     retained_editor_sessions: BTreeMap<parchmint_domain::DocumentId, SharedEditorSession>,
     effect_executor: Option<NativeProjectEffectExecutor>,
     synopsis_commits: SynopsisCommitQueue,
+    deferred_inspector_commits: DeferredInspectorCommitQueue,
+    notifications: Vec<WorkspaceNotification>,
+    notification_drawer_open: bool,
     project_mutations: ProjectMutationState,
     opaque_mutations: OpaqueMutationState,
     service_feeds: Option<AsyncServiceFeeds>,
@@ -1044,6 +1054,80 @@ struct NativeProjectState {
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
     modal_focus: ModalFocus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotificationKind {
+    Information,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceNotification {
+    message: String,
+    kind: NotificationKind,
+    expires_at: Option<Instant>,
+}
+
+impl WorkspaceNotification {
+    fn information(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: NotificationKind::Information,
+            expires_at: Some(Instant::now() + Duration::from_secs(5)),
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: NotificationKind::Error,
+            expires_at: None,
+        }
+    }
+}
+
+fn append_workspace_notification(
+    notifications: &mut Vec<WorkspaceNotification>,
+    notification: WorkspaceNotification,
+) {
+    const MAX_NOTIFICATIONS: usize = 50;
+    notifications.push(notification);
+    let excess = notifications.len().saturating_sub(MAX_NOTIFICATIONS);
+    if excess > 0 {
+        notifications.drain(..excess);
+    }
+}
+
+fn expire_workspace_notifications(notifications: &mut Vec<WorkspaceNotification>, now: Instant) {
+    notifications.retain(|notification| {
+        notification
+            .expires_at
+            .is_none_or(|expires_at| expires_at > now)
+    });
+}
+
+fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
+    match effect {
+        ProjectEffect::CreateHierarchy { .. } => Some("Created item"),
+        ProjectEffect::DeleteHierarchy(_) => Some("Moved item to Recently Deleted"),
+        ProjectEffect::MoveHierarchy { .. } => Some("Reorganized project"),
+        ProjectEffect::PasteCopiedSubtrees { .. } => Some("Copied item"),
+        ProjectEffect::PasteCutSubtrees { .. } => Some("Moved item"),
+        ProjectEffect::UndoProject => Some("Undid project change"),
+        ProjectEffect::RedoProject => Some("Redid project change"),
+        ProjectEffect::UpsertMetadataField(_) => Some("Saved metadata field"),
+        ProjectEffect::ReorderMetadataField { .. } => Some("Reordered metadata fields"),
+        ProjectEffect::DeleteMetadataField(_) => Some("Deleted metadata field"),
+        ProjectEffect::UpsertStyle(_) => Some("Saved style"),
+        ProjectEffect::DeleteStyle(_) => Some("Deleted style"),
+        ProjectEffect::ApplyGlobalReplacement { .. } => Some("Replaced matches"),
+        ProjectEffect::CreateNamedSnapshot(_) => Some("Created milestone"),
+        ProjectEffect::RestoreHistory { .. } => Some("Restored project version"),
+        ProjectEffect::RestoreDeletedSubtree { .. } => Some("Restored deleted item"),
+        ProjectEffect::SetProjectExportSettings(_) => Some("Saved export settings"),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1305,6 +1389,52 @@ struct SynopsisCommit {
 struct SynopsisCommitQueue {
     in_flight: Option<SynopsisCommit>,
     queued: VecDeque<SynopsisCommit>,
+}
+
+/// The Inspector reflects every keystroke immediately, while persistence waits
+/// for a brief pause. This makes typing one user operation rather than a
+/// sequence of durable project mutations and History checkpoints.
+#[derive(Debug, Default)]
+struct DeferredInspectorCommitQueue {
+    pending: BTreeMap<String, (Instant, ProjectEffect)>,
+}
+
+impl DeferredInspectorCommitQueue {
+    fn schedule(&mut self, effect: ProjectEffect, now: Instant) {
+        self.pending.insert(
+            Self::key_for(&effect),
+            (now + INSPECTOR_COMMIT_DELAY, effect),
+        );
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<ProjectEffect> {
+        let keys = self
+            .pending
+            .iter()
+            .filter_map(|(key, (due, _))| (*due <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| self.pending.remove(&key).map(|(_, effect)| effect))
+            .collect()
+    }
+
+    fn take_all(&mut self) -> Vec<ProjectEffect> {
+        std::mem::take(&mut self.pending)
+            .into_values()
+            .map(|(_, effect)| effect)
+            .collect()
+    }
+
+    fn key_for(effect: &ProjectEffect) -> String {
+        match effect {
+            ProjectEffect::CommitNodeTitle { node_id, .. } => format!("title:{node_id}"),
+            ProjectEffect::CommitSynopsis { node_id, .. } => format!("synopsis:{node_id}"),
+            ProjectEffect::CommitMetadataValue {
+                node_id, field_id, ..
+            } => format!("metadata:{node_id}:{field_id}"),
+            _ => unreachable!("only Inspector text effects may be deferred"),
+        }
+    }
 }
 
 impl SynopsisCommitQueue {
@@ -1589,6 +1719,8 @@ fn project_effect_requires_durability(effect: &ProjectEffect) -> bool {
             | ProjectEffect::MoveHierarchy { .. }
             | ProjectEffect::PasteCopiedSubtrees { .. }
             | ProjectEffect::PasteCutSubtrees { .. }
+            | ProjectEffect::UndoProject
+            | ProjectEffect::RedoProject
             | ProjectEffect::CommitNodeTitle { .. }
             | ProjectEffect::CommitSynopsis { .. }
             | ProjectEffect::CommitMetadataValue { .. }
@@ -1790,6 +1922,19 @@ impl NativeDesktop {
             Message::WorkspacePersisted { result } => {
                 if let Err(error) = result {
                     self.status = Some(format!("Workspace layout could not be saved: {error}"));
+                }
+                Task::none()
+            }
+            Message::ToggleNotificationDrawer { window } => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    state.notification_drawer_open = !state.notification_drawer_open;
+                }
+                Task::none()
+            }
+            Message::ClearNotifications { window } => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    state.notifications.clear();
+                    state.notification_drawer_open = false;
                 }
                 Task::none()
             }
@@ -2844,6 +2989,8 @@ impl NativeDesktop {
                         self.close_failures
                             .get(&state.project.window)
                             .map(String::as_str),
+                        &state.notifications,
+                        state.notification_drawer_open,
                     )
                 },
             ),
@@ -3040,16 +3187,42 @@ impl NativeDesktop {
                     Task::none()
                 })
             }
-            "edit.undo" | "edit.redo" => self.update_project_surface(
-                id,
-                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                    if command == "edit.undo" {
-                        crate::EditorMessage::Undo
-                    } else {
-                        crate::EditorMessage::Redo
-                    },
-                )),
-            ),
+            "edit.undo" | "edit.redo" => {
+                let project_surface_has_focus = self.windows.get(&id).is_some_and(|window| {
+                    matches!(
+                        window,
+                        NativeWindow::Project(state)
+                            if matches!(
+                                state.shell.focus_target(),
+                                crate::FocusTarget::Explorer
+                                    | crate::FocusTarget::Inspector
+                                    | crate::FocusTarget::StatusBar
+                                    | crate::FocusTarget::ModeSwitch
+                            )
+                    )
+                });
+                if !project_surface_has_focus {
+                    self.update_project_surface(
+                        id,
+                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                            if command == "edit.undo" {
+                                crate::EditorMessage::Undo
+                            } else {
+                                crate::EditorMessage::Redo
+                            },
+                        )),
+                    )
+                } else {
+                    self.update_project_surface(
+                        id,
+                        ProjectSurfaceMessage::Project(if command == "edit.undo" {
+                            ProjectMessage::UndoProject
+                        } else {
+                            ProjectMessage::RedoProject
+                        }),
+                    )
+                }
+            }
             _ => {
                 self.status = Some(format!("Unknown keyboard shortcut command: {command}"));
                 Task::none()
@@ -3394,6 +3567,8 @@ impl NativeDesktop {
         inspector_expansion: [bool; 3],
         appearance: ResolvedAppearance,
         close_failure: Option<&str>,
+        notifications: &'a [WorkspaceNotification],
+        notification_drawer_open: bool,
     ) -> Element<'a, Message> {
         let theme = ParchMintTheme::new(appearance);
         let editor = editor_center_surface(workspace.editor(), theme, editor_hosts, spelling_menu)
@@ -3414,6 +3589,120 @@ impl NativeDesktop {
             .spacing(0)
             .width(Length::Fill)
             .height(Length::Fill);
+        let toast: Element<'a, Message> = notifications.last().map_or_else(
+            || Space::new().into(),
+            |notification| {
+                let heading = match notification.kind {
+                    NotificationKind::Information => "ParchMint",
+                    NotificationKind::Error => "Error",
+                };
+                let interaction = if notification.kind == NotificationKind::Error {
+                    Interaction::Error
+                } else {
+                    Interaction::Rest
+                };
+                container(
+                    column![
+                        text(heading).size(12),
+                        text(notification.message.clone()).size(13)
+                    ]
+                    .spacing(2),
+                )
+                .padding([8, 12])
+                .width(360)
+                .style(move |_| {
+                    components::surface(theme, components::Surface::Elevated, interaction)
+                })
+                .into()
+            },
+        );
+        let toast = container(toast)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: 60.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Top);
+        let drawer: Element<'a, Message> = if notification_drawer_open {
+            let entries = notifications.iter().rev().take(12).fold(
+                column![].spacing(8),
+                |column, notification| {
+                    let kind = match notification.kind {
+                        NotificationKind::Information => "Info",
+                        NotificationKind::Error => "Error",
+                    };
+                    column.push(
+                        column![
+                            text(kind).size(11),
+                            text(notification.message.clone()).size(12),
+                        ]
+                        .spacing(2),
+                    )
+                },
+            );
+            container(
+                column![
+                    row![
+                        text("Notifications").size(14),
+                        Space::new().width(Length::Fill),
+                        button(text("Clear").size(12))
+                            .on_press(Message::ClearNotifications { window: id }),
+                    ]
+                    .align_y(iced::alignment::Vertical::Center),
+                    entries,
+                ]
+                .spacing(10),
+            )
+            .padding(12)
+            .width(360)
+            .style(move |_| {
+                components::surface(theme, components::Surface::Elevated, Interaction::Rest)
+            })
+            .into()
+        } else {
+            Space::new().into()
+        };
+        let drawer = container(drawer)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 12.0,
+                bottom: 36.0,
+                left: 0.0,
+            })
+            .align_x(iced::alignment::Horizontal::Right)
+            .align_y(iced::alignment::Vertical::Bottom);
+        let notification_button = container(
+            button(text(format!("Notifications {}", notifications.len())).size(11))
+                .padding([3, 6])
+                .on_press(Message::ToggleNotificationDrawer { window: id })
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        launcher_button_interaction(status),
+                    )
+                }),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(iced::Padding {
+            top: 0.0,
+            right: 54.0,
+            bottom: 4.0,
+            left: 0.0,
+        })
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Bottom);
+        let content: Element<'a, Message> = stack![content, toast, drawer, notification_button]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
         let modal: Option<Element<'a, Message>> = if close_failure.is_some() {
             Some(Self::native_error_modal(
                 "Couldn't save before closing",
@@ -3684,6 +3973,12 @@ impl NativeDesktop {
                     ProjectMessage::PasteSelection { .. } => Some("Pasting project item…"),
                     _ => None,
                 };
+                let defer_inspector_commit = matches!(
+                    &message,
+                    ProjectMessage::RenameNode { .. }
+                        | ProjectMessage::SetSynopsis { .. }
+                        | ProjectMessage::SetMetadataValue { .. }
+                );
                 if matches!(message, ProjectMessage::ShowGlobalSearch) {
                     state.shell.open_global_search();
                 } else if matches!(message, ProjectMessage::ShowExplorer) {
@@ -3754,13 +4049,14 @@ impl NativeDesktop {
                 }
                 for effect in effects {
                     match effect {
-                        ProjectEffect::CommitSynopsis { node_id, synopsis } => {
-                            tasks.push(Self::queue_synopsis_commit_task(
-                                &mut state.synopsis_commits,
-                                &mut state.project_mutations,
-                                node_id,
-                                synopsis,
-                            ));
+                        effect @ (ProjectEffect::CommitNodeTitle { .. }
+                        | ProjectEffect::CommitSynopsis { .. }
+                        | ProjectEffect::CommitMetadataValue { .. })
+                            if defer_inspector_commit =>
+                        {
+                            state
+                                .deferred_inspector_commits
+                                .schedule(effect, Instant::now());
                         }
                         ProjectEffect::ChooseExportDestination { output_name } => {
                             let Some(ports) = state.project.ports().cloned() else {
@@ -4396,6 +4692,16 @@ impl NativeDesktop {
                             | crate::EditorMessage::SetFindOptions { .. }
                     )
                 });
+                let reveal_focused_document = message.workspace_messages().iter().any(|message| {
+                    matches!(
+                        message,
+                        crate::EditorMessage::FocusPane(_)
+                            | crate::EditorMessage::OpenTab { .. }
+                            | crate::EditorMessage::OpenPreviewTab { .. }
+                            | crate::EditorMessage::ActivateTab { .. }
+                            | crate::EditorMessage::CloseTab { .. }
+                    )
+                });
                 if let EditorCenterMessage::SetReplaceDraft { pane, value } = &message {
                     state.editor_hosts.set_replace_draft(*pane, value.clone());
                 }
@@ -4403,6 +4709,9 @@ impl NativeDesktop {
                 let mut effects = Vec::new();
                 for workspace_message in message.workspace_messages() {
                     effects.extend(workspace.editor_mut().update(workspace_message));
+                }
+                if reveal_focused_document {
+                    workspace.reveal_focused_editor_document();
                 }
                 // An empty pane must stop rendering its mounted host in the
                 // same update as the final tab close. Waiting for the
@@ -4577,6 +4886,16 @@ impl NativeDesktop {
                                 } else {
                                     Task::none()
                                 };
+                            }
+                            if let Some(document_id) = workspace
+                                .editor()
+                                .pane(pane)
+                                .active_document()
+                                .map(str::to_owned)
+                            {
+                                workspace
+                                    .editor_mut()
+                                    .update(crate::EditorMessage::PromoteTab { pane, document_id });
                             }
                             if let Some(session) = state
                                 .editor_bindings
@@ -4833,6 +5152,12 @@ impl NativeDesktop {
                         .as_ref()
                         .and_then(|commit| state.synopsis_commits.finish(commit, true));
                     state.project_mutations.succeed(&ticket);
+                    if let Some(message) = project_effect_notification(&ticket.effect) {
+                        append_workspace_notification(
+                            &mut state.notifications,
+                            WorkspaceNotification::information(message),
+                        );
+                    }
                     if let Some(commit) = next_synopsis {
                         state.project_mutations.enqueue(ProjectMutationTicket {
                             effect: ProjectEffect::CommitSynopsis {
@@ -4872,6 +5197,10 @@ impl NativeDesktop {
             }
             if let Some(error) = error {
                 self.status = Some(error.clone());
+                append_workspace_notification(
+                    &mut state.notifications,
+                    WorkspaceNotification::error(error.clone()),
+                );
                 if state.autosave.close_after_save {
                     state.autosave.close_after_save = false;
                     self.closing_windows.remove(&window);
@@ -5011,6 +5340,28 @@ impl NativeDesktop {
             synopsis_commit: Some(commit),
         });
         Task::none()
+    }
+
+    fn enqueue_deferred_inspector_commit(state: &mut NativeProjectState, effect: ProjectEffect) {
+        match effect {
+            ProjectEffect::CommitSynopsis { node_id, synopsis } => {
+                let _ = Self::queue_synopsis_commit_task(
+                    &mut state.synopsis_commits,
+                    &mut state.project_mutations,
+                    node_id,
+                    synopsis,
+                );
+            }
+            effect @ (ProjectEffect::CommitNodeTitle { .. }
+            | ProjectEffect::CommitMetadataValue { .. }) => {
+                state.project_mutations.enqueue(ProjectMutationTicket {
+                    effect,
+                    history_action: None,
+                    synopsis_commit: None,
+                });
+            }
+            _ => unreachable!("only Inspector text effects may be deferred"),
+        }
     }
 
     fn open_spelling_menu(
@@ -5644,15 +5995,6 @@ impl NativeDesktop {
                         .map(|(node_id, _)| node_id.to_owned())
                 })
                 .flatten();
-                let cards_created_node = (state.shell.destination() == RibbonDestination::Cards)
-                    .then(|| hierarchy_rename.clone())
-                    .flatten();
-                let focus_card_title = cards_created_node.is_some();
-                if let Some(node_id) = cards_created_node.as_ref()
-                    && let Some(workspace) = state.workspace.as_mut()
-                {
-                    workspace.update(ProjectMessage::BeginCardsEdit(node_id.clone()));
-                }
                 state.effect_executor = state
                     .project
                     .ports()
@@ -5719,12 +6061,9 @@ impl NativeDesktop {
                     )
                 });
                 let rename_focus = hierarchy_rename.map_or_else(Task::none, |node_id| {
-                    let target = if focus_card_title {
-                        crate::harness_target::card_title_input_id(&node_id)
-                    } else {
-                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id)
-                    };
-                    iced::widget::operation::focus(target)
+                    iced::widget::operation::focus(
+                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
+                    )
                 });
                 Task::batch([reopen, refresh, terminal, rename_focus])
             }
@@ -5746,24 +6085,6 @@ impl NativeDesktop {
                         workspace.reconcile_snapshot(&snapshot);
                     }
                     workspace.update(ProjectMessage::MarkDirty(snapshot.project.revision.value()));
-                }
-                let cards_created_node = (state.shell.destination() == RibbonDestination::Cards
-                    && matches!(
-                        mutation.as_ref().map(|ticket| &ticket.effect),
-                        Some(ProjectEffect::CreateHierarchy { .. })
-                    ))
-                .then(|| {
-                    state
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.hierarchy_rename())
-                        .map(|(node_id, _)| node_id.to_owned())
-                })
-                .flatten();
-                if let Some(node_id) = cards_created_node.as_ref()
-                    && let Some(workspace) = state.workspace.as_mut()
-                {
-                    workspace.update(ProjectMessage::BeginCardsEdit(node_id.clone()));
                 }
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::new(snapshot.clone());
@@ -5801,13 +6122,7 @@ impl NativeDesktop {
                     || opaque_mutation.map_or(SavePurpose::Untracked, SavePurpose::OpaqueMutation),
                     SavePurpose::ProjectMutation,
                 );
-                let save = Self::save_task(window, ports, ProjectSaveKind::Structural, purpose);
-                let focus = cards_created_node.map_or_else(Task::none, |node_id| {
-                    iced::widget::operation::focus(crate::harness_target::card_title_input_id(
-                        &node_id,
-                    ))
-                });
-                Task::batch([save, focus])
+                Self::save_task(window, ports, ProjectSaveKind::Structural, purpose)
             }
             Ok(ProjectEffectCompletion::TreePaste {
                 snapshot,
@@ -7594,6 +7909,7 @@ impl NativeDesktop {
             let NativeWindow::Project(state) = native else {
                 continue;
             };
+            expire_workspace_notifications(&mut state.notifications, now);
             let due_spellchecks = state
                 .pending_spellchecks
                 .iter()
@@ -7604,6 +7920,13 @@ impl NativeDesktop {
                 if let Ok(task) = Self::spellcheck_task(*window, state, view) {
                     tasks.push(task);
                 }
+            }
+            let due_inspector_commits = state.deferred_inspector_commits.take_due(now);
+            if !due_inspector_commits.is_empty() {
+                for effect in due_inspector_commits {
+                    Self::enqueue_deferred_inspector_commit(state, effect);
+                }
+                tasks.push(Self::launch_next_persistent_mutation(*window, state));
             }
             if !state.autosave.should_save(now)
                 || state.project_mutations.blocks_close()
@@ -7983,6 +8306,9 @@ impl NativeDesktop {
                 retained_editor_sessions,
                 effect_executor,
                 synopsis_commits: SynopsisCommitQueue::default(),
+                deferred_inspector_commits: DeferredInspectorCommitQueue::default(),
+                notifications: Vec::new(),
+                notification_drawer_open: false,
                 project_mutations: ProjectMutationState::default(),
                 opaque_mutations: OpaqueMutationState::default(),
                 service_feeds,
@@ -8227,6 +8553,29 @@ impl NativeDesktop {
         if !self.closing_windows.insert(id) {
             return Task::none();
         }
+        let has_deferred_inspector_commits = !state.deferred_inspector_commits.pending.is_empty();
+        if has_deferred_inspector_commits {
+            let NativeWindow::Project(state) = self
+                .windows
+                .get_mut(&id)
+                .expect("project window remains live while close waits")
+            else {
+                unreachable!("project window kind was checked above")
+            };
+            for effect in state.deferred_inspector_commits.take_all() {
+                Self::enqueue_deferred_inspector_commit(state, effect);
+            }
+            state.autosave.close_after_save = true;
+            self.status = Some("Finishing Inspector changes before closing…".to_owned());
+            return Self::launch_next_persistent_mutation(id, state);
+        }
+        let NativeWindow::Project(state) = self
+            .windows
+            .get(&id)
+            .expect("project window remains live while close waits")
+        else {
+            unreachable!("project window kind was checked above")
+        };
         if state.project_mutations.blocks_close() || state.opaque_mutations.blocks_close() {
             let NativeWindow::Project(state) = self
                 .windows
@@ -9477,6 +9826,197 @@ mod tests {
     use super::*;
 
     static APPEARANCE_STREAM_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn notification_drawer_keeps_the_latest_bounded_session_history() {
+        let mut notifications = Vec::new();
+        for index in 0..52 {
+            append_workspace_notification(
+                &mut notifications,
+                WorkspaceNotification::information(format!("Update {index}")),
+            );
+        }
+
+        assert_eq!(notifications.len(), 50);
+        assert_eq!(
+            notifications.first().map(|entry| entry.message.as_str()),
+            Some("Update 2")
+        );
+        assert_eq!(
+            notifications.last().map(|entry| entry.message.as_str()),
+            Some("Update 51")
+        );
+    }
+
+    #[test]
+    fn transient_notifications_expire_but_errors_remain_in_the_drawer() {
+        let mut information = WorkspaceNotification::information("Saved project");
+        information.expires_at = Some(Instant::now() - Duration::from_secs(1));
+        let mut notifications = vec![information, WorkspaceNotification::error("Disk full")];
+
+        expire_workspace_notifications(&mut notifications, Instant::now());
+
+        assert!(matches!(
+            notifications.as_slice(),
+            [WorkspaceNotification {
+                message,
+                kind: NotificationKind::Error,
+                expires_at: None,
+            }] if message == "Disk full"
+        ));
+    }
+
+    #[test]
+    fn notifications_are_limited_to_durable_structural_changes() {
+        assert_eq!(
+            project_effect_notification(&ProjectEffect::CreateNamedSnapshot("Draft one".into())),
+            Some("Created milestone")
+        );
+        assert_eq!(
+            project_effect_notification(&ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".into(),
+                title: "Chapter one".into(),
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn notification_drawer_can_be_opened_and_cleared_without_persisting_project_state() {
+        let project = legacy_project(PathBuf::from("/tmp/notifications.parchmint"), 219);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        append_workspace_notification(
+            &mut state.notifications,
+            WorkspaceNotification::information("Created milestone"),
+        );
+
+        let _ = desktop.update(Message::ToggleNotificationDrawer { window });
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(state.notification_drawer_open);
+        assert_eq!(state.notifications.len(), 1);
+
+        let _ = desktop.update(Message::ClearNotifications { window });
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(!state.notification_drawer_open);
+        assert!(state.notifications.is_empty());
+    }
+
+    #[test]
+    fn completed_project_change_and_failure_leave_appropriate_notifications() {
+        let project = legacy_project(PathBuf::from("/tmp/notification-results.parchmint"), 220);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let ticket = ProjectMutationTicket {
+            effect: ProjectEffect::CreateNamedSnapshot("Draft one".to_owned()),
+            history_action: None,
+            synopsis_commit: None,
+        };
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        state.project_mutations.active = Some(ticket.clone());
+
+        let _ = desktop.after_persistent_mutation_terminal(
+            window,
+            PersistentMutationTerminal::ProjectSucceeded(ticket),
+            None,
+        );
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(matches!(
+            state.notifications.last(),
+            Some(WorkspaceNotification {
+                message,
+                kind: NotificationKind::Information,
+                ..
+            }) if message == "Created milestone"
+        ));
+
+        let _ = desktop.after_persistent_mutation_terminal(
+            window,
+            PersistentMutationTerminal::OpaqueFailed(OpaqueMutationToken {
+                kind: OpaqueMutationKind::HistoryReinitialize,
+                sequence: 1,
+            }),
+            Some("History could not be repaired".to_owned()),
+        );
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(matches!(
+            state.notifications.last(),
+            Some(WorkspaceNotification {
+                message,
+                kind: NotificationKind::Error,
+                expires_at: None,
+            }) if message == "History could not be repaired"
+        ));
+    }
+
+    #[test]
+    fn project_surface_undo_shortcut_uses_the_project_mutation_lane() {
+        let project = legacy_project(PathBuf::from("/tmp/project-undo.parchmint"), 221);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        install_fixture_workspace(&mut desktop, window);
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        state.shell.focus(crate::FocusTarget::Explorer);
+
+        let _ = desktop.activate_shortcut(window, "edit.undo");
+
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(matches!(
+            state
+                .project_mutations
+                .active
+                .as_ref()
+                .map(|ticket| &ticket.effect),
+            Some(ProjectEffect::UndoProject)
+        ));
+    }
 
     struct DropCountingAppearanceStream;
 
@@ -11060,6 +11600,50 @@ mod tests {
         assert_eq!(mutations.active, Some(settings.clone()));
         assert_eq!(mutations.succeed(&settings), None);
         assert!(!mutations.blocks_close());
+    }
+
+    #[test]
+    fn inspector_typing_coalesces_to_one_durable_effect_after_a_pause() {
+        let now = Instant::now();
+        let mut queue = DeferredInspectorCommitQueue::default();
+        queue.schedule(
+            ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "Ch".to_owned(),
+            },
+            now,
+        );
+        queue.schedule(
+            ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "Chapter One".to_owned(),
+            },
+            now + Duration::from_millis(300),
+        );
+        queue.schedule(
+            ProjectEffect::CommitMetadataValue {
+                node_id: "chapter-one".to_owned(),
+                field_id: "status".to_owned(),
+                value: "Draft".to_owned(),
+            },
+            now,
+        );
+
+        assert_eq!(
+            queue.take_due(now + INSPECTOR_COMMIT_DELAY),
+            [ProjectEffect::CommitMetadataValue {
+                node_id: "chapter-one".to_owned(),
+                field_id: "status".to_owned(),
+                value: "Draft".to_owned(),
+            }]
+        );
+        assert_eq!(
+            queue.take_due(now + Duration::from_millis(1_100)),
+            [ProjectEffect::CommitNodeTitle {
+                node_id: "chapter-one".to_owned(),
+                title: "Chapter One".to_owned(),
+            }]
+        );
     }
 
     #[test]

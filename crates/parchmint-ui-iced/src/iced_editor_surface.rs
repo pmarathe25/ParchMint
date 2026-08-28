@@ -663,9 +663,12 @@ fn tab_strip(
     let active = state.active_document();
     let layout =
         EditorWorkspace::tab_strip_layout(measured_width, state.tabs(), active.unwrap_or_default());
-    let tabs = state.tabs().iter().zip(layout.tabs()).enumerate().fold(
-        row![].spacing(2),
-        |row, (index, (tab, presentation))| {
+    let tabs = layout
+        .tabs()
+        .iter()
+        .fold(row![].spacing(2), |row, presentation| {
+            let index = presentation.source_index();
+            let tab = &state.tabs()[index];
             row.push(tab_button(
                 tab,
                 presentation,
@@ -678,8 +681,26 @@ fn tab_strip(
                     theme,
                 },
             ))
-        },
-    );
+        });
+    let tabs = if layout.overflow_tabs().is_empty() {
+        tabs
+    } else {
+        let pane_for_overflow = pane;
+        tabs.push(
+            pick_list(
+                layout.overflow_tabs().to_vec(),
+                Option::<crate::TabOverflowItem>::None,
+                move |tab| {
+                    EditorCenterMessage::Workspace(EditorMessage::ActivateTab {
+                        pane: pane_for_overflow,
+                        document_id: tab.id().to_owned(),
+                    })
+                },
+            )
+            .placeholder(format!("{} tabs", layout.overflow_tabs().len()))
+            .width(58),
+        )
+    };
     let strip: Element<'static, EditorCenterMessage> = container(tabs)
         .padding([0, 2])
         .width(Length::Fill)
@@ -723,19 +744,35 @@ fn tab_button(
     } else {
         presentation.display_title().to_owned()
     };
-    let activate: Element<'static, EditorCenterMessage> = button(text(title).size(13).font(Font {
+    let mut title_font = Font {
         weight: font::Weight::Medium,
         ..Font::with_name("Source Sans 3")
-    }))
-    .padding([7, 8])
-    .width(Length::Fill)
-    .on_press(EditorCenterMessage::Workspace(EditorMessage::ActivateTab {
-        pane,
-        document_id: id.clone(),
-    }))
-    .style(move |_, status| flat_tab_button_style(theme, tab_interaction(status, active, focused)))
-    .into();
-    let activate = activate;
+    };
+    if tab.is_preview() {
+        title_font.style = font::Style::Italic;
+    }
+    let activate: Element<'static, EditorCenterMessage> =
+        button(text(title).size(13).font(title_font))
+            .padding([7, 8])
+            .width(Length::Fill)
+            .on_press(EditorCenterMessage::Workspace(EditorMessage::ActivateTab {
+                pane,
+                document_id: id.clone(),
+            }))
+            .style(move |_, status| {
+                flat_tab_button_style(theme, tab_interaction(status, active, focused))
+            })
+            .into();
+    let activate = if let Some(tooltip) = presentation.tooltip().map(str::to_owned) {
+        stationary_tooltip::tooltip(
+            activate,
+            container(text(tooltip).size(12)).padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        )
+        .into()
+    } else {
+        activate
+    };
     let close = button(text("×").size(14))
         .padding([6, 6])
         .width(presentation.close_bounds().width())

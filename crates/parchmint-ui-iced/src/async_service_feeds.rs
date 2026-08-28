@@ -37,7 +37,7 @@ use parchmint_export_api::{
 };
 use parchmint_history_api::{
     CheckpointCategory, CheckpointId, CheckpointResource, CheckpointSummary, HistoryCursor,
-    HistoryPage, HistoryPageQuery, RestorePlan, SnapshotPreview,
+    HistoryPage, HistoryPageQuery, RestorePlan, SnapshotResourcePaths,
 };
 use parchmint_project_format::CanonicalRelativePath;
 use parchmint_search_api::{SearchBatch, SearchBatchSink, SearchField, SearchHit, SearchQuery};
@@ -532,29 +532,23 @@ impl HistoryListResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryResourceResult {
-    pub canonical_path: String,
-    pub content_hash: [u8; 32],
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryPreviewResult {
     pub checkpoint: HistoryCheckpointRow,
-    pub resources: Vec<HistoryResourceResult>,
+    pub resource_paths: Vec<String>,
     pub document: Option<HistoryDocumentPreview>,
 }
 
 impl HistoryPreviewResult {
-    fn from_preview(preview: SnapshotPreview, document: Option<HistoryDocumentPreview>) -> Self {
+    fn from_preview(
+        preview: SnapshotResourcePaths,
+        document: Option<HistoryDocumentPreview>,
+    ) -> Self {
         Self {
             checkpoint: HistoryCheckpointRow::from_summary(preview.checkpoint),
-            resources: preview
-                .resources
+            resource_paths: preview
+                .resource_paths
                 .into_iter()
-                .map(|(path, hash)| HistoryResourceResult {
-                    canonical_path: path.as_str().to_owned(),
-                    content_hash: *hash.as_bytes(),
-                })
+                .map(|path| path.as_str().to_owned())
                 .collect(),
             document,
         }
@@ -564,11 +558,7 @@ impl HistoryPreviewResult {
         ProjectTaskPayload::HistoryPreviewReady {
             preview: HistoryPreviewData {
                 checkpoint: self.checkpoint.clone(),
-                resource_paths: self
-                    .resources
-                    .iter()
-                    .map(|resource| resource.canonical_path.clone())
-                    .collect(),
+                resource_paths: self.resource_paths.iter().cloned().collect(),
                 document: self.document.clone(),
             },
         }
@@ -596,14 +586,14 @@ impl DeletedPreviewResult {
 fn load_checkpoint_document(
     ports: &dyn ServiceFeedPorts,
     checkpoint: CheckpointId,
-    preview: &SnapshotPreview,
+    preview: &SnapshotResourcePaths,
     document: DocumentId,
 ) -> Result<Option<HistoryDocumentPreview>, ServiceFeedError> {
     let document_id = encode_hex(document.as_bytes());
     let suffix = format!("/{document_id}.html");
     let mut matches = preview
-        .resources
-        .keys()
+        .resource_paths
+        .iter()
         .filter(|path| path.as_str().ends_with(&suffix));
     let Some(path) = matches.next().cloned() else {
         return Ok(None);
@@ -1139,7 +1129,7 @@ trait ServiceFeedPorts: Send + Sync {
     fn history_preview(
         &self,
         checkpoint: CheckpointId,
-    ) -> Result<SnapshotPreview, ServiceFeedError>;
+    ) -> Result<SnapshotResourcePaths, ServiceFeedError>;
     fn history_resource(
         &self,
         checkpoint: CheckpointId,
@@ -1226,9 +1216,9 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
     fn history_preview(
         &self,
         checkpoint: CheckpointId,
-    ) -> Result<SnapshotPreview, ServiceFeedError> {
+    ) -> Result<SnapshotResourcePaths, ServiceFeedError> {
         self.access()?
-            .history(|history| history.preview(checkpoint))
+            .history(|history| history.preview_resource_paths(checkpoint))
             .map_err(stale_session)?
             .map_err(|error| service_error(ServiceKind::History, error))
     }
@@ -1469,7 +1459,7 @@ mod tests {
         canceled: Mutex<Vec<u64>>,
         search_batches: Mutex<Vec<SearchBatch>>,
         history_page: Mutex<Option<HistoryPage>>,
-        history_preview: Mutex<Option<SnapshotPreview>>,
+        history_preview: Mutex<Option<SnapshotResourcePaths>>,
         history_resource: Mutex<Option<CheckpointResource>>,
         recovery_revision: AtomicU64,
         export_mode: Mutex<FakeExportMode>,
@@ -1531,7 +1521,10 @@ mod tests {
                 })
         }
 
-        fn history_preview(&self, _: CheckpointId) -> Result<SnapshotPreview, ServiceFeedError> {
+        fn history_preview(
+            &self,
+            _: CheckpointId,
+        ) -> Result<SnapshotResourcePaths, ServiceFeedError> {
             self.check()?;
             self.history_preview
                 .lock()
@@ -1870,12 +1863,9 @@ mod tests {
         fake.history_preview
             .lock()
             .expect("history preview")
-            .replace(SnapshotPreview {
+            .replace(SnapshotResourcePaths {
                 checkpoint: summary(1, 42),
-                resources: BTreeMap::from([(
-                    path,
-                    parchmint_history_api::ContentHash::from_bytes([8; 32]),
-                )]),
+                resource_paths: vec![path],
             });
         let feeds = feeds(fake);
 
@@ -1895,8 +1885,7 @@ mod tests {
             .run()
             .expect("preview");
         assert_eq!(preview.checkpoint.checkpoint_id, encode_hex(&[1; 16]));
-        assert_eq!(preview.resources[0].canonical_path, "project.toml");
-        assert_eq!(preview.resources[0].content_hash, [8; 32]);
+        assert_eq!(preview.resource_paths, ["project.toml"]);
     }
 
     #[test]
@@ -1915,9 +1904,9 @@ mod tests {
         fake.history_preview
             .lock()
             .unwrap()
-            .replace(SnapshotPreview {
+            .replace(SnapshotResourcePaths {
                 checkpoint: summary(3, 9),
-                resources: BTreeMap::from([(path.clone(), hash)]),
+                resource_paths: vec![path.clone()],
             });
         fake.history_resource
             .lock()

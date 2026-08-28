@@ -260,75 +260,6 @@ fn author_can_configure_metadata_to_appear_on_cards() {
 }
 
 #[test]
-fn novelist_can_build_an_outline_directly_in_cards() {
-    let run = IsolatedRun::new("cards-first-outline").expect("isolated run");
-    let project = run.root().join("cards-first-outline.parchmint");
-    let harness = create_project(&run, &project, "Cards First Outline");
-
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Cards),
-        )
-        .expect("open Cards");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::CardsNewGroup)
-        .expect("create an Act from Cards");
-    let act = harness
-        .hierarchy_node("New Group")
-        .expect("resolve Cards-created Act");
-    harness
-        .replace_card_title(HarnessWindow::Project, act, "Act One")
-        .expect("name the Act in Cards");
-    harness
-        .click_text(HarnessWindow::Project, "Done")
-        .expect("finish Act editing");
-    assert_eq!(
-        harness
-            .cards_creation_parent()
-            .expect("read Cards quick-create parent"),
-        "Act One",
-        "the edited group remains the Cards creation target"
-    );
-
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::CardsNewDocument)
-        .expect("create a chapter in the selected Act from Cards");
-    let opening = harness
-        .hierarchy_node("Untitled")
-        .expect("resolve Cards-created chapter");
-    harness
-        .replace_card_title(HarnessWindow::Project, opening.clone(), "Opening Image")
-        .expect("name the chapter in Cards");
-    harness
-        .replace_card_synopsis(
-            HarnessWindow::Project,
-            opening,
-            "A storm strands the cartographer before the voyage begins.",
-        )
-        .expect("outline the chapter in Cards");
-    harness
-        .click_text(HarnessWindow::Project, "Done")
-        .expect("finish chapter editing");
-
-    assert!(visible(&harness, "Act One"));
-    assert!(visible(&harness, "Opening Image"));
-    assert!(visible(
-        &harness,
-        "A storm strands the cartographer before the voyage begins."
-    ));
-    assert_order(
-        &harness,
-        &["Act One", "Opening Image"],
-        "Cards-created chapter belongs in its selected Act",
-    );
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close Cards-first outline");
-    harness.shutdown().expect("stop Cards-first outline");
-}
-
-#[test]
 fn author_can_rename_a_chapter_from_the_inspector() {
     let run = IsolatedRun::new("inspector-title").expect("isolated run");
     let project = run.root().join("inspector-title.parchmint");
@@ -434,6 +365,40 @@ fn editor_honors_standard_undo_and_redo_shortcuts() {
 }
 
 #[test]
+fn explorer_focus_routes_undo_and_redo_to_project_history() {
+    let run = IsolatedRun::new("project-undo-shortcuts").expect("isolated run");
+    let project = run.root().join("project-undo-shortcuts.parchmint");
+    let harness = create_project(&run, &project, "Project Undo Shortcuts");
+
+    create_group(&harness, "Manuscript", "Part One");
+    assert!(visible(&harness, "Part One"));
+
+    for _ in 0..3 {
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::F6)
+            .expect("move focus to Explorer");
+    }
+    harness
+        .press_command_key(HarnessWindow::Project, 'z')
+        .expect("undo Explorer project change");
+    assert!(
+        !visible(&harness, "Part One"),
+        "project undo should remove the Explorer-created group"
+    );
+
+    harness
+        .press_command_key(HarnessWindow::Project, 'y')
+        .expect("redo Explorer project change");
+    assert!(visible(&harness, "Part One"));
+    harness
+        .close(HarnessWindow::Project)
+        .expect("close project undo shortcut project");
+    harness
+        .shutdown()
+        .expect("stop project undo shortcut project");
+}
+
+#[test]
 fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
     let run = IsolatedRun::new("settings-keyboard-focus").expect("isolated run");
     let project = run.root().join("settings-keyboard-focus.parchmint");
@@ -511,7 +476,7 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
             HarnessTarget::Ribbon(RibbonDestination::History),
         )
         .expect("open project history");
-    assert!(visible(&harness, "All project checkpoints"));
+    assert!(visible(&harness, "Writing timeline"));
     harness
         .click_history_checkpoint(HarnessWindow::Project, 0)
         .expect("compare an automatic checkpoint");
@@ -521,13 +486,13 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         harness.history_status().expect("read history status")
     );
     harness
-        .click_text(HarnessWindow::Project, "Restore selected checkpoint")
+        .click_text(HarnessWindow::Project, "Restore “Automatic save”")
         .expect("request checkpoint restoration");
     assert!(visible(&harness, "Restore project history"));
     harness
         .click_text(HarnessWindow::Project, "Confirm")
         .expect("restore the selected checkpoint");
-    assert!(visible(&harness, "History"));
+    assert!(visible(&harness, "Writing timeline"));
     harness
         .close(HarnessWindow::Project)
         .expect("close history project");

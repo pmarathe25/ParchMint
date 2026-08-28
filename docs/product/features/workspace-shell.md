@@ -13,5 +13,6 @@
 - **WS-011:** The minimum supported application-window size is 1280 × 720 logical pixels. ParchMint must prevent smaller window sizes and must not substitute a mobile or feature-reduced layout.
 - **WS-012:** Every project workspace must provide persistent, mutually exclusive navigation to Editor, Cards, project History, Recently Deleted, Export, and Project Settings. Global Search is entered from the Explorer header and replaces Explorer in the left sidebar.
 - **WS-013:** The bottom status bar must provide keyboard-accessible controls to show or hide Explorer and Inspector in addition to word count and save status. Pane controls expose pressed state.
+- **WS-014:** Completed project actions and failures provide a brief top-of-workspace notification. Notifications are also available from a bounded, session-only drawer in the status area; non-actionable notices expire while failures remain until dismissed.
 - **WS-014:** Applicable Synopsis and metadata values in Inspector must be editable in place; Comments remain available only for document context.
 - **WS-015:** Inspector sections, Explorer roots, grouped Global Search results, and comparable Cards groups must expose consistent expand/collapse behavior and state.
