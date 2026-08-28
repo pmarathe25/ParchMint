@@ -19,6 +19,7 @@ use crate::{EditorPane, RibbonDestination};
 pub enum HarnessTarget {
     Ribbon(RibbonDestination),
     ExplorerSearch,
+    ExplorerRename,
     GlobalSearchQuery,
     GlobalReplacement,
     ModalCancel,
@@ -29,6 +30,7 @@ pub enum HarnessTarget {
     InspectorSynopsis,
     LocalFind(EditorPane),
     LocalReplace(EditorPane),
+    TabOverflow(EditorPane),
 }
 
 impl HarnessTarget {
@@ -42,6 +44,7 @@ impl HarnessTarget {
             Self::Ribbon(RibbonDestination::Settings) => "harness.ribbon.settings",
             Self::Ribbon(RibbonDestination::GlobalSearch) => "harness.ribbon.global-search",
             Self::ExplorerSearch => "harness.explorer.search",
+            Self::ExplorerRename => "harness.explorer.rename",
             Self::GlobalSearchQuery => "global-search-query",
             Self::GlobalReplacement => "global-search-replacement",
             Self::ModalCancel => "parchmint-focus-modal-cancel",
@@ -54,6 +57,8 @@ impl HarnessTarget {
             Self::LocalFind(EditorPane::Companion) => "harness.local-find.companion",
             Self::LocalReplace(EditorPane::Primary) => "harness.local-replace.primary",
             Self::LocalReplace(EditorPane::Companion) => "harness.local-replace.companion",
+            Self::TabOverflow(EditorPane::Primary) => "harness.tab-overflow.primary",
+            Self::TabOverflow(EditorPane::Companion) => "harness.tab-overflow.companion",
         })
     }
 }
@@ -99,4 +104,13 @@ pub(crate) fn card_drop_after_id(node_id: &str) -> Id {
 
 pub(crate) fn history_checkpoint_id(checkpoint_id: &str) -> Id {
     format!("harness.history.checkpoint.{checkpoint_id}").into()
+}
+
+/// Identifies one rendered tab without depending on its author-visible title.
+pub(crate) fn editor_tab_id(pane: EditorPane, document_id: &str) -> Id {
+    let pane = match pane {
+        EditorPane::Primary => "primary",
+        EditorPane::Companion => "companion",
+    };
+    format!("harness.editor.tab.{pane}.{document_id}").into()
 }

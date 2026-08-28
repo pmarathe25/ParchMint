@@ -399,6 +399,101 @@ fn explorer_focus_routes_undo_and_redo_to_project_history() {
 }
 
 #[test]
+fn explorer_creation_replaces_the_selected_default_title() {
+    let run = IsolatedRun::new("explorer-rename-shortcut").expect("isolated run");
+    let project = run.root().join("explorer-rename-shortcut.parchmint");
+    let harness = create_project(&run, &project, "Explorer Rename Shortcut");
+
+    harness
+        .right_click_text(HarnessWindow::Project, "Manuscript")
+        .expect("open Manuscript context menu");
+    harness
+        .click_text(HarnessWindow::Project, "Create group")
+        .expect("create a group");
+    harness
+        .redraw(HarnessWindow::Project)
+        .expect("render the created group-name field");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("inspect created group-name field"),
+        "the created group must render an inline name field"
+    );
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("inspect initial group-name focus"),
+        "creation must immediately focus the inline name field"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Part One")
+        .expect("replace the selected default group name");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit the initial group name");
+    let titles = harness
+        .hierarchy_titles()
+        .expect("read hierarchy after direct creation naming");
+    assert!(
+        titles.iter().any(|title| title == "Part One"),
+        "the created group must have its requested title: {titles:?}"
+    );
+    assert!(!titles.iter().any(|title| title == "New Group"));
+
+    harness
+        .close(HarnessWindow::Project)
+        .expect("close Explorer rename project");
+    harness.shutdown().expect("stop Explorer rename project");
+}
+
+#[test]
+fn explorer_f2_rename_replaces_the_selected_title() {
+    let run = IsolatedRun::new("explorer-f2-rename").expect("isolated run");
+    let project = run.root().join("explorer-f2-rename.parchmint");
+    let harness = create_project(&run, &project, "Explorer F2 Rename");
+
+    for _ in 0..3 {
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::F6)
+            .expect("move keyboard focus to Explorer");
+    }
+    harness
+        .click_text(HarnessWindow::Project, "Untitled Document")
+        .expect("select the document to rename");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::F2)
+        .expect("start standard Explorer rename");
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("inspect F2 rename focus"),
+        "F2 must focus the selected Explorer title"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Chapter One")
+        .expect("replace the selected title through F2");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit standard Explorer rename");
+    let titles = harness
+        .hierarchy_titles()
+        .expect("read hierarchy after F2 rename");
+    assert!(
+        titles.iter().any(|title| title == "Chapter One"),
+        "{titles:?}"
+    );
+    assert!(
+        !titles.iter().any(|title| title == "Untitled Document"),
+        "F2 must replace the selected title: {titles:?}"
+    );
+
+    harness
+        .close(HarnessWindow::Project)
+        .expect("close Explorer F2 rename project");
+    harness.shutdown().expect("stop Explorer F2 rename project");
+}
+
+#[test]
 fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
     let run = IsolatedRun::new("settings-keyboard-focus").expect("isolated run");
     let project = run.root().join("settings-keyboard-focus.parchmint");
@@ -470,6 +565,10 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
     harness
         .elapse_autosave_idle()
         .expect("create the later automatic checkpoint");
+    let later_revision = harness
+        .active_editor_body()
+        .expect("read later revision before opening history");
+    assert!(later_revision.contains("The second chart changed the route."));
     harness
         .click_target(
             HarnessWindow::Project,
@@ -478,8 +577,8 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         .expect("open project history");
     assert!(visible(&harness, "Writing timeline"));
     harness
-        .click_history_checkpoint(HarnessWindow::Project, 0)
-        .expect("compare an automatic checkpoint");
+        .click_history_checkpoint(HarnessWindow::Project, 1)
+        .expect("compare the earlier automatic checkpoint");
     assert!(
         visible(&harness, "Checkpoint"),
         "history status: {}",
@@ -494,9 +593,142 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         .expect("restore the selected checkpoint");
     assert!(visible(&harness, "Writing timeline"));
     harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .expect("return to the restored draft");
+    let restored_revision = harness
+        .active_editor_body()
+        .expect("read the restored draft");
+    assert!(
+        restored_revision.contains("The first chart marked the safe channel."),
+        "restore must retain the earlier checkpoint text: {restored_revision:?}"
+    );
+    assert!(
+        !restored_revision.contains("The second chart changed the route."),
+        "restore must discard the later revision: {restored_revision:?}"
+    );
+    harness
         .close(HarnessWindow::Project)
         .expect("close history project");
     harness.shutdown().expect("stop history project");
+}
+
+#[test]
+fn author_can_edit_a_document_selected_from_tab_overflow() {
+    let run = IsolatedRun::new("tab-overflow-editing").expect("isolated run");
+    let project = run.root().join("tab-overflow-editing.parchmint");
+    let harness = create_project(&run, &project, "Tab Overflow Editing");
+
+    create_group(&harness, "Manuscript", "Chapters");
+    for title in [
+        "Chapter One",
+        "Chapter Two",
+        "Chapter Three",
+        "Chapter Four",
+        "Chapter Five",
+        "Chapter Six",
+        "Chapter Seven",
+        "Chapter Eight",
+        "Chapter Nine",
+        "Chapter Ten",
+    ] {
+        create_document(&harness, "Chapters", title);
+        harness
+            .right_click_text(HarnessWindow::Project, title)
+            .expect("open chapter context menu");
+        harness
+            .click_text(HarnessWindow::Project, "Open")
+            .expect("open chapter as a permanent tab");
+    }
+    let tab_titles = harness.tab_titles().expect("read the open tab order");
+    assert!(
+        tab_titles.len() >= 10,
+        "opening each chapter must retain its tab before exercising overflow: {tab_titles:?}"
+    );
+    harness
+        .resize(HarnessWindow::Project, 960.0, 720.0)
+        .expect("resize the writing workspace to exercise responsive tab overflow");
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::TabOverflow(EditorPane::Primary),
+        )
+        .expect("open the real tab-overflow menu");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+        .expect("move to the first hidden tab");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("activate the hidden tab from overflow");
+    let overflow_selected_title = harness
+        .active_editor_tab_title()
+        .expect("identify the document selected from overflow");
+    let overflow_selected_id = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .expect("identify the overflow-selected document");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "Overflow sentinel.",
+        )
+        .expect("edit the tab selected through overflow");
+    assert!(
+        harness
+            .active_editor_body()
+            .expect("read the tab selected from overflow")
+            .contains("Overflow sentinel."),
+        "the mounted editor must match the tab activated through overflow"
+    );
+    assert!(
+        harness
+            .editor_tab_is_visible(
+                HarnessWindow::Project,
+                EditorPane::Primary,
+                overflow_selected_id,
+            )
+            .expect("inspect the rendered tab strip"),
+        "selecting a hidden tab must rotate the tab strip to reveal it"
+    );
+
+    let other_title = ["Chapter Ten", "Chapter Nine", "Chapter Eight"]
+        .into_iter()
+        .find(|title| *title != overflow_selected_title.as_str())
+        .expect("a visible chapter distinct from the overflow selection");
+    harness
+        .right_click_text(HarnessWindow::Project, other_title)
+        .expect("open another chapter after the overflow edit");
+    harness
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("switch to another chapter");
+    assert!(
+        !harness
+            .active_editor_body()
+            .expect("read a different chapter")
+            .contains("Overflow sentinel."),
+        "editing a hidden tab must not write into whichever document happened to be mounted"
+    );
+    harness
+        .right_click_text(HarnessWindow::Project, overflow_selected_title.clone())
+        .expect("return to the overflow-selected document");
+    harness
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("open the overflow-selected document again");
+    assert!(
+        harness
+            .active_editor_body()
+            .expect("read the overflow-selected document again")
+            .contains("Overflow sentinel."),
+        "the overflow edit must remain attached to its selected document"
+    );
+
+    harness
+        .close(HarnessWindow::Project)
+        .expect("close tab-overflow project");
+    harness.shutdown().expect("stop tab-overflow project");
 }
 
 #[test]

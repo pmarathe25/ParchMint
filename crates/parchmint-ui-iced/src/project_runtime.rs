@@ -160,7 +160,14 @@ impl NativeProjectEffectExecutor {
                         )));
                     }
                 };
-                self.execute_commands([command]).await
+                match self.execute_commands([command]).await? {
+                    ProjectEffectCompletion::RefreshedSnapshot(snapshot) => {
+                        Ok(ProjectEffectCompletion::WorkflowSnapshot(snapshot))
+                    }
+                    _ => Err(ProjectRuntimeError::InvalidEffect(
+                        "creating hierarchy produced an unexpected completion",
+                    )),
+                }
             }
             ProjectEffect::DeleteHierarchy(node_ids) => {
                 let nodes = resolve_distinct_nodes(&resolvers, node_ids)?;
@@ -2657,6 +2664,26 @@ mod tests {
             .expect("candidate can be reserved in the collision fixture");
 
         assert_ne!(first, generated_node_id(&collided, 4));
+    }
+
+    #[test]
+    fn group_creation_uses_the_same_workflow_snapshot_as_document_creation() {
+        let (snapshot, _, _, _) = fixture();
+        let (executor, _) = executor(snapshot);
+
+        let result = block_on(
+            executor.execute_project_effect(ProjectEffect::CreateHierarchy {
+                parent_id: stable_id_string(NodeId::manuscript_root().as_bytes()),
+                kind: HierarchyItemKind::Group,
+            }),
+        );
+
+        let Ok(ProjectEffectCompletion::WorkflowSnapshot(created)) = result else {
+            panic!("group creation must return the durable workflow snapshot");
+        };
+        assert!(created.project.nodes.iter().any(|(_, node)| {
+            node.title == "New Group" && matches!(node.kind, NodeKind::Group)
+        }));
     }
 
     #[test]

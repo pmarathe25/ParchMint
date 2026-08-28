@@ -64,6 +64,8 @@ enum HarnessAction {
     TypeInto(HarnessWindow, String, String),
     TypeAt(HarnessWindow, (f32, f32), String),
     TypeIntoTarget(HarnessWindow, HarnessTarget, String),
+    TargetIsVisible(HarnessWindow, HarnessTarget),
+    EditorTabIsVisible(HarnessWindow, EditorPane, String),
     TargetIsFocused(HarnessWindow, HarnessTarget),
     TypeFocused(HarnessWindow, String),
     PressKey(HarnessWindow, HarnessKey),
@@ -87,11 +89,16 @@ enum HarnessAction {
         HarnessDropPosition,
     ),
     ContainsText(HarnessWindow, String),
+    Resize(HarnessWindow, f32, f32),
+    Redraw(HarnessWindow),
     ElapseAutosaveIdle,
     Close(HarnessWindow),
     ActiveEditorBody,
+    ActiveEditorTabTitle,
+    ActiveEditorDocumentId(EditorPane),
     ReplacementStatus,
     HierarchyTitles,
+    TabTitles,
     CommentFeedback,
     HistoryStatus,
     Snapshot(HarnessWindow, PathBuf),
@@ -179,6 +186,12 @@ fn execute_action(
         HarnessAction::TypeIntoTarget(window, target, value) => {
             harness.type_into_target(window, target, &value)
         }
+        HarnessAction::TargetIsVisible(window, target) => {
+            return harness
+                .target_is_visible(window, target)
+                .map(HarnessValue::Bool)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::TargetIsFocused(window, target) => {
             return harness
                 .target_is_focused(window, target)
@@ -233,11 +246,31 @@ fn execute_action(
                 .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::EditorTabIsVisible(window, pane, document_id) => {
+            return harness
+                .editor_tab_is_visible(window, pane, &document_id)
+                .map(HarnessValue::Bool)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::Resize(window, width, height) => harness.resize(window, width, height),
+        HarnessAction::Redraw(window) => harness.redraw(window),
         HarnessAction::ElapseAutosaveIdle => harness.elapse_autosave_idle(),
         HarnessAction::Close(window) => harness.close(window),
         HarnessAction::ActiveEditorBody => {
             return harness
                 .active_editor_body()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::ActiveEditorTabTitle => {
+            return harness
+                .active_editor_tab_title()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::ActiveEditorDocumentId(pane) => {
+            return harness
+                .active_editor_document_id(pane)
                 .map(HarnessValue::Text)
                 .map_err(|error| error.to_string());
         }
@@ -250,6 +283,12 @@ fn execute_action(
         HarnessAction::HierarchyTitles => {
             return harness
                 .hierarchy_titles()
+                .map(HarnessValue::Texts)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::TabTitles => {
+            return harness
+                .tab_titles()
                 .map(HarnessValue::Texts)
                 .map_err(|error| error.to_string());
         }
@@ -509,6 +548,31 @@ impl DesktopInteractionHarness {
             .into_bool()
     }
 
+    /// Returns whether a production target is currently rendered.
+    pub fn target_is_visible(
+        &self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+    ) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::TargetIsVisible(window, target))?
+            .into_bool()
+    }
+
+    /// Returns whether a document is presently rendered in a pane's tab strip.
+    pub fn editor_tab_is_visible(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: impl Into<String>,
+    ) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::EditorTabIsVisible(
+            window,
+            pane,
+            document_id.into(),
+        ))?
+        .into_bool()
+    }
+
     pub fn replace_text_and_submit(
         &self,
         window: HarnessWindow,
@@ -631,6 +695,22 @@ impl DesktopInteractionHarness {
             .into_bool()
     }
 
+    /// Resizes the rendered window and dispatches its real resize event.
+    pub fn resize(
+        &self,
+        window: HarnessWindow,
+        width: f32,
+        height: f32,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::Resize(window, width, height))?
+            .into_unit()
+    }
+
+    /// Advances the native surface by one Iced render frame.
+    pub fn redraw(&self, window: HarnessWindow) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::Redraw(window))?.into_unit()
+    }
+
     pub fn elapse_autosave_idle(&self) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ElapseAutosaveIdle)?.into_unit()
     }
@@ -643,6 +723,20 @@ impl DesktopInteractionHarness {
         self.request(HarnessAction::ActiveEditorBody)?.into_text()
     }
 
+    pub fn active_editor_tab_title(&self) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::ActiveEditorTabTitle)?
+            .into_text()
+    }
+
+    /// Returns the stable ID of the document active in an authoring pane.
+    pub fn active_editor_document_id(
+        &self,
+        pane: EditorPane,
+    ) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::ActiveEditorDocumentId(pane))?
+            .into_text()
+    }
+
     /// Returns the live state of the project-wide replacement preview.
     pub fn replacement_status(&self) -> Result<String, InteractionHarnessError> {
         self.request(HarnessAction::ReplacementStatus)?.into_text()
@@ -650,6 +744,10 @@ impl DesktopInteractionHarness {
 
     pub fn hierarchy_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {
         self.request(HarnessAction::HierarchyTitles)?.into_texts()
+    }
+
+    pub fn tab_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {
+        self.request(HarnessAction::TabTitles)?.into_texts()
     }
 
     /// Returns the active comment-composer feedback, if any.

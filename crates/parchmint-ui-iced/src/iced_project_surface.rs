@@ -2,7 +2,7 @@
 
 use iced::widget::{
     Space, button, checkbox, column, container, mouse_area, opaque, rich_text, row, scrollable,
-    span, stack, text, text_editor, text_input,
+    sensor, span, stack, text, text_editor, text_input,
 };
 use iced::{Background, Border, Color, Element, Font, Length, Theme, border, font};
 use parchmint_editor_api::{SemanticBlock, SemanticBlockKind, SemanticInlineMark};
@@ -37,6 +37,8 @@ pub(crate) enum ProjectSurfaceMessage {
     ToggleInspectorSection(InspectorSection),
     BeginResize(SidebarPanel),
     LoadMoreHistory,
+    /// The newly-created Explorer rename field has entered the rendered tree.
+    HierarchyRenameShown(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +50,7 @@ pub(crate) enum SidebarPanel {
 
 pub(crate) fn hierarchy_rename_input_id(_node_id: &str) -> iced::widget::Id {
     // Only one Explorer entry can be edited at a time.
-    iced::widget::Id::new("hierarchy-rename")
+    crate::harness_target::HarnessTarget::ExplorerRename.id()
 }
 
 // Divider lines belong to the adjacent sidebar's reference width; they must
@@ -438,18 +440,25 @@ fn explorer_rail<'a>(
                     .map(|(_, draft)| draft)
                     .unwrap_or(item.title);
                 hierarchy_drag::commit_on_click_away(
-                    text_input("Rename", draft)
-                        .id(hierarchy_rename_input_id(item.id))
-                        .on_input(|title| {
-                            ProjectSurfaceMessage::Project(ProjectMessage::SetHierarchyRenameDraft(
-                                title,
+                    sensor(
+                        text_input("Rename", draft)
+                            .id(hierarchy_rename_input_id(item.id))
+                            .on_input(|title| {
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetHierarchyRenameDraft(title),
+                                )
+                            })
+                            .on_submit(ProjectSurfaceMessage::Project(
+                                ProjectMessage::CommitHierarchyRename,
                             ))
-                        })
-                        .on_submit(ProjectSurfaceMessage::Project(
-                            ProjectMessage::CommitHierarchyRename,
-                        ))
-                        .padding([5, 6])
-                        .width(Length::Fill),
+                            .padding([5, 6])
+                            .width(Length::Fill),
+                    )
+                    .key(item.id.to_owned())
+                    .on_show({
+                        let node_id = item.id.to_owned();
+                        move |_| ProjectSurfaceMessage::HierarchyRenameShown(node_id.clone())
+                    }),
                     ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyRename),
                 )
             } else {

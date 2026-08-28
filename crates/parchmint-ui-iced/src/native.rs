@@ -1025,6 +1025,9 @@ struct NativeProjectState {
     /// tab must never replace edits which have not reached project persistence
     /// with the stale document snapshot carried by a mount effect.
     retained_editor_sessions: BTreeMap<parchmint_domain::DocumentId, SharedEditorSession>,
+    /// A created Explorer row must first be rendered before Iced can focus its
+    /// inline text field. The surface consumes this one-shot request on show.
+    pending_hierarchy_rename_focus: Option<String>,
     effect_executor: Option<NativeProjectEffectExecutor>,
     synopsis_commits: SynopsisCommitQueue,
     deferred_inspector_commits: DeferredInspectorCommitQueue,
@@ -3329,6 +3332,34 @@ impl NativeDesktop {
                     ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(node_id)),
                 );
             }
+            let rename_node = matches!(key, keyboard::Key::Named(keyboard::key::Named::F2))
+                .then(|| {
+                    let NativeWindow::Project(state) = self.windows.get(&id)? else {
+                        return None;
+                    };
+                    if state.shell.focus_target() != crate::FocusTarget::Explorer {
+                        return None;
+                    }
+                    let workspace = state.workspace.as_ref()?;
+                    workspace
+                        .explorer()
+                        .selected_ids()
+                        .first()
+                        .filter(|node| {
+                            workspace
+                                .explorer()
+                                .row(node)
+                                .is_some_and(|row| row.kind != crate::HierarchyRowKind::Root)
+                        })
+                        .map(|node| (*node).to_owned())
+                })
+                .flatten();
+            if let Some(node_id) = rename_node {
+                return self.update_project_surface(
+                    id,
+                    ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyRename(node_id)),
+                );
+            }
             let local_find_open = self.windows.get(&id).is_some_and(|window| {
                 let NativeWindow::Project(state) = window else {
                     return false;
@@ -3938,6 +3969,15 @@ impl NativeDesktop {
                     }
                 })
             }
+            ProjectSurfaceMessage::HierarchyRenameShown(node_id) => {
+                if state.pending_hierarchy_rename_focus.as_deref() != Some(node_id.as_str()) {
+                    return Task::none();
+                }
+                state.pending_hierarchy_rename_focus = None;
+                let input_id = crate::iced_project_surface::hierarchy_rename_input_id(&node_id);
+                iced::widget::operation::focus(input_id.clone())
+                    .chain(iced::widget::operation::select_all(input_id))
+            }
             ProjectSurfaceMessage::Project(mut message) => {
                 if let ProjectMessage::SelectHierarchy { gesture, .. }
                 | ProjectMessage::BeginHierarchyDrag { gesture, .. } = &mut message
@@ -4018,9 +4058,11 @@ impl NativeDesktop {
                     ));
                 }
                 if let Some(node_id) = hierarchy_rename_target {
-                    tasks.push(iced::widget::operation::focus(
-                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
-                    ));
+                    let input_id = crate::iced_project_surface::hierarchy_rename_input_id(&node_id);
+                    tasks.push(
+                        iced::widget::operation::focus(input_id.clone())
+                            .chain(iced::widget::operation::select_all(input_id)),
+                    );
                 }
                 if let Some(document) = history_filter {
                     let ticket = workspace.begin_task(ProjectTask::LoadHistory);
@@ -5961,7 +6003,27 @@ impl NativeDesktop {
         let history_action = mutation.as_ref().and_then(|ticket| ticket.history_action);
         match result {
             Ok(ProjectEffectCompletion::WorkflowSnapshot(snapshot)) => {
-                Self::prune_deleted_document_sessions(state, snapshot.as_ref());
+                let restoring_history = matches!(
+                    mutation.as_ref().map(|ticket| &ticket.effect),
+                    Some(ProjectEffect::RestoreHistory { .. })
+                );
+                if restoring_history {
+                    // A History restore replaces every canonical document.
+                    // Mounted and retained sessions are mutable working copies,
+                    // so reusing even one would immediately paint the replaced
+                    // project with its pre-restore prose. Discard all of them
+                    // before reopening the restored workspace tabs below.
+                    Self::teardown_editor_sessions(state);
+                    state.editor_hosts.insert(
+                        EditorPane::Primary,
+                        crate::iced_editor_surface::EditorPaneSlot::state(
+                            crate::iced_editor_surface::EditorCenterPaneState::Loading,
+                        ),
+                    );
+                    state.editor_hosts.remove(EditorPane::Companion);
+                } else {
+                    Self::prune_deleted_document_sessions(state, snapshot.as_ref());
+                }
                 let snapshot = Arc::new(*snapshot);
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::clone(&snapshot);
@@ -5983,18 +6045,19 @@ impl NativeDesktop {
                         workspace.complete_history_workflow();
                     }
                 }
-                let hierarchy_rename = matches!(
+                let creating_hierarchy = matches!(
                     mutation.as_ref().map(|ticket| &ticket.effect),
                     Some(ProjectEffect::CreateHierarchy { .. })
-                )
-                .then(|| {
-                    state
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.hierarchy_rename())
-                        .map(|(node_id, _)| node_id.to_owned())
-                })
-                .flatten();
+                );
+                let hierarchy_rename = creating_hierarchy
+                    .then(|| {
+                        state
+                            .workspace
+                            .as_ref()
+                            .and_then(|workspace| workspace.hierarchy_rename())
+                            .map(|(node_id, _)| node_id.to_owned())
+                    })
+                    .flatten();
                 state.effect_executor = state
                     .project
                     .ports()
@@ -6004,7 +6067,7 @@ impl NativeDesktop {
                     self.status = Some(format!("Could not refresh mounted styles: {error}"));
                 }
                 let mut reopen = Vec::new();
-                if let Some(workspace) = state.workspace.as_ref() {
+                if !creating_hierarchy && let Some(workspace) = state.workspace.as_ref() {
                     if let Some(document) = workspace
                         .editor()
                         .pane(EditorPane::Primary)
@@ -6053,6 +6116,10 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
+                if hierarchy_rename.is_some() {
+                    state.shell.focus(crate::FocusTarget::Explorer);
+                }
+                state.pending_hierarchy_rename_focus = hierarchy_rename;
                 let terminal = mutation.map_or_else(Task::none, |ticket| {
                     self.after_persistent_mutation_terminal(
                         window,
@@ -6060,12 +6127,7 @@ impl NativeDesktop {
                         None,
                     )
                 });
-                let rename_focus = hierarchy_rename.map_or_else(Task::none, |node_id| {
-                    iced::widget::operation::focus(
-                        crate::iced_project_surface::hierarchy_rename_input_id(&node_id),
-                    )
-                });
-                Task::batch([reopen, refresh, terminal, rename_focus])
+                Task::batch([reopen, refresh, terminal])
             }
             Ok(ProjectEffectCompletion::RefreshedSnapshot(snapshot)) => {
                 let snapshot = *snapshot;
@@ -8304,6 +8366,7 @@ impl NativeDesktop {
                 editor_bindings,
                 mounted_documents,
                 retained_editor_sessions,
+                pending_hierarchy_rename_focus: None,
                 effect_executor,
                 synopsis_commits: SynopsisCommitQueue::default(),
                 deferred_inspector_commits: DeferredInspectorCommitQueue::default(),

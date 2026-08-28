@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use iced::{
@@ -59,6 +59,7 @@ pub enum HarnessKey {
     Escape,
     Tab,
     F6,
+    F2,
     ArrowDown,
     ArrowUp,
 }
@@ -95,6 +96,7 @@ impl HarnessKey {
             Self::Escape => keyboard::key::Named::Escape,
             Self::Tab => keyboard::key::Named::Tab,
             Self::F6 => keyboard::key::Named::F6,
+            Self::F2 => keyboard::key::Named::F2,
             Self::ArrowDown => keyboard::key::Named::ArrowDown,
             Self::ArrowUp => keyboard::key::Named::ArrowUp,
         })
@@ -149,6 +151,13 @@ impl PersistentSurface {
             cache: user_interface::Cache::default(),
             cursor: mouse::Cursor::Unavailable,
         }
+    }
+
+    fn resize(&mut self, size: Size) {
+        self.size = size;
+        // Layout and overlay geometry are size-dependent, while focus state
+        // lives in the widgets themselves and is reconstructed by Iced.
+        self.cache = user_interface::Cache::default();
     }
 
     fn find_bounds<S>(
@@ -425,6 +434,43 @@ impl NativeDesktopHarness {
             .get_mut(&id)
             .expect("surface was created")
             .is_focused(desktop.view(id), target.id()))
+    }
+
+    /// Reports whether a stable production target is presently in the
+    /// rendered window, without changing its focus or state.
+    pub fn target_is_visible(
+        &mut self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+    ) -> Result<bool, HarnessError> {
+        let id = self.window_id(window)?;
+        self.ensure_surface(id, window)?;
+        let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+        Ok(surfaces
+            .get_mut(&id)
+            .expect("surface was created")
+            .find_bounds(desktop.view(id), target.id())
+            .is_ok())
+    }
+
+    /// Reports whether a document is rendered as a tab in the requested pane.
+    pub fn editor_tab_is_visible(
+        &mut self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: &str,
+    ) -> Result<bool, HarnessError> {
+        let id = self.window_id(window)?;
+        self.ensure_surface(id, window)?;
+        let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+        Ok(surfaces
+            .get_mut(&id)
+            .expect("surface was created")
+            .find_bounds(
+                desktop.view(id),
+                harness_target::editor_tab_id(pane, document_id),
+            )
+            .is_ok())
     }
 
     /// Types into the widget that retained focus from an earlier interaction.
@@ -971,6 +1017,46 @@ impl NativeDesktopHarness {
         Ok(simulator.find(text).is_ok())
     }
 
+    /// Resizes a headless production window and dispatches the matching Iced
+    /// window event. Author flows use this to exercise responsive layouts
+    /// through the same update path as a real desktop resize.
+    pub fn resize(
+        &mut self,
+        window: HarnessWindow,
+        width: f32,
+        height: f32,
+    ) -> Result<(), HarnessError> {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err(HarnessError::new(format!(
+                "window dimensions must be finite and positive, got {width}×{height}"
+            )));
+        }
+        let id = self.window_id(window)?;
+        self.ensure_surface(id, window)?;
+        let size = Size::new(width, height);
+        self.surfaces
+            .get_mut(&id)
+            .expect("surface was created")
+            .resize(size);
+        self.dispatch_events(window, [Event::Window(window::Event::Resized(size))])?;
+        self.record(window, format!("resize window to {width}×{height}"));
+        Ok(())
+    }
+
+    /// Delivers the next window render frame. Some production controls, such
+    /// as a newly inserted inline text field, can only receive focus once the
+    /// toolkit has placed them in the rendered tree.
+    pub fn redraw(&mut self, window: HarnessWindow) -> Result<(), HarnessError> {
+        self.dispatch_events(
+            window,
+            [Event::Window(
+                window::Event::RedrawRequested(Instant::now()),
+            )],
+        )?;
+        self.record(window, "render window frame".to_owned());
+        Ok(())
+    }
+
     /// Advances the product autosave clock past the idle delay without sleeping.
     pub fn elapse_autosave_idle(&mut self) -> Result<(), HarnessError> {
         let now = Instant::now();
@@ -1035,6 +1121,56 @@ impl NativeDesktopHarness {
         Ok(projection.body().to_owned())
     }
 
+    /// Returns the title of the document in the focused authoring pane.
+    pub fn active_editor_tab_title(&self) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))?;
+        let pane = workspace.editor().focused_pane();
+        let document_id = workspace
+            .editor()
+            .pane(pane)
+            .active_document()
+            .ok_or_else(|| HarnessError::new("focused editor has no active document"))?;
+        workspace
+            .editor()
+            .pane(pane)
+            .tabs()
+            .iter()
+            .find(|tab| tab.id() == document_id)
+            .map(|tab| tab.title().to_owned())
+            .ok_or_else(|| HarnessError::new("focused editor tab is unavailable"))
+    }
+
+    /// Returns the active document identity for the requested authoring pane.
+    pub fn active_editor_document_id(&self, pane: EditorPane) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        state
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.editor().pane(pane).active_document())
+            .map(str::to_owned)
+            .ok_or_else(|| HarnessError::new("editor pane has no active document"))
+    }
+
     /// Describes the live replacement-preview state for deterministic flow
     /// diagnostics when a semantic action is unavailable.
     pub fn replacement_status(&self) -> Result<String, HarnessError> {
@@ -1092,6 +1228,32 @@ impl NativeDesktopHarness {
             .rows()
             .into_iter()
             .map(|row| row.title.to_owned())
+            .collect())
+    }
+
+    /// Returns the primary pane's tabs in author-visible order. This observes
+    /// the live workspace only; flows still activate tabs through their
+    /// rendered strip or overflow control.
+    pub fn tab_titles(&self) -> Result<Vec<String>, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))?;
+        Ok(workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .tabs()
+            .iter()
+            .map(|tab| tab.title().to_owned())
             .collect())
     }
 

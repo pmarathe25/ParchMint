@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, pick_list, row, sensor, stack, text,
-    text_input,
+    Space, button, column, container, mouse_area, opaque, pick_list, responsive, row, sensor,
+    stack, text, text_input,
 };
 use iced::{
     Background, Element, Font, Length,
@@ -585,10 +585,6 @@ fn editor_pane_surface(
         state,
         pane,
         workspace.focused_pane() == pane,
-        slots
-            .slot(pane)
-            .and_then(EditorPaneSlot::host)
-            .map_or(1.0, |host| host.viewport().width),
         workspace.tab_drag_source(pane),
         workspace.tab_drag_target(pane),
         theme,
@@ -655,20 +651,52 @@ fn tab_strip(
     state: &EditorPaneState,
     pane: EditorPane,
     focused: bool,
-    measured_width: f32,
     drag_source: Option<&str>,
     drag_target: Option<usize>,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
-    let active = state.active_document();
-    let layout =
-        EditorWorkspace::tab_strip_layout(measured_width, state.tabs(), active.unwrap_or_default());
+    let tabs = state.tabs().to_vec();
+    let active_document = state.active_document().map(str::to_owned);
+    let drag_source = drag_source.map(str::to_owned);
+    responsive(move |available| {
+        tab_strip_for_width(
+            &tabs,
+            active_document.as_deref(),
+            pane,
+            focused,
+            drag_source.as_deref(),
+            drag_target,
+            available.width,
+            theme,
+        )
+    })
+    .width(Length::Fill)
+    .height(36)
+    .into()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tab_strip_for_width(
+    tabs: &[TabSpec],
+    active_document: Option<&str>,
+    pane: EditorPane,
+    focused: bool,
+    drag_source: Option<&str>,
+    drag_target: Option<usize>,
+    available_width: f32,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    let layout = EditorWorkspace::tab_strip_layout(
+        available_width,
+        tabs,
+        active_document.unwrap_or_default(),
+    );
     let tabs = layout
         .tabs()
         .iter()
         .fold(row![].spacing(2), |row, presentation| {
             let index = presentation.source_index();
-            let tab = &state.tabs()[index];
+            let tab = &tabs[index];
             row.push(tab_button(
                 tab,
                 presentation,
@@ -686,7 +714,8 @@ fn tab_strip(
         tabs
     } else {
         let pane_for_overflow = pane;
-        tabs.push(
+        tabs.push(harness_target::target(
+            HarnessTarget::TabOverflow(pane),
             pick_list(
                 layout.overflow_tabs().to_vec(),
                 Option::<crate::TabOverflowItem>::None,
@@ -699,7 +728,7 @@ fn tab_strip(
             )
             .placeholder(format!("{} tabs", layout.overflow_tabs().len()))
             .width(58),
-        )
+        ))
     };
     let strip: Element<'static, EditorCenterMessage> = container(tabs)
         .padding([0, 2])
@@ -789,33 +818,36 @@ fn tab_button(
         components::surface(theme, Surface::Panel, Interaction::Rest),
     )
     .into();
-    mouse_area(
-        container(
-            column![
-                row![activate, close]
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-                container(Space::new())
-                    .height(2)
-                    .width(Length::Fill)
-                    .style(move |_| tab_underline_style(theme, active)),
-            ]
-            .spacing(0),
+    harness_target::target_id(
+        harness_target::editor_tab_id(pane, &id),
+        mouse_area(
+            container(
+                column![
+                    row![activate, close]
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    container(Space::new())
+                        .height(2)
+                        .width(Length::Fill)
+                        .style(move |_| tab_underline_style(theme, active)),
+                ]
+                .spacing(0),
+            )
+            .width(presentation.bounds().width())
+            .style(move |_| tab_container_style(theme, drag_source, drag_target)),
         )
-        .width(presentation.bounds().width())
-        .style(move |_| tab_container_style(theme, drag_source, drag_target)),
+        .on_enter(EditorCenterMessage::Workspace(
+            EditorMessage::SetTabDragTarget {
+                pane,
+                target_index: index,
+            },
+        ))
+        .interaction(if drag_source {
+            iced::mouse::Interaction::Grabbing
+        } else {
+            iced::mouse::Interaction::Pointer
+        }),
     )
-    .on_enter(EditorCenterMessage::Workspace(
-        EditorMessage::SetTabDragTarget {
-            pane,
-            target_index: index,
-        },
-    ))
-    .interaction(if drag_source {
-        iced::mouse::Interaction::Grabbing
-    } else {
-        iced::mouse::Interaction::Pointer
-    })
     .into()
 }
 
