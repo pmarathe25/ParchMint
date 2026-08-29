@@ -35,6 +35,9 @@ fn rapid_nested_moves_and_renames_keep_one_consistent_hierarchy() {
         .click_text(HarnessWindow::Project, "Opening")
         .expect("select moved Opening");
     harness
+        .click_target(HarnessWindow::Project, HarnessTarget::InspectorTitle)
+        .expect("begin renaming the moved document in Inspector");
+    harness
         .replace_target(
             HarnessWindow::Project,
             HarnessTarget::InspectorTitle,
@@ -308,7 +311,10 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
         )
         .expect("set global replacement");
     harness
-        .click_text(HarnessWindow::Project, "Replace")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::GlobalReplacementReview,
+        )
         .expect("open replacement preview");
     harness
         .click_text(HarnessWindow::Project, "Revalidate selection")

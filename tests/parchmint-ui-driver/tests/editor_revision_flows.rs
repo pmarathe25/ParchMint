@@ -157,7 +157,10 @@ fn editor_supports_local_then_project_wide_phrase_revision() {
         )
         .expect("enter global replacement");
     harness
-        .click_text(HarnessWindow::Project, "Replace")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::GlobalReplacementReview,
+        )
         .expect("open replacement preview");
     harness
         .click_text(HarnessWindow::Project, "Revalidate selection")

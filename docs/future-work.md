@@ -46,3 +46,11 @@ scheduled.
 - A separate review-oriented comment search, only if its semantics can remain
   clearly distinct from v1 Global Search, which intentionally excludes
   comments.
+
+## Motion and accessibility
+
+- A small, opt-in motion policy for transient overlays only. The writing
+  workspace intentionally responds immediately today: it has no decorative
+  layout or navigation animation. If overlay fades are introduced, they need a
+  reduced-motion setting, an injectable clock for deterministic tests, and a
+  short opacity-only transition that never delays input or changes layout.

@@ -523,7 +523,7 @@ fn formatting_icon_button(
                 )
             }),
         container(text(tooltip_label).size(12)).padding([4, 6]),
-        components::surface(theme, Surface::Panel, Interaction::Rest),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
     .into()
 }
@@ -894,7 +894,7 @@ fn tab_button(
         stationary_tooltip::tooltip(
             activate,
             container(text(tooltip).size(12)).padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         )
         .into()
     } else {
@@ -913,7 +913,7 @@ fn tab_button(
     let close: Element<'static, EditorCenterMessage> = stationary_tooltip::tooltip(
         close,
         container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
-        components::surface(theme, Surface::Panel, Interaction::Rest),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
     .into();
     harness_target::target_id(

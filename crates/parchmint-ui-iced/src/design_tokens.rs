@@ -22,6 +22,17 @@ pub const CORE_ICON_SIZE: u16 = 20;
 pub const DEFAULT_RADIUS: f32 = 4.0;
 pub const FOCUS_BORDER_WIDTH: f32 = 2.0;
 
+/// The compact, shared layout rhythm for application UI. Use these values for
+/// screen composition instead of introducing one-off gaps: dense controls use
+/// 4 or 8, ordinary UI groups use 12 or 16, and page-level separation uses 24
+/// or 32.
+pub const SPACING_4: f32 = 4.0;
+pub const SPACING_8: f32 = 8.0;
+pub const SPACING_12: f32 = 12.0;
+pub const SPACING_16: f32 = 16.0;
+pub const SPACING_24: f32 = 24.0;
+pub const SPACING_32: f32 = 32.0;
+
 /// Exact launcher composition metrics from the Penpot launcher frame.
 ///
 /// These constants are intentionally reusable: the launcher is a full-window
@@ -84,6 +95,14 @@ pub const UI_HEADING: Typography = Typography {
     size: 16,
     weight: 600,
     line_height: 1.25,
+};
+/// Page titles are distinct from section headings while remaining compact
+/// enough for the desktop workspace chrome.
+pub const UI_PAGE_TITLE: Typography = Typography {
+    family: "Source Sans 3",
+    size: 24,
+    weight: 600,
+    line_height: 1.2,
 };
 pub const UI_TAB: Typography = Typography {
     family: "Source Sans 3",
@@ -308,5 +327,19 @@ mod tests {
         assert_eq!(LAUNCHER_INSET, 72);
         assert_eq!(LAUNCHER_PROJECT_CARD_WIDTH, 520);
         assert_eq!(LAUNCHER_PROJECT_CARD_HEIGHT, 96);
+    }
+
+    #[test]
+    fn shared_spacing_and_page_title_roles_are_explicit_and_compact() {
+        assert_eq!(
+            [
+                SPACING_4, SPACING_8, SPACING_12, SPACING_16, SPACING_24, SPACING_32,
+            ],
+            [4.0, 8.0, 12.0, 16.0, 24.0, 32.0]
+        );
+        assert_eq!(UI_PAGE_TITLE.family, UI_HEADING.family);
+        assert_eq!(UI_PAGE_TITLE.size, 24);
+        assert_eq!(UI_PAGE_TITLE.weight, 600);
+        assert!(UI_PAGE_TITLE.line_height < UI_BODY.line_height);
     }
 }

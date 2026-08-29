@@ -1142,7 +1142,10 @@ fn revision_author_can_search_and_replace_a_draft_phrase() {
         )
         .expect("enter replacement");
     harness
-        .click_text(HarnessWindow::Project, "Replace")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::GlobalReplacementReview,
+        )
         .expect("review replacement");
     assert!(visible(&harness, "Replace Preview"));
     harness
@@ -1192,7 +1195,10 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
         )
         .expect("enter project-wide replacement");
     harness
-        .click_text(HarnessWindow::Project, "Replace")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::GlobalReplacementReview,
+        )
         .expect("review replacement");
     assert!(visible(&harness, "Replace Preview"));
     harness

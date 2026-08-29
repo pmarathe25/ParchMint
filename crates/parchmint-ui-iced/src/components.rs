@@ -73,7 +73,11 @@ pub fn surface(
     let mut style = container::Style {
         background: Some(Background::Color(background)),
         text_color: Some(palette.primary_text),
-        border: outlined(palette.border, 1.0),
+        border: if matches!(surface, Surface::Elevated | Surface::Dialog) {
+            outlined(palette.border, 1.0)
+        } else {
+            borderless()
+        },
         shadow: Shadow::default(),
         snap: true,
     };
@@ -87,7 +91,7 @@ pub fn surface(
         Interaction::Focused => style.border = outlined(palette.focus_ring, FOCUS_BORDER_WIDTH),
         Interaction::Selected => {
             style.background = Some(Background::Color(palette.accent_subtle));
-            style.border = outlined(palette.selection_border, 1.0);
+            style.border = borderless();
         }
         Interaction::Error => style.border = outlined(palette.error, FOCUS_BORDER_WIDTH),
         _ => {}
@@ -137,24 +141,17 @@ pub fn button_style(
         Interaction::Selected => (palette.accent_subtle, palette.primary_text),
         _ => (base_background, base_text),
     };
-    let border_color = match interaction {
-        Interaction::Focused => palette.focus_ring,
-        Interaction::Selected => palette.selection_border,
-        Interaction::Error => palette.error,
-        Interaction::Disabled => palette.border,
-        _ => base_border,
+    let (border_color, border_width) = match interaction {
+        Interaction::Focused => (palette.focus_ring, FOCUS_BORDER_WIDTH),
+        Interaction::Selected => (Color::TRANSPARENT, 0.0),
+        Interaction::Error => (palette.error, FOCUS_BORDER_WIDTH),
+        Interaction::Disabled => (palette.border, 1.0),
+        _ => (base_border, 1.0),
     };
     button::Style {
         background: Some(Background::Color(background)),
         text_color,
-        border: outlined(
-            border_color,
-            if matches!(interaction, Interaction::Focused | Interaction::Error) {
-                FOCUS_BORDER_WIDTH
-            } else {
-                1.0
-            },
-        ),
+        border: outlined(border_color, border_width),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -213,6 +210,9 @@ pub fn status_style(theme: ParchMintTheme, kind: StatusKind) -> container::Style
 fn outlined(color: Color, width: f32) -> iced::Border {
     border::color(color).width(width).rounded(DEFAULT_RADIUS)
 }
+fn borderless() -> iced::Border {
+    outlined(Color::TRANSPARENT, 0.0)
+}
 fn shadow(palette: SemanticPalette, surface: Surface) -> Shadow {
     Shadow {
         color: palette.scrim,
@@ -238,16 +238,61 @@ mod tests {
     use parchmint_preferences::ResolvedAppearance;
 
     #[test]
-    fn shared_components_use_semantic_focus_selection_and_error_styles_in_both_appearances() {
+    fn structural_surfaces_are_borderless_but_elevated_surfaces_remain_framed() {
         for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
             let theme = ParchMintTheme::new(appearance);
+            for structural_surface in [
+                Surface::Application,
+                Surface::Sidebar,
+                Surface::Panel,
+                Surface::Manuscript,
+                Surface::Status,
+            ] {
+                let resting = surface(theme, structural_surface, Interaction::Rest);
+                assert_eq!(resting.border.width, 0.0);
+                assert_eq!(resting.border.color, Color::TRANSPARENT);
+            }
+            for elevated_surface in [Surface::Elevated, Surface::Dialog] {
+                let resting = surface(theme, elevated_surface, Interaction::Rest);
+                assert_eq!(resting.border.width, 1.0);
+                assert_eq!(resting.border.color, theme.palette().border);
+            }
             assert_eq!(
-                surface(theme, Surface::Application, Interaction::Rest)
-                    .border
-                    .radius
-                    .top_left,
-                DEFAULT_RADIUS
+                surface(theme, Surface::Dialog, Interaction::Rest)
+                    .shadow
+                    .blur_radius,
+                32.0
             );
+        }
+    }
+
+    #[test]
+    fn selection_is_a_fill_and_keyboard_focus_is_a_ring_in_both_appearances() {
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let selected_surface = surface(theme, Surface::Panel, Interaction::Selected);
+            assert_eq!(
+                selected_surface.background,
+                Some(Background::Color(theme.palette().accent_subtle))
+            );
+            assert_eq!(selected_surface.border.width, 0.0);
+            assert_eq!(selected_surface.border.color, Color::TRANSPARENT);
+
+            for kind in [
+                ButtonKind::Primary,
+                ButtonKind::Secondary,
+                ButtonKind::Quiet,
+                ButtonKind::Destructive,
+                ButtonKind::Tab,
+            ] {
+                let selected = button_style(theme, kind, Interaction::Selected);
+                assert_eq!(
+                    selected.background,
+                    Some(Background::Color(theme.palette().accent_subtle))
+                );
+                assert_eq!(selected.border.width, 0.0);
+                assert_eq!(selected.border.color, Color::TRANSPARENT);
+            }
             assert_eq!(
                 button_style(theme, ButtonKind::Primary, Interaction::Focused)
                     .border
@@ -258,10 +303,7 @@ mod tests {
                 field_style(theme, Interaction::Error).border.width,
                 FOCUS_BORDER_WIDTH
             );
-            assert_ne!(
-                button_style(theme, ButtonKind::Tab, Interaction::Selected).background,
-                button_style(theme, ButtonKind::Tab, Interaction::Rest).background
-            );
+            assert_eq!(field_style(theme, Interaction::Rest).border.width, 1.0);
         }
     }
 }

@@ -17,7 +17,11 @@ use crate::{
     RestoreLocation, RibbonDestination, SaveState, SelectionGesture, SettingsCategory,
     SettingsDetail, ShellLayout, SidebarSurface, StatusCount, StyleProperty,
     components::{self, ButtonKind, Interaction, Surface},
-    design_tokens::{ParchMintTheme, RIBBON_HEIGHT, STATUS_HEIGHT},
+    design_tokens::{
+        ParchMintTheme, RIBBON_HEIGHT, SPACING_4, SPACING_8, SPACING_12, SPACING_16, SPACING_24,
+        SPACING_32, STATUS_HEIGHT, UI_BODY, UI_COMPACT, UI_HEADING, UI_LABEL, UI_PAGE_TITLE,
+        UI_TAB,
+    },
     focus, harness_target, hierarchy_drag,
     iced_editor_surface::EditorCenterMessage,
     icons::{Icon, icon, icon_sized},
@@ -322,7 +326,10 @@ fn sidebar_splitter(
         container(Space::new().width(1).height(Length::Fill))
             .width(SIDEBAR_SPLITTER_WIDTH)
             .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(theme.palette().divider)),
+                ..Default::default()
+            }),
     )
     .on_press(ProjectSurfaceMessage::BeginResize(panel))
     .interaction(iced::mouse::Interaction::ResizingHorizontally)
@@ -372,7 +379,7 @@ fn ribbon<'a>(
                 row.push(stationary_tooltip::tooltip(
                     control,
                     container(text(label).size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ))
             });
     let buttons = focus::f6_region(F6Region::ModeSwitch, buttons);
@@ -416,7 +423,7 @@ fn left_rail<'a>(
         SidebarSurface::GlobalSearch => global_search_rail(workspace, theme),
     };
     container(content)
-        .padding(12)
+        .padding(SPACING_12)
         .width(width)
         .height(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest))
@@ -432,15 +439,18 @@ fn explorer_rail<'a>(
         .rows()
         .into_iter()
         .filter(|item| hierarchy_row_is_visible(explorer, item.parent_id))
-        .fold(column![].spacing(1), |column, item| {
+        .fold(column![].spacing(SPACING_4), |column, item| {
             let depth = hierarchy_depth(explorer, item.parent_id);
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Root => button(
-                    text(if item.expanded { "▾" } else { "▸" })
-                        .size(12)
-                        .align_x(iced::alignment::Horizontal::Center),
-                )
-                .padding(2)
+                HierarchyRowKind::Root => button(icon_sized(
+                    if item.expanded {
+                        Icon::ExplorerFolderOpen
+                    } else {
+                        Icon::ExplorerFolderClosed
+                    },
+                    16,
+                ))
+                .padding(SPACING_4)
                 .width(20)
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
@@ -460,10 +470,7 @@ fn explorer_rail<'a>(
                 .width(20)
                 .align_x(iced::alignment::Horizontal::Center)
                 .into(),
-                HierarchyRowKind::Document => container(text("·").size(12))
-                    .width(20)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .into(),
+                HierarchyRowKind::Document => Space::new().width(20).into(),
             };
             let title = if item.cut_pending {
                 format!("{}  (cut)", item.title)
@@ -516,8 +523,8 @@ fn explorer_rail<'a>(
                 )
             } else {
                 let row = mouse_area(
-                    container(text(title).size(13))
-                        .padding([5, 6])
+                    container(text(title).size(u32::from(UI_TAB.size)))
+                        .padding([SPACING_4, SPACING_8])
                         .width(Length::Fill)
                         .style(move |_| {
                             if item.selected {
@@ -715,7 +722,7 @@ fn explorer_rail<'a>(
                             interaction(status, workspace.explorer_creation_menu_open())
                         )),
                     container(text("Create a document or group").size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ),
             ),
             harness_target::target(
@@ -732,7 +739,7 @@ fn explorer_rail<'a>(
                             interaction(status, false)
                         )),
                     container(text("Global Search").size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 )
             )
         ]
@@ -1044,7 +1051,7 @@ fn global_search_rail<'a>(
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
     let controls = row![
         stationary_tooltip::tooltip(
-            button(text("←  Search").size(16))
+            button(text("←  Search").size(u32::from(UI_HEADING.size)))
                 .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer))
                 .style(move |_, status| components::button_style(
                     theme,
@@ -1052,7 +1059,7 @@ fn global_search_rail<'a>(
                     interaction(status, false)
                 )),
             container(text("Back to Explorer").size(12)).padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
         Space::new().width(Length::Fill),
         stationary_tooltip::tooltip(
@@ -1076,7 +1083,7 @@ fn global_search_rail<'a>(
                 interaction(status, search.case_sensitive())
             )),
             container(text("Match case").size(12)).padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
         stationary_tooltip::tooltip(
             button(text(if search.whole_word() { "W ✓" } else { "W" }).size(12))
@@ -1092,11 +1099,11 @@ fn global_search_rail<'a>(
                     interaction(status, search.whole_word())
                 )),
             container(text("Match whole word").size(12)).padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
     ]
     .align_y(iced::alignment::Vertical::Center)
-    .spacing(8);
+    .spacing(SPACING_8);
     let mut grouped = BTreeMap::<&str, Vec<&crate::GlobalSearchResult>>::new();
     for result in search.windowed_results() {
         grouped
@@ -1105,81 +1112,80 @@ fn global_search_rail<'a>(
             .push(result);
     }
     let document_count = grouped.len();
-    let results =
-        grouped
-            .into_iter()
-            .fold(column![].spacing(8), |column, (document_id, matches)| {
-                let title = workspace
-                    .explorer()
-                    .title_for_document(document_id)
-                    .unwrap_or(document_id);
-                let match_count = matches.len();
-                let rows =
-                    matches
-                        .into_iter()
-                        .take(2)
-                        .fold(column![].spacing(3), |rows, result| {
-                            let active = search.active_match_id() == Some(result.match_id.as_str());
-                            let highlight = if active {
-                                theme.palette().search_match_active
+    let results = grouped.into_iter().fold(
+        column![].spacing(SPACING_8),
+        |column, (document_id, matches)| {
+            let title = workspace
+                .explorer()
+                .title_for_document(document_id)
+                .unwrap_or(document_id);
+            let match_count = matches.len();
+            let rows = matches
+                .into_iter()
+                .take(2)
+                .fold(column![].spacing(3), |rows, result| {
+                    let active = search.active_match_id() == Some(result.match_id.as_str());
+                    let highlight = if active {
+                        theme.palette().search_match_active
+                    } else {
+                        theme.palette().search_match
+                    };
+                    let snippet_spans: Vec<iced::widget::text::Span<'a>> = vec![
+                        span(result.prefix.as_str()),
+                        span(result.matching_text.as_str())
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::default()
+                            })
+                            .background(highlight),
+                        span(result.suffix.as_str()),
+                    ];
+                    let snippet = container(rich_text(snippet_spans).size(12))
+                        .padding([2, 3])
+                        .style(move |_| iced::widget::container::Style {
+                            border: if active {
+                                Border {
+                                    color: theme.palette().search_match_active,
+                                    width: 1.0,
+                                    radius: 2.0.into(),
+                                }
                             } else {
-                                theme.palette().search_match
-                            };
-                            let snippet_spans: Vec<iced::widget::text::Span<'a>> = vec![
-                                span(result.prefix.as_str()),
-                                span(result.matching_text.as_str())
-                                    .font(Font {
-                                        weight: font::Weight::Bold,
-                                        ..Font::default()
-                                    })
-                                    .background(highlight),
-                                span(result.suffix.as_str()),
-                            ];
-                            let snippet = container(rich_text(snippet_spans).size(12))
-                                .padding([2, 3])
-                                .style(move |_| iced::widget::container::Style {
-                                    border: if active {
-                                        Border {
-                                            color: theme.palette().search_match_active,
-                                            width: 1.0,
-                                            radius: 2.0.into(),
-                                        }
-                                    } else {
-                                        Border::default()
-                                    },
-                                    ..Default::default()
-                                });
-                            rows.push(
-                                button(snippet)
-                                    .padding([5, 6])
-                                    .width(Length::Fill)
-                                    .on_press(ProjectSurfaceMessage::Project(
-                                        ProjectMessage::NavigateGlobalSearchResult(
-                                            result.match_id.clone(),
-                                        ),
-                                    ))
-                                    .style(move |_, status| {
-                                        components::button_style(
-                                            theme,
-                                            ButtonKind::Quiet,
-                                            interaction(status, active),
-                                        )
-                                    }),
-                            )
+                                Border::default()
+                            },
+                            ..Default::default()
                         });
-                column.push(
-                    column![
-                        row![
-                            text(title).size(12),
-                            Space::new().width(Length::Fill),
-                            text(search_match_count_label(match_count)).size(12),
-                        ]
-                        .align_y(iced::alignment::Vertical::Center),
-                        rows,
+                    rows.push(
+                        button(snippet)
+                            .padding([5, 6])
+                            .width(Length::Fill)
+                            .on_press(ProjectSurfaceMessage::Project(
+                                ProjectMessage::NavigateGlobalSearchResult(result.match_id.clone()),
+                            ))
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, active),
+                                )
+                            }),
+                    )
+                });
+            column.push(
+                column![
+                    row![
+                        text(title).size(u32::from(UI_LABEL.size)),
+                        Space::new().width(Length::Fill),
+                        text(search_match_count_label(match_count))
+                            .size(u32::from(UI_COMPACT.size))
+                            .color(theme.palette().secondary_text),
                     ]
-                    .spacing(3),
-                )
-            });
+                    .align_y(iced::alignment::Vertical::Center),
+                    rows,
+                ]
+                .spacing(3),
+            )
+        },
+    );
     let result_count = search.results().len();
     let results = if search.results().is_empty() {
         results.push(
@@ -1205,23 +1211,26 @@ fn global_search_rail<'a>(
         .padding([7, 8])
         .width(Length::Fill)
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
-    let replace_action = button(
-        text(if result_count == 1 {
-            "Review 1 replacement".to_owned()
-        } else {
-            format!("Review {result_count} replacements")
-        })
-        .size(13),
-    )
-    .on_press_maybe(
-        (search.is_complete() && !search.results().is_empty()).then_some(
-            ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
-        ),
-    )
-    .padding([7, 14])
-    .style(move |_, status| {
-        components::button_style(theme, ButtonKind::Primary, interaction(status, false))
-    });
+    let replace_action = harness_target::target(
+        HarnessTarget::GlobalReplacementReview,
+        button(
+            text(if result_count == 1 {
+                "Review 1 replacement".to_owned()
+            } else {
+                format!("Review {result_count} replacements")
+            })
+            .size(13),
+        )
+        .on_press_maybe(
+            (search.is_complete() && !search.results().is_empty()).then_some(
+                ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
+            ),
+        )
+        .padding([7, 14])
+        .style(move |_, status| {
+            components::button_style(theme, ButtonKind::Primary, interaction(status, false))
+        }),
+    );
     let active_trail: Element<'a, ProjectSurfaceMessage> = search
         .active_match_id()
         .and_then(|active| {
@@ -1261,7 +1270,7 @@ fn global_search_rail<'a>(
             ))
             .height(Length::Fill)
     ]
-    .spacing(12)
+    .spacing(SPACING_12)
     .height(Length::Fill)
     .into()
 }
@@ -1351,7 +1360,7 @@ fn cards_center<'a>(
         .title(cards.section_id())
         .unwrap_or("Project");
     let sections = workspace.explorer().root_ids().into_iter().fold(
-        row![].spacing(4),
+        row![].spacing(SPACING_12),
         |sections, section_id| {
             let title = workspace
                 .explorer()
@@ -1361,18 +1370,16 @@ fn cards_center<'a>(
             let selected = section_id == cards.section_id();
             let section_id = section_id.to_owned();
             sections.push(
-                button(text(title).size(12))
-                    .padding([4, 7])
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::SetCardsSection(section_id),
-                    ))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            interaction(status, selected),
-                        )
-                    }),
+                button(
+                    text(title)
+                        .size(u32::from(UI_TAB.size))
+                        .line_height(UI_TAB.line_height),
+                )
+                .padding(0)
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetCardsSection(section_id),
+                ))
+                .style(move |_, status| text_tab_button_style(theme, status, selected)),
             )
         },
     );
@@ -1382,13 +1389,15 @@ fn cards_center<'a>(
         column![].spacing(0),
         |column, item| {
             let metadata = item.metadata.into_iter().fold(
-                column![].spacing(2),
+                column![].spacing(SPACING_4),
                 |metadata, (_, label, value)| {
                     metadata.push(
                         row![
-                            text(label).size(11),
+                            text(label)
+                                .size(u32::from(UI_COMPACT.size))
+                                .color(theme.palette().secondary_text),
                             text(" · ").size(11),
-                            text(value.unwrap_or("—")).size(12),
+                            text(value.unwrap_or("—")).size(u32::from(UI_COMPACT.size)),
                         ]
                         .spacing(0),
                     )
@@ -1396,12 +1405,17 @@ fn cards_center<'a>(
             );
             let node_id = item.node_id.to_owned();
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Group => {
-                    container(text(if item.expanded { "▾" } else { "▸" }))
-                        .width(28)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .into()
-                }
+                HierarchyRowKind::Group => container(icon_sized(
+                    if item.expanded {
+                        Icon::ExplorerFolderOpen
+                    } else {
+                        Icon::ExplorerFolderClosed
+                    },
+                    16,
+                ))
+                .width(28)
+                .align_x(iced::alignment::Horizontal::Center)
+                .into(),
                 _ => Space::new().width(28).into(),
             };
             let group = item.kind == HierarchyRowKind::Group;
@@ -1409,7 +1423,11 @@ fn cards_center<'a>(
                 row![
                     disclosure,
                     text(item.title)
-                        .size(if group { 17 } else { 16 })
+                        .size(if group {
+                            u32::from(UI_HEADING.size)
+                        } else {
+                            u32::from(UI_BODY.size)
+                        })
                         .font(if group {
                             Font {
                                 weight: font::Weight::Bold,
@@ -1420,14 +1438,14 @@ fn cards_center<'a>(
                         })
                         .width(Length::Fill),
                     Space::new().width(Length::Fill),
-                    container(metadata).padding([0, 8]).width(220),
+                    container(metadata).padding([0.0, SPACING_8]).width(220),
                 ]
                 .align_y(iced::alignment::Vertical::Center),
                 text(item.synopsis)
-                    .size(13)
+                    .size(u32::from(UI_BODY.size))
                     .color(theme.palette().secondary_text),
             ]
-            .spacing(6);
+            .spacing(SPACING_8);
             let before = DragDestination::BeforeSibling(node_id.clone());
             let after = DragDestination::AfterSibling(node_id.clone());
             let middle = if item.kind == HierarchyRowKind::Group {
@@ -1454,9 +1472,13 @@ fn cards_center<'a>(
                         row![card_content, drag_state].align_y(iced::alignment::Vertical::Center),
                         drop_state,
                     ]
-                    .spacing(if middle_active { 4 } else { 0 })
+                    .spacing(if middle_active { SPACING_4 } else { 0.0 })
                 )
-                .padding(if group { [14, 16] } else { [9, 16] })
+                .padding(if group {
+                    [SPACING_12, SPACING_16]
+                } else {
+                    [SPACING_8, SPACING_16]
+                })
                 .width(Length::Fill)
                 .style(move |_| {
                     if source_active || middle_active || item.selected {
@@ -1524,14 +1546,18 @@ fn cards_center<'a>(
         items
     };
     let content = column![
-        text(section_title).size(16),
-        text("Manuscript outline").size(12),
+        text(section_title)
+            .size(u32::from(UI_HEADING.size))
+            .line_height(UI_HEADING.line_height),
+        text("Manuscript outline")
+            .size(u32::from(UI_COMPACT.size))
+            .color(theme.palette().secondary_text),
         sections,
         scrollable(items).height(Length::Fill),
     ]
-    .spacing(12);
+    .spacing(SPACING_12);
     let content = container(content)
-        .padding([36, 24])
+        .padding([SPACING_32 + SPACING_4, SPACING_24])
         .width(Length::Fill)
         .height(Length::Fill);
     container(content)
@@ -1710,7 +1736,7 @@ fn history_center<'a>(
     let checkpoints =
         history
             .windowed_checkpoints()
-            .fold(column![].spacing(6), |column, checkpoint| {
+            .fold(column![].spacing(SPACING_4), |column, checkpoint| {
                 let checkpoint_id = checkpoint.checkpoint_id.clone();
                 let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
                 let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
@@ -1718,13 +1744,13 @@ fn history_center<'a>(
                 } else {
                     column
                 };
-                column.push(
-                    container(
+                column
+                    .push(
                         column![
                             harness_target::target_id(
                                 harness_target::history_checkpoint_id(&checkpoint_id),
-                                button(text(checkpoint.label()).size(14))
-                                    .padding([4, 0])
+                                button(text(checkpoint.label()).size(u32::from(UI_BODY.size)))
+                                    .padding([SPACING_4, 0.0])
                                     .width(Length::Fill)
                                     .on_press(ProjectSurfaceMessage::Project(
                                         ProjectMessage::SelectHistoryCheckpoint(
@@ -1743,13 +1769,21 @@ fn history_center<'a>(
                                 checkpoint.affected_summary(),
                                 checkpoint.sequence,
                             ))
-                            .size(11),
+                            .size(u32::from(UI_COMPACT.size))
+                            .color(theme.palette().secondary_text),
                         ]
-                        .spacing(3),
+                        .spacing(SPACING_4)
+                        .padding(SPACING_8)
+                        .height(Length::Fixed(72.0)),
                     )
-                    .padding(8)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
-                )
+                    .push(
+                        container(Space::new().height(1))
+                            .width(Length::Fill)
+                            .style(move |_| iced::widget::container::Style {
+                                background: Some(Background::Color(theme.palette().divider)),
+                                ..Default::default()
+                            }),
+                    )
             });
     let checkpoints = column![
         Space::new().height(history.checkpoint_window_start() as f32 * 72.0),
@@ -1902,8 +1936,16 @@ fn history_center<'a>(
     };
     let list =
         column![
-            text("Writing timeline").size(24),
-            text("Milestones and recoverable project versions").size(14),
+            text("Writing timeline")
+                .size(u32::from(UI_PAGE_TITLE.size))
+                .line_height(UI_PAGE_TITLE.line_height)
+                .font(Font {
+                    weight: font::Weight::Semibold,
+                    ..Font::with_name(UI_PAGE_TITLE.family)
+                }),
+            text("Milestones and recoverable project versions")
+                .size(u32::from(UI_BODY.size))
+                .color(theme.palette().secondary_text),
             milestone,
             filter,
             scrollable(checkpoints)
@@ -1913,24 +1955,39 @@ fn history_center<'a>(
                 .height(Length::Fill),
             load_more,
         ]
-        .spacing(12);
+        .spacing(SPACING_12);
     let detail = column![
-        text("Checkpoint details").size(24),
-        text("Compare a version with the current document or restore the whole project.").size(14),
+        text("Checkpoint details")
+            .size(u32::from(UI_PAGE_TITLE.size))
+            .line_height(UI_PAGE_TITLE.line_height)
+            .font(Font {
+                weight: font::Weight::Semibold,
+                ..Font::with_name(UI_PAGE_TITLE.family)
+            }),
+        text("Compare a version with the current document or restore the whole project.")
+            .size(u32::from(UI_BODY.size))
+            .color(theme.palette().secondary_text),
         error,
         maintenance,
         scrollable(comparison).height(Length::Fill),
         row![Space::new().width(Length::Fill), restore].spacing(12),
     ]
-    .spacing(14);
+    .spacing(SPACING_16);
     row![
         container(list)
-            .padding(16)
+            .padding(SPACING_16)
             .width(420)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
+            .width(SIDEBAR_SPLITTER_WIDTH)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(theme.palette().divider)),
+                ..Default::default()
+            }),
         container(detail)
-            .padding([20, 30])
+            .padding([SPACING_24, SPACING_32])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
@@ -2608,51 +2665,52 @@ fn settings_center<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let settings = workspace.settings();
-    let choices =
-        settings
-            .appearance_choices()
-            .into_iter()
-            .fold(column![].spacing(8), |column, mode| {
-                let (name, detail) = match mode {
-                    parchmint_preferences::AppearanceMode::System => {
-                        ("System", "Follow the operating system")
-                    }
-                    parchmint_preferences::AppearanceMode::Light => {
-                        ("Light", "Keep this appearance when the system changes")
-                    }
-                    parchmint_preferences::AppearanceMode::Dark => {
-                        ("Dark", "Keep this appearance when the system changes")
-                    }
-                };
-                column.push(
-                    button(
-                        row![
-                            text(if settings.appearance() == mode {
-                                "◉"
-                            } else {
-                                "○"
-                            })
-                            .size(22),
-                            text(name).size(16).font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }),
-                            Space::new().width(40),
-                            text(detail).size(14),
-                        ]
-                        .align_y(iced::alignment::Vertical::Center)
-                        .spacing(12),
-                    )
-                    .width(Length::Fill)
-                    .padding([5, 12])
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::SetAppearance(mode),
-                    ))
-                    .style(move |_, status| {
-                        flat_selection_button_style(theme, status, settings.appearance() == mode)
-                    }),
+    let choices = settings.appearance_choices().into_iter().fold(
+        column![].spacing(SPACING_8),
+        |column, mode| {
+            let (name, detail) = match mode {
+                parchmint_preferences::AppearanceMode::System => {
+                    ("System", "Follow the operating system")
+                }
+                parchmint_preferences::AppearanceMode::Light => {
+                    ("Light", "Keep this appearance when the system changes")
+                }
+                parchmint_preferences::AppearanceMode::Dark => {
+                    ("Dark", "Keep this appearance when the system changes")
+                }
+            };
+            column.push(
+                button(
+                    row![
+                        text(if settings.appearance() == mode {
+                            "◉"
+                        } else {
+                            "○"
+                        })
+                        .size(22),
+                        text(name).size(u32::from(UI_HEADING.size)).font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::DEFAULT
+                        }),
+                        Space::new().width(40),
+                        text(detail)
+                            .size(u32::from(UI_BODY.size))
+                            .color(theme.palette().secondary_text),
+                    ]
+                    .align_y(iced::alignment::Vertical::Center)
+                    .spacing(SPACING_12),
                 )
-            });
+                .width(Length::Fill)
+                .padding([SPACING_8, SPACING_12])
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetAppearance(mode),
+                ))
+                .style(move |_, status| {
+                    flat_selection_button_style(theme, status, settings.appearance() == mode)
+                }),
+            )
+        },
+    );
     let metadata = settings.metadata_fields().into_iter().enumerate().fold(
         column![
             row![
@@ -2673,7 +2731,7 @@ fn settings_center<'a>(
             .align_y(iced::alignment::Vertical::Center),
             text("Choose a field to edit its type, default, and card visibility.").size(11),
         ]
-        .spacing(8),
+        .spacing(SPACING_8),
         |column, (index, field)| {
             let id = field.id.to_owned();
             let delete_id = id.clone();
@@ -2710,7 +2768,7 @@ fn settings_center<'a>(
                 ))
                 .interaction(iced::mouse::Interaction::Grabbing),
                 container(text("Drag to reorder").size(12)).padding([4, 6]),
-                components::surface(theme, Surface::Panel, Interaction::Rest),
+                components::surface(theme, Surface::Elevated, Interaction::Rest),
             );
             let row = row![
                 drag_handle,
@@ -2720,17 +2778,17 @@ fn settings_center<'a>(
                         text(summary).size(11),
                         text(field.description.unwrap_or("No description")).size(11),
                     ]
-                    .spacing(3),
+                    .spacing(SPACING_4),
                 )
                 .width(Length::Fill)
-                .padding(10)
+                .padding(SPACING_8)
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::SelectMetadataField(id)
                 ))
                 .style(move |_, status| {
                     components::button_style(
                         theme,
-                        ButtonKind::Secondary,
+                        ButtonKind::Quiet,
                         interaction(status, selected),
                     )
                 }),
@@ -2746,10 +2804,10 @@ fn settings_center<'a>(
                             interaction(status, false),
                         )),
                     container(text("Delete field").size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ),
             ]
-            .spacing(6);
+            .spacing(SPACING_8);
             column.push(
                 mouse_area(container(row).width(Length::Fill).style(move |_| {
                     if target || dragging {
@@ -2796,16 +2854,12 @@ fn settings_center<'a>(
                     .spacing(14),
                 )
                 .width(Length::Fill)
-                .padding(10)
+                .padding(SPACING_8)
                 .on_press(ProjectSurfaceMessage::Project(ProjectMessage::SelectStyle(
                     id,
                 )))
                 .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Secondary,
-                        interaction(status, false),
-                    )
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
                 })
             ]
             .align_y(iced::alignment::Vertical::Center);
@@ -2827,7 +2881,7 @@ fn settings_center<'a>(
         settings
             .categories()
             .into_iter()
-            .fold(column![].spacing(4), |column, item| {
+            .fold(column![].spacing(SPACING_4), |column, item| {
                 column.push(
                     button(text(item.label).size(13).font(if item.selected {
                         Font {
@@ -2838,7 +2892,7 @@ fn settings_center<'a>(
                         Font::DEFAULT
                     }))
                     .width(Length::Fill)
-                    .padding([10, 12])
+                    .padding([SPACING_8, SPACING_12])
                     .on_press(ProjectSurfaceMessage::Project(
                         ProjectMessage::SelectSettingsCategory(item.category),
                     ))
@@ -2849,20 +2903,30 @@ fn settings_center<'a>(
             });
     let content: Element<'a, ProjectSurfaceMessage> = match category {
         SettingsCategory::Appearance => column![
-            text(appearance_heading).size(24),
-            text("Application setting · applies to every open ParchMint window.").size(15),
+            text(appearance_heading)
+                .size(u32::from(UI_PAGE_TITLE.size))
+                .line_height(UI_PAGE_TITLE.line_height)
+                .font(Font {
+                    weight: font::Weight::Semibold,
+                    ..Font::with_name(UI_PAGE_TITLE.family)
+                }),
+            text("Application setting · applies to every open ParchMint window.")
+                .size(u32::from(UI_BODY.size))
+                .color(theme.palette().secondary_text),
             Space::new().height(8),
             container(choices).width(540),
             Space::new().height(12),
             text("Operating system changes Light → Dark; every open ParchMint window updates immediately.").size(14),
         ]
-        .spacing(12)
+        .spacing(SPACING_12)
         .into(),
         SettingsCategory::General => column![
-            text("General").size(24),
+            text("General")
+                .size(u32::from(UI_PAGE_TITLE.size))
+                .line_height(UI_PAGE_TITLE.line_height),
             text("No general settings are available.").size(13),
         ]
-        .spacing(12)
+        .spacing(SPACING_12)
         .into(),
         SettingsCategory::Metadata => {
             let detail = match settings.selected_detail() {
@@ -2880,7 +2944,9 @@ fn settings_center<'a>(
                     .into()
             });
             column![
-                text("Metadata fields").size(24),
+                text("Metadata fields")
+                    .size(u32::from(UI_PAGE_TITLE.size))
+                    .line_height(UI_PAGE_TITLE.line_height),
                 row![
                     container(scrollable(metadata).height(Length::Fill))
                         .width(Length::FillPortion(2))
@@ -2894,10 +2960,10 @@ fn settings_center<'a>(
                     .height(Length::Fill)
                     .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
                 ]
-                .spacing(20)
+                .spacing(SPACING_24)
                 .height(Length::Fill),
             ]
-            .spacing(12)
+            .spacing(SPACING_12)
             .height(Length::Fill)
             .into()
         }
@@ -2910,7 +2976,9 @@ fn settings_center<'a>(
             }
             .unwrap_or_else(|| text("Select a style to edit its details.").size(12).into());
             column![
-                text("Styles").size(24),
+                text("Styles")
+                    .size(u32::from(UI_PAGE_TITLE.size))
+                    .line_height(UI_PAGE_TITLE.line_height),
                 row![
                     container(scrollable(styles).height(Length::Fill))
                         .width(Length::FillPortion(2))
@@ -2921,10 +2989,10 @@ fn settings_center<'a>(
                         .height(Length::Fill)
                         .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
                 ]
-                .spacing(20)
+                .spacing(SPACING_24)
                 .height(Length::Fill),
             ]
-            .spacing(12)
+            .spacing(SPACING_12)
             .height(Length::Fill)
             .into()
         }
@@ -2967,12 +3035,14 @@ fn settings_center<'a>(
                     .into(),
             };
             column![
-                text("Dictionaries").size(24),
+                text("Dictionaries")
+                    .size(u32::from(UI_PAGE_TITLE.size))
+                    .line_height(UI_PAGE_TITLE.line_height),
                 text(format!("Language · {}", dictionaries.language())).size(12),
                 scopes,
                 words,
             ]
-            .spacing(10)
+            .spacing(SPACING_12)
             .into()
         }
     };
@@ -2985,14 +3055,21 @@ fn settings_center<'a>(
                     .color(theme.palette().secondary_text),
                 navigation,
             ]
-            .spacing(10),
+            .spacing(SPACING_12),
         )
-        .padding([16, 12])
+        .padding([SPACING_16, SPACING_12])
         .width(280)
         .height(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
+            .width(SIDEBAR_SPLITTER_WIDTH)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(theme.palette().divider)),
+                ..Default::default()
+            }),
         container(content)
-            .padding([20, 24])
+            .padding([SPACING_24, SPACING_24])
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
@@ -3515,14 +3592,14 @@ fn inspector<'a>(
             .is_some_and(|row| row.kind == HierarchyRowKind::Document);
         let inspector = workspace.inspector();
         let metadata = inspector.metadata_items(selected).into_iter().fold(
-            column![].spacing(7),
+            column![].spacing(SPACING_8),
             |column, item| {
                 let node_id = selected_id.clone();
                 let field_id = item.field_id.to_owned();
                 let value = item.effective_value.unwrap_or_default();
                 column.push(
                     row![
-                        text(item.label).size(12).width(88),
+                        text(item.label).size(u32::from(UI_LABEL.size)).width(88),
                         text_input("—", value)
                             .on_input(move |value| ProjectSurfaceMessage::Project(
                                 ProjectMessage::SetMetadataValue {
@@ -3538,7 +3615,7 @@ fn inspector<'a>(
                                 field_interaction(status)
                             )),
                     ]
-                    .spacing(8)
+                    .spacing(SPACING_8)
                     .align_y(iced::alignment::Vertical::Center),
                 )
             },
@@ -3607,13 +3684,13 @@ fn inspector<'a>(
                             )
                         }),
                     container(text("Rename title").size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ),
             )
             .into()
         };
         let editor = workspace.editor();
-        let mut comments = column![].spacing(8);
+        let mut comments = column![].spacing(SPACING_8);
         let threads = editor.inspector_comments();
         let has_threads = !threads.is_empty();
         if !has_threads {
@@ -3643,22 +3720,23 @@ fn inspector<'a>(
             let mut card = column![
                 button(
                     row![
+                        column![
+                            text(root_body).size(u32::from(UI_BODY.size)),
+                            text(anchor_summary)
+                                .size(u32::from(UI_COMPACT.size))
+                                .color(theme.palette().secondary_text),
+                        ]
+                        .spacing(SPACING_4),
+                        Space::new().width(Length::Fill),
                         text(state)
-                            .size(11)
+                            .size(u32::from(UI_LABEL.size))
                             .font(Font {
-                                weight: font::Weight::Bold,
+                                weight: font::Weight::Semibold,
                                 ..Font::DEFAULT
                             })
                             .color(state_color),
-                        column![
-                            text(root_body).size(13),
-                            text(anchor_summary)
-                                .size(12)
-                                .color(theme.palette().secondary_text),
-                        ]
-                        .spacing(2),
                     ]
-                    .spacing(8)
+                    .spacing(SPACING_8)
                 )
                 .width(Length::Fill)
                 .padding([4, 0])
@@ -3669,7 +3747,7 @@ fn inspector<'a>(
                     components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
                 })
             ]
-            .spacing(6);
+            .spacing(SPACING_8);
             if let Some(root) = root {
                 let root_id = root.id().to_owned();
                 if editor.editing_comment_message() == Some((thread_id.as_str(), root_id.as_str()))
@@ -3951,7 +4029,7 @@ fn inspector<'a>(
                         theme,
                     ),
                 ]
-                .spacing(6),
+                .spacing(SPACING_8),
             );
             if editor.pending_delete_comment() == Some(thread_id.as_str()) {
                 card = card.push(
@@ -3995,7 +4073,14 @@ fn inspector<'a>(
         }
         // A document-level comment is always available: authors often need to
         // leave a note about a chapter before selecting specific prose.
-        comments = comments.push(text("New comment").size(12));
+        comments = comments.push(
+            text("New comment")
+                .size(u32::from(UI_LABEL.size))
+                .font(Font {
+                    weight: font::Weight::Semibold,
+                    ..Font::DEFAULT
+                }),
+        );
         comments = comments.push(
             text_editor(editor.comment_draft())
                 .id(HarnessTarget::CommentDraft.id())
@@ -4163,7 +4248,7 @@ fn status_bar<'a>(
                 .size(12),
             )
             .padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         )
         .into()
     } else {
@@ -4188,7 +4273,7 @@ fn status_bar<'a>(
                 .size(12)
             )
             .padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
         text(active_count).size(12),
         text(format!(
@@ -4217,7 +4302,7 @@ fn status_bar<'a>(
                 .size(12)
             )
             .padding([4, 6]),
-            components::surface(theme, Surface::Panel, Interaction::Rest),
+            components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
     ]
     .align_y(iced::alignment::Vertical::Center)
@@ -4415,6 +4500,22 @@ fn flat_selection_button_style(
     let mut style = components::button_style(theme, ButtonKind::Quiet, interaction(status, false));
     if selected && matches!(status, iced::widget::button::Status::Active) {
         style.background = Some(Background::Color(theme.palette().accent_subtle));
+        style.text_color = theme.palette().accent;
+        style.border = Border::default();
+    }
+    style
+}
+
+/// The Cards section picker is navigation embedded in content, rather than a
+/// separate control strip. A selected section therefore changes text color
+/// without becoming a filled pill.
+fn text_tab_button_style(
+    theme: ParchMintTheme,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
+    let mut style = components::button_style(theme, ButtonKind::Quiet, interaction(status, false));
+    if selected && matches!(status, iced::widget::button::Status::Active) {
         style.text_color = theme.palette().accent;
         style.border = Border::default();
     }
@@ -4823,7 +4924,11 @@ mod tests {
         );
         assert!(cards_surface.find("Manuscript outline").is_ok());
         assert!(cards_surface.find("EXPLORER").is_ok());
-        assert!(cards_surface.find("Inspector").is_ok());
+        assert!(
+            cards_surface
+                .find(HarnessTarget::InspectorTitle.id())
+                .is_ok()
+        );
         assert!(cards_surface.find("Document History").is_err());
         assert!(cards_surface.find("+ Document").is_err());
         assert!(cards_surface.find("Copy").is_err());
@@ -4842,7 +4947,11 @@ mod tests {
         );
         assert!(search_surface.find("←  Search").is_ok());
         assert!(search_surface.find("Replace with (optional)").is_ok());
-        assert!(search_surface.find("Inspector").is_ok());
+        assert!(
+            search_surface
+                .find(HarnessTarget::InspectorTitle.id())
+                .is_ok()
+        );
         assert!(search_surface.find("1 match in 1 document").is_ok());
         assert!(search_surface.find("Chapter One").is_ok());
         assert!(search_surface.find("1 match").is_ok());
@@ -5951,7 +6060,7 @@ mod tests {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
 
         let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-            assert!(settings.find("PROJECT SETTINGS").is_ok());
+            assert!(settings.find("SETTINGS").is_ok());
             settings
                 .click("Metadata fields")
                 .expect("metadata navigation");
@@ -5968,7 +6077,7 @@ mod tests {
         assert!(apply_project_messages(&mut workspace, messages).is_empty());
         let _metadata = interact(&workspace, RibbonDestination::Settings, |settings| {
             assert!(settings.find("Metadata field details").is_ok());
-            assert!(settings.find("PROJECT SETTINGS").is_ok());
+            assert!(settings.find("SETTINGS").is_ok());
         });
 
         for category in [SettingsCategory::Dictionaries, SettingsCategory::General] {
@@ -5979,7 +6088,7 @@ mod tests {
             });
             assert!(apply_project_messages(&mut workspace, messages).is_empty());
             let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-                assert!(settings.find("PROJECT SETTINGS").is_ok());
+                assert!(settings.find("SETTINGS").is_ok());
                 assert!(settings.find("Metadata field details").is_err());
             });
             assert!(messages.is_empty());
@@ -6248,7 +6357,7 @@ mod tests {
 
         let messages = interact(&workspace, RibbonDestination::GlobalSearch, |search| {
             search
-                .click("Replace")
+                .click("Review 1 replacement")
                 .expect("visible replacement preview action");
         });
         assert!(matches!(
@@ -6379,7 +6488,7 @@ mod tests {
             .update(EditorMessage::SetCommentDraft("A visible note".to_owned()));
 
         let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
-            assert!(editor.find("A visible note").is_ok());
+            assert!(editor.find(HarnessTarget::CommentDraft.id()).is_ok());
             editor
                 .click("Add to document")
                 .expect("visible comment creation action");
