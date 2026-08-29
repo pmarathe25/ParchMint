@@ -187,6 +187,19 @@ impl EditorCenterMessage {
                 message: MountedEditorMessage::Blur | MountedEditorMessage::ViewportChanged(_),
                 ..
             } => Vec::new(),
+            Self::Mounted {
+                pane,
+                message:
+                    MountedEditorMessage::HoverComment {
+                        comment_id,
+                        invocation_point,
+                    },
+                ..
+            } => vec![EditorMessage::SetCommentHover {
+                pane: *pane,
+                comment_id: comment_id.clone(),
+                invocation_point: *invocation_point,
+            }],
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
             Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
@@ -616,6 +629,24 @@ fn editor_pane_surface(
     } else {
         body
     };
+    let hovered_thread = workspace.hovered_comment(pane).and_then(|hover| {
+        workspace
+            .comment_thread(hover.comment_id())
+            .map(|thread| (hover.clone(), thread.clone()))
+    });
+    let body = match hovered_thread {
+        Some((hover, thread)) => comment_hover_overlay(body, &hover, &thread, theme),
+        None => body,
+    };
+    let body = mouse_area(body)
+        .on_exit(EditorCenterMessage::Workspace(
+            EditorMessage::SetCommentHover {
+                pane,
+                comment_id: None,
+                invocation_point: (0.0, 0.0),
+            },
+        ))
+        .into();
     let body = if workspace.focused_pane() == pane {
         focus::f6_region(F6Region::FocusedEditor, body)
     } else {
@@ -645,6 +676,73 @@ fn editor_pane_surface(
         move |_| EditorCenterMessage::HierarchyDropTarget(pane),
         move |_| EditorCenterMessage::ClearHierarchyDropTarget(pane),
     )
+}
+
+fn comment_hover_overlay(
+    content: Element<'static, EditorCenterMessage>,
+    hover: &crate::CommentHover,
+    thread: &crate::CommentThreadView,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    let quote = match thread.anchor() {
+        crate::CommentAnchor::Range { quote, .. }
+        | crate::CommentAnchor::Position { quote, .. }
+        | crate::CommentAnchor::Orphaned { quote, .. } => quote.clone(),
+        crate::CommentAnchor::Document { .. } => "Whole document".to_owned(),
+    };
+    let body = thread
+        .messages()
+        .first()
+        .map(|message| message.body().to_owned())
+        .unwrap_or_else(|| "No comment text.".to_owned());
+    let status = if thread.resolved() {
+        "Attached comment · Resolved"
+    } else {
+        "Attached comment"
+    };
+    let (x, y) = hover.invocation_point();
+    let card = container(
+        column![
+            text(status).size(11),
+            text(quote).size(12),
+            text(body).size(13),
+        ]
+        .spacing(5),
+    )
+    .width(248)
+    .padding(10)
+    .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest));
+    let dismiss = EditorCenterMessage::Workspace(EditorMessage::SetCommentHover {
+        pane: hover.pane(),
+        comment_id: None,
+        invocation_point: (0.0, 0.0),
+    });
+    stack![
+        content,
+        // This full-size presentation layer is deliberately ephemeral: the
+        // next pointer movement clears it. That is the same affordance as a
+        // native hover tooltip and prevents a read-only card obscuring prose
+        // after the pointer leaves its highlighted anchor.
+        mouse_area(
+            container(card)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding(iced::Padding {
+                    top: (y + 16.0).max(8.0),
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: (x + 12.0).max(8.0),
+                })
+                .align_x(Horizontal::Left)
+                .align_y(Vertical::Top),
+        )
+        .on_move({
+            let dismiss = dismiss.clone();
+            move |_| dismiss.clone()
+        })
+        .on_exit(dismiss),
+    ]
+    .into()
 }
 
 fn tab_strip(
@@ -1179,12 +1277,24 @@ mod tests {
                     view,
                     message,
                 } => {
-                    if !matches!(message, MountedEditorMessage::ViewportChanged(_)) {
-                        effects.extend(workspace.update(EditorMessage::FocusPane(pane)));
+                    if let MountedEditorMessage::HoverComment {
+                        comment_id,
+                        invocation_point,
+                    } = message
+                    {
+                        effects.extend(workspace.update(EditorMessage::SetCommentHover {
+                            pane,
+                            comment_id,
+                            invocation_point,
+                        }));
+                    } else {
+                        if !matches!(message, MountedEditorMessage::ViewportChanged(_)) {
+                            effects.extend(workspace.update(EditorMessage::FocusPane(pane)));
+                        }
+                        slots
+                            .update_mounted(pane, view, message)
+                            .expect("rendered mounted message reaches its retained host");
                     }
-                    slots
-                        .update_mounted(pane, view, message)
-                        .expect("rendered mounted message reaches its retained host");
                 }
                 EditorCenterMessage::SetReplaceDraft { pane, value } => {
                     slots.set_replace_draft(pane, value);
@@ -1298,6 +1408,28 @@ mod tests {
             message,
             EditorCenterMessage::Mounted { pane: EditorPane::Companion, view: message_view, .. } if message_view == view
         ));
+    }
+
+    #[test]
+    fn comment_hover_stays_presentation_only_without_stealing_editor_focus() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let view = workspace.pane(EditorPane::Companion).view();
+        let message = EditorCenterMessage::Mounted {
+            pane: EditorPane::Companion,
+            view,
+            message: MountedEditorMessage::HoverComment {
+                comment_id: Some("comment".to_owned()),
+                invocation_point: (24.0, 36.0),
+            },
+        };
+        assert_eq!(
+            message.workspace_messages(),
+            vec![EditorMessage::SetCommentHover {
+                pane: EditorPane::Companion,
+                comment_id: Some("comment".to_owned()),
+                invocation_point: (24.0, 36.0),
+            }]
+        );
     }
 
     #[test]

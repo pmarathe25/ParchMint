@@ -283,6 +283,9 @@ fn author_can_rename_a_chapter_from_the_inspector() {
     create_group(&harness, "Manuscript", "Part One");
     create_document(&harness, "Part One", "Untitled Scene");
     harness
+        .click_target(HarnessWindow::Project, HarnessTarget::InspectorTitle)
+        .expect("begin renaming the selected chapter in Inspector");
+    harness
         .replace_target(
             HarnessWindow::Project,
             HarnessTarget::InspectorTitle,
@@ -1059,6 +1062,26 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         harness
             .comment_feedback()
             .expect("read comment creation feedback")
+    );
+    harness
+        .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
+        .expect("hover the attached comment anchor");
+    assert!(
+        visible(&harness, "Attached comment"),
+        "the attached-comment hover card should appear beside the manuscript anchor; hover state: {}",
+        harness
+            .comment_hover_status()
+            .expect("read comment-hover diagnostic")
+    );
+    harness
+        .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
+        .expect("move away from the attached comment anchor");
+    assert!(
+        !visible(&harness, "Attached comment"),
+        "the transient comment card should dismiss after the pointer leaves its anchor; hover state: {}",
+        harness
+            .comment_hover_status()
+            .expect("read comment-hover diagnostic")
     );
     harness
         .type_into_target(

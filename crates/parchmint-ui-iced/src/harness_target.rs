@@ -35,6 +35,8 @@ pub enum HarnessTarget {
     LocalFind(EditorPane),
     LocalReplace(EditorPane),
     TabOverflow(EditorPane),
+    ExportBrowse,
+    ExportStart,
 }
 
 impl HarnessTarget {
@@ -67,6 +69,8 @@ impl HarnessTarget {
             Self::LocalReplace(EditorPane::Companion) => "harness.local-replace.companion",
             Self::TabOverflow(EditorPane::Primary) => "harness.tab-overflow.primary",
             Self::TabOverflow(EditorPane::Companion) => "harness.tab-overflow.companion",
+            Self::ExportBrowse => "harness.export.browse",
+            Self::ExportStart => "harness.export.start",
         })
     }
 }

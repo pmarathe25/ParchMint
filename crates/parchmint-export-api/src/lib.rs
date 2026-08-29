@@ -295,12 +295,6 @@ impl ExportPlan {
             &project.manuscript,
             EffectiveExportSettings::from_defaults(project.defaults),
         );
-        if has_mixed_revisions(&builder.revisions) {
-            builder
-                .issues
-                .push(ExportValidationIssue::MixedSourceRevisions);
-        }
-
         if builder.issues.is_empty() {
             Ok(Self {
                 scope: OrderedExportScope::EntireManuscript,
@@ -420,19 +414,11 @@ impl<'a> PlanBuilder<'a> {
     }
 }
 
-fn has_mixed_revisions(revisions: &BTreeMap<DocumentId, SourceRevision>) -> bool {
-    let Some(first) = revisions.values().next().copied() else {
-        return false;
-    };
-    revisions.values().any(|revision| *revision != first)
-}
-
 /// A validation problem that prevents an export from starting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportValidationIssue {
     MissingSource { document: DocumentId },
     DuplicateDocument { document: DocumentId },
-    MixedSourceRevisions,
     UnsafeOutputTarget { target: String },
 }
 

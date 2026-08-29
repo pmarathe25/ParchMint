@@ -580,6 +580,11 @@ enum Message {
         ticket: AutosaveTicket,
         result: NativeTaskResult<ProjectionRun<AutosaveCompletion, NativeTaskOutcome>>,
     },
+    RecoveryProjectionPersisted {
+        window: window::Id,
+        session: ProjectSessionCapability,
+        result: NativeTaskResult<ProjectionRun<(), NativeTaskOutcome>>,
+    },
     ClipboardWriteFinished {
         window: window::Id,
         request: NativeClipboardRequest,
@@ -912,6 +917,9 @@ fn resolved_system_appearance(appearance: SystemAppearance) -> ResolvedAppearanc
 
 fn keyboard_accelerator(key: &str, modifiers: keyboard::Modifiers) -> Option<&'static str> {
     let key = key.to_ascii_lowercase();
+    if modifiers == (keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT) && key == "f" {
+        return Some("search.global");
+    }
     if modifiers == keyboard::Modifiers::COMMAND {
         return match key.as_str() {
             "n" => Some("file.new"),
@@ -970,7 +978,10 @@ fn apply_hierarchy_pointer_modifiers(message: &mut ProjectMessage, modifiers: ke
 }
 
 fn should_activate_shortcut(command: &str, accelerator_fallback: bool) -> bool {
-    command.starts_with("file.") || command.starts_with("format.") || accelerator_fallback
+    command.starts_with("file.")
+        || command.starts_with("format.")
+        || command.starts_with("search.")
+        || accelerator_fallback
 }
 
 #[derive(Debug, Clone)]
@@ -1068,6 +1079,9 @@ struct NativeProjectState {
     /// inline text field. The surface consumes this one-shot request on show.
     pending_hierarchy_rename_focus: Option<String>,
     pending_metadata_field_creation_focus: bool,
+    /// Sidebar visibility before the author explicitly focuses a dual-pane
+    /// comparison. The command restores exactly this state on its next use.
+    focused_pane_sidebar_restore: Option<(bool, bool)>,
     effect_executor: Option<NativeProjectEffectExecutor>,
     synopsis_commits: SynopsisCommitQueue,
     deferred_inspector_commits: DeferredInspectorCommitQueue,
@@ -1079,6 +1093,10 @@ struct NativeProjectState {
     recovery_acceptance: Option<RecoveryAcceptanceTicket>,
     active_export: Option<ExportOperationToken>,
     export_destination: Option<parchmint_platform_api::UntrustedPathSelection>,
+    /// An export requested while a mounted editor has unsaved prose. The
+    /// projection save completes before the exporter reads the project
+    /// snapshot, so generated files never silently omit current writing.
+    pending_export: Option<PendingExport>,
     autosave: AutosaveState,
     /// The most recent project-wide search entered while a mounted draft is
     /// being persisted. The search starts from the freshly indexed snapshot.
@@ -1097,6 +1115,13 @@ struct NativeProjectState {
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
     modal_focus: ModalFocus,
+}
+
+struct PendingExport {
+    ticket: ProjectTaskTicket,
+    ports: ProjectUiPorts,
+    selection: parchmint_platform_api::UntrustedPathSelection,
+    options: ExportRunOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1590,6 +1615,8 @@ struct AutosaveState {
     dirty_sessions: BTreeMap<SharedEditorSession, EditorRevision>,
     projected_sessions: BTreeMap<SharedEditorSession, EditorRevision>,
     save_in_flight: bool,
+    recovery_projection_in_flight: bool,
+    last_recovery_projection: Option<Instant>,
     close_after_save: bool,
     explicit_save_waiting: bool,
 }
@@ -1597,6 +1624,9 @@ struct AutosaveState {
 impl AutosaveState {
     const IDLE_DELAY: Duration = Duration::from_secs(60);
     const CONTINUOUS_LIMIT: Duration = Duration::from_secs(300);
+    /// Bound recovery work while retaining a recent, durable replay point for
+    /// continuous typing between ordinary autosaves.
+    const RECOVERY_PROJECTION_INTERVAL: Duration = Duration::from_secs(2);
 
     fn mark_dirty(&mut self, session: SharedEditorSession, revision: EditorRevision, now: Instant) {
         self.first_dirty.get_or_insert(now);
@@ -1610,11 +1640,21 @@ impl AutosaveState {
     fn should_save(&self, now: Instant) -> bool {
         !self.dirty_sessions.is_empty()
             && !self.save_in_flight
+            && !self.recovery_projection_in_flight
             && self.first_dirty.is_some_and(|first| {
                 now.saturating_duration_since(first) >= Self::CONTINUOUS_LIMIT
                     || self
                         .last_edit
                         .is_some_and(|last| now.saturating_duration_since(last) >= Self::IDLE_DELAY)
+            })
+    }
+
+    fn should_capture_recovery(&self, now: Instant) -> bool {
+        !self.dirty_sessions.is_empty()
+            && !self.save_in_flight
+            && !self.recovery_projection_in_flight
+            && self.last_recovery_projection.is_none_or(|last| {
+                now.saturating_duration_since(last) >= Self::RECOVERY_PROJECTION_INTERVAL
             })
     }
 
@@ -1641,6 +1681,7 @@ impl AutosaveState {
         if self.dirty_sessions.is_empty() {
             self.first_dirty = None;
             self.last_edit = None;
+            self.last_recovery_projection = None;
         } else {
             self.first_dirty = Some(Instant::now());
         }
@@ -1659,6 +1700,8 @@ impl AutosaveState {
         self.projected_sessions.clear();
         self.first_dirty = None;
         self.last_edit = None;
+        self.recovery_projection_in_flight = false;
+        self.last_recovery_projection = None;
     }
 }
 
@@ -2075,6 +2118,14 @@ impl NativeDesktop {
                             && !state.opaque_mutations.blocks_close()
                         {
                             return self.start_projection_save(window, ProjectSaveKind::Explicit);
+                        } else if let Some(export) = state.pending_export.take() {
+                            return Self::export_task(
+                                window,
+                                export.ticket,
+                                export.ports,
+                                export.selection,
+                                export.options,
+                            );
                         } else if let Some(request) = state.pending_global_search.take()
                             && let Some(workspace) = state.workspace.as_mut()
                         {
@@ -2103,6 +2154,11 @@ impl NativeDesktop {
                                 &mut state.pending_global_search,
                                 format!("Project search could not save the latest draft: {error}"),
                             );
+                            Self::fail_pending_export(
+                                workspace,
+                                &mut state.pending_export,
+                                format!("Export could not save the latest draft: {error}"),
+                            );
                         }
                         if close_after_save {
                             self.status = None;
@@ -2116,6 +2172,59 @@ impl NativeDesktop {
                             return self.start_projection_save(window, ProjectSaveKind::Explicit);
                         }
                     }
+                }
+                Task::none()
+            }
+            Message::RecoveryProjectionPersisted {
+                window,
+                session,
+                result,
+            } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                    return Task::none();
+                };
+                if state.project.session != session {
+                    return Task::none();
+                }
+                state.autosave.recovery_projection_in_flight = false;
+                let failure = match result {
+                    Ok(run) => {
+                        state.autosave.record_projected(run.projected);
+                        run.result
+                            .err()
+                            .and_then(NativeTaskOutcome::save_failure_message)
+                    }
+                    Err(outcome) => outcome.save_failure_message(),
+                };
+                if let Some(error) = failure {
+                    if let Some(workspace) = state.workspace.as_mut() {
+                        Self::fail_pending_global_search(
+                            workspace,
+                            &mut state.pending_global_search,
+                            format!("Project search could not record the latest draft: {error}"),
+                        );
+                        Self::fail_pending_export(
+                            workspace,
+                            &mut state.pending_export,
+                            format!("Export could not record the latest draft: {error}"),
+                        );
+                    }
+                    self.status = Some(error);
+                    return Task::none();
+                }
+                let explicit_save = state.autosave.explicit_save_waiting;
+                let flush_pending_draft = explicit_save
+                    || state.pending_global_search.is_some()
+                    || state.pending_export.is_some();
+                let mutations_are_idle = !state.project_mutations.blocks_close()
+                    && !state.opaque_mutations.blocks_close();
+                if flush_pending_draft && mutations_are_idle {
+                    let kind = if explicit_save {
+                        ProjectSaveKind::Explicit
+                    } else {
+                        ProjectSaveKind::Autosave
+                    };
+                    return self.start_projection_save(window, kind);
                 }
                 Task::none()
             }
@@ -3200,6 +3309,10 @@ impl NativeDesktop {
     fn activate_shortcut(&mut self, id: window::Id, command: &str) -> Task<Message> {
         let capability = self.capability_for_window(id);
         let task = match command {
+            "search.global" => self.update_project_surface(
+                id,
+                ProjectSurfaceMessage::Project(ProjectMessage::ShowGlobalSearch),
+            ),
             "file.new" => {
                 self.creating_project = true;
                 self.windows
@@ -3220,6 +3333,41 @@ impl NativeDesktop {
             ),
             "file.close" => self.close_window(id),
             "edit.copy" | "edit.cut" | "edit.paste" => {
+                let tree_message = self
+                    .windows
+                    .get(&id)
+                    .and_then(|window| {
+                        let NativeWindow::Project(state) = window else {
+                            return None;
+                        };
+                        (state.shell.focus_target() == crate::FocusTarget::Explorer).then(|| {
+                            match command {
+                                "edit.copy" => Some(ProjectMessage::CopySelection),
+                                "edit.cut" => Some(ProjectMessage::CutSelection),
+                                "edit.paste" => state
+                                    .workspace
+                                    .as_ref()
+                                    .and_then(|workspace| workspace.clipboard_paste_destination())
+                                    .map(|destination| ProjectMessage::PasteSelection {
+                                        destination,
+                                    }),
+                                _ => unreachable!("clipboard command was matched above"),
+                            }
+                        })
+                    })
+                    .flatten();
+                let explorer_has_focus = self.windows.get(&id).is_some_and(|window| {
+                    matches!(
+                        window,
+                        NativeWindow::Project(state)
+                            if state.shell.focus_target() == crate::FocusTarget::Explorer
+                    )
+                });
+                if explorer_has_focus {
+                    return tree_message.map_or_else(Task::none, |message| {
+                        self.update_project_surface(id, ProjectSurfaceMessage::Project(message))
+                    });
+                }
                 let intent = match command {
                     "edit.copy" => MountedEditorClipboardIntent::Copy,
                     "edit.cut" => MountedEditorClipboardIntent::Cut,
@@ -3481,7 +3629,8 @@ impl NativeDesktop {
             });
             let find_message = match key {
                 keyboard::Key::Character(key)
-                    if key.eq_ignore_ascii_case("f") && modifiers.command() =>
+                    if key.eq_ignore_ascii_case("f")
+                        && *modifiers == keyboard::Modifiers::COMMAND =>
                 {
                     Some(crate::EditorMessage::OpenLocalFind)
                 }
@@ -4034,11 +4183,26 @@ impl NativeDesktop {
             ProjectSurfaceMessage::ToggleExplorer => {
                 let visible = !state.shell.layout().explorer_is_visible();
                 state.shell.layout_mut().set_explorer_visible(visible);
+                state.focused_pane_sidebar_restore = None;
                 Self::workspace_persist_task(id, state)
             }
             ProjectSurfaceMessage::ToggleInspector => {
                 let visible = !state.shell.layout().inspector_is_visible();
                 state.shell.layout_mut().set_inspector_visible(visible);
+                state.focused_pane_sidebar_restore = None;
+                Self::workspace_persist_task(id, state)
+            }
+            ProjectSurfaceMessage::ToggleFocusedPane => {
+                if let Some((explorer, inspector)) = state.focused_pane_sidebar_restore.take() {
+                    state.shell.layout_mut().set_explorer_visible(explorer);
+                    state.shell.layout_mut().set_inspector_visible(inspector);
+                } else {
+                    let layout = state.shell.layout();
+                    state.focused_pane_sidebar_restore =
+                        Some((layout.explorer_is_visible(), layout.inspector_is_visible()));
+                    state.shell.layout_mut().set_explorer_visible(false);
+                    state.shell.layout_mut().set_inspector_visible(false);
+                }
                 Self::workspace_persist_task(id, state)
             }
             ProjectSurfaceMessage::ToggleInspectorSection(section) => {
@@ -4100,6 +4264,14 @@ impl NativeDesktop {
                 iced::widget::operation::focus(
                     crate::iced_project_surface::metadata_field_name_input_id(),
                 )
+            }
+            ProjectSurfaceMessage::InspectorRenameShown(node_id) => {
+                if workspace.inspector_title_rename_node_id() != Some(node_id.as_str()) {
+                    return Task::none();
+                }
+                let input_id = crate::iced_project_surface::inspector_title_input_id();
+                iced::widget::operation::focus(input_id.clone())
+                    .chain(iced::widget::operation::select_all(input_id))
             }
             ProjectSurfaceMessage::Project(mut message) => {
                 apply_hierarchy_pointer_modifiers(&mut message, state.modifiers);
@@ -4353,6 +4525,7 @@ impl NativeDesktop {
 
                             state.pending_global_search = Some(request);
                             if state.autosave.save_in_flight
+                                || state.autosave.recovery_projection_in_flight
                                 || state.project_mutations.blocks_close()
                                 || state.opaque_mutations.blocks_close()
                             {
@@ -4743,7 +4916,74 @@ impl NativeDesktop {
                                 ));
                                 continue;
                             };
-                            tasks.push(Self::export_task(id, ticket, ports, selection, options));
+                            if state.autosave.dirty_sessions.is_empty()
+                                && !state.autosave.save_in_flight
+                            {
+                                tasks
+                                    .push(Self::export_task(id, ticket, ports, selection, options));
+                                continue;
+                            }
+
+                            state.pending_export = Some(PendingExport {
+                                ticket,
+                                ports: ports.clone(),
+                                selection,
+                                options,
+                            });
+                            if state.autosave.save_in_flight
+                                || state.autosave.recovery_projection_in_flight
+                                || state.project_mutations.blocks_close()
+                                || state.opaque_mutations.blocks_close()
+                            {
+                                self.status =
+                                    Some("Saving the latest draft before exporting…".into());
+                                continue;
+                            }
+                            let Some(adapter) = state.project.editor_adapter().cloned() else {
+                                Self::fail_pending_export(
+                                    workspace,
+                                    &mut state.pending_export,
+                                    "Export cannot read the latest draft because the editor is unavailable."
+                                        .to_owned(),
+                                );
+                                continue;
+                            };
+                            let plans = match editor_projection_plans(
+                                adapter.as_ref(),
+                                deduplicated_editor_sessions(
+                                    state
+                                        .editor_bindings
+                                        .values()
+                                        .map(MountedEditorBinding::session),
+                                    state.retained_editor_sessions.values().cloned(),
+                                ),
+                                &state.autosave.projected_sessions,
+                            ) {
+                                Ok(plans) => plans,
+                                Err(error) => {
+                                    Self::fail_pending_export(
+                                        workspace,
+                                        &mut state.pending_export,
+                                        error,
+                                    );
+                                    continue;
+                                }
+                            };
+                            let ticket = AutosaveTicket {
+                                dirty_sessions: state.autosave.dirty_sessions.clone(),
+                            };
+                            state.autosave.save_in_flight = true;
+                            workspace
+                                .update(ProjectMessage::StartSave(workspace.project_revision()));
+                            tasks.push(Self::autosave_task(
+                                id,
+                                ports,
+                                adapter,
+                                plans,
+                                ticket,
+                                ProjectSaveKind::Autosave,
+                            ));
+                            self.status = Some("Saving the latest draft before exporting…".into());
                         }
                         ProjectEffect::CancelExport => {
                             let Some(operation) = state.active_export else {
@@ -4993,6 +5233,19 @@ impl NativeDesktop {
                         spelling_range,
                         invocation_point,
                     );
+                }
+
+                // Hover cards are entirely presentation state. The editor
+                // adapter need not refresh its document/session projection
+                // on every pointer movement.
+                if matches!(
+                    &message,
+                    EditorCenterMessage::Mounted {
+                        message: parchmint_editor_iced::MountedEditorMessage::HoverComment { .. },
+                        ..
+                    }
+                ) {
+                    return Task::none();
                 }
 
                 match message {
@@ -7497,6 +7750,29 @@ impl NativeDesktop {
         )
     }
 
+    fn recovery_projection_task(
+        window: window::Id,
+        ports: ProjectUiPorts,
+        adapter: Arc<EditorIcedAdapter>,
+        plans: Vec<EditorProjectionPlan>,
+    ) -> Task<Message> {
+        let session = ports.session();
+        Task::perform(
+            Self::run_native_blocking_operation("record recovery", move || {
+                Ok(run_projection_sequence(
+                    &plans,
+                    |plan| Self::persist_native_projection(&ports, adapter.as_ref(), plan),
+                    || Ok(()),
+                ))
+            }),
+            move |result| Message::RecoveryProjectionPersisted {
+                window,
+                session,
+                result,
+            },
+        )
+    }
+
     fn accept_persistence_snapshot(state: &mut NativeProjectState, snapshot: ProjectSnapshot) {
         let is_current = state
             .project
@@ -8101,6 +8377,20 @@ impl NativeDesktop {
         ));
     }
 
+    fn fail_pending_export(
+        workspace: &mut ProjectWorkspace,
+        pending_export: &mut Option<PendingExport>,
+        reason: String,
+    ) {
+        let Some(export) = pending_export.take() else {
+            return;
+        };
+        workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+            export.ticket,
+            ProjectTaskPayload::Failed(reason),
+        ));
+    }
+
     fn autosave_tick(&mut self, now: Instant) -> Task<Message> {
         let mut tasks = Vec::new();
         for (window, native) in &mut self.windows {
@@ -8126,13 +8416,55 @@ impl NativeDesktop {
                 }
                 tasks.push(Self::launch_next_persistent_mutation(*window, state));
             }
-            if !state.autosave.should_save(now)
+            if state.autosave.should_save(now)
+                && !state.project_mutations.blocks_close()
+                && !state.opaque_mutations.blocks_close()
+            {
+                if state.workspace.is_none() {
+                    continue;
+                }
+                let Some(ports) = state.project.ports().cloned() else {
+                    continue;
+                };
+                let Some(adapter) = state.project.editor_adapter().cloned() else {
+                    continue;
+                };
+                let plans = match Self::projection_plans(state) {
+                    Ok(plans) => plans,
+                    Err(error) => {
+                        self.status = Some(error);
+                        continue;
+                    }
+                };
+                let through_revision = state
+                    .workspace
+                    .as_ref()
+                    .expect("workspace presence was checked above")
+                    .project_revision();
+                let ticket = AutosaveTicket {
+                    dirty_sessions: state.autosave.dirty_sessions.clone(),
+                };
+                state.autosave.save_in_flight = true;
+                state
+                    .workspace
+                    .as_mut()
+                    .expect("workspace presence was checked above")
+                    .update(ProjectMessage::StartSave(through_revision));
+                let window = *window;
+                tasks.push(Self::autosave_task(
+                    window,
+                    ports,
+                    adapter,
+                    plans,
+                    ticket,
+                    ProjectSaveKind::Autosave,
+                ));
+                continue;
+            }
+            if !state.autosave.should_capture_recovery(now)
                 || state.project_mutations.blocks_close()
                 || state.opaque_mutations.blocks_close()
             {
-                continue;
-            }
-            if state.workspace.is_none() {
                 continue;
             }
             let Some(ports) = state.project.ports().cloned() else {
@@ -8148,28 +8480,13 @@ impl NativeDesktop {
                     continue;
                 }
             };
-            let through_revision = state
-                .workspace
-                .as_ref()
-                .expect("workspace presence was checked above")
-                .project_revision();
-            let ticket = AutosaveTicket {
-                dirty_sessions: state.autosave.dirty_sessions.clone(),
-            };
-            state.autosave.save_in_flight = true;
-            state
-                .workspace
-                .as_mut()
-                .expect("workspace presence was checked above")
-                .update(ProjectMessage::StartSave(through_revision));
-            let window = *window;
-            tasks.push(Self::autosave_task(
-                window,
-                ports,
-                adapter,
-                plans,
-                ticket,
-                ProjectSaveKind::Autosave,
+            if plans.is_empty() {
+                continue;
+            }
+            state.autosave.recovery_projection_in_flight = true;
+            state.autosave.last_recovery_projection = Some(now);
+            tasks.push(Self::recovery_projection_task(
+                *window, ports, adapter, plans,
             ));
         }
         Task::batch(tasks)
@@ -8184,6 +8501,7 @@ impl NativeDesktop {
             return Task::none();
         };
         if state.autosave.save_in_flight
+            || state.autosave.recovery_projection_in_flight
             || state.project_mutations.blocks_close()
             || state.opaque_mutations.blocks_close()
         {
@@ -8504,6 +8822,7 @@ impl NativeDesktop {
                 retained_editor_sessions,
                 pending_hierarchy_rename_focus: None,
                 pending_metadata_field_creation_focus: false,
+                focused_pane_sidebar_restore: None,
                 effect_executor,
                 synopsis_commits: SynopsisCommitQueue::default(),
                 deferred_inspector_commits: DeferredInspectorCommitQueue::default(),
@@ -8515,6 +8834,7 @@ impl NativeDesktop {
                 recovery_acceptance: None,
                 active_export: None,
                 export_destination: None,
+                pending_export: None,
                 autosave: AutosaveState::default(),
                 pending_global_search: None,
                 next_spellcheck_generation: 0,
@@ -11252,6 +11572,13 @@ mod tests {
             Some("format.bold")
         );
         assert_eq!(keyboard_accelerator("s", keyboard::Modifiers::NONE), None);
+        assert_eq!(
+            keyboard_accelerator(
+                "f",
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
+            ),
+            Some("search.global"),
+        );
         #[cfg(target_os = "macos")]
         assert_eq!(
             keyboard_accelerator(
@@ -11558,6 +11885,32 @@ mod tests {
         autosave.mark_dirty(session, 2.into(), start + Duration::from_secs(299));
         assert!(!autosave.should_save(start + Duration::from_secs(358)));
         assert!(autosave.should_save(start + Duration::from_secs(359)));
+    }
+
+    #[test]
+    fn recovery_projection_is_bounded_and_does_not_wait_for_idle_autosave() {
+        let start = Instant::now();
+        let mut autosave = AutosaveState::default();
+        autosave.mark_dirty(SharedEditorSession::new(1), 1.into(), start);
+
+        assert!(autosave.should_capture_recovery(start));
+        autosave.recovery_projection_in_flight = true;
+        assert!(
+            !autosave.should_capture_recovery(start + AutosaveState::RECOVERY_PROJECTION_INTERVAL),
+            "only one recovery projection may run at a time"
+        );
+        autosave.recovery_projection_in_flight = false;
+        autosave.last_recovery_projection = Some(start);
+        assert!(!autosave.should_capture_recovery(
+            start + AutosaveState::RECOVERY_PROJECTION_INTERVAL - Duration::from_millis(1)
+        ));
+        assert!(
+            autosave.should_capture_recovery(start + AutosaveState::RECOVERY_PROJECTION_INTERVAL)
+        );
+        assert!(
+            !autosave.should_save(start + AutosaveState::RECOVERY_PROJECTION_INTERVAL),
+            "recovery capture must protect recent input before ordinary autosave is due"
+        );
     }
 
     #[test]

@@ -30,7 +30,9 @@ intentional rule for growing or scrolling.
 
 The status bar places the Explorer visibility control at the left and the
 Inspector visibility control at the far right. Each uses the selected mint
-treatment while its pane is shown.
+treatment while its pane is shown. When a companion editor is open, an explicit
+`Focus pane` action may hide both sidebars; its label changes to `Restore panes`
+until it restores the exact prior sidebar visibility.
 
 Focus, selection, disabled, warning, error, comment, search-match, and save
 states must meet contrast requirements without color alone. Reference boards

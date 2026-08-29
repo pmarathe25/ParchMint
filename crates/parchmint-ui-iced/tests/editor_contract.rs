@@ -174,6 +174,7 @@ fn selecting_a_comment_navigates_and_highlights_its_anchor_in_the_last_focused_v
         anchor: CommentAnchor::Range {
             document_id: "chapter-one".into(),
             range: FindMatch::new(17, 24),
+            quote: "highlighted passage".into(),
         },
     });
 

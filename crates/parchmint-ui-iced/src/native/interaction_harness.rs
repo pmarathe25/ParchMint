@@ -60,6 +60,8 @@ pub enum HarnessKey {
     Tab,
     F6,
     F2,
+    ArrowLeft,
+    ArrowRight,
     ArrowDown,
     ArrowUp,
 }
@@ -89,6 +91,49 @@ pub enum HarnessHierarchySurface {
     Cards,
 }
 
+/// The selection gesture used by a hierarchy interaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessSelectionGesture {
+    Replace,
+    Additive,
+    ContiguousRange,
+}
+
+impl From<HarnessSelectionGesture> for SelectionGesture {
+    fn from(gesture: HarnessSelectionGesture) -> Self {
+        match gesture {
+            HarnessSelectionGesture::Replace => Self::Replace,
+            HarnessSelectionGesture::Additive => Self::Additive,
+            HarnessSelectionGesture::ContiguousRange => Self::ContiguousRange,
+        }
+    }
+}
+
+/// A stable, author-visible History row for assertions that must not depend
+/// on repeated labels or rendered-list virtualization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessHistoryCheckpoint {
+    pub id: String,
+    pub sequence: u64,
+    pub category: String,
+    pub label: String,
+    pub affected_document_ids: Vec<String>,
+    pub recorded_at_unix_millis: Option<u64>,
+    pub timeline_heading: Option<String>,
+}
+
+/// One row in the current Explorer projection, retaining the semantic state
+/// that is lost in a flattened title list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessHierarchyEntry {
+    pub id: String,
+    pub title: String,
+    pub parent_id: Option<String>,
+    pub document_id: Option<String>,
+    pub selected: bool,
+    pub cut_pending: bool,
+}
+
 impl HarnessKey {
     fn into_iced(self) -> keyboard::Key {
         keyboard::Key::Named(match self {
@@ -97,6 +142,8 @@ impl HarnessKey {
             Self::Tab => keyboard::key::Named::Tab,
             Self::F6 => keyboard::key::Named::F6,
             Self::F2 => keyboard::key::Named::F2,
+            Self::ArrowLeft => keyboard::key::Named::ArrowLeft,
+            Self::ArrowRight => keyboard::key::Named::ArrowRight,
             Self::ArrowDown => keyboard::key::Named::ArrowDown,
             Self::ArrowUp => keyboard::key::Named::ArrowUp,
         })
@@ -532,6 +579,20 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
+    /// Sends a Shift-modified named key to the currently focused widget.
+    pub fn press_shift_key(
+        &mut self,
+        window: HarnessWindow,
+        key: HarnessKey,
+    ) -> Result<(), HarnessError> {
+        self.dispatch_events(
+            window,
+            Self::key_tap_events(key.into_iced(), keyboard::Modifiers::SHIFT),
+        )?;
+        self.record(window, format!("press shift-{key:?}"));
+        Ok(())
+    }
+
     /// Sends the platform command-modifier shortcut to the focused widget.
     pub fn press_command_key(
         &mut self,
@@ -758,6 +819,185 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
+    /// Moves the pointer over a stable target without pressing it. Fractions
+    /// are evaluated against current live bounds, preserving hover behavior
+    /// across layouts and window sizes.
+    pub fn move_pointer_to_target(
+        &mut self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        position: (f32, f32),
+    ) -> Result<(), HarnessError> {
+        let position = Self::relative_position(self.find_target_bounds(window, target)?, position)?;
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::CursorMoved { position })],
+        )?;
+        self.record(
+            window,
+            format!("move pointer to target {target:?} at {position:?}"),
+        );
+        Ok(())
+    }
+
+    /// Moves the pointer beyond the window's bounds so production hover,
+    /// drag-target, and popover leave behavior receives its ordinary event.
+    pub fn move_pointer_outside(&mut self, window: HarnessWindow) -> Result<(), HarnessError> {
+        let size = self.current_window_size(window)?;
+        let position = IcedPoint::new(size.width + 1.0, size.height + 1.0);
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::CursorMoved { position })],
+        )?;
+        self.record(window, "move pointer outside window".to_owned());
+        Ok(())
+    }
+
+    /// Moves the pointer over one uniquely occurring prose run using its live
+    /// editor geometry. This keeps hover workflows independent of wrapping,
+    /// fonts, and window dimensions while still dispatching a real pointer
+    /// event to the mounted Canvas.
+    pub fn move_pointer_to_editor_text(
+        &mut self,
+        window: HarnessWindow,
+        pane: crate::EditorPane,
+        text: &str,
+    ) -> Result<(), HarnessError> {
+        let id = self.window_id(window)?;
+        let local_position = {
+            let NativeWindow::Project(state) = self
+                .desktop
+                .windows
+                .get(&id)
+                .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+            else {
+                return Err(HarnessError::new("selected window is not a project"));
+            };
+            let binding = state
+                .editor_bindings
+                .get(&pane)
+                .ok_or_else(|| HarnessError::new(format!("{pane:?} editor pane is not mounted")))?;
+            let adapter = state
+                .project
+                .editor_adapter()
+                .ok_or_else(|| HarnessError::new("project editor adapter is unavailable"))?;
+            let block = adapter
+                .primary_visible_block(binding.session())
+                .map_err(|error| HarnessError::new(error.to_string()))?;
+            let matches = block.text().match_indices(text).collect::<Vec<_>>();
+            let [(byte_start, _)] = matches.as_slice() else {
+                return Err(HarnessError::new(if matches.is_empty() {
+                    format!("editor prose {text:?} was not found")
+                } else {
+                    format!("editor prose {text:?} is ambiguous")
+                }));
+            };
+            let position = block.text()[..*byte_start].chars().count() as u64;
+            let geometry = adapter
+                .geometry(binding.session(), binding.view(), block.block())
+                .map_err(|error| HarnessError::new(error.to_string()))?;
+            let scalar = geometry
+                .draw_scalars()
+                .iter()
+                .find(|scalar| scalar.position.value() == position)
+                .ok_or_else(|| HarnessError::new("editor prose has no live scalar geometry"))?;
+            IcedPoint::new(
+                scalar.bounds.x + scalar.bounds.width * 0.5,
+                scalar.bounds.y + scalar.bounds.height * 0.5,
+            )
+        };
+        let target = match pane {
+            crate::EditorPane::Primary => HarnessTarget::EditorPrimary,
+            crate::EditorPane::Companion => HarnessTarget::EditorCompanion,
+        };
+        let bounds = self.find_target_bounds(window, target)?;
+        let position = IcedPoint::new(bounds.x + local_position.x, bounds.y + local_position.y);
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::CursorMoved { position })],
+        )?;
+        self.record(
+            window,
+            format!("move pointer to editor prose {text:?} in {pane:?}"),
+        );
+        Ok(())
+    }
+
+    /// Moves the pointer over the one attached comment anchor currently
+    /// visible in a pane. The coordinate comes from the editor's own comment
+    /// decoration and layout, rather than a window-relative guess.
+    pub fn move_pointer_to_comment_anchor(
+        &mut self,
+        window: HarnessWindow,
+        pane: crate::EditorPane,
+    ) -> Result<(), HarnessError> {
+        let id = self.window_id(window)?;
+        let local_position = {
+            let NativeWindow::Project(state) = self
+                .desktop
+                .windows
+                .get(&id)
+                .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+            else {
+                return Err(HarnessError::new("selected window is not a project"));
+            };
+            let binding = state
+                .editor_bindings
+                .get(&pane)
+                .ok_or_else(|| HarnessError::new(format!("{pane:?} editor pane is not mounted")))?;
+            let adapter = state
+                .project
+                .editor_adapter()
+                .ok_or_else(|| HarnessError::new("project editor adapter is unavailable"))?;
+            let decorations = adapter
+                .comment_decorations(binding.session(), binding.view())
+                .map_err(|error| HarnessError::new(error.to_string()))?
+                .into_iter()
+                .filter(|decoration| !decoration.range().is_collapsed())
+                .collect::<Vec<_>>();
+            let [decoration] = decorations.as_slice() else {
+                return Err(HarnessError::new(format!(
+                    "expected one visible attached comment anchor, found {}",
+                    decorations.len()
+                )));
+            };
+            let block = adapter
+                .primary_visible_block(binding.session())
+                .map_err(|error| HarnessError::new(error.to_string()))?;
+            let geometry = adapter
+                .geometry(binding.session(), binding.view(), block.block())
+                .map_err(|error| HarnessError::new(error.to_string()))?;
+            let scalar = geometry
+                .draw_scalars()
+                .iter()
+                .find(|scalar| {
+                    decoration.range().start() <= scalar.position
+                        && scalar.position < decoration.range().end()
+                })
+                .ok_or_else(|| HarnessError::new("comment anchor has no live scalar geometry"))?;
+            IcedPoint::new(
+                scalar.bounds.x + scalar.bounds.width * 0.5,
+                scalar.bounds.y + scalar.bounds.height * 0.5,
+            )
+        };
+        let target = match pane {
+            crate::EditorPane::Primary => HarnessTarget::EditorPrimary,
+            crate::EditorPane::Companion => HarnessTarget::EditorCompanion,
+        };
+        let bounds = self.find_target_bounds(window, target)?;
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::CursorMoved {
+                position: IcedPoint::new(bounds.x + local_position.x, bounds.y + local_position.y),
+            })],
+        )?;
+        self.record(
+            window,
+            format!("move pointer to comment anchor in {pane:?}"),
+        );
+        Ok(())
+    }
+
     /// Selects one uniquely occurring run of prose in a mounted editor by its
     /// document position. This semantic harness action deliberately avoids
     /// fractional canvas drags, whose geometry changes with wrapping and font
@@ -853,6 +1093,34 @@ impl NativeDesktopHarness {
         }
     }
 
+    /// Applies an explicit range/additive/replace selection through the same
+    /// production workspace reducer used after native pointer modifiers are
+    /// decoded. This avoids geometry-dependent drag-source ownership while
+    /// preserving selection normalization and command routing.
+    pub fn select_hierarchy_node(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+        gesture: HarnessSelectionGesture,
+    ) -> Result<(), HarnessError> {
+        let id = self.window_id(window)?;
+        let task = self.desktop.update(Message::ProjectSurface {
+            window: id,
+            message: crate::iced_project_surface::ProjectSurfaceMessage::Project(
+                ProjectMessage::SelectHierarchy {
+                    node_id: node.id().to_owned(),
+                    gesture: gesture.into(),
+                },
+            ),
+        });
+        self.run_task(task)?;
+        self.record(
+            window,
+            format!("select hierarchy node {node:?} with {gesture:?}"),
+        );
+        Ok(())
+    }
+
     /// Returns the editor's live comment-composer feedback for diagnostics and
     /// workflow assertions.
     pub fn comment_feedback(&self) -> Result<String, HarnessError> {
@@ -874,6 +1142,35 @@ impl NativeDesktopHarness {
                     .comment_feedback()
                     .unwrap_or_default()
                     .to_owned()
+            })
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
+    }
+
+    /// Reports the current transient comment-hover state for author-flow
+    /// diagnostics without exposing a visual coordinate contract.
+    pub fn comment_hover_status(&self) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        state
+            .workspace
+            .as_ref()
+            .map(|workspace| {
+                [crate::EditorPane::Primary, crate::EditorPane::Companion]
+                    .into_iter()
+                    .find_map(|pane| {
+                        workspace
+                            .editor()
+                            .hovered_comment(pane)
+                            .map(|hover| format!("pane={pane:?}, comment={}", hover.comment_id()))
+                    })
+                    .unwrap_or_else(|| "none".to_owned())
             })
             .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
     }
@@ -906,6 +1203,40 @@ impl NativeDesktopHarness {
             .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
     }
 
+    /// Returns every loaded checkpoint row in its authoritative timeline
+    /// order, independent of History's rendered virtual window.
+    pub fn history_checkpoints(&self) -> Result<Vec<HarnessHistoryCheckpoint>, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))?;
+        Ok(workspace
+            .history()
+            .checkpoints()
+            .iter()
+            .map(|checkpoint| HarnessHistoryCheckpoint {
+                id: checkpoint.checkpoint_id.clone(),
+                sequence: checkpoint.sequence,
+                category: checkpoint.category.label().to_owned(),
+                label: checkpoint.label(),
+                affected_document_ids: checkpoint.affected_document_ids.clone(),
+                recorded_at_unix_millis: checkpoint.recorded_at_unix_millis(),
+                timeline_heading: workspace
+                    .history()
+                    .timeline_heading(&checkpoint.checkpoint_id),
+            })
+            .collect())
+    }
+
     /// Summarizes the live project-wide search state for workflow diagnostics.
     pub fn global_search_status(&self) -> Result<String, HarnessError> {
         let id = self.window_id(HarnessWindow::Project)?;
@@ -936,6 +1267,24 @@ impl NativeDesktopHarness {
                     search.error(),
                 )
             })
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
+    }
+
+    /// Summarizes the live export state for workflow diagnostics.
+    pub fn export_status(&self) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        state
+            .workspace
+            .as_ref()
+            .map(|workspace| format!("{:?}", workspace.export().state()))
             .ok_or_else(|| HarnessError::new("project workspace has not loaded"))
     }
 
@@ -1052,6 +1401,36 @@ impl NativeDesktopHarness {
                     "history checkpoint at visible position {position} is unavailable"
                 ))
             })?;
+        self.click_history_checkpoint_by_id(window, &checkpoint_id)
+    }
+
+    /// Selects one loaded History checkpoint by its stable opaque identity.
+    pub fn click_history_checkpoint_by_id(
+        &mut self,
+        window: HarnessWindow,
+        checkpoint_id: &str,
+    ) -> Result<(), HarnessError> {
+        let id = self.window_id(window)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let known = state.workspace.as_ref().is_some_and(|workspace| {
+            workspace
+                .history()
+                .checkpoints()
+                .iter()
+                .any(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
+        });
+        if !known {
+            return Err(HarnessError::new(format!(
+                "history checkpoint {checkpoint_id:?} is unavailable"
+            )));
+        }
         let bounds = self.find_id_bounds(
             window,
             harness_target::history_checkpoint_id(&checkpoint_id),
@@ -1062,7 +1441,7 @@ impl NativeDesktopHarness {
         )?;
         self.record(
             window,
-            format!("click history checkpoint at visible position {position}"),
+            format!("click history checkpoint {checkpoint_id:?}"),
         );
         Ok(())
     }
@@ -1135,6 +1514,52 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
+    /// Drags a document from Explorer onto the requested editor pane. The
+    /// hierarchy remains unchanged; production's editor-pane drop path opens
+    /// the document in the pane.
+    pub fn drag_hierarchy_node_to_pane(
+        &mut self,
+        window: HarnessWindow,
+        source: &HarnessNode,
+        pane: EditorPane,
+    ) -> Result<(), HarnessError> {
+        let source_position = self
+            .find_id_bounds(window, harness_target::explorer_row_id(source.id()))?
+            .center();
+        let threshold_position = IcedPoint::new(source_position.x + 5.0, source_position.y);
+        self.dispatch_events(
+            window,
+            [
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: source_position,
+                }),
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: threshold_position,
+                }),
+            ],
+        )?;
+        let target = match pane {
+            EditorPane::Primary => HarnessTarget::EditorPrimary,
+            EditorPane::Companion => HarnessTarget::EditorCompanion,
+        };
+        let destination = self.find_target_bounds(window, target)?.center();
+        self.dispatch_events(
+            window,
+            [
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: destination,
+                }),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ],
+        )?;
+        self.record(
+            window,
+            format!("drag hierarchy node {source:?} to {pane:?} editor pane"),
+        );
+        Ok(())
+    }
+
     pub fn contains_text(&self, window: HarnessWindow, text: &str) -> Result<bool, HarnessError> {
         let id = self.window_id(window)?;
         let mut simulator = Simulator::<Message>::with_size(
@@ -1187,16 +1612,57 @@ impl NativeDesktopHarness {
 
     /// Advances the product autosave clock past the idle delay without sleeping.
     pub fn elapse_autosave_idle(&mut self) -> Result<(), HarnessError> {
+        self.advance_autosave_clock(
+            AutosaveState::IDLE_DELAY + Duration::from_millis(1),
+            AutosaveState::IDLE_DELAY + Duration::from_millis(1),
+        )
+    }
+
+    /// Advances the high-frequency recovery cadence without reaching the
+    /// ordinary idle autosave boundary.
+    pub fn elapse_recovery_capture(&mut self) -> Result<(), HarnessError> {
         let now = Instant::now();
-        let elapsed = AutosaveState::IDLE_DELAY + Duration::from_millis(1);
         let mut found_dirty = false;
         for native in self.desktop.windows.values_mut() {
             let NativeWindow::Project(state) = native else {
                 continue;
             };
             if !state.autosave.dirty_sessions.is_empty() {
-                state.autosave.first_dirty = Some(now - elapsed);
-                state.autosave.last_edit = Some(now - elapsed);
+                state.autosave.last_recovery_projection =
+                    Some(now - AutosaveState::RECOVERY_PROJECTION_INTERVAL);
+                found_dirty = true;
+            }
+        }
+        if !found_dirty {
+            return Err(HarnessError::new(
+                "recovery capture could not advance because no editor session is dirty",
+            ));
+        }
+        self.record(
+            HarnessWindow::Project,
+            "advance recovery capture clock".to_owned(),
+        );
+        let task = self.desktop.update(Message::AutosaveTick(now));
+        self.run_task(task)
+    }
+
+    /// Advances the independent dirty-session and idle-edit clock boundaries
+    /// before dispatching the production autosave tick. This covers both idle
+    /// and continuous-writing save policies without a wall-clock sleep.
+    pub fn advance_autosave_clock(
+        &mut self,
+        first_dirty_age: Duration,
+        last_edit_age: Duration,
+    ) -> Result<(), HarnessError> {
+        let now = Instant::now();
+        let mut found_dirty = false;
+        for native in self.desktop.windows.values_mut() {
+            let NativeWindow::Project(state) = native else {
+                continue;
+            };
+            if !state.autosave.dirty_sessions.is_empty() {
+                state.autosave.first_dirty = Some(now - first_dirty_age);
+                state.autosave.last_edit = Some(now - last_edit_age);
                 found_dirty = true;
             }
         }
@@ -1205,7 +1671,12 @@ impl NativeDesktopHarness {
                 "autosave could not advance because no editor session is dirty",
             ));
         }
-        self.record(HarnessWindow::Project, "elapse autosave idle".to_owned());
+        self.record(
+            HarnessWindow::Project,
+            format!(
+                "advance autosave clock first-dirty={first_dirty_age:?}, last-edit={last_edit_age:?}"
+            ),
+        );
         let task = self.desktop.update(Message::AutosaveTick(now));
         self.run_task(task)
     }
@@ -1359,6 +1830,37 @@ impl NativeDesktopHarness {
             .collect())
     }
 
+    /// Returns the current Explorer hierarchy with stable identity, parent,
+    /// selection, and pending-cut state intact.
+    pub fn hierarchy(&self) -> Result<Vec<HarnessHierarchyEntry>, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))?;
+        Ok(workspace
+            .explorer()
+            .rows()
+            .into_iter()
+            .map(|row| HarnessHierarchyEntry {
+                id: row.id.to_owned(),
+                title: row.title.to_owned(),
+                parent_id: row.parent_id.map(str::to_owned),
+                document_id: row.document_id.map(str::to_owned),
+                selected: row.selected,
+                cut_pending: row.cut_pending,
+            })
+            .collect())
+    }
+
     /// Returns the primary pane's tabs in author-visible order. This observes
     /// the live workspace only; flows still activate tabs through their
     /// rendered strip or overflow control.
@@ -1391,11 +1893,12 @@ impl NativeDesktopHarness {
         path: impl AsRef<Path>,
     ) -> Result<(), HarnessError> {
         let id = self.window_id(window)?;
-        let mut simulator = Simulator::<Message>::with_size(
-            Settings::default(),
-            Self::window_size(window),
-            self.desktop.view(id),
-        );
+        let size = self
+            .surfaces
+            .get(&id)
+            .map_or_else(|| Self::window_size(window), |surface| surface.size);
+        let mut simulator =
+            Simulator::<Message>::with_size(Settings::default(), size, self.desktop.view(id));
         simulator
             .snapshot(&self.desktop.theme(id))
             .and_then(|snapshot| snapshot.matches_image(path))
@@ -1604,6 +2107,14 @@ impl NativeDesktopHarness {
             HarnessWindow::Launcher => LAUNCHER_SIZE,
             HarnessWindow::Project => PROJECT_SIZE,
         }
+    }
+
+    fn current_window_size(&self, window: HarnessWindow) -> Result<Size, HarnessError> {
+        let id = self.window_id(window)?;
+        Ok(self
+            .surfaces
+            .get(&id)
+            .map_or_else(|| Self::window_size(window), |surface| surface.size))
     }
 
     fn window_id(&self, window: HarnessWindow) -> Result<window::Id, HarnessError> {

@@ -8,7 +8,10 @@ use parchmint_editor_api::{
     EditorSelection, InlineMarkKind, ListDepthChange, SharedEditorSession, SpellcheckDecoration,
     StyleId, ViewId,
 };
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use crate::adapter::EditorIcedAdapter;
 use crate::layout::{
@@ -202,6 +205,12 @@ pub enum MountedEditorMessage {
     ToggleBlockFormat(BlockFormatKind),
     InsertAtomicBlock(AtomicBlockKind),
     ApplyParagraphStyle(StyleId),
+    /// The pointer entered or left a text-attached comment. This is
+    /// presentation-only: the project surface owns the accompanying card.
+    HoverComment {
+        comment_id: Option<String>,
+        invocation_point: (f32, f32),
+    },
     /// A secondary-button hit with independent comment and spelling targets.
     OpenSpellingMenu {
         comment_range: EditorSelection,
@@ -293,6 +302,15 @@ struct SurfaceState {
     focused: bool,
     modifiers: keyboard::Modifiers,
     drag_anchor: Option<DocumentPosition>,
+    last_click: Option<SurfaceClick>,
+    hovered_comment: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceClick {
+    position: Point,
+    at: Instant,
+    count: u8,
 }
 
 impl Default for SurfaceState {
@@ -301,6 +319,37 @@ impl Default for SurfaceState {
             focused: false,
             modifiers: keyboard::Modifiers::NONE,
             drag_anchor: None,
+            last_click: None,
+            hovered_comment: None,
+        }
+    }
+}
+
+impl SurfaceState {
+    const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+    const MULTI_CLICK_DISTANCE_SQUARED: f32 = 64.0;
+
+    fn register_left_click(&mut self, position: Point) -> u8 {
+        let now = Instant::now();
+        let count = self
+            .last_click
+            .filter(|prior| {
+                now.saturating_duration_since(prior.at) <= Self::MULTI_CLICK_INTERVAL
+                    && (prior.position.x - position.x).powi(2)
+                        + (prior.position.y - position.y).powi(2)
+                        <= Self::MULTI_CLICK_DISTANCE_SQUARED
+            })
+            .map_or(1, |prior| prior.count.saturating_add(1));
+        if count >= 3 {
+            self.last_click = None;
+            3
+        } else {
+            self.last_click = Some(SurfaceClick {
+                position,
+                at: now,
+                count,
+            });
+            count
         }
     }
 }
@@ -335,16 +384,34 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
                 self.set_focus(true);
+                let clicks = state.register_left_click(position);
                 let extend = state.modifiers.contains(keyboard::Modifiers::SHIFT);
                 let anchor = if extend {
                     content.selection.anchor()
                 } else {
                     document
                 };
-                state.drag_anchor = Some(anchor);
-                let message = if extend {
+                let message = if clicks == 3 {
+                    state.drag_anchor = None;
+                    MountedEditorMessage::SetSelection(
+                        content
+                            .geometry
+                            .paragraph_selection_at(document)
+                            .unwrap_or_else(|| EditorSelection::new(document, document)),
+                    )
+                } else if clicks == 2 {
+                    state.drag_anchor = None;
+                    MountedEditorMessage::SetSelection(
+                        content
+                            .geometry
+                            .word_selection_at(document)
+                            .unwrap_or_else(|| EditorSelection::new(document, document)),
+                    )
+                } else if extend {
+                    state.drag_anchor = Some(anchor);
                     MountedEditorMessage::SetSelection(EditorSelection::new(anchor, document))
                 } else {
+                    state.drag_anchor = Some(anchor);
                     MountedEditorMessage::Focus(document)
                 };
                 Some(Action::publish(message).and_capture())
@@ -359,6 +426,25 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     )))
                     .and_capture(),
                 )
+            }
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let (comment_id, invocation_point) = cursor
+                    .position_in(bounds)
+                    .map(|position| {
+                        (
+                            comment_at(&content, position.x, position.y),
+                            (position.x, position.y),
+                        )
+                    })
+                    .unwrap_or((None, (0.0, 0.0)));
+                if state.hovered_comment == comment_id {
+                    return None;
+                }
+                state.hovered_comment = comment_id.clone();
+                Some(Action::publish(MountedEditorMessage::HoverComment {
+                    comment_id,
+                    invocation_point,
+                }))
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
                 if state.drag_anchor.take().is_some() =>
@@ -656,17 +742,29 @@ fn spelling_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorS
 }
 
 fn comment_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSelection> {
+    if !content.selection.is_collapsed() {
+        // A contextual comment action belongs to the current selection even
+        // when the menu is opened from its convenient nearby whitespace.
+        // Collapsing it based on the pointer's pixel location creates a
+        // surprising cursor comment instead of the selected-text anchor.
+        return Some(content.selection);
+    }
     let document = content.geometry.hit_test(x, y)?;
-    Some(
-        if !content.selection.is_collapsed()
-            && content.selection.start() <= document
-            && document <= content.selection.end()
-        {
-            content.selection
-        } else {
-            EditorSelection::new(document, document)
-        },
-    )
+    Some(EditorSelection::new(document, document))
+}
+
+fn comment_at(content: &SurfaceContent, x: f32, y: f32) -> Option<String> {
+    let document = content.geometry.hit_test(x, y)?;
+    content.comments.iter().find_map(|decoration| {
+        (decoration.range().start() <= document && document < decoration.range().end()).then(|| {
+            decoration
+                .comment()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        })
+    })
 }
 
 fn viewport_from_bounds(bounds: Rectangle) -> Option<EditorViewport> {
@@ -928,7 +1026,8 @@ fn apply_surface_message(
         // The native shell owns the popover and validates its exact revision
         // before it executes an action. The canvas has already performed the
         // range hit test before publishing this message.
-        MountedEditorMessage::OpenSpellingMenu { .. } => Ok(()),
+        MountedEditorMessage::OpenSpellingMenu { .. }
+        | MountedEditorMessage::HoverComment { .. } => Ok(()),
     }
 }
 
@@ -1915,6 +2014,69 @@ mod tests {
         assert!(!content.lock().expect("content").focused);
     }
 
+    #[test]
+    fn canvas_double_and_triple_click_select_word_and_paragraph() {
+        let viewport = EditorViewport::new(200.0, 80.0).expect("viewport");
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(
+                BlockId::from_bytes([54; 16]),
+                "alpha beta",
+                DocumentPosition::default(),
+            ),
+            viewport,
+            0.0,
+            crate::EditorLayoutMetrics::default(),
+            None,
+        )
+        .expect("geometry");
+        let beta = geometry.draw_scalars()[7].bounds;
+        let content = Arc::new(Mutex::new(SurfaceContent {
+            geometry,
+            selection: EditorSelection::new(0.into(), 0.into()),
+            focused: false,
+            viewport,
+            theme: EditorSurfaceTheme::light(),
+            spellcheck: Vec::new(),
+            comments: Vec::new(),
+        }));
+        let surface = EditorSurface { content };
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0));
+        let cursor = mouse::Cursor::Available(Point::new(beta.x, beta.y));
+        let mut state = SurfaceState::default();
+        let press = |state: &mut SurfaceState| {
+            let action = canvas::Program::update(
+                &surface,
+                state,
+                &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                bounds,
+                cursor,
+            )
+            .expect("click action");
+            action.into_inner().0.expect("click message")
+        };
+        let release = |state: &mut SurfaceState| {
+            let _ = canvas::Program::update(
+                &surface,
+                state,
+                &iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                bounds,
+                cursor,
+            );
+        };
+
+        assert_eq!(press(&mut state), MountedEditorMessage::Focus(7.into()));
+        release(&mut state);
+        assert_eq!(
+            press(&mut state),
+            MountedEditorMessage::SetSelection(EditorSelection::new(6.into(), 10.into()))
+        );
+        release(&mut state);
+        assert_eq!(
+            press(&mut state),
+            MountedEditorMessage::SetSelection(EditorSelection::new(0.into(), 10.into()))
+        );
+    }
+
     fn assert_tiny_skia_golden(snapshot: &Snapshot, stem: &str) {
         let renderer = format!("{snapshot:?}");
         assert!(
@@ -2280,6 +2442,7 @@ mod tests {
         let mut selected = content;
         selected.selection = range;
         assert_eq!(comment_range_at(&selected, first.x, first.y), Some(range));
+        assert_eq!(comment_range_at(&selected, 200.0, 80.0), Some(range));
     }
 
     #[test]
@@ -2317,6 +2480,13 @@ mod tests {
         let surface =
             mounted_surface(&adapter, session, view, block, EditorSurfaceTheme::light()).unwrap();
         assert!(surface.content().comments[0].active());
+        let content = surface.content();
+        let first = content.geometry.draw_scalars()[0].bounds;
+        assert_eq!(
+            comment_at(&content, first.x, first.y),
+            Some("2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d".to_owned())
+        );
+        assert_eq!(comment_at(&content, 220.0, 80.0), None);
     }
 
     #[test]

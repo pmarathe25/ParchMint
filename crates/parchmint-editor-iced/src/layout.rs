@@ -642,6 +642,57 @@ impl BlockLayoutGeometry {
         self.document_range
     }
 
+    /// Returns the visible word containing a caret position. This deliberately
+    /// uses scalar positions instead of byte offsets so double-click selection
+    /// remains correct for Unicode prose.
+    pub fn word_selection_at(&self, position: DocumentPosition) -> Option<EditorSelection> {
+        let index = self
+            .scalars
+            .iter()
+            .position(|scalar| scalar.position == position)
+            .or_else(|| {
+                position.value().checked_sub(1).and_then(|previous| {
+                    self.scalars
+                        .iter()
+                        .position(|scalar| scalar.position.value() == previous)
+                })
+            })?;
+        if !word_scalar(self.scalars[index].character) {
+            return None;
+        }
+        let mut start = index;
+        while start > 0
+            && self.scalars[start - 1].position.value() + 1 == self.scalars[start].position.value()
+            && word_scalar(self.scalars[start - 1].character)
+        {
+            start -= 1;
+        }
+        let mut end = index + 1;
+        while end < self.scalars.len()
+            && self.scalars[end - 1].position.value() + 1 == self.scalars[end].position.value()
+            && word_scalar(self.scalars[end].character)
+        {
+            end += 1;
+        }
+        Some(EditorSelection::new(
+            self.scalars[start].position,
+            DocumentPosition::from(self.scalars[end - 1].position.value() + 1),
+        ))
+    }
+
+    /// Returns the semantic block at a caret position for standard
+    /// triple-click paragraph selection.
+    pub fn paragraph_selection_at(&self, position: DocumentPosition) -> Option<EditorSelection> {
+        self.block_kinds
+            .iter()
+            .find(|(start, end, _)| *start <= position && position <= *end)
+            .map(|(start, end, _)| EditorSelection::new(*start, *end))
+            .or_else(|| {
+                (self.document_range.start() <= position && position <= self.document_range.end())
+                    .then_some(self.document_range)
+            })
+    }
+
     pub(crate) fn block_kind_at(&self, position: DocumentPosition) -> Option<SemanticBlockKind> {
         self.block_kinds
             .iter()
@@ -739,6 +790,10 @@ impl BlockLayoutGeometry {
                 .map(|(candidate, _)| *candidate)
         }
     }
+}
+
+fn word_scalar(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 fn build_height_index(
@@ -1788,6 +1843,32 @@ mod tests {
         assert_eq!(geometry.line_start(2.into()), Some(0.into()));
         assert_eq!(geometry.line_end(2.into()), Some(3.into()));
         assert!(geometry.max_scroll_y(viewport) > 0.0);
+    }
+
+    #[test]
+    fn word_and_paragraph_selection_use_unicode_scalar_positions() {
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(block(10), "héllo, world", DocumentPosition::default()),
+            EditorViewport::new(240.0, 80.0).expect("viewport"),
+            0.0,
+            regression_metrics(),
+            None,
+        )
+        .expect("geometry");
+
+        assert_eq!(
+            geometry.word_selection_at(2.into()),
+            Some(EditorSelection::new(0.into(), 5.into()))
+        );
+        assert_eq!(
+            geometry.word_selection_at(5.into()),
+            None,
+            "comma is not a word"
+        );
+        assert_eq!(
+            geometry.paragraph_selection_at(8.into()),
+            Some(EditorSelection::new(0.into(), 12.into()))
+        );
     }
 
     #[test]

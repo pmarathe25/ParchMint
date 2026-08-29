@@ -250,6 +250,27 @@ impl CanonicalDocument {
     pub fn as_html(&self) -> &str {
         &self.html
     }
+
+    /// Appends `suffix` to the first Document Title block only when its
+    /// rendered text still matches `display_title`. This preserves divergent
+    /// authored titles while keeping a synchronized copy's display and
+    /// content titles aligned.
+    pub fn append_copy_suffix_to_matching_title(&self, display_title: &str, suffix: &str) -> Self {
+        let mut nodes = match parse_html(&self.html) {
+            Ok(nodes) => nodes,
+            // A CanonicalDocument has already passed this parser. Retaining
+            // the original bytes is nevertheless safer than making a title
+            // copy operation destructive if that invariant ever changes.
+            Err(_) => return self.clone(),
+        };
+        if append_suffix_to_first_matching_document_title(&mut nodes, display_title, suffix) {
+            Self {
+                html: render_html(&nodes),
+            }
+        } else {
+            self.clone()
+        }
+    }
 }
 
 /// A validated JSON annotation sidecar.
@@ -2861,6 +2882,64 @@ enum HtmlNode {
     },
 }
 
+fn append_suffix_to_first_matching_document_title(
+    nodes: &mut [HtmlNode],
+    display_title: &str,
+    suffix: &str,
+) -> bool {
+    for node in nodes {
+        let HtmlNode::Element {
+            attributes,
+            children,
+            ..
+        } = node
+        else {
+            continue;
+        };
+        if attributes
+            .get("data-style-id")
+            .is_some_and(|style| style == "document-title")
+        {
+            let mut text = String::new();
+            collect_html_text(children, &mut text);
+            if text != display_title {
+                return false;
+            }
+            return append_suffix_to_last_text(children, suffix);
+        }
+        if append_suffix_to_first_matching_document_title(children, display_title, suffix) {
+            return true;
+        }
+    }
+    false
+}
+
+fn collect_html_text(nodes: &[HtmlNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            HtmlNode::Text(text) => output.push_str(text),
+            HtmlNode::Element { children, .. } => collect_html_text(children, output),
+        }
+    }
+}
+
+fn append_suffix_to_last_text(nodes: &mut [HtmlNode], suffix: &str) -> bool {
+    for node in nodes.iter_mut().rev() {
+        match node {
+            HtmlNode::Text(text) => {
+                text.push_str(suffix);
+                return true;
+            }
+            HtmlNode::Element { children, .. } => {
+                if append_suffix_to_last_text(children, suffix) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn parse_html(html: &str) -> Result<Vec<HtmlNode>, FormatError> {
     let mut root = Vec::new();
     let mut stack: Vec<(String, BTreeMap<String, String>, Vec<HtmlNode>)> = Vec::new();
@@ -3263,6 +3342,28 @@ mod tests {
             .unwrap();
         assert_eq!(encoded.bytes, document.as_html().as_bytes());
         assert_eq!(codec().decode_document(&encoded.bytes).unwrap(), document);
+    }
+
+    #[test]
+    fn copying_a_synchronized_document_title_updates_only_that_title() {
+        let document = codec()
+            .decode_document(
+                br#"<p data-style-id="document-title"><strong>Chapter</strong> One</p><p>Body</p>"#,
+            )
+            .expect("canonical document");
+        assert_eq!(
+            document
+                .append_copy_suffix_to_matching_title("Chapter One", " Copy")
+                .as_html(),
+            r#"<p data-style-id="document-title"><strong>Chapter</strong> One Copy</p><p>Body</p>"#
+        );
+        assert_eq!(
+            document
+                .append_copy_suffix_to_matching_title("Different display title", " Copy")
+                .as_html(),
+            document.as_html(),
+            "a divergent display title must not rewrite authored content"
+        );
     }
 
     #[test]

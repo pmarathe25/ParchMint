@@ -1,7 +1,9 @@
 # Explorer, Inspector, and comments
 
 - Create comments from the editor context menu or Comments panel. Anchors are
-  actual highlights.
+  actual highlights; hovering an attached highlight opens a small, read-only
+  card with its quote and first comment message. The card dismisses as soon as
+  the pointer leaves the anchor and never takes editor focus.
 - Tree rows are compact and non-overlapping, with no checkboxes or
   active-document rail. Use stronger treatment for focused-pane selection and
   quieter treatment for another pane's active document.

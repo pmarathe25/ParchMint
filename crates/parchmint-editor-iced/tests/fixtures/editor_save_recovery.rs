@@ -992,6 +992,7 @@ fn save_projection(
             category: CheckpointCategory::Autosave,
             affected_documents: vec![DOCUMENT],
             name: None,
+            recorded_at_unix_millis: Some(1_725_000_000_000),
         },
         SavePriority::Autosave,
     );

@@ -828,6 +828,7 @@ fn verification_workspace(
                     category: HistoryCheckpointCategory::Autosave,
                     affected_document_ids: vec![chapter_one_document],
                     name: Some("Chapter One".to_owned()),
+                    recorded_at_unix_millis: Some(1_725_000_000_000),
                 },
                 HistoryCheckpointRow {
                     checkpoint_id: "before-revisions".to_owned(),
@@ -835,6 +836,7 @@ fn verification_workspace(
                     category: HistoryCheckpointCategory::NamedSnapshot,
                     affected_document_ids: Vec::new(),
                     name: Some("Before revisions".to_owned()),
+                    recorded_at_unix_millis: Some(1_724_999_700_000),
                 },
                 HistoryCheckpointRow {
                     checkpoint_id: "moved-chapter-two".to_owned(),
@@ -842,6 +844,7 @@ fn verification_workspace(
                     category: HistoryCheckpointCategory::StructuralChange,
                     affected_document_ids: vec![chapter_two_document],
                     name: Some("Moved Chapter Two".to_owned()),
+                    recorded_at_unix_millis: Some(1_724_999_400_000),
                 },
                 HistoryCheckpointRow {
                     checkpoint_id: "saved-chapter-one".to_owned(),
@@ -851,6 +854,7 @@ fn verification_workspace(
                         snapshot.documents[0].document_id.as_bytes(),
                     )],
                     name: Some("Chapter One".to_owned()),
+                    recorded_at_unix_millis: Some(1_724_999_100_000),
                 },
             ];
             let ticket = workspace.begin_task(ProjectTask::LoadHistory);

@@ -1470,6 +1470,7 @@ pub struct GlobalSearchState {
     complete: bool,
     error: Option<String>,
     scroll_offset: f32,
+    active_match_id: Option<String>,
 }
 
 impl GlobalSearchState {
@@ -1515,6 +1516,11 @@ impl GlobalSearchState {
 
     pub fn results(&self) -> &[GlobalSearchResult] {
         &self.results
+    }
+
+    /// The result most recently routed into the focused authoring view.
+    pub fn active_match_id(&self) -> Option<&str> {
+        self.active_match_id.as_deref()
     }
 
     pub fn windowed_results(&self) -> impl Iterator<Item = &GlobalSearchResult> {
@@ -1978,8 +1984,7 @@ impl HistoryCheckpointCategory {
     }
 }
 
-/// A checkpoint row projected from the History service, without inventing
-/// timestamps or document titles the service did not provide.
+/// A checkpoint row projected from the History service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryCheckpointRow {
     pub checkpoint_id: String,
@@ -1987,6 +1992,7 @@ pub struct HistoryCheckpointRow {
     pub category: HistoryCheckpointCategory,
     pub affected_document_ids: Vec<String>,
     pub name: Option<String>,
+    pub recorded_at_unix_millis: Option<u64>,
 }
 
 impl HistoryCheckpointRow {
@@ -2006,10 +2012,8 @@ impl HistoryCheckpointRow {
         }
     }
 
-    /// History has no persisted wall-clock field. The git-backed provider's
-    /// synthetic commit time is an identity-stability detail, not display data.
     pub const fn recorded_at_unix_millis(&self) -> Option<u64> {
-        None
+        self.recorded_at_unix_millis
     }
 }
 
@@ -2132,6 +2136,8 @@ pub struct HistoryState {
 }
 
 impl HistoryState {
+    const WRITING_SESSION_GAP_MILLIS: u64 = 30 * 60 * 1_000;
+
     pub const fn is_virtualized(&self) -> bool {
         true
     }
@@ -2164,6 +2170,34 @@ impl HistoryState {
     pub fn windowed_checkpoints(&self) -> impl Iterator<Item = &HistoryCheckpointRow> {
         let start = (self.scroll_offset.max(0.0) / 72.0) as usize;
         self.visible_checkpoints().skip(start).take(60)
+    }
+
+    /// A concise date/session heading for a checkpoint at the start of a
+    /// writing session. The comparison intentionally uses only persisted
+    /// wall-clock metadata; old checkpoints remain in an honest legacy group.
+    pub fn timeline_heading(&self, checkpoint_id: &str) -> Option<String> {
+        let mut previous: Option<&HistoryCheckpointRow> = None;
+        for checkpoint in self.visible_checkpoints() {
+            if checkpoint.checkpoint_id == checkpoint_id {
+                return match (previous, checkpoint.recorded_at_unix_millis) {
+                    (None, Some(timestamp)) => Some(writing_session_label(timestamp)),
+                    (None, None) => Some("Earlier checkpoints".to_owned()),
+                    (Some(previous), Some(timestamp))
+                        if previous
+                            .recorded_at_unix_millis
+                            .is_none_or(|newer| !same_writing_session(newer, timestamp)) =>
+                    {
+                        Some(writing_session_label(timestamp))
+                    }
+                    (Some(previous), None) if previous.recorded_at_unix_millis.is_some() => {
+                        Some("Earlier checkpoints".to_owned())
+                    }
+                    _ => None,
+                };
+            }
+            previous = Some(checkpoint);
+        }
+        None
     }
 
     pub fn checkpoint_window_start(&self) -> usize {
@@ -2250,6 +2284,44 @@ impl HistoryState {
     pub fn maintenance_message(&self) -> Option<&str> {
         self.maintenance_message.as_deref()
     }
+}
+
+fn same_writing_session(newer: u64, older: u64) -> bool {
+    let newer_day = newer / 86_400_000;
+    let older_day = older / 86_400_000;
+    newer_day == older_day
+        && newer.saturating_sub(older) <= HistoryState::WRITING_SESSION_GAP_MILLIS
+}
+
+fn writing_session_label(timestamp: u64) -> String {
+    let days = i64::try_from(timestamp / 86_400_000).unwrap_or(i64::MAX);
+    let (year, month, day) = civil_date_from_unix_days(days);
+    format!("{year:04}-{month:02}-{day:02} UTC · Writing session")
+}
+
+// Howard Hinnant's public-domain civil-date conversion, kept here to avoid a
+// locale/time-zone dependency in the deterministic project UI crate.
+fn civil_date_from_unix_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let days = days_since_epoch + 719_468;
+    let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + i64::from(month <= 2);
+    (
+        i32::try_from(year).unwrap_or(if year.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }),
+        u32::try_from(month).expect("civil month is positive"),
+        u32::try_from(day).expect("civil day is positive"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3331,6 +3403,9 @@ pub enum ProjectMessage {
         node_id: String,
         title: String,
     },
+    BeginInspectorTitleRename(String),
+    CommitInspectorTitleRename,
+    CancelInspectorTitleRename,
     BeginHierarchyRename(String),
     SetHierarchyRenameDraft(String),
     CommitHierarchyRename,
@@ -3618,6 +3693,7 @@ pub struct ProjectWorkspace {
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
     hierarchy_rename: Option<HierarchyRename>,
+    inspector_title_rename: Option<String>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
@@ -3680,6 +3756,7 @@ impl ProjectWorkspace {
                     category: HistoryCheckpointCategory::NamedSnapshot,
                     affected_document_ids: vec!["chapter-one".to_owned()],
                     name: Some("Draft Two".to_owned()),
+                    recorded_at_unix_millis: Some(1_725_000_000_000),
                 },
                 HistoryCheckpointRow {
                     checkpoint_id: "autosave-17".to_owned(),
@@ -3687,6 +3764,7 @@ impl ProjectWorkspace {
                     category: HistoryCheckpointCategory::Autosave,
                     affected_document_ids: vec!["chapter-one".to_owned()],
                     name: None,
+                    recorded_at_unix_millis: Some(1_724_999_700_000),
                 },
             ],
             ..HistoryState::default()
@@ -3710,6 +3788,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            inspector_title_rename: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -3770,6 +3849,7 @@ impl ProjectWorkspace {
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
+            inspector_title_rename: None,
             pending_hierarchy_creation: None,
             last_activated_document: None,
             synopsis_editors,
@@ -4016,6 +4096,20 @@ impl ProjectWorkspace {
             })
     }
 
+    /// Resolves the ordinary Explorer paste destination from the current
+    /// selection: containers receive children and a document receives pasted
+    /// siblings immediately after it.
+    pub fn clipboard_paste_destination(&self) -> Option<DragDestination> {
+        let node_id = self.explorer.selected_ids().into_iter().next()?;
+        let row = self.explorer.row(node_id)?;
+        Some(match row.kind {
+            HierarchyRowKind::Root | HierarchyRowKind::Group => {
+                DragDestination::IntoGroup(node_id.to_owned())
+            }
+            HierarchyRowKind::Document => DragDestination::AfterSibling(node_id.to_owned()),
+        })
+    }
+
     pub fn hierarchy_drag_source(&self) -> Option<&str> {
         self.pointer_drag
             .as_ref()
@@ -4062,6 +4156,12 @@ impl ProjectWorkspace {
         self.hierarchy_rename
             .as_ref()
             .map(|rename| (rename.node_id.as_str(), rename.title.as_str()))
+    }
+
+    /// The Inspector title enters edit mode only after explicit activation so
+    /// ordinary inspection retains a quiet, read-only heading.
+    pub fn inspector_title_rename_node_id(&self) -> Option<&str> {
+        self.inspector_title_rename.as_deref()
     }
 
     /// Clears a cut payload only after the runtime reports a durable move and
@@ -4654,6 +4754,7 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
+                self.inspector_title_rename = None;
                 self.explorer.select(&node_id, gesture);
                 self.sync_inspector_context_from_selection();
                 Vec::new()
@@ -4723,6 +4824,18 @@ impl ProjectWorkspace {
             ProjectMessage::RenameNode { node_id, title } => {
                 self.explorer.rename(&node_id, title.clone());
                 vec![ProjectEffect::CommitNodeTitle { node_id, title }]
+            }
+            ProjectMessage::BeginInspectorTitleRename(node_id) => {
+                if self.explorer.row(&node_id).is_none() {
+                    return Vec::new();
+                }
+                self.inspector_title_rename = Some(node_id);
+                Vec::new()
+            }
+            ProjectMessage::CommitInspectorTitleRename
+            | ProjectMessage::CancelInspectorTitleRename => {
+                self.inspector_title_rename = None;
+                Vec::new()
             }
             ProjectMessage::BeginHierarchyRename(node_id) => {
                 let Some(node) = self.explorer.nodes.get(&node_id) else {
@@ -5266,6 +5379,7 @@ impl ProjectWorkspace {
                 self.global_search.scroll_offset = 0.0;
                 self.global_search.complete = false;
                 self.global_search.error = None;
+                self.global_search.active_match_id = None;
                 self.replacement_preview.close();
                 vec![self.search_effect()]
             }
@@ -5294,10 +5408,12 @@ impl ProjectWorkspace {
                 self.global_search.scroll_offset = 0.0;
                 self.global_search.complete = false;
                 self.global_search.error = None;
+                self.global_search.active_match_id = None;
                 self.replacement_preview.close();
                 vec![self.search_effect()]
             }
             ProjectMessage::NavigateGlobalSearchResult(match_id) => {
+                self.global_search.active_match_id = Some(match_id.clone());
                 vec![ProjectEffect::NavigateSearchResult {
                     match_id,
                     revalidate_revision: true,
@@ -6554,6 +6670,7 @@ mod tests {
                 .map(str::to_owned)
                 .collect(),
             name: name.map(str::to_owned),
+            recorded_at_unix_millis: Some(1_725_000_000_000),
         }
     }
 
@@ -6564,13 +6681,75 @@ mod tests {
 
         assert_eq!(row.label(), "Draft Two");
         assert_eq!(row.affected_summary(), "1 document");
-        assert_eq!(row.recorded_at_unix_millis(), None);
+        assert_eq!(row.recorded_at_unix_millis(), Some(1_725_000_000_000));
         assert_eq!(row.category, HistoryCheckpointCategory::NamedSnapshot);
         assert_eq!(row.affected_document_ids.len(), 1);
         assert_eq!(
             HistoryCheckpointCategory::Restoration.label(),
             "Restoration"
         );
+    }
+
+    #[test]
+    fn history_timeline_groups_persisted_writing_sessions_without_faking_legacy_dates() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        workspace.history.checkpoints = vec![
+            HistoryCheckpointRow {
+                checkpoint_id: "latest".to_owned(),
+                sequence: 5,
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: Some(1_704_157_200_000),
+            },
+            HistoryCheckpointRow {
+                checkpoint_id: "same-session".to_owned(),
+                sequence: 4,
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: Some(1_704_156_000_000),
+            },
+            HistoryCheckpointRow {
+                checkpoint_id: "earlier-session".to_owned(),
+                sequence: 3,
+                category: HistoryCheckpointCategory::ExplicitSave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: Some(1_704_153_000_000),
+            },
+            HistoryCheckpointRow {
+                checkpoint_id: "legacy".to_owned(),
+                sequence: 2,
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: None,
+            },
+            HistoryCheckpointRow {
+                checkpoint_id: "older-legacy".to_owned(),
+                sequence: 1,
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: None,
+            },
+        ];
+
+        assert_eq!(
+            workspace.history().timeline_heading("latest"),
+            Some("2024-01-02 UTC · Writing session".to_owned())
+        );
+        assert_eq!(workspace.history().timeline_heading("same-session"), None);
+        assert_eq!(
+            workspace.history().timeline_heading("earlier-session"),
+            Some("2024-01-01 UTC · Writing session".to_owned())
+        );
+        assert_eq!(
+            workspace.history().timeline_heading("legacy"),
+            Some("Earlier checkpoints".to_owned())
+        );
+        assert_eq!(workspace.history().timeline_heading("older-legacy"), None);
     }
 
     #[test]
@@ -7022,6 +7201,7 @@ mod tests {
                             category: HistoryCheckpointCategory::Autosave,
                             affected_document_ids: Vec::new(),
                             name: None,
+                            recorded_at_unix_millis: None,
                         },
                         resource_paths: Vec::new(),
                         document: None,
@@ -7240,6 +7420,7 @@ mod tests {
                 category: HistoryCheckpointCategory::Autosave,
                 affected_document_ids: Vec::new(),
                 name: None,
+                recorded_at_unix_millis: None,
             })
             .collect();
         workspace.update(ProjectMessage::SetHistoryScroll(7_200.0));
@@ -7479,6 +7660,28 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_paste_destination_uses_selected_container_or_document() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "part-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(
+            workspace.clipboard_paste_destination(),
+            Some(DragDestination::IntoGroup("part-one".to_owned()))
+        );
+
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(
+            workspace.clipboard_paste_destination(),
+            Some(DragDestination::AfterSibling("chapter-one".to_owned()))
+        );
+    }
+
+    #[test]
     fn new_project_session_rejects_the_previous_tree_clipboard_payload() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -7666,6 +7869,52 @@ mod tests {
 
         assert_eq!(workspace.sidebar_surface(), SidebarSurface::GlobalSearch);
         assert!(!workspace.editor().local_search(view).is_open());
+    }
+
+    #[test]
+    fn inspector_title_rename_is_explicit_and_clears_when_committed_or_reselected() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        workspace.update(ProjectMessage::BeginInspectorTitleRename(
+            "chapter-one".to_owned(),
+        ));
+        assert_eq!(
+            workspace.inspector_title_rename_node_id(),
+            Some("chapter-one")
+        );
+
+        workspace.update(ProjectMessage::CommitInspectorTitleRename);
+        assert_eq!(workspace.inspector_title_rename_node_id(), None);
+
+        workspace.update(ProjectMessage::BeginInspectorTitleRename(
+            "chapter-one".to_owned(),
+        ));
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-three".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(workspace.inspector_title_rename_node_id(), None);
+    }
+
+    #[test]
+    fn global_search_marks_the_navigated_result_until_the_query_changes() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+
+        let effects = workspace.update(ProjectMessage::NavigateGlobalSearchResult(
+            "chapter-one-match-1".to_owned(),
+        ));
+        assert!(matches!(
+            effects.as_slice(),
+            [ProjectEffect::NavigateSearchResult { match_id, .. }]
+                if match_id == "chapter-one-match-1"
+        ));
+        assert_eq!(
+            workspace.global_search().active_match_id(),
+            Some("chapter-one-match-1")
+        );
+
+        workspace.update(ProjectMessage::SetGlobalSearchQuery("harbor".to_owned()));
+        assert_eq!(workspace.global_search().active_match_id(), None);
     }
 
     #[test]

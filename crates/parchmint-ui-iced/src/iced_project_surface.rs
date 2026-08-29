@@ -10,7 +10,7 @@ use parchmint_ui_api::HistoryMaintenanceStatus;
 use std::collections::BTreeMap;
 
 use crate::{
-    CommentAnchor, ContentState, DragDestination, EditorMessage, F6Region, FocusTarget,
+    CommentAnchor, ContentState, DragDestination, EditorMessage, EditorPane, F6Region, FocusTarget,
     HarnessTarget, HierarchyItemKind, HierarchyRowKind, InspectorSection,
     MetadataFieldApplicability, MetadataFieldTextKind, Point, ProjectFixture, ProjectMessage,
     ProjectModal, ProjectWorkspace, ReplacementCheckState, ReplacementPreviewRowKind,
@@ -34,6 +34,7 @@ pub(crate) enum ProjectSurfaceMessage {
     Focus(FocusTarget),
     ToggleExplorer,
     ToggleInspector,
+    ToggleFocusedPane,
     ToggleInspectorSection(InspectorSection),
     BeginResize(SidebarPanel),
     LoadMoreHistory,
@@ -41,6 +42,9 @@ pub(crate) enum ProjectSurfaceMessage {
     HierarchyRenameShown(String),
     /// The transient metadata-field name control is ready to receive typing.
     MetadataFieldCreationShown,
+    /// The Inspector's intentionally quiet title was explicitly activated for
+    /// renaming and can now safely receive focus.
+    InspectorRenameShown(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +61,10 @@ pub(crate) fn hierarchy_rename_input_id(_node_id: &str) -> iced::widget::Id {
 
 pub(crate) fn metadata_field_name_input_id() -> iced::widget::Id {
     HarnessTarget::MetadataFieldName.id()
+}
+
+pub(crate) fn inspector_title_input_id() -> iced::widget::Id {
+    HarnessTarget::InspectorTitle.id()
 }
 
 // Divider lines belong to the adjacent sidebar's reference width; they must
@@ -368,14 +376,28 @@ fn ribbon<'a>(
                 ))
             });
     let buttons = focus::f6_region(F6Region::ModeSwitch, buttons);
+    let active_label = match destination {
+        RibbonDestination::Editor | RibbonDestination::GlobalSearch => "Editor",
+        RibbonDestination::Cards => "Cards",
+        RibbonDestination::History => "History",
+        RibbonDestination::RecentlyDeleted => "Recently Deleted",
+        RibbonDestination::Export => "Export",
+        RibbonDestination::Settings => "Settings",
+    };
     let title = row![icon(Icon::Project), text(project_title).size(16),]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center)
         .width(230);
     container(
-        row![title, buttons]
-            .spacing(16)
-            .align_y(iced::alignment::Vertical::Center),
+        row![
+            title,
+            buttons,
+            text(active_label)
+                .size(12)
+                .color(theme.palette().secondary_text)
+        ]
+        .spacing(16)
+        .align_y(iced::alignment::Vertical::Center),
     )
     .padding([6, 18])
     .width(Length::Fill)
@@ -632,39 +654,91 @@ fn explorer_rail<'a>(
     } else {
         Space::new().height(0).into()
     };
+    let selection_shelf: Element<'a, ProjectSurfaceMessage> = {
+        let selected_count = explorer.selected_ids().len();
+        if selected_count > 1 {
+            container(
+                row![
+                    text(format!("{selected_count} selected")).size(12),
+                    Space::new().width(Length::Fill),
+                    button(text("Copy").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::CopySelection
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )),
+                    button(text("Move").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(ProjectMessage::CutSelection))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )),
+                    button(text("Delete").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::DeleteSelection
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )),
+                ]
+                .spacing(3)
+                .align_y(iced::alignment::Vertical::Center),
+            )
+            .padding([4, 0])
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Selected))
+            .into()
+        } else {
+            Space::new().height(0).into()
+        }
+    };
     let rail = column![
         row![
             text("EXPLORER").size(12),
             Space::new().width(Length::Fill),
             harness_target::target(
                 HarnessTarget::ExplorerAdd,
-                button(text("+").size(20))
-                    .padding([2, 6])
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ToggleExplorerCreationMenu
-                    ))
-                    .style(move |_, status| components::button_style(
-                        theme,
-                        ButtonKind::Quiet,
-                        interaction(status, workspace.explorer_creation_menu_open())
-                    )),
+                stationary_tooltip::tooltip(
+                    button(text("+ New").size(12))
+                        .padding([4, 7])
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ToggleExplorerCreationMenu
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, workspace.explorer_creation_menu_open())
+                        )),
+                    container(text("Create a document or group").size(12)).padding([4, 6]),
+                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                ),
             ),
             harness_target::target(
                 HarnessTarget::ExplorerSearch,
-                button(text("⌕").size(20))
-                    .padding([2, 5])
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ShowGlobalSearch
-                    ))
-                    .style(move |_, status| components::button_style(
-                        theme,
-                        ButtonKind::Quiet,
-                        interaction(status, false)
-                    ))
+                stationary_tooltip::tooltip(
+                    button(text("⌕").size(20))
+                        .padding([2, 5])
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ShowGlobalSearch
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false)
+                        )),
+                    container(text("Global Search").size(12)).padding([4, 6]),
+                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                )
             )
         ]
         .spacing(4),
         creation_menu,
+        selection_shelf,
         scrollable(rows).height(Length::Fill),
     ]
     .spacing(8)
@@ -918,6 +992,16 @@ fn comment_action<'a>(
     .into()
 }
 
+fn comment_anchor_summary(anchor: &CommentAnchor) -> String {
+    match anchor {
+        CommentAnchor::Range { quote, .. } => format!("“{quote}”"),
+        CommentAnchor::Position { quote, .. } if quote.is_empty() => "At cursor".to_owned(),
+        CommentAnchor::Position { quote, .. } => format!("At cursor · “{quote}”"),
+        CommentAnchor::Document { .. } => "Document comment".to_owned(),
+        CommentAnchor::Orphaned { quote, .. } => format!("Anchor needs attention · “{quote}”"),
+    }
+}
+
 fn hierarchy_row_is_visible<'a>(
     explorer: &'a crate::ExplorerState,
     mut parent_id: Option<&'a str>,
@@ -959,45 +1043,57 @@ fn global_search_rail<'a>(
         .padding([7, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
     let controls = row![
-        button(text("←  Search").size(16))
-            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer))
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                interaction(status, false)
-            )),
+        stationary_tooltip::tooltip(
+            button(text("←  Search").size(16))
+                .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    interaction(status, false)
+                )),
+            container(text("Back to Explorer").size(12)).padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        ),
         Space::new().width(Length::Fill),
-        button(
-            text(if search.case_sensitive() {
-                "Aa ✓"
-            } else {
-                "Aa"
-            })
-            .size(12)
-        )
-        .on_press(ProjectSurfaceMessage::Project(
-            ProjectMessage::SetGlobalSearchOptions {
-                case_sensitive: !search.case_sensitive(),
-                whole_word: search.whole_word()
-            }
-        ))
-        .style(move |_, status| components::button_style(
-            theme,
-            ButtonKind::Quiet,
-            interaction(status, search.case_sensitive())
-        )),
-        button(text(if search.whole_word() { "W ✓" } else { "W" }).size(12))
+        stationary_tooltip::tooltip(
+            button(
+                text(if search.case_sensitive() {
+                    "Aa ✓"
+                } else {
+                    "Aa"
+                })
+                .size(12)
+            )
             .on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::SetGlobalSearchOptions {
-                    case_sensitive: search.case_sensitive(),
-                    whole_word: !search.whole_word()
+                    case_sensitive: !search.case_sensitive(),
+                    whole_word: search.whole_word()
                 }
             ))
             .style(move |_, status| components::button_style(
                 theme,
                 ButtonKind::Quiet,
-                interaction(status, search.whole_word())
+                interaction(status, search.case_sensitive())
             )),
+            container(text("Match case").size(12)).padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        ),
+        stationary_tooltip::tooltip(
+            button(text(if search.whole_word() { "W ✓" } else { "W" }).size(12))
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetGlobalSearchOptions {
+                        case_sensitive: search.case_sensitive(),
+                        whole_word: !search.whole_word()
+                    }
+                ))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    interaction(status, search.whole_word())
+                )),
+            container(text("Match whole word").size(12)).padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        ),
     ]
     .align_y(iced::alignment::Vertical::Center)
     .spacing(8);
@@ -1023,9 +1119,11 @@ fn global_search_rail<'a>(
                         .into_iter()
                         .take(2)
                         .fold(column![].spacing(3), |rows, result| {
-                            let highlight = Color {
-                                a: 0.28,
-                                ..theme.palette().accent
+                            let active = search.active_match_id() == Some(result.match_id.as_str());
+                            let highlight = if active {
+                                theme.palette().search_match_active
+                            } else {
+                                theme.palette().search_match
                             };
                             let snippet_spans: Vec<iced::widget::text::Span<'a>> = vec![
                                 span(result.prefix.as_str()),
@@ -1037,7 +1135,20 @@ fn global_search_rail<'a>(
                                     .background(highlight),
                                 span(result.suffix.as_str()),
                             ];
-                            let snippet = rich_text(snippet_spans).size(12);
+                            let snippet = container(rich_text(snippet_spans).size(12))
+                                .padding([2, 3])
+                                .style(move |_| iced::widget::container::Style {
+                                    border: if active {
+                                        Border {
+                                            color: theme.palette().search_match_active,
+                                            width: 1.0,
+                                            radius: 2.0.into(),
+                                        }
+                                    } else {
+                                        Border::default()
+                                    },
+                                    ..Default::default()
+                                });
                             rows.push(
                                 button(snippet)
                                     .padding([5, 6])
@@ -1051,7 +1162,7 @@ fn global_search_rail<'a>(
                                         components::button_style(
                                             theme,
                                             ButtonKind::Quiet,
-                                            interaction(status, false),
+                                            interaction(status, active),
                                         )
                                     }),
                             )
@@ -1094,25 +1205,56 @@ fn global_search_rail<'a>(
         .padding([7, 8])
         .width(Length::Fill)
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
-    let replace_action = button(text("Replace").size(13))
-        .on_press_maybe(
-            (search.is_complete() && !search.results().is_empty()).then_some(
-                ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
-            ),
-        )
-        .padding([7, 14])
-        .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Primary, interaction(status, false))
-        });
+    let replace_action = button(
+        text(if result_count == 1 {
+            "Review 1 replacement".to_owned()
+        } else {
+            format!("Review {result_count} replacements")
+        })
+        .size(13),
+    )
+    .on_press_maybe(
+        (search.is_complete() && !search.results().is_empty()).then_some(
+            ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
+        ),
+    )
+    .padding([7, 14])
+    .style(move |_, status| {
+        components::button_style(theme, ButtonKind::Primary, interaction(status, false))
+    });
+    let active_trail: Element<'a, ProjectSurfaceMessage> = search
+        .active_match_id()
+        .and_then(|active| {
+            search
+                .results()
+                .iter()
+                .position(|result| result.match_id == active)
+        })
+        .map(|index| {
+            text(format!(
+                "{} · {} of {} · results stay open here",
+                search.query(),
+                index + 1,
+                result_count,
+            ))
+            .size(11)
+            .color(theme.palette().secondary_text)
+            .into()
+        })
+        .unwrap_or_else(|| Space::new().height(0).into());
     column![
         controls,
         query,
         row![replace, replace_action].spacing(8),
+        text("Searches titles, synopsis, and metadata; review changes document body text only.")
+            .size(11)
+            .color(theme.palette().secondary_text),
         text(global_search_result_count_label(
             result_count,
             document_count
         ))
         .size(12),
+        active_trail,
         scrollable(results)
             .on_scroll(|viewport| ProjectSurfaceMessage::Project(
                 ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
@@ -1262,15 +1404,28 @@ fn cards_center<'a>(
                 }
                 _ => Space::new().width(28).into(),
             };
+            let group = item.kind == HierarchyRowKind::Group;
             let card_content = column![
                 row![
                     disclosure,
-                    text(item.title).size(16).width(Length::Fill),
+                    text(item.title)
+                        .size(if group { 17 } else { 16 })
+                        .font(if group {
+                            Font {
+                                weight: font::Weight::Bold,
+                                ..Font::DEFAULT
+                            }
+                        } else {
+                            Font::DEFAULT
+                        })
+                        .width(Length::Fill),
                     Space::new().width(Length::Fill),
                     container(metadata).padding([0, 8]).width(220),
                 ]
                 .align_y(iced::alignment::Vertical::Center),
-                text(item.synopsis).size(13),
+                text(item.synopsis)
+                    .size(13)
+                    .color(theme.palette().secondary_text),
             ]
             .spacing(6);
             let before = DragDestination::BeforeSibling(node_id.clone());
@@ -1301,7 +1456,7 @@ fn cards_center<'a>(
                     ]
                     .spacing(if middle_active { 4 } else { 0 })
                 )
-                .padding([10, 16])
+                .padding(if group { [14, 16] } else { [9, 16] })
                 .width(Length::Fill)
                 .style(move |_| {
                     if source_active || middle_active || item.selected {
@@ -1346,6 +1501,14 @@ fn cards_center<'a>(
                     theme,
                 ))
                 .push(card)
+                .push(
+                    container(Space::new().height(1))
+                        .width(Length::Fill)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(Background::Color(theme.palette().divider)),
+                            ..Default::default()
+                        }),
+                )
                 .push(hierarchy_drop_strip(
                     after,
                     harness_target::card_drop_after_id(&node_id),
@@ -1550,6 +1713,11 @@ fn history_center<'a>(
             .fold(column![].spacing(6), |column, checkpoint| {
                 let checkpoint_id = checkpoint.checkpoint_id.clone();
                 let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
+                let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
+                    column.push(text(heading).size(11).color(theme.palette().secondary_text))
+                } else {
+                    column
+                };
                 column.push(
                     container(
                         column![
@@ -2341,28 +2509,30 @@ fn export_center<'a>(
         state,
     ]
     .spacing(10);
-    let output_file = row![
-        text_input("Output file", export.output_name())
-            .on_input_maybe(export.can_start().then_some(|value| {
-                ProjectSurfaceMessage::Project(ProjectMessage::SetExportOutputName(value))
-            }))
-            .padding([9, 12])
-            .width(Length::Fill)
-            .style(move |_, status| components::field_style(theme, field_interaction(status))),
-        button(text("Browse…"))
-            .padding([9, 14])
-            .on_press_maybe(
-                (!export.can_cancel()).then_some(ProjectSurfaceMessage::Project(
-                    ProjectMessage::BrowseExportDestination
-                ))
-            )
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Secondary,
-                interaction(status, false)
-            )),
-    ]
-    .spacing(8);
+    let output_file =
+        row![
+            text_input("Output file", export.output_name())
+                .on_input_maybe(export.can_start().then_some(|value| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetExportOutputName(value))
+                }))
+                .padding([9, 12])
+                .width(Length::Fill)
+                .style(move |_, status| components::field_style(theme, field_interaction(status))),
+            harness_target::target(
+                HarnessTarget::ExportBrowse,
+                button(text("Browse…"))
+                    .padding([9, 14])
+                    .on_press_maybe((!export.can_cancel()).then_some(
+                        ProjectSurfaceMessage::Project(ProjectMessage::BrowseExportDestination)
+                    ))
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Secondary,
+                        interaction(status, false)
+                    )),
+            ),
+        ]
+        .spacing(8);
     let content =
         container(
             column![
@@ -2396,18 +2566,19 @@ fn export_center<'a>(
                             ButtonKind::Secondary,
                             interaction(status, false)
                         )),
-                    button(text("Export"))
-                        .padding([10, 18])
-                        .on_press_maybe(
-                            export.can_start().then_some(ProjectSurfaceMessage::Project(
-                                ProjectMessage::StartExport
+                    harness_target::target(
+                        HarnessTarget::ExportStart,
+                        button(text("Export"))
+                            .padding([10, 18])
+                            .on_press_maybe(export.can_start().then_some(
+                                ProjectSurfaceMessage::Project(ProjectMessage::StartExport)
                             ))
-                        )
-                        .style(move |_, status| components::button_style(
-                            theme,
-                            ButtonKind::Primary,
-                            interaction(status, false)
-                        )),
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Primary,
+                                interaction(status, false)
+                            )),
+                    ),
                     terminal_actions,
                 ]
                 .spacing(12),
@@ -2505,8 +2676,6 @@ fn settings_center<'a>(
         .spacing(8),
         |column, (index, field)| {
             let id = field.id.to_owned();
-            let move_up_id = id.clone();
-            let move_down_id = id.clone();
             let delete_id = id.clone();
             let selected = matches!(
                 settings.selected_detail(),
@@ -2525,52 +2694,76 @@ fn settings_center<'a>(
                     ""
                 },
             );
-            column.push(
-                row![
-                    button(
-                        column![
-                            text(field.label).size(13),
-                            text(summary).size(11),
-                            text(field.description.unwrap_or("No description")).size(11),
-                        ]
-                        .spacing(3),
-                    )
-                    .width(Length::Fill)
-                    .padding(10)
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::SelectMetadataField(id)
-                    ))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Secondary,
-                            interaction(status, selected),
-                        )
-                    }),
+            let dragging = settings.metadata_drag_source() == Some(field.id);
+            let target = settings.metadata_drag_target() == Some(index);
+            let drag_handle = stationary_tooltip::tooltip(
+                mouse_area(
+                    container(text("⠿").size(16))
+                        .width(22)
+                        .align_x(iced::alignment::Horizontal::Center),
+                )
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::BeginMetadataFieldDrag(id.clone()),
+                ))
+                .on_release(ProjectSurfaceMessage::Project(
+                    ProjectMessage::CommitMetadataFieldDrag,
+                ))
+                .interaction(iced::mouse::Interaction::Grabbing),
+                container(text("Drag to reorder").size(12)).padding([4, 6]),
+                components::surface(theme, Surface::Panel, Interaction::Rest),
+            );
+            let row = row![
+                drag_handle,
+                button(
                     column![
-                        button(text("↑").size(11)).on_press_maybe((index > 0).then_some(
-                            ProjectSurfaceMessage::Project(ProjectMessage::ReorderMetadataField {
-                                field_id: move_up_id,
-                                target_index: index.saturating_sub(1),
-                            },)
-                        )),
-                        button(text("↓").size(11)).on_press_maybe(
-                            (index + 1 < settings.metadata_fields().len()).then_some(
-                                ProjectSurfaceMessage::Project(
-                                    ProjectMessage::ReorderMetadataField {
-                                        field_id: move_down_id,
-                                        target_index: index + 1,
-                                    }
-                                ),
-                            ),
-                        ),
-                        button(text("Delete").size(11)).on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::RequestDeleteMetadataField(delete_id)
-                        ),),
+                        text(field.label).size(13),
+                        text(summary).size(11),
+                        text(field.description.unwrap_or("No description")).size(11),
                     ]
                     .spacing(3),
-                ]
-                .spacing(6),
+                )
+                .width(Length::Fill)
+                .padding(10)
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SelectMetadataField(id)
+                ))
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Secondary,
+                        interaction(status, selected),
+                    )
+                }),
+                stationary_tooltip::tooltip(
+                    button(icon_sized(Icon::RecentlyDeleted, 16))
+                        .padding(5)
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::RequestDeleteMetadataField(delete_id),
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )),
+                    container(text("Delete field").size(12)).padding([4, 6]),
+                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                ),
+            ]
+            .spacing(6);
+            column.push(
+                mouse_area(container(row).width(Length::Fill).style(move |_| {
+                    if target || dragging {
+                        components::surface(theme, Surface::Panel, Interaction::Selected)
+                    } else {
+                        iced::widget::container::Style::default()
+                    }
+                }))
+                .on_enter(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetMetadataFieldDragTarget(index),
+                ))
+                .on_release(ProjectSurfaceMessage::Project(
+                    ProjectMessage::CommitMetadataFieldDrag,
+                )),
             )
         },
     );
@@ -2657,8 +2850,7 @@ fn settings_center<'a>(
     let content: Element<'a, ProjectSurfaceMessage> = match category {
         SettingsCategory::Appearance => column![
             text(appearance_heading).size(24),
-            text("Appearance").size(20),
-            text("Choose the application appearance.").size(15),
+            text("Application setting · applies to every open ParchMint window.").size(15),
             Space::new().height(8),
             container(choices).width(540),
             Space::new().height(12),
@@ -2785,11 +2977,20 @@ fn settings_center<'a>(
         }
     };
     row![
-        container(column![text("PROJECT SETTINGS").size(12), navigation].spacing(18))
-            .padding([16, 12])
-            .width(280)
-            .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(
+            column![
+                text("SETTINGS").size(12),
+                text("Project and application")
+                    .size(11)
+                    .color(theme.palette().secondary_text),
+                navigation,
+            ]
+            .spacing(10),
+        )
+        .padding([16, 12])
+        .width(280)
+        .height(Length::Fill)
+        .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
         container(content)
             .padding([20, 24])
             .width(Length::Fill)
@@ -3362,19 +3563,54 @@ fn inspector<'a>(
         .style(move |_, status| multiline_field_style(theme, status));
         let title: Element<'a, ProjectSurfaceMessage> = if compact {
             text(format!("INSPECTOR · {title}")).size(12).into()
-        } else {
-            let title_id = selected_id;
-            text_input("Untitled", title)
-                .id(HarnessTarget::InspectorTitle.id())
-                .on_input(move |title| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::RenameNode {
-                        node_id: title_id.clone(),
-                        title,
+        } else if workspace.inspector_title_rename_node_id() == Some(selected) {
+            let title_id = selected_id.clone();
+            sensor(
+                text_input("Untitled", title)
+                    .id(inspector_title_input_id())
+                    .on_input(move |title| {
+                        ProjectSurfaceMessage::Project(ProjectMessage::RenameNode {
+                            node_id: title_id.clone(),
+                            title,
+                        })
                     })
-                })
-                .padding([6, 8])
-                .style(move |_, status| components::field_style(theme, field_interaction(status)))
-                .into()
+                    .on_submit(ProjectSurfaceMessage::Project(
+                        ProjectMessage::CommitInspectorTitleRename,
+                    ))
+                    .padding([6, 8])
+                    .style(move |_, status| {
+                        components::field_style(theme, field_interaction(status))
+                    }),
+            )
+            .key(selected_id.clone())
+            .on_show({
+                let node_id = selected_id.clone();
+                move |_| ProjectSurfaceMessage::InspectorRenameShown(node_id.clone())
+            })
+            .into()
+        } else {
+            let node_id = selected_id.clone();
+            harness_target::target(
+                HarnessTarget::InspectorTitle,
+                stationary_tooltip::tooltip(
+                    button(text(format!("INSPECTOR · {title}")).size(12))
+                        .width(Length::Fill)
+                        .padding(0)
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::BeginInspectorTitleRename(node_id),
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                    container(text("Rename title").size(12)).padding([4, 6]),
+                    components::surface(theme, Surface::Panel, Interaction::Rest),
+                ),
+            )
+            .into()
         };
         let editor = workspace.editor();
         let mut comments = column![].spacing(8);
@@ -3396,30 +3632,41 @@ fn inspector<'a>(
             } else {
                 "Unresolved"
             };
+            let state_color = if thread.resolved() {
+                theme.palette().comment_resolved
+            } else {
+                theme.palette().comment_active
+            };
             let root = thread.messages().first();
             let root_body = root.map(|message| message.body()).unwrap_or("Comment");
+            let anchor_summary = comment_anchor_summary(thread.anchor());
             let mut card = column![
                 button(
                     row![
-                        text(state).size(11).font(Font {
-                            weight: font::Weight::Bold,
-                            ..Font::DEFAULT
-                        }),
-                        text(root_body).size(13),
+                        text(state)
+                            .size(11)
+                            .font(Font {
+                                weight: font::Weight::Bold,
+                                ..Font::DEFAULT
+                            })
+                            .color(state_color),
+                        column![
+                            text(root_body).size(13),
+                            text(anchor_summary)
+                                .size(12)
+                                .color(theme.palette().secondary_text),
+                        ]
+                        .spacing(2),
                     ]
                     .spacing(8)
                 )
                 .width(Length::Fill)
-                .padding([6, 8])
+                .padding([4, 0])
                 .on_press(ProjectSurfaceMessage::EditorCenter(
                     EditorCenterMessage::Workspace(EditorMessage::SelectComment(thread_id.clone()))
                 ))
                 .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Secondary,
-                        interaction(status, false),
-                    )
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
                 })
             ]
             .spacing(6);
@@ -3606,11 +3853,16 @@ fn inspector<'a>(
                 card = card.push(
                     container(
                         column![
-                            text("Anchor needs attention").size(12).font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }),
-                            text(format!("{context_before}[{quote}]{context_after}")).size(12),
+                            text("Anchor needs attention")
+                                .size(12)
+                                .font(Font {
+                                    weight: font::Weight::Bold,
+                                    ..Font::DEFAULT
+                                })
+                                .color(theme.palette().comment_orphaned),
+                            text(format!("{context_before}[{quote}]{context_after}"))
+                                .size(12)
+                                .color(theme.palette().secondary_text),
                             row![
                                 button(text("Reattach to selection")).on_press(
                                     ProjectSurfaceMessage::EditorCenter(
@@ -3732,10 +3984,13 @@ fn inspector<'a>(
                     .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
                 );
             }
-            comments = comments.push(
-                container(card)
-                    .padding(10)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+            comments = comments.push(card).push(
+                container(Space::new().height(1))
+                    .width(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(Background::Color(theme.palette().divider)),
+                        ..Default::default()
+                    }),
             );
         }
         // A document-level comment is always available: authors often need to
@@ -3840,18 +4095,9 @@ fn inspector<'a>(
                 sections = sections.push(comments);
             }
         }
-        let inspector_heading: Element<'a, ProjectSurfaceMessage> = if compact {
-            Space::new().height(0).into()
-        } else {
-            text("Inspector").size(12).into()
-        };
-        column![
-            inspector_heading,
-            title,
-            scrollable(sections).height(Length::Fill),
-        ]
-        .spacing(12)
-        .height(Length::Fill)
+        column![title, scrollable(sections).height(Length::Fill),]
+            .spacing(12)
+            .height(Length::Fill)
     } else {
         column![
             text("Inspector").size(12),
@@ -3888,31 +4134,91 @@ fn status_bar<'a>(
         StatusCount::Selection(words) => format!("Selection · {words} words"),
         StatusCount::ActiveDocument(words) => format!("Document · {words} words"),
     };
+    let pane_focus_action: Element<'a, ProjectSurfaceMessage> = if workspace
+        .editor()
+        .pane(EditorPane::Companion)
+        .is_populated()
+    {
+        let panes_focused = !explorer_visible && !inspector_visible;
+        stationary_tooltip::tooltip(
+            button(
+                text(if panes_focused {
+                    "Restore panes"
+                } else {
+                    "Focus pane"
+                })
+                .size(12),
+            )
+            .padding([3, 6])
+            .on_press(ProjectSurfaceMessage::ToggleFocusedPane)
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            }),
+            container(
+                text(if panes_focused {
+                    "Restore the Explorer and Inspector"
+                } else {
+                    "Temporarily hide the Explorer and Inspector"
+                })
+                .size(12),
+            )
+            .padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        )
+        .into()
+    } else {
+        Space::new().width(0).into()
+    };
     let content = row![
-        button(sidebar_toggle_glyph(theme, true))
-            .on_press(ProjectSurfaceMessage::ToggleExplorer)
-            .padding([4, 0])
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                interaction(status, explorer_visible)
-            )),
+        stationary_tooltip::tooltip(
+            button(sidebar_toggle_glyph(theme, true))
+                .on_press(ProjectSurfaceMessage::ToggleExplorer)
+                .padding([4, 0])
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    interaction(status, explorer_visible)
+                )),
+            container(
+                text(if explorer_visible {
+                    "Hide Explorer"
+                } else {
+                    "Show Explorer"
+                })
+                .size(12)
+            )
+            .padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        ),
         text(active_count).size(12),
         text(format!(
             "Manuscript · {} words",
             editor_status.manuscript_total()
         ))
         .size(12),
+        pane_focus_action,
         Space::new().width(Length::Fill),
         text(label).size(12),
-        button(sidebar_toggle_glyph(theme, false))
-            .on_press(ProjectSurfaceMessage::ToggleInspector)
-            .padding([4, 0])
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                interaction(status, inspector_visible)
-            )),
+        stationary_tooltip::tooltip(
+            button(sidebar_toggle_glyph(theme, false))
+                .on_press(ProjectSurfaceMessage::ToggleInspector)
+                .padding([4, 0])
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    interaction(status, inspector_visible)
+                )),
+            container(
+                text(if inspector_visible {
+                    "Hide Inspector"
+                } else {
+                    "Show Inspector"
+                })
+                .size(12)
+            )
+            .padding([4, 6]),
+            components::surface(theme, Surface::Panel, Interaction::Rest),
+        ),
     ]
     .align_y(iced::alignment::Vertical::Center)
     .spacing(14);

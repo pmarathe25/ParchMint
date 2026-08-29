@@ -11,16 +11,18 @@ use std::{
 
 use parchmint_diagnostics::DiagnosticEvent;
 use parchmint_platform_api::ApplicationPaths;
+use parchmint_platform_api::UntrustedClipboardContent;
 use parchmint_platform_native::testing::NativeFixture;
 use parchmint_ui_iced::{
-    EditorPane, HarnessDropPosition, HarnessHierarchySurface, HarnessKey, HarnessNode,
-    HarnessTarget, HarnessTraceEntry, HarnessWindow, NativeDesktopError, NativeDesktopHarness,
+    EditorPane, HarnessDropPosition, HarnessHierarchyEntry, HarnessHierarchySurface,
+    HarnessHistoryCheckpoint, HarnessKey, HarnessNode, HarnessSelectionGesture, HarnessTarget,
+    HarnessTraceEntry, HarnessWindow, NativeDesktopError, NativeDesktopHarness,
     NativeDesktopStartup,
 };
 
 use super::{
-    ProductionControls, ProductionObservation, composition::assemble_interaction_harness,
-    native_callbacks::NativeDesktopDriver,
+    ProductionControls, ProductionFaultKind, ProductionFaultPoint, ProductionObservation,
+    composition::assemble_interaction_harness, native_callbacks::NativeDesktopDriver,
 };
 use crate::{LaunchRequest, StartupError};
 
@@ -70,6 +72,7 @@ enum HarnessAction {
     TargetIsFocused(HarnessWindow, HarnessTarget),
     TypeFocused(HarnessWindow, String),
     PressKey(HarnessWindow, HarnessKey),
+    PressShiftKey(HarnessWindow, HarnessKey),
     PressCommandKey(HarnessWindow, char),
     PressCommandShiftKey(HarnessWindow, char),
     ReplaceText(HarnessWindow, String, String),
@@ -78,12 +81,18 @@ enum HarnessAction {
     DragTextToText(HarnessWindow, String, String),
     DragTextToTextAt(HarnessWindow, String, String, HarnessDropPosition),
     DragWithinTarget(HarnessWindow, HarnessTarget, (f32, f32), (f32, f32)),
+    MovePointerToTarget(HarnessWindow, HarnessTarget, (f32, f32)),
+    MovePointerOutside(HarnessWindow),
+    MovePointerToEditorText(HarnessWindow, EditorPane, String),
+    MovePointerToCommentAnchor(HarnessWindow, EditorPane),
     SelectEditorText(HarnessWindow, EditorPane, String),
     HierarchyNode(String),
     ClickHierarchyNode(HarnessWindow, HarnessNode),
+    SelectHierarchyNode(HarnessWindow, HarnessNode, HarnessSelectionGesture),
     RightClickHierarchyNode(HarnessWindow, HarnessNode),
     HierarchyNodeIsVisible(HarnessWindow, HarnessNode),
     ClickHistoryCheckpoint(HarnessWindow, usize),
+    ClickHistoryCheckpointById(HarnessWindow, String),
     DragHierarchyNode(
         HarnessWindow,
         HarnessHierarchySurface,
@@ -91,20 +100,27 @@ enum HarnessAction {
         HarnessNode,
         HarnessDropPosition,
     ),
+    DragHierarchyNodeToPane(HarnessWindow, HarnessNode, EditorPane),
     ContainsText(HarnessWindow, String),
     Resize(HarnessWindow, f32, f32),
     Redraw(HarnessWindow),
     ElapseAutosaveIdle,
+    ElapseRecoveryCapture,
+    AdvanceAutosaveClock(Duration, Duration),
     Close(HarnessWindow),
     ActiveEditorBody,
     ActiveEditorTabTitle,
     ActiveEditorDocumentId(EditorPane),
     ReplacementStatus,
     GlobalSearchStatus,
+    ExportStatus,
     HierarchyTitles,
     TabTitles,
     CommentFeedback,
+    CommentHoverStatus,
     HistoryStatus,
+    HistoryCheckpoints,
+    Hierarchy,
     Snapshot(HarnessWindow, PathBuf),
     Trace,
     Shutdown,
@@ -115,6 +131,8 @@ enum HarnessValue {
     Bool(bool),
     Text(String),
     Texts(Vec<String>),
+    HistoryCheckpoints(Vec<HarnessHistoryCheckpoint>),
+    Hierarchy(Vec<HarnessHierarchyEntry>),
     Node(HarnessNode),
     Trace(Vec<HarnessTraceEntry>),
 }
@@ -207,6 +225,7 @@ fn execute_action(
         }
         HarnessAction::TypeFocused(window, value) => harness.type_focused(window, &value),
         HarnessAction::PressKey(window, key) => harness.press_key(window, key),
+        HarnessAction::PressShiftKey(window, key) => harness.press_shift_key(window, key),
         HarnessAction::PressCommandKey(window, key) => harness.press_command_key(window, key),
         HarnessAction::PressCommandShiftKey(window, key) => {
             harness.press_command_shift_key(window, key)
@@ -229,6 +248,16 @@ fn execute_action(
         HarnessAction::DragWithinTarget(window, target, from, to) => {
             harness.drag_within_target(window, target, from, to)
         }
+        HarnessAction::MovePointerToTarget(window, target, position) => {
+            harness.move_pointer_to_target(window, target, position)
+        }
+        HarnessAction::MovePointerOutside(window) => harness.move_pointer_outside(window),
+        HarnessAction::MovePointerToEditorText(window, pane, text) => {
+            harness.move_pointer_to_editor_text(window, pane, &text)
+        }
+        HarnessAction::MovePointerToCommentAnchor(window, pane) => {
+            harness.move_pointer_to_comment_anchor(window, pane)
+        }
         HarnessAction::SelectEditorText(window, pane, text) => {
             harness.select_editor_text(window, pane, &text)
         }
@@ -240,6 +269,9 @@ fn execute_action(
         }
         HarnessAction::ClickHierarchyNode(window, node) => {
             harness.click_hierarchy_node(window, &node)
+        }
+        HarnessAction::SelectHierarchyNode(window, node, gesture) => {
+            harness.select_hierarchy_node(window, &node, gesture)
         }
         HarnessAction::RightClickHierarchyNode(window, node) => {
             harness.right_click_hierarchy_node(window, &node)
@@ -253,8 +285,14 @@ fn execute_action(
         HarnessAction::ClickHistoryCheckpoint(window, position) => {
             harness.click_history_checkpoint(window, position)
         }
+        HarnessAction::ClickHistoryCheckpointById(window, checkpoint_id) => {
+            harness.click_history_checkpoint_by_id(window, &checkpoint_id)
+        }
         HarnessAction::DragHierarchyNode(window, surface, source, destination, position) => {
             harness.drag_hierarchy_node(window, surface, &source, &destination, position)
+        }
+        HarnessAction::DragHierarchyNodeToPane(window, source, pane) => {
+            harness.drag_hierarchy_node_to_pane(window, &source, pane)
         }
         HarnessAction::ContainsText(window, text) => {
             return harness
@@ -271,6 +309,10 @@ fn execute_action(
         HarnessAction::Resize(window, width, height) => harness.resize(window, width, height),
         HarnessAction::Redraw(window) => harness.redraw(window),
         HarnessAction::ElapseAutosaveIdle => harness.elapse_autosave_idle(),
+        HarnessAction::ElapseRecoveryCapture => harness.elapse_recovery_capture(),
+        HarnessAction::AdvanceAutosaveClock(first_dirty_age, last_edit_age) => {
+            harness.advance_autosave_clock(first_dirty_age, last_edit_age)
+        }
         HarnessAction::Close(window) => harness.close(window),
         HarnessAction::ActiveEditorBody => {
             return harness
@@ -302,6 +344,12 @@ fn execute_action(
                 .map(HarnessValue::Text)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::ExportStatus => {
+            return harness
+                .export_status()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::HierarchyTitles => {
             return harness
                 .hierarchy_titles()
@@ -320,10 +368,28 @@ fn execute_action(
                 .map(HarnessValue::Text)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::CommentHoverStatus => {
+            return harness
+                .comment_hover_status()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::HistoryStatus => {
             return harness
                 .history_status()
                 .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::HistoryCheckpoints => {
+            return harness
+                .history_checkpoints()
+                .map(HarnessValue::HistoryCheckpoints)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::Hierarchy => {
+            return harness
+                .hierarchy()
+                .map(HarnessValue::Hierarchy)
                 .map_err(|error| error.to_string());
         }
         HarnessAction::Snapshot(window, path) => harness.snapshot(window, path),
@@ -343,6 +409,7 @@ pub struct DesktopInteractionHarness {
     commands: mpsc::Sender<HarnessCommand>,
     thread: Option<thread::JoinHandle<Result<(), String>>>,
     controls: ProductionControls,
+    fixture: NativeFixture,
 }
 
 impl DesktopInteractionHarness {
@@ -399,6 +466,7 @@ impl DesktopInteractionHarness {
                 commands: command_sender,
                 thread: Some(thread),
                 controls,
+                fixture,
             }),
             Ok(HarnessReady::Failed(error)) => {
                 let _ = thread.join();
@@ -527,6 +595,16 @@ impl DesktopInteractionHarness {
         key: HarnessKey,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::PressKey(window, key))?
+            .into_unit()
+    }
+
+    /// Sends a Shift-modified named key to the focused control.
+    pub fn press_shift_key(
+        &self,
+        window: HarnessWindow,
+        key: HarnessKey,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::PressShiftKey(window, key))?
             .into_unit()
     }
 
@@ -665,6 +743,51 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    /// Moves the pointer over a stable production target without clicking it.
+    pub fn move_pointer_to_target(
+        &self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        position: (f32, f32),
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::MovePointerToTarget(window, target, position))?
+            .into_unit()
+    }
+
+    /// Moves the pointer beyond the current window bounds.
+    pub fn move_pointer_outside(
+        &self,
+        window: HarnessWindow,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::MovePointerOutside(window))?
+            .into_unit()
+    }
+
+    /// Moves the pointer over one uniquely occurring live prose run.
+    pub fn move_pointer_to_editor_text(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        text: impl Into<String>,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::MovePointerToEditorText(
+            window,
+            pane,
+            text.into(),
+        ))?
+        .into_unit()
+    }
+
+    /// Moves the pointer to the single visible attached comment anchor.
+    pub fn move_pointer_to_comment_anchor(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::MovePointerToCommentAnchor(window, pane))?
+            .into_unit()
+    }
+
     /// Selects a uniquely occurring prose run by semantic document text,
     /// keeping comment and popover workflows independent of pixel geometry.
     pub fn select_editor_text(
@@ -692,6 +815,18 @@ impl DesktopInteractionHarness {
         node: HarnessNode,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickHierarchyNode(window, node))?
+            .into_unit()
+    }
+
+    /// Applies an explicit selection gesture to a hierarchy node through the
+    /// production selection reducer.
+    pub fn select_hierarchy_node(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+        gesture: HarnessSelectionGesture,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::SelectHierarchyNode(window, node, gesture))?
             .into_unit()
     }
 
@@ -725,6 +860,20 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    /// Selects a loaded History row by stable checkpoint ID rather than its
+    /// repeated author-visible label or a virtualized list position.
+    pub fn click_history_checkpoint_by_id(
+        &self,
+        window: HarnessWindow,
+        checkpoint_id: impl Into<String>,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ClickHistoryCheckpointById(
+            window,
+            checkpoint_id.into(),
+        ))?
+        .into_unit()
+    }
+
     pub fn drag_hierarchy_node(
         &self,
         window: HarnessWindow,
@@ -741,6 +890,17 @@ impl DesktopInteractionHarness {
             position,
         ))?
         .into_unit()
+    }
+
+    /// Drags an Explorer document onto a production editor-pane drop target.
+    pub fn drag_hierarchy_node_to_pane(
+        &self,
+        window: HarnessWindow,
+        source: HarnessNode,
+        pane: EditorPane,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::DragHierarchyNodeToPane(window, source, pane))?
+            .into_unit()
     }
 
     pub fn contains_text(
@@ -770,6 +930,25 @@ impl DesktopInteractionHarness {
 
     pub fn elapse_autosave_idle(&self) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ElapseAutosaveIdle)?.into_unit()
+    }
+
+    /// Advances the production recovery cadence without waiting on wall time.
+    pub fn elapse_recovery_capture(&self) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ElapseRecoveryCapture)?
+            .into_unit()
+    }
+
+    /// Advances the production autosave clock without a wall-clock wait.
+    pub fn advance_autosave_clock(
+        &self,
+        first_dirty_age: Duration,
+        last_edit_age: Duration,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::AdvanceAutosaveClock(
+            first_dirty_age,
+            last_edit_age,
+        ))?
+        .into_unit()
     }
 
     pub fn close(&self, window: HarnessWindow) -> Result<(), InteractionHarnessError> {
@@ -804,6 +983,11 @@ impl DesktopInteractionHarness {
         self.request(HarnessAction::GlobalSearchStatus)?.into_text()
     }
 
+    /// Returns the live export state for workflow diagnostics.
+    pub fn export_status(&self) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::ExportStatus)?.into_text()
+    }
+
     pub fn hierarchy_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {
         self.request(HarnessAction::HierarchyTitles)?.into_texts()
     }
@@ -817,9 +1001,62 @@ impl DesktopInteractionHarness {
         self.request(HarnessAction::CommentFeedback)?.into_text()
     }
 
+    /// Returns transient comment-hover state for author-flow diagnostics.
+    pub fn comment_hover_status(&self) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::CommentHoverStatus)?.into_text()
+    }
+
     /// Returns the selected checkpoint and comparison state for diagnostics.
     pub fn history_status(&self) -> Result<String, InteractionHarnessError> {
         self.request(HarnessAction::HistoryStatus)?.into_text()
+    }
+
+    /// Returns the authoritative loaded History rows rather than a rendered
+    /// window of repeated labels.
+    pub fn history_checkpoints(
+        &self,
+    ) -> Result<Vec<HarnessHistoryCheckpoint>, InteractionHarnessError> {
+        self.request(HarnessAction::HistoryCheckpoints)?
+            .into_history_checkpoints()
+    }
+
+    /// Returns the Explorer projection with stable identity and selection
+    /// state for multi-select, cut, and ordering assertions.
+    pub fn hierarchy(&self) -> Result<Vec<HarnessHierarchyEntry>, InteractionHarnessError> {
+        self.request(HarnessAction::Hierarchy)?.into_hierarchy()
+    }
+
+    /// Configures the next deterministic native dialog response.
+    pub fn set_next_path_selection(&self, path: impl Into<PathBuf>) {
+        self.fixture.set_next_path_selection(path.into());
+    }
+
+    /// Seeds the deterministic system clipboard used by production paste.
+    pub fn seed_clipboard(&self, plain_text: Option<&str>, html: Option<&str>) {
+        let mut content = UntrustedClipboardContent::empty();
+        if let Some(plain_text) = plain_text {
+            content = content.with_plain_text(plain_text);
+        }
+        if let Some(html) = html {
+            content = content.with_html(html);
+        }
+        self.fixture.seed_external_clipboard(content);
+    }
+
+    /// Reads the deterministic system clipboard written by production copy or
+    /// cut commands. HTML is absent because ParchMint's v1 clipboard writer
+    /// intentionally publishes plain text only.
+    pub fn clipboard_contents(&self) -> (Option<String>, Option<String>) {
+        let content = self.fixture.clipboard_contents();
+        (
+            content.plain_text().map(str::to_owned),
+            content.html().map(str::to_owned),
+        )
+    }
+
+    /// Causes the next specified production boundary operation to fail.
+    pub fn fail_next(&self, point: ProductionFaultPoint, kind: ProductionFaultKind) {
+        self.controls.fail_next(point, kind);
     }
 
     pub fn snapshot(
@@ -844,6 +1081,13 @@ impl DesktopInteractionHarness {
     }
 
     pub fn shutdown(mut self) -> Result<(), InteractionHarnessError> {
+        self.stop()
+    }
+
+    /// Stops the headless process without dispatching a project close request
+    /// or its final-save path. Recovery flows use this to model an abandoned
+    /// session; platform-backed tests remain responsible for real OS kills.
+    pub fn abandon(mut self) -> Result<(), InteractionHarnessError> {
         self.stop()
     }
 
@@ -911,6 +1155,26 @@ impl HarnessValue {
     fn into_texts(self) -> Result<Vec<String>, InteractionHarnessError> {
         match self {
             Self::Texts(values) => Ok(values),
+            _ => Err(InteractionHarnessError::new(
+                "interaction harness returned an unexpected response",
+            )),
+        }
+    }
+
+    fn into_history_checkpoints(
+        self,
+    ) -> Result<Vec<HarnessHistoryCheckpoint>, InteractionHarnessError> {
+        match self {
+            Self::HistoryCheckpoints(checkpoints) => Ok(checkpoints),
+            _ => Err(InteractionHarnessError::new(
+                "interaction harness returned an unexpected response",
+            )),
+        }
+    }
+
+    fn into_hierarchy(self) -> Result<Vec<HarnessHierarchyEntry>, InteractionHarnessError> {
+        match self {
+            Self::Hierarchy(entries) => Ok(entries),
             _ => Err(InteractionHarnessError::new(
                 "interaction harness returned an unexpected response",
             )),

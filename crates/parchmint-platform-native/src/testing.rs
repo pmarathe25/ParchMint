@@ -191,6 +191,27 @@ impl NativeFixture {
             .unwrap_or_else(|error| error.into_inner()) = content;
     }
 
+    /// Returns the current deterministic system clipboard payload.
+    pub fn clipboard_contents(&self) -> UntrustedClipboardContent {
+        self.backend
+            .clipboard
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Makes the next path-dialog request return `path`.
+    ///
+    /// This keeps complete-application export flows inside their isolated
+    /// filesystem instead of relying on the fixture's fallback path.
+    pub fn set_next_path_selection(&self, path: PathBuf) {
+        *self
+            .backend
+            .next_path_selection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(path);
+    }
+
     pub fn set_system_appearance(&self, appearance: SystemAppearance) {
         self.set_system_appearance_silently(appearance);
         self.services.publish_appearance(appearance);
@@ -296,6 +317,7 @@ struct FixtureBackend {
     appearance: Mutex<SystemAppearance>,
     appearance_reads: AtomicU64,
     dialog_invocations: AtomicU64,
+    next_path_selection: Mutex<Option<PathBuf>>,
     opened_external_urls: Mutex<Vec<String>>,
     next_menu_pause: Mutex<Option<BackendMenuPause>>,
     application_paths: ApplicationPaths,
@@ -344,6 +366,7 @@ impl FixtureBackend {
             appearance: Mutex::new(SystemAppearance::Light),
             appearance_reads: AtomicU64::new(0),
             dialog_invocations: AtomicU64::new(0),
+            next_path_selection: Mutex::new(None),
             opened_external_urls: Mutex::new(Vec::new()),
             next_menu_pause: Mutex::new(None),
             application_paths,
@@ -410,6 +433,14 @@ impl NativeBackend for FixtureBackend {
         _request: PathDialog,
     ) -> Result<Option<UntrustedPathSelection>, PlatformError> {
         self.dialog_invocations.fetch_add(1, Ordering::Relaxed);
+        if let Some(path) = self
+            .next_path_selection
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            return Ok(Some(UntrustedPathSelection::new(path)));
+        }
         #[cfg(target_os = "windows")]
         let path = PathBuf::from(r"C:\outside\project.parchment");
         #[cfg(not(target_os = "windows"))]

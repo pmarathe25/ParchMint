@@ -164,7 +164,7 @@ fn inherited_settings_resolve_project_group_and_document_levels() {
 }
 
 #[test]
-fn validation_rejects_missing_sources_mixed_revisions_and_unsafe_targets() {
+fn validation_rejects_missing_sources_and_unsafe_targets_but_keeps_per_document_revisions() {
     let (first, source_one) = document(1, "First", 1, "one");
     let missing = ExportNode::document(document_id(2), "Missing", ExportSettings::default());
     let project = snapshot(vec![first, missing], BTreeMap::from([source_one]));
@@ -201,15 +201,17 @@ fn validation_rejects_missing_sources_mixed_revisions_and_unsafe_targets() {
             source_two,
         ]),
     );
-    let report = ExportPlan::build(
+    let plan = ExportPlan::build(
         ExportRequest::new("safe.html", ExportRunOptions::default()),
         &mixed,
     )
-    .expect_err("mixed revisions must fail");
+    .expect("each document revision should be captured independently");
     assert!(
-        report
-            .issues()
-            .contains(&ExportValidationIssue::MixedSourceRevisions)
+        plan.source_revisions()
+            .values()
+            .copied()
+            .eq([1.into(), 2.into()]),
+        "the immutable plan must retain each document's captured revision"
     );
 }
 

@@ -7,8 +7,9 @@ mod production;
 
 #[cfg(feature = "interaction-harness")]
 pub use parchmint_ui_iced::{
-    EditorPane, HarnessDropPosition, HarnessHierarchySurface, HarnessKey, HarnessNode,
-    HarnessTarget, HarnessTraceEntry, HarnessWindow, RibbonDestination,
+    EditorPane, HarnessDropPosition, HarnessHierarchyEntry, HarnessHierarchySurface,
+    HarnessHistoryCheckpoint, HarnessKey, HarnessNode, HarnessSelectionGesture, HarnessTarget,
+    HarnessTraceEntry, HarnessWindow, RibbonDestination,
 };
 #[cfg(feature = "interaction-harness")]
 pub use production::{DesktopInteractionHarness, InteractionHarnessError};

@@ -14,3 +14,6 @@
 - **CMT-012:** Orphaned comments remain visible and can be reattached or converted to document-level.
 - **CMT-013:** Comments are not copied when a document is duplicated.
 - **CMT-014:** Comments are excluded from export and v1 global search.
+- **CMT-015:** Hovering an attached range or position anchor shows a transient,
+  read-only card with its quote and root comment. The card dismisses when the
+  pointer moves away and never takes editor focus.

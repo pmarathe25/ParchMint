@@ -13,4 +13,5 @@
 - **SEARCH-011:** Global replacement modifies editable document bodies only.
 - **SEARCH-012:** Global replacement requires a central hierarchy-shaped preview with selection controls for groups, documents, and matches, including indeterminate parent states.
 - **SEARCH-013:** Applying global replacement is one composite project operation, one logical project undo, and one history checkpoint.
+- **SEARCH-015:** `Ctrl/Cmd+Shift+F` opens the existing whole-project Global Search. It must not be intercepted by document-local Find.
 - **SEARCH-014:** Results are revalidated against current document revisions before navigation or replacement.

@@ -502,6 +502,7 @@ impl HistoryCheckpointRow {
                 .map(|document| encode_hex(document.as_bytes()))
                 .collect(),
             name: summary.name.map(|name| name.as_str().to_owned()),
+            recorded_at_unix_millis: summary.recorded_at_unix_millis,
         }
     }
 }
@@ -1688,6 +1689,7 @@ mod tests {
             category: CheckpointCategory::NamedSnapshot,
             affected_documents: vec![DocumentId::from_bytes([id + 1; 16])],
             name: Some(SnapshotName::new("Draft").expect("snapshot name")),
+            recorded_at_unix_millis: Some(u64::from(sequence)),
         }
     }
 
