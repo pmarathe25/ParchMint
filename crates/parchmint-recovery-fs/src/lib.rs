@@ -1092,6 +1092,8 @@ struct WireCheckpointInput {
     category: WireCheckpointCategory,
     affected_documents: Vec<[u8; 16]>,
     name: Option<String>,
+    #[serde(default)]
+    recorded_at_unix_millis: Option<u64>,
 }
 
 impl From<&CheckpointInput> for WireCheckpointInput {
@@ -1116,6 +1118,7 @@ impl From<&CheckpointInput> for WireCheckpointInput {
                 .name
                 .as_ref()
                 .map(|name| name.as_str().to_owned()),
+            recorded_at_unix_millis: checkpoint.recorded_at_unix_millis,
         }
     }
 }
@@ -1150,6 +1153,7 @@ impl TryFrom<WireCheckpointInput> for CheckpointInput {
                 .map(DocumentId::from_bytes)
                 .collect(),
             name,
+            recorded_at_unix_millis: wire.recorded_at_unix_millis,
         })
     }
 }

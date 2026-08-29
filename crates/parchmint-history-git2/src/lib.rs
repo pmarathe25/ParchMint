@@ -250,6 +250,7 @@ impl HistoryStore for Git2HistoryStore {
                 category: input.category,
                 affected_documents,
                 name: input.name.clone(),
+                recorded_at_unix_millis: input.recorded_at_unix_millis,
             };
             let message = encode_metadata(&metadata);
             let signature = Signature::new(
@@ -952,6 +953,7 @@ struct CommitMetadata {
     category: CheckpointCategory,
     affected_documents: Vec<parchmint_history_api::DocumentId>,
     name: Option<SnapshotName>,
+    recorded_at_unix_millis: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -969,6 +971,7 @@ impl HistoryRecord {
             category: self.metadata.category,
             affected_documents: self.metadata.affected_documents.clone(),
             name: self.metadata.name.clone(),
+            recorded_at_unix_millis: self.metadata.recorded_at_unix_millis,
         }
     }
 }
@@ -1036,8 +1039,12 @@ fn encode_metadata(metadata: &CommitMetadata) -> String {
         .as_ref()
         .map(|name| encode_hex(name.as_str().as_bytes()))
         .unwrap_or_else(|| "-".into());
+    let recorded_at = metadata
+        .recorded_at_unix_millis
+        .map(|timestamp| format!("recorded-at={timestamp}\n"))
+        .unwrap_or_default();
     format!(
-        "{MESSAGE_HEADER}\nsequence={}\nintent={}\ncategory={}\naffected={affected}\nname={name}\n",
+        "{MESSAGE_HEADER}\nsequence={}\nintent={}\ncategory={}\naffected={affected}\nname={name}\n{recorded_at}",
         metadata.sequence,
         encode_hex(metadata.intent_hash.as_bytes()),
         encode_category(metadata.category),
@@ -1077,6 +1084,15 @@ fn decode_metadata(message: &[u8]) -> Result<CommitMetadata, HistoryError> {
             Some(SnapshotName::new(name).map_err(|_| corrupt("snapshot name is invalid"))?)
         }
     };
+    let recorded_at_unix_millis = lines
+        .next()
+        .map(|line| {
+            line.strip_prefix("recorded-at=")
+                .ok_or_else(|| corrupt("checkpoint metadata has unexpected fields"))?
+                .parse::<u64>()
+                .map_err(|_| corrupt("checkpoint recorded-at metadata is invalid"))
+        })
+        .transpose()?;
     if lines.any(|line| !line.is_empty()) {
         return Err(corrupt("checkpoint metadata has unexpected fields"));
     }
@@ -1089,6 +1105,7 @@ fn decode_metadata(message: &[u8]) -> Result<CommitMetadata, HistoryError> {
         category,
         affected_documents,
         name,
+        recorded_at_unix_millis,
     })
 }
 
@@ -1562,5 +1579,24 @@ fn storage_git(operation: &'static str, error: git2::Error) -> HistoryError {
     HistoryError::Storage {
         operation,
         reason: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_checkpoint_metadata_without_a_display_time_stays_readable() {
+        let metadata = decode_metadata(
+            format!(
+                "{MESSAGE_HEADER}\nsequence=1\nintent={}\ncategory=autosave\naffected=\nname=-\n",
+                "00".repeat(32)
+            )
+            .as_bytes(),
+        )
+        .expect("legacy metadata should remain valid");
+
+        assert_eq!(metadata.recorded_at_unix_millis, None);
     }
 }

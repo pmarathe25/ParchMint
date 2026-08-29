@@ -76,6 +76,12 @@ pub struct CheckpointInput {
     pub category: CheckpointCategory,
     pub affected_documents: Vec<DocumentId>,
     pub name: Option<SnapshotName>,
+    /// The wall-clock instant at which ParchMint made the checkpoint request.
+    ///
+    /// This is optional so providers can continue to read projects created by
+    /// older clients that did not persist display time. It is presentation
+    /// metadata only; it never participates in checkpoint identity.
+    pub recorded_at_unix_millis: Option<u64>,
 }
 
 impl CheckpointInput {
@@ -150,6 +156,9 @@ pub struct CheckpointSummary {
     pub category: CheckpointCategory,
     pub affected_documents: Vec<DocumentId>,
     pub name: Option<SnapshotName>,
+    /// The persisted wall-clock instant for timeline grouping and display.
+    /// Older checkpoints may not have this metadata.
+    pub recorded_at_unix_millis: Option<u64>,
 }
 
 /// A stable newest-first page of checkpoint summaries.

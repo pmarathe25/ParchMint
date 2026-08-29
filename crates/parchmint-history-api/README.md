@@ -55,6 +55,7 @@ pub struct CheckpointInput {
     pub category: CheckpointCategory,
     pub affected_documents: Vec<DocumentId>,
     pub name: Option<SnapshotName>,
+    pub recorded_at_unix_millis: Option<u64>,
 }
 ```
 

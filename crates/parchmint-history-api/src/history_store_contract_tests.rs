@@ -353,6 +353,7 @@ fn named_snapshot_inputs_require_only_a_nonempty_name() {
         category: CheckpointCategory::NamedSnapshot,
         affected_documents: Vec::new(),
         name: Some(SnapshotName::new("Before restructuring").unwrap()),
+        recorded_at_unix_millis: Some(1_725_000_000_000),
     };
     assert!(input.validate().is_ok());
 }

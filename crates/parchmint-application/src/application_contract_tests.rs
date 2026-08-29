@@ -824,6 +824,7 @@ fn save_request(revision: u64) -> SaveRequest {
             category: CheckpointCategory::Autosave,
             affected_documents: vec![document_id()],
             name: None,
+            recorded_at_unix_millis: Some(revision),
         },
         SavePriority::Autosave,
     )
@@ -2061,7 +2062,7 @@ fn prepared_mixed_forest_normalizes_descendants_and_preserves_order_and_authored
             .get(prepared.created_roots[1])
             .unwrap()
             .title,
-        "Interlude"
+        "Interlude Copy"
     );
     let copied_node = prepared.node_ids[&node];
     let copied_document = prepared.document_ids[&document];
@@ -2069,7 +2070,7 @@ fn prepared_mixed_forest_normalizes_descendants_and_preserves_order_and_authored
     assert_ne!(copied_document, document);
     assert_eq!(
         prepared.project.nodes.get(copied_node).unwrap().title,
-        "Chapter One"
+        "Chapter One Copy"
     );
     assert_eq!(
         prepared
@@ -2078,7 +2079,7 @@ fn prepared_mixed_forest_normalizes_descendants_and_preserves_order_and_authored
             .find(|snapshot| snapshot.document_id == copied_document)
             .unwrap()
             .body,
-        body
+        "<p data-style-id=\"document-title\">Chapter One Copy</p><p>Body</p>"
     );
     assert!(
         prepared

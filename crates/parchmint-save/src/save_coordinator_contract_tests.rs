@@ -355,6 +355,7 @@ fn request(
                 .map(|(document, _)| document_id(*document))
                 .collect(),
             name: None,
+            recorded_at_unix_millis: Some(generation),
         },
         priority,
     )

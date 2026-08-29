@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_contracts::{
@@ -1605,16 +1606,21 @@ pub(crate) fn prepare_duplicates(
             let parent = node_ids[&source_parent];
             (parent, draft.nodes.children(parent).len())
         };
+        let copied_title = match source_node.kind {
+            NodeKind::Document(_) => format!("{} Copy", source_node.title),
+            NodeKind::Group => source_node.title.clone(),
+            NodeKind::Root(_) => unreachable!("fixed roots were rejected"),
+        };
         let command = match source_node.kind {
             NodeKind::Group => {
-                ProjectCommand::create_group(fresh_node, parent, index, source_node.title.clone())
+                ProjectCommand::create_group(fresh_node, parent, index, copied_title.clone())
             }
             NodeKind::Document(document) => ProjectCommand::create_document(
                 fresh_node,
                 document_ids[&document],
                 parent,
                 index,
-                source_node.title.clone(),
+                copied_title.clone(),
             ),
             NodeKind::Root(_) => unreachable!("fixed roots were rejected"),
         };
@@ -1673,10 +1679,11 @@ pub(crate) fn prepare_duplicates(
                 })?;
             duplicated_documents.push(DocumentSnapshot {
                 document_id: document_ids[&source_document],
-                // The node title is preserved exactly, so an existing first
-                // document-title block remains synchronized without rewriting
-                // or normalizing the authored body.
-                body: source_snapshot.body.clone(),
+                body: ProjectFormatCodec::default()
+                    .decode_document(source_snapshot.body.as_bytes())?
+                    .append_copy_suffix_to_matching_title(&source_node.title, " Copy")
+                    .as_html()
+                    .to_owned(),
                 comments: Vec::new(),
                 revision: Default::default(),
                 visibility: crate::DocumentVisibility::Closed,
@@ -2257,6 +2264,7 @@ fn materialize_patch_save_request(
         category,
         affected_documents,
         name,
+        recorded_at_unix_millis: current_unix_millis(),
     };
     SaveRequest::new(revisions, writes, checkpoint, priority)
 }
@@ -2348,8 +2356,16 @@ fn materialize_save_request(
         category,
         affected_documents,
         name,
+        recorded_at_unix_millis: current_unix_millis(),
     };
     SaveRequest::new(revisions, writes, checkpoint, priority)
+}
+
+fn current_unix_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn checkpoint_intent_hash(

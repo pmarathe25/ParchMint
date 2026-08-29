@@ -10,6 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use parchmint_application::{
@@ -526,6 +527,7 @@ fn save(path: PathBuf, priority: SavePriority) -> Outcome {
             category: CheckpointCategory::ExplicitSave,
             affected_documents: Vec::new(),
             name: None,
+            recorded_at_unix_millis: current_unix_millis(),
         },
         priority,
     );
@@ -627,6 +629,7 @@ fn checkpoint(path: PathBuf, name: String) -> CommandResult {
         category: CheckpointCategory::NamedSnapshot,
         affected_documents: Vec::new(),
         name: Some(snapshot_name),
+        recorded_at_unix_millis: current_unix_millis(),
     };
     match store.checkpoint(input) {
         Ok(checkpoint) => CommandResult::success(json!({
@@ -851,6 +854,13 @@ fn checkpoint_intent_hash(
         digest.update(hash.as_bytes());
     }
     CheckpointIntentHash::from_bytes(digest.finalize().into())
+}
+
+fn current_unix_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -1091,6 +1101,7 @@ fn finish_pending_restore(
             category: CheckpointCategory::Restoration,
             affected_documents: Vec::new(),
             name: None,
+            recorded_at_unix_millis: current_unix_millis(),
         })
         .is_err()
     {

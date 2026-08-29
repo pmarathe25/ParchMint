@@ -107,6 +107,7 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
             category: CheckpointCategory::ExplicitSave,
             affected_documents: vec![TEST_DOCUMENT],
             name: None,
+            recorded_at_unix_millis: Some(1_725_000_000_000),
         }),
         Err(HistoryError::InvalidInput { .. })
     ));
@@ -137,6 +138,7 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
     assert_eq!(page.checkpoints.len(), 2);
     assert_eq!(page.checkpoints[0].id, named);
     assert_eq!(page.checkpoints[0].sequence, 2);
+    assert_eq!(page.checkpoints[0].recorded_at_unix_millis, Some(2));
     assert_eq!(
         page.checkpoints[0]
             .name
@@ -147,6 +149,7 @@ fn checkpoints_are_idempotent_and_named_unchanged_snapshots_are_committed() {
     );
     assert_eq!(page.checkpoints[1].id, save);
     assert_eq!(page.checkpoints[1].sequence, 1);
+    assert_eq!(page.checkpoints[1].recorded_at_unix_millis, Some(1));
     let preview = store.preview(save).expect("checkpoint should preview");
     assert_eq!(preview.resources, version.hashes());
     let paths = store
@@ -543,6 +546,7 @@ fn stale_git_lock_recovery_requires_the_current_project_lock_owner() {
                 category: CheckpointCategory::ExplicitSave,
                 affected_documents: vec![TEST_DOCUMENT],
                 name: None,
+                recorded_at_unix_millis: Some(1_725_000_000_000),
             })
             .is_err()
     );

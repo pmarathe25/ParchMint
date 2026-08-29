@@ -116,6 +116,7 @@ fn intent(hash_value: u8) -> CheckpointIntent {
             category: CheckpointCategory::ExplicitSave,
             affected_documents: Vec::new(),
             name: None,
+            recorded_at_unix_millis: Some(u64::from(hash_value)),
         },
         priority: SavePriority::Explicit,
         state: CheckpointIntentState::Planned,

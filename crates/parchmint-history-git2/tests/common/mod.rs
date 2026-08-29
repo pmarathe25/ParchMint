@@ -238,6 +238,7 @@ pub fn checkpoint(
         category,
         affected_documents: vec![TEST_DOCUMENT],
         name: None,
+        recorded_at_unix_millis: Some(u64::from(intent)),
     })
 }
 
@@ -253,5 +254,6 @@ pub fn named_checkpoint(
         category: CheckpointCategory::NamedSnapshot,
         affected_documents: Vec::new(),
         name: Some(SnapshotName::new(name).expect("snapshot name should be valid")),
+        recorded_at_unix_millis: Some(u64::from(intent)),
     })
 }
