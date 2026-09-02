@@ -14,7 +14,7 @@ use parchmint_platform_api::ApplicationPaths;
 use parchmint_platform_api::UntrustedClipboardContent;
 use parchmint_platform_native::testing::NativeFixture;
 use parchmint_ui_iced::{
-    EditorPane, HarnessDropPosition, HarnessHierarchyEntry, HarnessHierarchySurface,
+    EditorPane, FocusTarget, HarnessDropPosition, HarnessHierarchyEntry, HarnessHierarchySurface,
     HarnessHistoryCheckpoint, HarnessKey, HarnessNode, HarnessSelectionGesture, HarnessTarget,
     HarnessTraceEntry, HarnessWindow, NativeDesktopError, NativeDesktopHarness,
     NativeDesktopStartup,
@@ -70,6 +70,8 @@ enum HarnessAction {
     TargetIsVisible(HarnessWindow, HarnessTarget),
     EditorTabIsVisible(HarnessWindow, EditorPane, String),
     TargetIsFocused(HarnessWindow, HarnessTarget),
+    FocusTarget(HarnessWindow),
+    ScrollTargetBy(HarnessWindow, HarnessTarget, f32),
     TypeFocused(HarnessWindow, String),
     PressKey(HarnessWindow, HarnessKey),
     PressShiftKey(HarnessWindow, HarnessKey),
@@ -85,12 +87,16 @@ enum HarnessAction {
     MovePointerOutside(HarnessWindow),
     MovePointerToEditorText(HarnessWindow, EditorPane, String),
     MovePointerToCommentAnchor(HarnessWindow, EditorPane),
+    MultiClickEditorText(HarnessWindow, EditorPane, String, u8),
     SelectEditorText(HarnessWindow, EditorPane, String),
     HierarchyNode(String),
     ClickHierarchyNode(HarnessWindow, HarnessNode),
+    ClickCardsNode(HarnessWindow, HarnessNode),
+    DoubleClickCardsNode(HarnessWindow, HarnessNode),
     SelectHierarchyNode(HarnessWindow, HarnessNode, HarnessSelectionGesture),
     RightClickHierarchyNode(HarnessWindow, HarnessNode),
     HierarchyNodeIsVisible(HarnessWindow, HarnessNode),
+    CardsNodeIsVisible(HarnessWindow, HarnessNode),
     ClickHistoryCheckpoint(HarnessWindow, usize),
     ClickHistoryCheckpointById(HarnessWindow, String),
     DragHierarchyNode(
@@ -129,6 +135,7 @@ enum HarnessAction {
 enum HarnessValue {
     Unit,
     Bool(bool),
+    FocusTarget(FocusTarget),
     Text(String),
     Texts(Vec<String>),
     HistoryCheckpoints(Vec<HarnessHistoryCheckpoint>),
@@ -223,6 +230,15 @@ fn execute_action(
                 .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::FocusTarget(window) => {
+            return harness
+                .focus_target(window)
+                .map(HarnessValue::FocusTarget)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::ScrollTargetBy(window, target, delta_y) => {
+            harness.scroll_target_by(window, target, delta_y)
+        }
         HarnessAction::TypeFocused(window, value) => harness.type_focused(window, &value),
         HarnessAction::PressKey(window, key) => harness.press_key(window, key),
         HarnessAction::PressShiftKey(window, key) => harness.press_shift_key(window, key),
@@ -258,6 +274,9 @@ fn execute_action(
         HarnessAction::MovePointerToCommentAnchor(window, pane) => {
             harness.move_pointer_to_comment_anchor(window, pane)
         }
+        HarnessAction::MultiClickEditorText(window, pane, text, clicks) => {
+            harness.multi_click_editor_text(window, pane, &text, clicks)
+        }
         HarnessAction::SelectEditorText(window, pane, text) => {
             harness.select_editor_text(window, pane, &text)
         }
@@ -270,6 +289,10 @@ fn execute_action(
         HarnessAction::ClickHierarchyNode(window, node) => {
             harness.click_hierarchy_node(window, &node)
         }
+        HarnessAction::ClickCardsNode(window, node) => harness.click_cards_node(window, &node),
+        HarnessAction::DoubleClickCardsNode(window, node) => {
+            harness.double_click_cards_node(window, &node)
+        }
         HarnessAction::SelectHierarchyNode(window, node, gesture) => {
             harness.select_hierarchy_node(window, &node, gesture)
         }
@@ -279,6 +302,12 @@ fn execute_action(
         HarnessAction::HierarchyNodeIsVisible(window, node) => {
             return harness
                 .hierarchy_node_is_visible(window, &node)
+                .map(HarnessValue::Bool)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::CardsNodeIsVisible(window, node) => {
+            return harness
+                .cards_node_is_visible(window, &node)
                 .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
@@ -663,6 +692,15 @@ impl DesktopInteractionHarness {
             .into_bool()
     }
 
+    /// Returns the shell's semantic keyboard-focus owner.
+    pub fn focus_target(
+        &self,
+        window: HarnessWindow,
+    ) -> Result<FocusTarget, InteractionHarnessError> {
+        self.request(HarnessAction::FocusTarget(window))?
+            .into_focus_target()
+    }
+
     /// Returns whether a production target is currently rendered.
     pub fn target_is_visible(
         &self,
@@ -788,6 +826,24 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    /// Uses real native pointer events to double- or triple-click one unique
+    /// prose run in the mounted editor.
+    pub fn multi_click_editor_text(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        text: impl Into<String>,
+        clicks: u8,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::MultiClickEditorText(
+            window,
+            pane,
+            text.into(),
+            clicks,
+        ))?
+        .into_unit()
+    }
+
     /// Selects a uniquely occurring prose run by semantic document text,
     /// keeping comment and popover workflows independent of pixel geometry.
     pub fn select_editor_text(
@@ -815,6 +871,27 @@ impl DesktopInteractionHarness {
         node: HarnessNode,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickHierarchyNode(window, node))?
+            .into_unit()
+    }
+
+    /// Clicks a mounted Cards row through its rendered, stable node target.
+    /// This avoids ambiguous visible titles that may also occur in Explorer.
+    pub fn click_cards_node(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ClickCardsNode(window, node))?
+            .into_unit()
+    }
+
+    /// Double-clicks a mounted Cards row through its stable node target.
+    pub fn double_click_cards_node(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::DoubleClickCardsNode(window, node))?
             .into_unit()
     }
 
@@ -848,6 +925,27 @@ impl DesktopInteractionHarness {
     ) -> Result<bool, InteractionHarnessError> {
         self.request(HarnessAction::HierarchyNodeIsVisible(window, node))?
             .into_bool()
+    }
+
+    /// Reports whether a resolved hierarchy row is mounted in Cards.
+    pub fn cards_node_is_visible(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::CardsNodeIsVisible(window, node))?
+            .into_bool()
+    }
+
+    /// Scrolls a semantic production region using a native wheel event.
+    pub fn scroll_target_by(
+        &self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        delta_y: f32,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ScrollTargetBy(window, target, delta_y))?
+            .into_unit()
     }
 
     /// Selects one loaded History row without relying on its repeated label.
@@ -1137,6 +1235,15 @@ impl HarnessValue {
     fn into_bool(self) -> Result<bool, InteractionHarnessError> {
         match self {
             Self::Bool(value) => Ok(value),
+            _ => Err(InteractionHarnessError::new(
+                "interaction harness returned an unexpected response",
+            )),
+        }
+    }
+
+    fn into_focus_target(self) -> Result<FocusTarget, InteractionHarnessError> {
+        match self {
+            Self::FocusTarget(target) => Ok(target),
             _ => Err(InteractionHarnessError::new(
                 "interaction harness returned an unexpected response",
             )),

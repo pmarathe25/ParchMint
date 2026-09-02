@@ -1001,7 +1001,7 @@ impl CommentThreadView {
 pub struct CommentHover {
     pane: EditorPane,
     comment_id: String,
-    invocation_point: (f32, f32),
+    anchor_bounds: Rect,
 }
 
 impl CommentHover {
@@ -1013,8 +1013,26 @@ impl CommentHover {
         &self.comment_id
     }
 
-    pub const fn invocation_point(&self) -> (f32, f32) {
-        self.invocation_point
+    pub const fn anchor_bounds(&self) -> Rect {
+        self.anchor_bounds
+    }
+}
+
+/// A transient editor-local draft anchored to the selection used to create it.
+/// It is presentation state only and is never persisted with the document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CommentComposer {
+    pane: EditorPane,
+    anchor_bounds: Rect,
+}
+
+impl CommentComposer {
+    pub const fn pane(self) -> EditorPane {
+        self.pane
+    }
+
+    pub const fn anchor_bounds(self) -> Rect {
+        self.anchor_bounds
     }
 }
 
@@ -1265,14 +1283,18 @@ pub enum EditorMessage {
     SetCommentHover {
         pane: EditorPane,
         comment_id: Option<String>,
-        invocation_point: (f32, f32),
+        anchor_bounds: Rect,
     },
     SetCommentDraft(String),
     EditCommentDraft(text_editor::Action),
     CreateComment {
         document_level: bool,
     },
-    BeginCommentAtSelection,
+    BeginCommentAtSelection {
+        pane: EditorPane,
+        anchor_bounds: Rect,
+    },
+    CancelCommentComposer,
     SetCommentReplyDraft {
         thread_id: String,
         body: String,
@@ -1404,6 +1426,8 @@ pub struct EditorWorkspace {
     comments: BTreeMap<String, CommentAnchor>,
     comment_threads: BTreeMap<String, CommentThreadView>,
     hovered_comment: Option<CommentHover>,
+    comment_composer: Option<CommentComposer>,
+    selected_comment: Option<String>,
     comment_draft: text_editor::Content,
     comment_reply_drafts: BTreeMap<String, text_editor::Content>,
     editing_comment_message: Option<(String, String)>,
@@ -1503,6 +1527,8 @@ impl EditorWorkspace {
             comments: BTreeMap::new(),
             comment_threads: BTreeMap::new(),
             hovered_comment: None,
+            comment_composer: None,
+            selected_comment: None,
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
@@ -1587,6 +1613,8 @@ impl EditorWorkspace {
             comments: snapshot_comment_anchors(snapshot),
             comment_threads: snapshot_comment_threads(snapshot),
             hovered_comment: None,
+            comment_composer: None,
+            selected_comment: None,
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
@@ -1666,6 +1694,10 @@ impl EditorWorkspace {
             .hovered_comment
             .take()
             .filter(|hover| self.comment_threads.contains_key(hover.comment_id()));
+        self.selected_comment = self
+            .selected_comment
+            .take()
+            .filter(|comment| self.comment_threads.contains_key(comment));
         self.comment_reply_drafts
             .retain(|thread, _| self.comment_threads.contains_key(thread));
         for thread in self.comment_threads.keys() {
@@ -1872,20 +1904,48 @@ impl EditorWorkspace {
         let InspectorContext::Document { document_id } = &self.inspector else {
             return Vec::new();
         };
-        self.comment_threads
+        let mut threads = self
+            .comment_threads
             .values()
             .filter(|thread| &thread.document_id == document_id)
-            .collect()
+            .collect::<Vec<_>>();
+        let selected = self.selected_comment.as_deref();
+        threads.sort_by_key(|thread| selected != Some(thread.id()));
+        threads
+    }
+
+    /// Number of comment threads currently shown by the Inspector.
+    pub fn inspector_comment_count(&self) -> usize {
+        self.inspector_comments().len()
+    }
+
+    /// Number of unresolved comment threads currently shown by the Inspector.
+    pub fn inspector_unresolved_comment_count(&self) -> usize {
+        self.inspector_comments()
+            .into_iter()
+            .filter(|thread| !thread.resolved())
+            .count()
     }
 
     pub fn comment_thread(&self, comment_id: &str) -> Option<&CommentThreadView> {
         self.comment_threads.get(comment_id)
     }
 
+    /// The comment currently revealed at the top of its document Inspector.
+    /// This is transient presentation state, never canonical comment data.
+    pub fn selected_comment(&self) -> Option<&str> {
+        self.selected_comment.as_deref()
+    }
+
     pub fn hovered_comment(&self, pane: EditorPane) -> Option<&CommentHover> {
         self.hovered_comment
             .as_ref()
             .filter(|hover| hover.pane() == pane)
+    }
+
+    pub(crate) fn comment_composer(&self, pane: EditorPane) -> Option<CommentComposer> {
+        self.comment_composer
+            .filter(|composer| composer.pane() == pane)
     }
 
     /// Reflects a mounted document's comment projection before its next
@@ -1896,15 +1956,16 @@ impl EditorWorkspace {
         document_id: &str,
         comments: &[CanonicalComment],
     ) {
+        // Preserve the stable text-derived hover anchor across a live
+        // projection refresh. The old implementation filtered it immediately
+        // after temporarily removing this document's threads, so saving an
+        // edit made the anchored card disappear even though its thread still
+        // existed in the refreshed projection.
+        let hovered_comment = self.hovered_comment.take();
         self.comments
             .retain(|_, anchor| anchor.document_id() != document_id);
         self.comment_threads
             .retain(|_, thread| thread.document_id != document_id);
-        self.hovered_comment = self
-            .hovered_comment
-            .take()
-            .filter(|hover| self.comment_threads.contains_key(hover.comment_id()));
-
         for thread in comments {
             let id = stable_id_string(thread.id.as_bytes());
             let anchor = comment_anchor(document_id, thread);
@@ -1927,6 +1988,12 @@ impl EditorWorkspace {
                 },
             );
         }
+        self.hovered_comment =
+            hovered_comment.filter(|hover| self.comment_threads.contains_key(hover.comment_id()));
+        self.selected_comment = self
+            .selected_comment
+            .take()
+            .filter(|comment| self.comment_threads.contains_key(comment));
         self.comment_reply_drafts
             .retain(|thread, _| self.comment_threads.contains_key(thread));
         for thread in self.comment_threads.keys() {
@@ -2268,7 +2335,10 @@ impl EditorWorkspace {
                     self.active_style = style.clone();
                 }
                 if let Some(command) = command.editor_command() {
-                    self.command(command)
+                    let view = self.pane(self.focused_pane).view;
+                    let mut effects = self.command(command);
+                    effects.push(EditorEffect::RestoreEditorFocus { view });
+                    effects
                 } else {
                     self.link_editor.open();
                     Vec::new()
@@ -2336,14 +2406,14 @@ impl EditorWorkspace {
             EditorMessage::SetCommentHover {
                 pane,
                 comment_id,
-                invocation_point,
+                anchor_bounds,
             } => {
                 self.hovered_comment = comment_id
                     .filter(|comment_id| self.comment_threads.contains_key(comment_id))
                     .map(|comment_id| CommentHover {
                         pane,
                         comment_id,
-                        invocation_point,
+                        anchor_bounds,
                     });
                 Vec::new()
             }
@@ -2365,14 +2435,29 @@ impl EditorWorkspace {
                 } else {
                     self.comment_draft = text_editor::Content::new();
                     self.comment_feedback = Some("Saving comment…".into());
+                    self.comment_composer = None;
                     self.command(EditorCommand::CreateComment {
                         body,
                         document_level,
                     })
                 }
             }
-            EditorMessage::BeginCommentAtSelection => {
-                self.comment_feedback = Some("Write a comment for the selected anchor.".into());
+            EditorMessage::BeginCommentAtSelection {
+                pane,
+                anchor_bounds,
+            } => {
+                self.comment_composer = Some(CommentComposer {
+                    pane,
+                    anchor_bounds,
+                });
+                self.comment_draft = text_editor::Content::new();
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::CancelCommentComposer => {
+                self.comment_composer = None;
+                self.comment_draft = text_editor::Content::new();
+                self.comment_feedback = None;
                 Vec::new()
             }
             EditorMessage::SetCommentReplyDraft { thread_id, body } => {
@@ -2705,6 +2790,10 @@ impl EditorWorkspace {
     }
 
     fn select_comment(&mut self, comment_id: String) -> Vec<EditorEffect> {
+        self.selected_comment = self
+            .comment_threads
+            .contains_key(&comment_id)
+            .then(|| comment_id.clone());
         let current_document = self
             .pane(self.focused_pane)
             .active_document()
@@ -3156,7 +3245,8 @@ mod tests {
             let effects = workspace.update(EditorMessage::Format(formatting));
             assert!(matches!(
                 effects.as_slice(),
-                [EditorEffect::Command { command, .. }] if command == &expected
+                [EditorEffect::Command { command, .. }, EditorEffect::RestoreEditorFocus { .. }]
+                    if command == &expected
             ));
         }
     }
@@ -3469,10 +3559,13 @@ mod tests {
         assert_eq!(workspace.active_style(), "Heading 1");
         assert!(matches!(
             effects.as_slice(),
-            [EditorEffect::Command {
-                command: EditorCommand::ApplyParagraphStyle(style),
-                ..
-            }] if style == "Heading 1"
+            [
+                EditorEffect::Command {
+                    command: EditorCommand::ApplyParagraphStyle(style),
+                    ..
+                },
+                EditorEffect::RestoreEditorFocus { .. },
+            ] if style == "Heading 1"
         ));
         assert!(
             workspace
@@ -3654,30 +3747,25 @@ mod tests {
         workspace.reconcile_document_comments("chapter-one", &[thread.clone()]);
         let comments = workspace.inspector_comments();
         assert_eq!(comments.len(), 1);
+        assert_eq!(workspace.inspector_comment_count(), 1);
+        assert_eq!(workspace.inspector_unresolved_comment_count(), 1);
         assert_eq!(comments[0].messages()[0].body(), "Check the weather.");
         workspace.update(EditorMessage::SetCommentHover {
             pane: EditorPane::Primary,
             comment_id: Some("07070707070707070707070707070707".to_owned()),
-            invocation_point: (48.0, 64.0),
+            anchor_bounds: Rect::new(48.0, 64.0, 32.0, 16.0),
         });
         assert_eq!(
             workspace
                 .hovered_comment(EditorPane::Primary)
-                .map(CommentHover::invocation_point),
-            Some((48.0, 64.0))
+                .map(CommentHover::anchor_bounds),
+            Some(Rect::new(48.0, 64.0, 32.0, 16.0))
         );
         assert!(
             workspace
                 .comment_thread("07070707070707070707070707070707")
                 .is_some()
         );
-        workspace.update(EditorMessage::SetCommentHover {
-            pane: EditorPane::Primary,
-            comment_id: None,
-            invocation_point: (0.0, 0.0),
-        });
-        assert!(workspace.hovered_comment(EditorPane::Primary).is_none());
-
         thread.resolved = true;
         thread
             .messages
@@ -3690,9 +3778,67 @@ mod tests {
         let comments = workspace.inspector_comments();
         assert!(comments[0].resolved());
         assert_eq!(comments[0].messages().len(), 2);
+        assert_eq!(workspace.inspector_unresolved_comment_count(), 0);
+        assert_eq!(
+            workspace
+                .hovered_comment(EditorPane::Primary)
+                .map(CommentHover::anchor_bounds),
+            Some(Rect::new(48.0, 64.0, 32.0, 16.0)),
+            "a live edit must not dismiss a card that is still anchored to the same thread"
+        );
+
+        workspace.update(EditorMessage::SetCommentHover {
+            pane: EditorPane::Primary,
+            comment_id: None,
+            anchor_bounds: Rect::default(),
+        });
+        assert!(workspace.hovered_comment(EditorPane::Primary).is_none());
 
         workspace.reconcile_document_comments("chapter-one", &[]);
         assert!(workspace.inspector_comments().is_empty());
+    }
+
+    #[test]
+    fn selected_comment_is_first_in_its_inspector_and_clears_only_when_removed() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let first = parchmint_editor_api::CommentId::from_bytes([1; 16]);
+        let selected = parchmint_editor_api::CommentId::from_bytes([2; 16]);
+        let first_id = stable_id_string(first.as_bytes());
+        let selected_id = stable_id_string(selected.as_bytes());
+        let comments = [
+            CanonicalComment::new(
+                first,
+                parchmint_editor_api::EditorSelection::new(1.into(), 4.into()),
+                "Earlier thread",
+                parchmint_editor_api::BlockId::from_bytes([3; 16]),
+            ),
+            CanonicalComment::new(
+                selected,
+                parchmint_editor_api::EditorSelection::new(5.into(), 8.into()),
+                "Selected thread",
+                parchmint_editor_api::BlockId::from_bytes([3; 16]),
+            ),
+        ];
+        workspace.reconcile_document_comments("chapter-one", &comments);
+        workspace.update(EditorMessage::SelectComment(selected_id.clone()));
+
+        assert_eq!(workspace.selected_comment(), Some(selected_id.as_str()));
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert_eq!(
+            workspace
+                .inspector_comments()
+                .into_iter()
+                .map(|thread| thread.id())
+                .collect::<Vec<_>>(),
+            [selected_id.as_str(), first_id.as_str()]
+        );
+
+        workspace.reconcile_document_comments("chapter-one", &comments);
+        assert_eq!(workspace.selected_comment(), Some(selected_id.as_str()));
+
+        workspace.reconcile_document_comments("chapter-one", &comments[..1]);
+        assert_eq!(workspace.selected_comment(), None);
+        assert_eq!(workspace.inspector_comments()[0].id(), first_id.as_str());
     }
 
     #[test]

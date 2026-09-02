@@ -1,11 +1,107 @@
 use std::{fs, path::Path, time::Duration};
 
 use parchmint_desktop::{
-    DesktopInteractionHarness, EditorPane, HarnessSelectionGesture, HarnessTarget, HarnessWindow,
-    LaunchRequest, ProductionFaultKind, ProductionFaultPoint, ProductionObservation,
+    DesktopInteractionHarness, EditorPane, HarnessKey, HarnessSelectionGesture, HarnessTarget,
+    HarnessWindow, LaunchRequest, ProductionFaultKind, ProductionFaultPoint, ProductionObservation,
     RibbonDestination,
 };
 use parchmint_ui_driver::IsolatedRun;
+
+#[test]
+fn explorer_opening_keeps_editor_shortcuts_and_reselecting_keeps_the_selection() {
+    let run = IsolatedRun::new("explorer-open-editor-focus").expect("isolated run");
+    let project = run.root().join("explorer-open-editor-focus.parchmint");
+    let harness = create_project(&run, &project, "Explorer Editor Focus");
+
+    create_document(&harness, "Manuscript", "Focused Scene");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "Explorerfocus prose.",
+        )
+        .expect("write scene prose");
+    let document_id = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .expect("read created document identity");
+    harness
+        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, document_id)
+        .expect("close the created tab before previewing it from Explorer");
+
+    let scene = harness
+        .hierarchy_node("Focused Scene")
+        .expect("resolve Explorer scene");
+    harness
+        .click_hierarchy_node(HarnessWindow::Project, scene.clone())
+        .expect("open the scene from Explorer");
+    harness
+        .multi_click_editor_text(
+            HarnessWindow::Project,
+            EditorPane::Primary,
+            "Explorerfocus",
+            2,
+        )
+        .expect("select a word with native double-click");
+    harness
+        .click_hierarchy_node(HarnessWindow::Project, scene)
+        .expect("reselect the already active Explorer document");
+    harness
+        .press_command_key(HarnessWindow::Project, 'b')
+        .expect("format the retained selection immediately after Explorer navigation");
+    harness
+        .elapse_autosave_idle()
+        .expect("persist formatted Explorer prose");
+
+    let bodies = canonical_bodies(&project);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("<strong>Explorerfocus</strong> prose.")),
+        "Explorer selection must not remount or lose editor focus; bodies: {bodies:?}"
+    );
+    close(harness);
+}
+
+#[test]
+fn native_triple_click_selects_a_paragraph_for_formatting() {
+    let run = IsolatedRun::new("editor-triple-click").expect("isolated run");
+    let project = run.root().join("editor-triple-click.parchmint");
+    let harness = create_project(&run, &project, "Editor Triple Click");
+
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "First paragraph.",
+        )
+        .expect("write the first paragraph");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("split the manuscript into a second paragraph");
+    harness
+        .type_focused(HarnessWindow::Project, "Second paragraph.")
+        .expect("write the second paragraph");
+    let body = harness.active_editor_body().expect("read split manuscript");
+    assert!(body.contains("Second paragraph."), "body was {body:?}");
+    harness
+        .multi_click_editor_text(HarnessWindow::Project, EditorPane::Primary, "Second", 3)
+        .expect("select the second paragraph with native triple-click");
+    harness
+        .press_command_key(HarnessWindow::Project, 'i')
+        .expect("format the triple-click paragraph");
+    harness
+        .elapse_autosave_idle()
+        .expect("persist formatted paragraph");
+
+    let bodies = canonical_bodies(&project);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("<em>Second paragraph.</em>")),
+        "triple-click should select the paragraph, not only the clicked word; bodies: {bodies:?}"
+    );
+    close(harness);
+}
 
 #[test]
 fn editor_clipboard_flow_copies_and_sanitizes_external_rich_text() {

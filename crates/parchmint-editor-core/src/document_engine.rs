@@ -845,10 +845,20 @@ fn locate_position(
     for (index, block) in blocks.iter().enumerate() {
         let len = block_scalar_len(block);
         let end = offset.checked_add(len).ok_or(EngineError::InvalidEdit)?;
-        if position < end || position == end && (prefer_previous || index + 1 == blocks.len()) {
+        // Empty blocks have no scalar range, but their zero position is still
+        // a valid insertion point. Without this explicit boundary case, a
+        // later block observes a position smaller than its offset and the
+        // subtraction below underflows.
+        if position == offset && len == 0 {
+            return Ok((index, 0));
+        }
+        if position >= offset
+            && (position < end || position == end && (prefer_previous || index + 1 == blocks.len()))
+        {
             return Ok((index, position - offset));
         }
-        if position == end + 1 && !prefer_previous && index + 1 < blocks.len() {
+        if position >= offset && position == end + 1 && !prefer_previous && index + 1 < blocks.len()
+        {
             return Ok((index + 1, 0));
         }
         offset = end.checked_add(1).ok_or(EngineError::InvalidEdit)?;
@@ -1023,5 +1033,31 @@ fn scalar_to_byte(text: &str, scalar: usize) -> Option<usize> {
         Some(text.len())
     } else {
         text.char_indices().nth(scalar).map(|(index, _)| index)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(id: u8, kind: SemanticBlockKind, text: &str) -> SemanticBlockSnapshot {
+        SemanticBlockSnapshot {
+            id: BlockId::from_bytes([id; 16]),
+            kind,
+            attributes: BTreeMap::new(),
+            text: text.to_owned(),
+            marks: Vec::new(),
+            list_depth: 0,
+        }
+    }
+
+    #[test]
+    fn locate_position_accepts_an_empty_leading_block_without_underflowing() {
+        let blocks = [
+            block(1, SemanticBlockKind::Paragraph, ""),
+            block(2, SemanticBlockKind::SceneBreak, ""),
+        ];
+
+        assert_eq!(locate_position(&blocks, 0, false), Ok((0, 0)));
     }
 }

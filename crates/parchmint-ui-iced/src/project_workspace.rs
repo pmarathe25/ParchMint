@@ -499,6 +499,22 @@ impl ExplorerState {
             .map(|node| node.id.as_str())
     }
 
+    /// Ordered hierarchy titles for a document, from its root section through
+    /// the document itself. Editor panes use this to show their own compact
+    /// context path without deriving presentation from Explorer selection.
+    pub fn breadcrumb_for_document(&self, document_id: &str) -> Option<Vec<&str>> {
+        let node_id = self.node_id_for_document(document_id)?;
+        let mut node_ids = self.ancestors(node_id);
+        node_ids.reverse();
+        node_ids.push(node_id);
+        Some(
+            node_ids
+                .into_iter()
+                .filter_map(|id| self.nodes.get(id).map(|node| node.title.as_str()))
+                .collect(),
+        )
+    }
+
     fn reveal_document(&mut self, document_id: &str) -> bool {
         let Some(node_id) = self.node_id_for_document(document_id).map(str::to_owned) else {
             return false;
@@ -780,12 +796,32 @@ fn synopsis_editors(explorer: &ExplorerState) -> BTreeMap<String, text_editor::C
 pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
     section_id: &'a str,
+    scroll_offset: f32,
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
     definitions: &'a BTreeMap<String, MetadataDefinition>,
     field_order: &'a [String],
     values: &'a BTreeMap<(String, String), String>,
+}
+
+// Cards deliberately use a single, stable row extent. Besides keeping a long
+// outline responsive, that makes the scroll projection honest: the padding
+// above and below the retained window represents rows that are not mounted.
+pub(crate) const CARDS_CARD_CONTENT_HEIGHT: f32 = 88.0;
+pub(crate) const CARDS_DROP_STRIP_HEIGHT: f32 = 4.0;
+pub(crate) const CARDS_ROW_HEIGHT: f32 =
+    CARDS_CARD_CONTENT_HEIGHT + 1.0 + (CARDS_DROP_STRIP_HEIGHT * 2.0);
+const CARDS_WINDOW_SIZE: usize = 48;
+
+/// The mounted portion of a Cards outline and the space represented by rows
+/// outside that portion.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct CardsWindow {
+    pub start: usize,
+    pub end: usize,
+    pub top_padding: f32,
+    pub bottom_padding: f32,
 }
 
 /// One ordered Cards item with effective visible metadata values.
@@ -828,58 +864,119 @@ impl<'a> CardsState<'a> {
         self.last_activated_document
     }
 
-    /// Items under the selected section in canonical hierarchy order.
+    /// Cards are windowed rather than materializing an entire manuscript
+    /// hierarchy into widgets. This is intentionally a presentation fact so
+    /// interaction and diagnostics can assert it without knowing Iced.
+    pub const fn is_virtualized(&self) -> bool {
+        true
+    }
+
+    /// The complete Cards projection for semantic contracts and diagnostics.
+    /// Rendering must use [`Self::windowed_items`] so a large manuscript never
+    /// becomes a large widget tree.
     pub fn items(&self) -> Vec<CardItem<'a>> {
         self.explorer
             .preorder_ids()
             .into_iter()
-            .filter(|id| {
-                *id != self.section_id
+            .filter(|&node_id| {
+                node_id != self.section_id
                     && self
                         .explorer
                         .nodes
-                        .get(*id)
+                        .get(node_id)
                         .is_some_and(|node| node.section_id == self.section_id)
             })
-            .filter_map(|id| {
-                let node = self.explorer.nodes.get(id)?;
-                let metadata = self
-                    .field_order
-                    .iter()
-                    .filter_map(|field_id| {
-                        let definition = self.definitions.get(field_id)?;
-                        (definition.visible_on_cards
-                            && definition.applicability.applies_to(node.kind))
-                        .then(|| {
-                            // Defaults are copied when a node is created. Existing
-                            // nodes without a stored value stay empty; a later
-                            // definition edit must never rewrite their cards.
-                            let value = self
-                                .values
-                                .get(&(id.to_owned(), field_id.clone()))
-                                .map(String::as_str);
-                            (field_id.as_str(), definition.label.as_str(), value)
-                        })
-                    })
-                    .collect();
-                Some(CardItem {
-                    node_id: id,
-                    document_id: node.document_id.as_deref(),
-                    title: &node.title,
-                    synopsis: &node.synopsis,
-                    kind: match node.kind {
-                        HierarchyNodeKind::Root => HierarchyRowKind::Root,
-                        HierarchyNodeKind::Group => HierarchyRowKind::Group,
-                        HierarchyNodeKind::Document => HierarchyRowKind::Document,
-                    },
-                    depth: self.explorer.depth(id).saturating_sub(1),
-                    expanded: self.explorer.expanded.contains(id),
-                    visible: self.explorer.ancestors_are_expanded(id),
-                    selected: self.explorer.selected.contains(id),
-                    metadata,
-                })
+            .filter_map(|node_id| {
+                let mut item = self.item(node_id)?;
+                item.visible = self.is_visible_item(node_id);
+                Some(item)
             })
             .collect()
+    }
+
+    pub fn visible_item_count(&self) -> usize {
+        self.explorer
+            .preorder_ids()
+            .into_iter()
+            .filter(|node_id| self.is_visible_item(node_id))
+            .count()
+    }
+
+    pub(crate) fn item_window(&self) -> CardsWindow {
+        let visible_item_count = self.visible_item_count();
+        let maximum_start = visible_item_count.saturating_sub(CARDS_WINDOW_SIZE);
+        let start = ((self.scroll_offset.max(0.0) / CARDS_ROW_HEIGHT) as usize).min(maximum_start);
+        let end = start
+            .saturating_add(CARDS_WINDOW_SIZE)
+            .min(visible_item_count);
+        CardsWindow {
+            start,
+            end,
+            top_padding: start as f32 * CARDS_ROW_HEIGHT,
+            bottom_padding: visible_item_count.saturating_sub(end) as f32 * CARDS_ROW_HEIGHT,
+        }
+    }
+
+    /// The small currently-mounted Cards projection in canonical hierarchy
+    /// order. Rows outside this window are represented by fixed padding.
+    pub fn windowed_items(&self) -> Vec<CardItem<'a>> {
+        let window = self.item_window();
+        self.explorer
+            .preorder_ids()
+            .into_iter()
+            .filter(|node_id| self.is_visible_item(node_id))
+            .skip(window.start)
+            .take(window.end.saturating_sub(window.start))
+            .filter_map(|node_id| self.item(node_id))
+            .collect()
+    }
+
+    fn is_visible_item(&self, node_id: &str) -> bool {
+        node_id != self.section_id
+            && self
+                .explorer
+                .nodes
+                .get(node_id)
+                .is_some_and(|node| node.section_id == self.section_id)
+            && self.explorer.ancestors_are_expanded(node_id)
+    }
+
+    fn item(&self, node_id: &'a str) -> Option<CardItem<'a>> {
+        let node = self.explorer.nodes.get(node_id)?;
+        let metadata = self
+            .field_order
+            .iter()
+            .filter_map(|field_id| {
+                let definition = self.definitions.get(field_id)?;
+                (definition.visible_on_cards && definition.applicability.applies_to(node.kind))
+                    .then(|| {
+                        // Defaults are copied when a node is created. Existing
+                        // nodes without a stored value stay empty; a later
+                        // definition edit must never rewrite their cards.
+                        let value = self
+                            .values
+                            .get(&(node_id.to_owned(), field_id.clone()))
+                            .map(String::as_str);
+                        (field_id.as_str(), definition.label.as_str(), value)
+                    })
+            })
+            .collect();
+        Some(CardItem {
+            node_id,
+            document_id: node.document_id.as_deref(),
+            title: &node.title,
+            synopsis: &node.synopsis,
+            kind: match node.kind {
+                HierarchyNodeKind::Root => HierarchyRowKind::Root,
+                HierarchyNodeKind::Group => HierarchyRowKind::Group,
+                HierarchyNodeKind::Document => HierarchyRowKind::Document,
+            },
+            depth: self.explorer.depth(node_id).saturating_sub(1),
+            expanded: self.explorer.expanded.contains(node_id),
+            visible: true,
+            selected: self.explorer.selected.contains(node_id),
+            metadata,
+        })
     }
 }
 
@@ -2114,6 +2211,33 @@ impl HistoryComparison {
                 summary
             })
     }
+
+    /// Returns the current document's word-count change relative to the
+    /// checkpoint. This is derived from the already-loaded comparison rows;
+    /// it never triggers a checkpoint load or a second diff operation.
+    pub fn word_count_delta(&self) -> i64 {
+        let checkpoint_words = self
+            .lines
+            .iter()
+            .filter_map(|line| line.before.as_ref())
+            .map(comparison_line_word_count)
+            .sum::<usize>();
+        let current_words = self
+            .lines
+            .iter()
+            .filter_map(|line| line.after.as_ref())
+            .map(comparison_line_word_count)
+            .sum::<usize>();
+        i64::try_from(current_words).unwrap_or(i64::MAX)
+            - i64::try_from(checkpoint_words).unwrap_or(i64::MAX)
+    }
+}
+
+fn comparison_line_word_count(line: &HistoryComparisonTextLine) -> usize {
+    line.spans
+        .iter()
+        .map(|span| span.text.split_whitespace().count())
+        .sum()
 }
 
 /// History list/detail presentation facts.
@@ -2133,6 +2257,19 @@ pub struct HistoryState {
     scroll_offset: f32,
     maintenance: HistoryMaintenanceStatus,
     maintenance_message: Option<String>,
+}
+
+pub(crate) const HISTORY_CHECKPOINT_ROW_HEIGHT: f32 = 72.0;
+pub(crate) const HISTORY_TIMELINE_DIVIDER_HEIGHT: f32 = 1.0;
+pub(crate) const HISTORY_TIMELINE_HEADING_HEIGHT: f32 = 20.0;
+const HISTORY_CHECKPOINT_WINDOW_SIZE: usize = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HistoryCheckpointWindow {
+    pub start: usize,
+    pub end: usize,
+    pub top_padding: f32,
+    pub bottom_padding: f32,
 }
 
 impl HistoryState {
@@ -2168,8 +2305,10 @@ impl HistoryState {
     }
 
     pub fn windowed_checkpoints(&self) -> impl Iterator<Item = &HistoryCheckpointRow> {
-        let start = (self.scroll_offset.max(0.0) / 72.0) as usize;
-        self.visible_checkpoints().skip(start).take(60)
+        let window = self.checkpoint_window();
+        self.visible_checkpoints()
+            .skip(window.start)
+            .take(window.end.saturating_sub(window.start))
     }
 
     /// A concise date/session heading for a checkpoint at the start of a
@@ -2179,36 +2318,59 @@ impl HistoryState {
         let mut previous: Option<&HistoryCheckpointRow> = None;
         for checkpoint in self.visible_checkpoints() {
             if checkpoint.checkpoint_id == checkpoint_id {
-                return match (previous, checkpoint.recorded_at_unix_millis) {
-                    (None, Some(timestamp)) => Some(writing_session_label(timestamp)),
-                    (None, None) => Some("Earlier checkpoints".to_owned()),
-                    (Some(previous), Some(timestamp))
-                        if previous
-                            .recorded_at_unix_millis
-                            .is_none_or(|newer| !same_writing_session(newer, timestamp)) =>
-                    {
-                        Some(writing_session_label(timestamp))
-                    }
-                    (Some(previous), None) if previous.recorded_at_unix_millis.is_some() => {
-                        Some("Earlier checkpoints".to_owned())
-                    }
-                    _ => None,
-                };
+                return starts_writing_session(previous, checkpoint).then(|| {
+                    checkpoint
+                        .recorded_at_unix_millis
+                        .map_or_else(|| "Earlier checkpoints".to_owned(), writing_session_label)
+                });
             }
             previous = Some(checkpoint);
         }
         None
     }
 
-    pub fn checkpoint_window_start(&self) -> usize {
-        (self.scroll_offset.max(0.0) / 72.0) as usize
-    }
+    pub(crate) fn checkpoint_window(&self) -> HistoryCheckpointWindow {
+        let scroll_offset = self.scroll_offset.max(0.0);
+        let mut top_padding = 0.0;
+        let mut start: usize = 0;
+        let mut visible_count: usize = 0;
+        let mut total_height = 0.0;
+        let mut found_start = false;
+        let mut previous = None;
 
-    pub fn checkpoint_window_bottom_padding(&self) -> f32 {
-        self.visible_checkpoints()
-            .count()
-            .saturating_sub(self.checkpoint_window_start().saturating_add(60)) as f32
-            * 72.0
+        for checkpoint in self.visible_checkpoints() {
+            let extent = history_checkpoint_extent(previous, checkpoint);
+            if !found_start && total_height + extent <= scroll_offset {
+                start += 1;
+                top_padding += extent;
+            } else {
+                found_start = true;
+            }
+            total_height += extent;
+            visible_count += 1;
+            previous = Some(checkpoint);
+        }
+
+        let end = start
+            .saturating_add(HISTORY_CHECKPOINT_WINDOW_SIZE)
+            .min(visible_count);
+        let visible_height = self
+            .visible_checkpoints()
+            .enumerate()
+            .scan(None, |previous, (index, checkpoint)| {
+                let extent = history_checkpoint_extent(*previous, checkpoint);
+                *previous = Some(checkpoint);
+                Some((index, extent))
+            })
+            .filter_map(|(index, extent)| (start..end).contains(&index).then_some(extent))
+            .sum::<f32>();
+
+        HistoryCheckpointWindow {
+            start,
+            end,
+            top_padding,
+            bottom_padding: (total_height - top_padding - visible_height).max(0.0),
+        }
     }
 
     pub fn active_document_filter(&self) -> Option<&str> {
@@ -2231,34 +2393,9 @@ impl HistoryState {
         self.current_document.as_ref()
     }
 
-    /// Builds a typed comparison only when the selected checkpoint preview and
-    /// current presentation facts refer to the same loaded document.
+    /// Returns the comparison built by the background History preview task.
     pub fn comparison(&self) -> Option<&HistoryComparison> {
         self.comparison.as_ref()
-    }
-
-    fn refresh_comparison(&mut self) {
-        let Some(preview) = self.preview.as_ref() else {
-            self.comparison = None;
-            return;
-        };
-        let Some(before) = preview.document.as_ref() else {
-            self.comparison = None;
-            return;
-        };
-        let Some(after) = self.current_document.as_ref() else {
-            self.comparison = None;
-            return;
-        };
-        if before.document_id != after.document_id {
-            self.comparison = None;
-            return;
-        }
-        self.comparison = Some(compare_history_documents(
-            &preview.checkpoint.checkpoint_id,
-            before,
-            after,
-        ));
     }
 
     pub fn named_snapshot_draft(&self) -> &str {
@@ -2283,6 +2420,32 @@ impl HistoryState {
 
     pub fn maintenance_message(&self) -> Option<&str> {
         self.maintenance_message.as_deref()
+    }
+}
+
+fn history_checkpoint_extent(
+    previous: Option<&HistoryCheckpointRow>,
+    checkpoint: &HistoryCheckpointRow,
+) -> f32 {
+    HISTORY_CHECKPOINT_ROW_HEIGHT
+        + HISTORY_TIMELINE_DIVIDER_HEIGHT
+        + if starts_writing_session(previous, checkpoint) {
+            HISTORY_TIMELINE_HEADING_HEIGHT
+        } else {
+            0.0
+        }
+}
+
+fn starts_writing_session(
+    previous: Option<&HistoryCheckpointRow>,
+    checkpoint: &HistoryCheckpointRow,
+) -> bool {
+    match (previous, checkpoint.recorded_at_unix_millis) {
+        (None, _) => true,
+        (Some(previous), Some(timestamp)) => previous
+            .recorded_at_unix_millis
+            .is_none_or(|newer| !same_writing_session(newer, timestamp)),
+        (Some(previous), None) => previous.recorded_at_unix_millis.is_some(),
     }
 }
 
@@ -2331,7 +2494,7 @@ enum HistoryLineEdit {
     Removed(String),
 }
 
-fn compare_history_documents(
+pub(crate) fn compare_history_documents(
     checkpoint_id: &str,
     before: &HistoryDocumentPreview,
     after: &HistoryCurrentDocument,
@@ -3316,6 +3479,8 @@ pub enum ProjectTaskPayload {
     },
     HistoryPreviewReady {
         preview: HistoryPreviewData,
+        current_document: Option<HistoryCurrentDocument>,
+        comparison: Option<HistoryComparison>,
     },
     DeletedPreviewReady {
         node_id: String,
@@ -3388,6 +3553,7 @@ pub enum ProjectMessage {
         gesture: SelectionGesture,
     },
     ToggleHierarchyExpanded(String),
+    SelectAndToggleHierarchyExpanded(String),
     NavigateExplorer(ExplorerNavigation),
     RequestCreateHierarchy {
         parent_id: String,
@@ -3479,6 +3645,7 @@ pub enum ProjectMessage {
     ConfirmDeleteStyle,
     ActivateCard(String),
     SetCardsSection(String),
+    SetCardsScroll(f32),
     BeginHierarchyDrag {
         source_id: String,
         gesture: SelectionGesture,
@@ -3687,6 +3854,7 @@ pub struct ProjectWorkspace {
     explorer: ExplorerState,
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
+    cards_scroll_offset: f32,
     cards_drag_destination: Option<DragDestination>,
     explorer_creation_menu_open: bool,
     pointer_drag: Option<HierarchyPointerDrag>,
@@ -3780,6 +3948,7 @@ impl ProjectWorkspace {
             explorer,
             tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
+            cards_scroll_offset: 0.0,
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
@@ -3843,6 +4012,7 @@ impl ProjectWorkspace {
             explorer,
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
+            cards_scroll_offset: 0.0,
             cards_drag_destination: None,
             explorer_creation_menu_open: false,
             pointer_drag: None,
@@ -4200,6 +4370,7 @@ impl ProjectWorkspace {
         CardsState {
             explorer: &self.explorer,
             section_id: &self.cards_section,
+            scroll_offset: self.cards_scroll_offset,
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
@@ -4317,7 +4488,7 @@ impl ProjectWorkspace {
     /// while a History preview is being shown.
     pub fn set_history_current_document(&mut self, document: Option<HistoryCurrentDocument>) {
         self.history.current_document = document;
-        self.history.refresh_comparison();
+        self.history.comparison = None;
     }
 
     pub fn complete_history_workflow(&mut self) {
@@ -4430,6 +4601,24 @@ impl ProjectWorkspace {
 
     pub fn editor_mut(&mut self) -> &mut EditorWorkspace {
         &mut self.editor
+    }
+
+    /// Per-pane document paths for editor chrome. These reflect each pane's
+    /// active tab, so companion context never follows Explorer selection.
+    pub(crate) fn active_editor_breadcrumbs(&self) -> BTreeMap<EditorPane, Vec<String>> {
+        [EditorPane::Primary, EditorPane::Companion]
+            .into_iter()
+            .filter_map(|pane| {
+                let document_id = self.editor.pane(pane).active_document()?;
+                let breadcrumb = self
+                    .explorer
+                    .breadcrumb_for_document(document_id)?
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                Some((pane, breadcrumb))
+            })
+            .collect()
     }
 
     pub const fn project_session(&self) -> u64 {
@@ -4760,6 +4949,16 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::ToggleHierarchyExpanded(node_id) => {
+                self.explorer.toggle_expanded(&node_id);
+                Vec::new()
+            }
+            ProjectMessage::SelectAndToggleHierarchyExpanded(node_id) => {
+                // A group click is both structural disclosure and a selection
+                // change. Explorer and Cards therefore keep Inspector context
+                // synchronized even when the click collapses the group.
+                self.inspector_title_rename = None;
+                self.explorer.select(&node_id, SelectionGesture::Replace);
+                self.sync_inspector_context_from_selection();
                 self.explorer.toggle_expanded(&node_id);
                 Vec::new()
             }
@@ -5226,6 +5425,13 @@ impl ProjectWorkspace {
                     .is_some_and(|node| node.kind == HierarchyNodeKind::Root)
                 {
                     self.cards_section = section;
+                    self.cards_scroll_offset = 0.0;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetCardsScroll(offset) => {
+                if offset.is_finite() {
+                    self.cards_scroll_offset = offset.max(0.0);
                 }
                 Vec::new()
             }
@@ -5508,6 +5714,7 @@ impl ProjectWorkspace {
                 }
                 self.history.selected_checkpoint_id = Some(checkpoint_id.clone());
                 self.history.preview = None;
+                self.history.current_document = None;
                 self.history.comparison = None;
                 self.history.error = None;
                 vec![ProjectEffect::PreviewHistory(checkpoint_id)]
@@ -5938,11 +6145,17 @@ impl ProjectWorkspace {
             }
         });
         let tab = TabSpec::new(document_id.clone(), title);
-        let _ = self.editor.update(if preview {
-            EditorMessage::OpenPreviewTab { pane, tab }
-        } else {
-            EditorMessage::OpenTab { pane, tab }
-        });
+        if self
+            .editor
+            .update(if preview {
+                EditorMessage::OpenPreviewTab { pane, tab }
+            } else {
+                EditorMessage::OpenTab { pane, tab }
+            })
+            .is_empty()
+        {
+            return Vec::new();
+        }
         match pane {
             EditorPane::Primary => vec![ProjectEffect::OpenDocumentInPrimary(document_id)],
             EditorPane::Companion => vec![ProjectEffect::OpenDocumentInCompanion(document_id)],
@@ -6152,9 +6365,14 @@ impl ProjectWorkspace {
                 self.history.error = None;
                 true
             }
-            ProjectTaskPayload::HistoryPreviewReady { preview } => {
+            ProjectTaskPayload::HistoryPreviewReady {
+                preview,
+                current_document,
+                comparison,
+            } => {
                 self.history.preview = Some(preview);
-                self.history.refresh_comparison();
+                self.history.current_document = current_document;
+                self.history.comparison = comparison;
                 self.history.error = None;
                 true
             }
@@ -6328,8 +6546,24 @@ fn project_payload_claim_is_exact(task: &ProjectTask, payload: &ProjectTaskPaylo
         ) => through_revision == saved_revision,
         (
             ProjectTask::PreviewHistory { checkpoint_id },
-            ProjectTaskPayload::HistoryPreviewReady { preview },
-        ) => checkpoint_id == &preview.checkpoint.checkpoint_id,
+            ProjectTaskPayload::HistoryPreviewReady {
+                preview,
+                current_document,
+                comparison,
+            },
+        ) => {
+            checkpoint_id == &preview.checkpoint.checkpoint_id
+                && comparison.as_ref().is_none_or(|comparison| {
+                    comparison.checkpoint_id == preview.checkpoint.checkpoint_id
+                        && preview
+                            .document
+                            .as_ref()
+                            .is_some_and(|document| document.document_id == comparison.document_id)
+                        && current_document
+                            .as_ref()
+                            .is_some_and(|document| document.document_id == comparison.document_id)
+                })
+        }
         (
             ProjectTask::PreviewDeleted {
                 node_id,
@@ -6539,6 +6773,47 @@ fn is_research_section(section_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_breadcrumb_follows_the_hierarchy_not_current_selection() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-two".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+
+        assert_eq!(
+            workspace.explorer().breadcrumb_for_document("chapter-one"),
+            Some(vec!["Manuscript", "Part One", "Chapter One"])
+        );
+        assert_eq!(
+            workspace.explorer().breadcrumb_for_document("missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn active_editor_breadcrumbs_follow_each_panes_active_document() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let breadcrumbs = workspace.active_editor_breadcrumbs();
+
+        assert_eq!(
+            breadcrumbs.get(&EditorPane::Primary),
+            Some(&vec![
+                "Manuscript".to_owned(),
+                "Part One".to_owned(),
+                "Chapter One".to_owned(),
+            ])
+        );
+        assert_eq!(
+            breadcrumbs.get(&EditorPane::Companion),
+            Some(&vec![
+                "Manuscript".to_owned(),
+                "Part One".to_owned(),
+                "Chapter Two".to_owned(),
+            ])
+        );
+    }
 
     #[test]
     fn metadata_field_creation_stays_local_until_a_nonempty_name_is_confirmed() {
@@ -6772,31 +7047,37 @@ mod tests {
             )
         }
 
-        let mut history = HistoryState {
-            preview: Some(HistoryPreviewData {
-                checkpoint: history_row(
-                    "checkpoint-7",
-                    HistoryCheckpointCategory::Autosave,
-                    None,
-                    vec!["chapter-one"],
-                ),
-                resource_paths: vec!["documents/chapter-one.html".to_owned()],
-                document: Some(HistoryDocumentPreview {
-                    document_id: "chapter-one".to_owned(),
-                    canonical_path: "documents/chapter-one.html".to_owned(),
-                    semantic: semantic(&["The blue house", "Keep", "Remove me"]),
-                }),
-            }),
-            current_document: Some(HistoryCurrentDocument {
+        let preview = HistoryPreviewData {
+            checkpoint: history_row(
+                "checkpoint-7",
+                HistoryCheckpointCategory::Autosave,
+                None,
+                vec!["chapter-one"],
+            ),
+            resource_paths: vec!["documents/chapter-one.html".to_owned()],
+            document: Some(HistoryDocumentPreview {
                 document_id: "chapter-one".to_owned(),
-                title: "Chapter One".to_owned(),
-                body: "<p>The green house</p><p>Keep</p><p>Added one</p><p>Added two</p>"
-                    .to_owned(),
-                semantic: semantic(&["The green house", "Keep", "Added one", "Added two"]),
+                canonical_path: "documents/chapter-one.html".to_owned(),
+                semantic: semantic(&["The blue house", "Keep", "Remove me"]),
             }),
+        };
+        let current = HistoryCurrentDocument {
+            document_id: "chapter-one".to_owned(),
+            title: "Chapter One".to_owned(),
+            body: "<p>The green house</p><p>Keep</p><p>Added one</p><p>Added two</p>".to_owned(),
+            semantic: semantic(&["The green house", "Keep", "Added one", "Added two"]),
+        };
+        let comparison = compare_history_documents(
+            &preview.checkpoint.checkpoint_id,
+            preview.document.as_ref().expect("checkpoint document"),
+            &current,
+        );
+        let history = HistoryState {
+            preview: Some(preview),
+            current_document: Some(current),
+            comparison: Some(comparison),
             ..HistoryState::default()
         };
-        history.refresh_comparison();
 
         let comparison = history.comparison().expect("same document is comparable");
         assert_eq!(comparison.checkpoint_id, "checkpoint-7");
@@ -6809,6 +7090,7 @@ mod tests {
                 modified_lines: 2,
             }
         );
+        assert_eq!(comparison.word_count_delta(), 2);
         assert_eq!(
             comparison.lines[0].kind,
             HistoryComparisonLineKind::Modified
@@ -6869,7 +7151,7 @@ mod tests {
 
     #[test]
     fn history_comparison_refuses_unrelated_loaded_documents() {
-        let mut history = HistoryState {
+        let history = HistoryState {
             preview: Some(HistoryPreviewData {
                 checkpoint: history_row(
                     "checkpoint-7",
@@ -6892,9 +7174,58 @@ mod tests {
             }),
             ..HistoryState::default()
         };
-        history.refresh_comparison();
 
         assert_eq!(history.comparison(), None);
+    }
+
+    #[test]
+    fn history_preview_reducer_accepts_prebuilt_comparison_without_recomputing_it() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        let checkpoint = history_row(
+            "checkpoint-7",
+            HistoryCheckpointCategory::Autosave,
+            None,
+            vec!["chapter-one"],
+        );
+        let preview = HistoryPreviewData {
+            checkpoint: checkpoint.clone(),
+            resource_paths: vec!["documents/chapter-one.html".to_owned()],
+            document: Some(HistoryDocumentPreview {
+                document_id: "chapter-one".to_owned(),
+                canonical_path: "documents/chapter-one.html".to_owned(),
+                semantic: SemanticDocument::default(),
+            }),
+        };
+        let comparison = HistoryComparison {
+            checkpoint_id: checkpoint.checkpoint_id.clone(),
+            document_id: "chapter-one".to_owned(),
+            document_title: "Chapter One".to_owned(),
+            lines: Vec::new(),
+        };
+        let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
+            checkpoint_id: checkpoint.checkpoint_id,
+        });
+
+        assert!(
+            workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                ticket,
+                ProjectTaskPayload::HistoryPreviewReady {
+                    preview: preview.clone(),
+                    current_document: Some(HistoryCurrentDocument {
+                        document_id: "chapter-one".to_owned(),
+                        title: "Chapter One".to_owned(),
+                        body: String::new(),
+                        semantic: SemanticDocument::default(),
+                    }),
+                    comparison: Some(comparison.clone()),
+                },
+            ))
+        );
+        assert_eq!(workspace.history().preview(), Some(&preview));
+        assert_eq!(workspace.history().comparison(), Some(&comparison));
+
+        workspace.set_history_current_document(None);
+        assert_eq!(workspace.history().comparison(), None);
     }
 
     #[test]
@@ -7067,6 +7398,8 @@ mod tests {
                 first,
                 ProjectTaskPayload::HistoryPreviewReady {
                     preview: first_preview,
+                    current_document: None,
+                    comparison: None,
                 },
             ))
         );
@@ -7086,6 +7419,8 @@ mod tests {
                 second,
                 ProjectTaskPayload::HistoryPreviewReady {
                     preview: preview.clone(),
+                    current_document: None,
+                    comparison: None,
                 },
             ))
         );
@@ -7206,6 +7541,8 @@ mod tests {
                         resource_paths: Vec::new(),
                         document: None,
                     },
+                    current_document: None,
+                    comparison: None,
                 },
             ))
         );
@@ -7423,9 +7760,128 @@ mod tests {
                 recorded_at_unix_millis: None,
             })
             .collect();
-        workspace.update(ProjectMessage::SetHistoryScroll(7_200.0));
-        assert_eq!(workspace.history().checkpoint_window_start(), 100);
+        workspace.update(ProjectMessage::SetHistoryScroll(7_320.0));
+        assert_eq!(workspace.history().checkpoint_window().start, 100);
         assert_eq!(workspace.history().windowed_checkpoints().count(), 60);
+    }
+
+    #[test]
+    fn cards_window_bounds_a_large_outline_and_preserves_selected_rows() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        for index in 0..350 {
+            let id = format!("bulk-card-{index}");
+            workspace.explorer.nodes.insert(
+                id.clone(),
+                HierarchyNode::new(
+                    &id,
+                    &format!("Bulk card {index}"),
+                    "manuscript",
+                    Some("manuscript"),
+                    HierarchyNodeKind::Document,
+                ),
+            );
+            workspace
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .expect("fixture manuscript root")
+                .children
+                .push(id);
+        }
+
+        assert!(workspace.cards().is_virtualized());
+        assert_eq!(workspace.cards().visible_item_count(), 354);
+        assert_eq!(workspace.cards().windowed_items().len(), 48);
+
+        workspace.update(ProjectMessage::SetCardsScroll(CARDS_ROW_HEIGHT * 300.0));
+        let window = workspace.cards().item_window();
+        let rows = workspace.cards().windowed_items();
+        assert_eq!(window.start, 300);
+        assert_eq!(rows.len(), 48);
+        assert_eq!(rows.first().map(|item| item.node_id), Some("bulk-card-296"));
+        assert_eq!(
+            window.top_padding + rows.len() as f32 * CARDS_ROW_HEIGHT + window.bottom_padding,
+            workspace.cards().visible_item_count() as f32 * CARDS_ROW_HEIGHT,
+        );
+        let selected = rows[10].node_id.to_owned();
+
+        workspace.update(ProjectMessage::SetCardsScroll(CARDS_ROW_HEIGHT * 10_000.0));
+        let final_window = workspace.cards().item_window();
+        let final_rows = workspace.cards().windowed_items();
+        assert_eq!(final_window.start, 306);
+        assert_eq!(final_rows.len(), 48);
+        assert_eq!(
+            final_rows.last().map(|item| item.node_id),
+            Some("bulk-card-349")
+        );
+
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: selected.clone(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert!(
+            workspace
+                .cards()
+                .windowed_items()
+                .iter()
+                .any(|item| item.node_id == selected && item.selected)
+        );
+    }
+
+    #[test]
+    fn history_window_geometry_preserves_checkpoint_identity_across_session_headings() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        let base_timestamp = 1_725_000_000_000_u64;
+        workspace.history.checkpoints = (0..180)
+            .map(|index| HistoryCheckpointRow {
+                checkpoint_id: format!("checkpoint-{index}"),
+                sequence: u64::try_from(index).expect("fixture index"),
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: Some(
+                    base_timestamp
+                        - u64::try_from(index / 10).expect("fixture session") * 40 * 60 * 1_000
+                        - u64::try_from(index % 10).expect("fixture position") * 60 * 1_000,
+                ),
+            })
+            .collect();
+        let rows_before_window = 75.0;
+        let headings_before_window = 8.0;
+        let offset = rows_before_window
+            * (HISTORY_CHECKPOINT_ROW_HEIGHT + HISTORY_TIMELINE_DIVIDER_HEIGHT)
+            + headings_before_window * HISTORY_TIMELINE_HEADING_HEIGHT;
+
+        workspace.update(ProjectMessage::SetHistoryScroll(offset));
+
+        let window = workspace.history().checkpoint_window();
+        let visible_ids = workspace
+            .history()
+            .windowed_checkpoints()
+            .map(|checkpoint| checkpoint.checkpoint_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(window.start, 75);
+        assert_eq!(window.end, 135);
+        assert_eq!(window.top_padding, offset);
+        assert_eq!(
+            visible_ids.first().map(String::as_str),
+            Some("checkpoint-75")
+        );
+        assert_eq!(
+            visible_ids.last().map(String::as_str),
+            Some("checkpoint-134")
+        );
+
+        assert_eq!(
+            workspace.update(ProjectMessage::SelectHistoryCheckpoint(
+                visible_ids[0].clone(),
+            )),
+            [ProjectEffect::PreviewHistory("checkpoint-75".to_owned())]
+        );
+        assert_eq!(
+            workspace.history().selected_checkpoint_id(),
+            Some("checkpoint-75")
+        );
     }
 
     #[test]
@@ -7774,6 +8230,27 @@ mod tests {
     }
 
     #[test]
+    fn reselecting_the_active_explorer_document_does_not_request_a_remount() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+
+        assert_eq!(
+            workspace.update(ProjectMessage::PreviewHierarchyNode(
+                "chapter-two".to_owned()
+            )),
+            [ProjectEffect::OpenDocumentInPrimary(
+                "chapter-two".to_owned()
+            )]
+        );
+        assert!(
+            workspace
+                .update(ProjectMessage::PreviewHierarchyNode(
+                    "chapter-two".to_owned()
+                ))
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn save_completion_for_an_older_captured_revision_leaves_later_edits_dirty() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         let ticket = workspace.begin_task(ProjectTask::Save {
@@ -7851,7 +8328,7 @@ mod tests {
         assert!(
             workspace
                 .cards()
-                .items()
+                .windowed_items()
                 .iter()
                 .any(|item| item.node_id == "part-one" && item.selected)
         );

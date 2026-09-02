@@ -120,6 +120,13 @@ fn navigation_focus_dialog_and_menu_states_are_consistent() {
     assert!(!shell.inspector_section_is_expanded(InspectorSection::Synopsis));
     assert!(shell.comments_are_available());
 
+    shell.toggle_inspector_section(InspectorSection::Comments);
+    assert!(!shell.inspector_section_is_expanded(InspectorSection::Comments));
+    shell.expand_inspector_section(InspectorSection::Comments);
+    assert!(shell.inspector_section_is_expanded(InspectorSection::Comments));
+    shell.expand_inspector_section(InspectorSection::Comments);
+    assert!(shell.inspector_section_is_expanded(InspectorSection::Comments));
+
     shell.focus_next_region();
     assert_eq!(shell.focus_region(), F6Region::Inspector);
     assert!(shell.has_visible_focus());

@@ -206,10 +206,11 @@ pub enum MountedEditorMessage {
     InsertAtomicBlock(AtomicBlockKind),
     ApplyParagraphStyle(StyleId),
     /// The pointer entered or left a text-attached comment. This is
-    /// presentation-only: the project surface owns the accompanying card.
+    /// presentation-only: the project surface owns the accompanying card,
+    /// which remains anchored to the highlighted text rather than the cursor.
     HoverComment {
         comment_id: Option<String>,
-        invocation_point: (f32, f32),
+        anchor_bounds: (f32, f32, f32, f32),
     },
     /// A secondary-button hit with independent comment and spelling targets.
     OpenSpellingMenu {
@@ -428,22 +429,20 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 )
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
-                let (comment_id, invocation_point) = cursor
+                let (comment_id, anchor_bounds) = cursor
                     .position_in(bounds)
                     .map(|position| {
-                        (
-                            comment_at(&content, position.x, position.y),
-                            (position.x, position.y),
-                        )
+                        comment_hit(&content, position.x, position.y)
+                            .unwrap_or((None, (0.0, 0.0, 0.0, 0.0)))
                     })
-                    .unwrap_or((None, (0.0, 0.0)));
+                    .unwrap_or((None, (0.0, 0.0, 0.0, 0.0)));
                 if state.hovered_comment == comment_id {
                     return None;
                 }
                 state.hovered_comment = comment_id.clone();
                 Some(Action::publish(MountedEditorMessage::HoverComment {
                     comment_id,
-                    invocation_point,
+                    anchor_bounds,
                 }))
             }
             iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
@@ -753,17 +752,37 @@ fn comment_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSe
     Some(EditorSelection::new(document, document))
 }
 
+#[cfg(test)]
 fn comment_at(content: &SurfaceContent, x: f32, y: f32) -> Option<String> {
+    comment_hit(content, x, y).and_then(|(comment, _)| comment)
+}
+
+fn comment_hit(
+    content: &SurfaceContent,
+    x: f32,
+    y: f32,
+) -> Option<(Option<String>, (f32, f32, f32, f32))> {
     let document = content.geometry.hit_test(x, y)?;
     content.comments.iter().find_map(|decoration| {
-        (decoration.range().start() <= document && document < decoration.range().end()).then(|| {
-            decoration
-                .comment()
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect()
-        })
+        if decoration.range().start() > document || document >= decoration.range().end() {
+            return None;
+        }
+        let bounds = content
+            .geometry
+            .selection_rectangles(decoration.range())
+            .into_iter()
+            .next()?;
+        Some((
+            Some(
+                decoration
+                    .comment()
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            ),
+            (bounds.x, bounds.y, bounds.width, bounds.height),
+        ))
     })
 }
 
@@ -2485,6 +2504,23 @@ mod tests {
         assert_eq!(
             comment_at(&content, first.x, first.y),
             Some("2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d".to_owned())
+        );
+        let anchor = comment_hit(&content, first.x, first.y)
+            .expect("first scalar is inside the comment")
+            .1;
+        let expected = content.geometry.selection_rectangles(range)[0];
+        assert_eq!(
+            anchor,
+            (expected.x, expected.y, expected.width, expected.height),
+            "comment cards anchor to text geometry, never to the pointer position"
+        );
+        let second = content.geometry.draw_scalars()[1].bounds;
+        assert_eq!(
+            comment_hit(&content, second.x, second.y)
+                .expect("second scalar is inside the same comment")
+                .1,
+            anchor,
+            "moving within a highlighted comment must keep its anchor fixed"
         );
         assert_eq!(comment_at(&content, 220.0, 80.0), None);
     }

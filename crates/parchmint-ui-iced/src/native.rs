@@ -14,7 +14,10 @@ use std::{
     hash::Hash,
     io::BufWriter,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -87,7 +90,7 @@ use crate::{
         LAUNCHER_RHYTHM, LAUNCHER_SUBTITLE_SIZE, LAUNCHER_TITLE_SIZE, LAUNCHER_WORDMARK_SIZE,
         ParchMintTheme,
     },
-    iced_editor_surface::{EditorCenterMessage, EditorHostSlots, editor_center_surface},
+    iced_editor_surface::{EditorCenterMessage, EditorHostSlots},
     iced_project_surface::{
         ProjectSurfaceMessage, SidebarPanel, native_project_surface as workspace_surface,
     },
@@ -551,6 +554,10 @@ enum Message {
     ClearNotifications {
         window: window::Id,
     },
+    DismissNotification {
+        window: window::Id,
+        notification_id: u64,
+    },
     CloseRequested(window::Id),
     ShowNewProject,
     CancelNewProject,
@@ -979,9 +986,9 @@ fn apply_hierarchy_pointer_modifiers(message: &mut ProjectMessage, modifiers: ke
 
 fn should_activate_shortcut(command: &str, accelerator_fallback: bool) -> bool {
     command.starts_with("file.")
-        || command.starts_with("format.")
         || command.starts_with("search.")
-        || accelerator_fallback
+        || ((command.starts_with("edit.") || command.starts_with("format."))
+            && accelerator_fallback)
 }
 
 #[derive(Debug, Clone)]
@@ -1132,6 +1139,7 @@ enum NotificationKind {
 
 #[derive(Debug, Clone)]
 struct WorkspaceNotification {
+    id: u64,
     message: String,
     kind: NotificationKind,
     expires_at: Option<Instant>,
@@ -1140,6 +1148,7 @@ struct WorkspaceNotification {
 impl WorkspaceNotification {
     fn information(message: impl Into<String>) -> Self {
         Self {
+            id: next_workspace_notification_id(),
             message: message.into(),
             kind: NotificationKind::Information,
             expires_at: Some(Instant::now() + Duration::from_secs(5)),
@@ -1148,11 +1157,17 @@ impl WorkspaceNotification {
 
     fn error(message: impl Into<String>) -> Self {
         Self {
+            id: next_workspace_notification_id(),
             message: message.into(),
             kind: NotificationKind::Error,
             expires_at: None,
         }
     }
+}
+
+fn next_workspace_notification_id() -> u64 {
+    static NEXT_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_NOTIFICATION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 fn append_workspace_notification(
@@ -1173,6 +1188,13 @@ fn expire_workspace_notifications(notifications: &mut Vec<WorkspaceNotification>
             .expires_at
             .is_none_or(|expires_at| expires_at > now)
     });
+}
+
+fn dismiss_workspace_notification(
+    notifications: &mut Vec<WorkspaceNotification>,
+    notification_id: u64,
+) {
+    notifications.retain(|notification| notification.id != notification_id);
 }
 
 fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
@@ -1606,6 +1628,7 @@ struct NativeSpellingMenuContext {
     word: String,
     range: EditorSelection,
     comment_range: EditorSelection,
+    comment_anchor_bounds: crate::Rect,
 }
 
 #[derive(Debug, Default)]
@@ -2030,6 +2053,18 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            Message::DismissNotification {
+                window,
+                notification_id,
+            } => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    dismiss_workspace_notification(&mut state.notifications, notification_id);
+                    if state.notifications.is_empty() {
+                        state.notification_drawer_open = false;
+                    }
+                }
+                Task::none()
+            }
             Message::CloseRequested(id) => self.close_window(id),
             Message::ShowNewProject => {
                 self.creating_project = true;
@@ -2439,7 +2474,7 @@ impl NativeDesktop {
                     return Task::none();
                 };
                 let payload = match result {
-                    Ok(preview) => preview.reducer_payload(),
+                    Ok(preview) => preview.into_reducer_payload(),
                     Err(outcome) => {
                         let Some(error) = outcome.failure_message() else {
                             return Task::none();
@@ -3716,7 +3751,16 @@ impl NativeDesktop {
                     state.pending_spelling_menu = None;
                     state.spelling_menu = None;
                 } else if let Some(workspace) = state.workspace.as_mut() {
-                    workspace.update(ProjectMessage::CancelCut);
+                    let composer_open = [EditorPane::Primary, EditorPane::Companion]
+                        .into_iter()
+                        .any(|pane| workspace.editor().comment_composer(pane).is_some());
+                    if composer_open {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelCommentComposer);
+                    } else {
+                        workspace.update(ProjectMessage::CancelCut);
+                    }
                 }
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => match state.resizing {
@@ -3861,8 +3905,15 @@ impl NativeDesktop {
         notification_drawer_open: bool,
     ) -> Element<'a, Message> {
         let theme = ParchMintTheme::new(appearance);
-        let editor = editor_center_surface(workspace.editor(), theme, editor_hosts, spelling_menu)
-            .map(ProjectSurfaceMessage::EditorCenter);
+        let breadcrumbs = workspace.active_editor_breadcrumbs();
+        let editor = crate::iced_editor_surface::editor_center_surface_with_breadcrumbs(
+            workspace.editor(),
+            theme,
+            editor_hosts,
+            spelling_menu,
+            &breadcrumbs,
+        )
+        .map(ProjectSurfaceMessage::EditorCenter);
         let surface = workspace_surface(
             workspace,
             destination,
@@ -3926,11 +3977,21 @@ impl NativeDesktop {
                         NotificationKind::Error => "Error",
                     };
                     column.push(
-                        column![
-                            text(kind).size(11),
-                            text(notification.message.clone()).size(12),
+                        row![
+                            column![
+                                text(kind).size(11),
+                                text(notification.message.clone()).size(12),
+                            ]
+                            .spacing(2),
+                            Space::new().width(Length::Fill),
+                            button(text("Dismiss").size(11)).on_press(
+                                Message::DismissNotification {
+                                    window: id,
+                                    notification_id: notification.id,
+                                }
+                            ),
                         ]
-                        .spacing(2),
+                        .align_y(iced::alignment::Vertical::Top),
                     )
                 },
             );
@@ -4177,8 +4238,10 @@ impl NativeDesktop {
                         .get(&workspace.editor().focused_pane())
                 {
                     let _ = binding.restore_focus();
+                    return Task::none();
                 }
-                Task::none()
+                crate::focus::region_id(state.shell.focus_region())
+                    .map_or_else(Task::none, iced::widget::operation::focus)
             }
             ProjectSurfaceMessage::ToggleExplorer => {
                 let visible = !state.shell.layout().explorer_is_visible();
@@ -4275,15 +4338,19 @@ impl NativeDesktop {
             }
             ProjectSurfaceMessage::Project(mut message) => {
                 apply_hierarchy_pointer_modifiers(&mut message, state.modifiers);
-                if matches!(
+                // Cards owns document activation as a gesture, while the
+                // shell owns the visible destination. Only move to Editor
+                // after a real document-open effect, so stale or invalid
+                // Card IDs cannot unexpectedly change the workspace route.
+                let activates_card = matches!(&message, ProjectMessage::ActivateCard(_));
+                let focus_explorer = matches!(
                     &message,
                     ProjectMessage::SelectHierarchy { .. }
                         | ProjectMessage::ToggleHierarchyExpanded(_)
+                        | ProjectMessage::SelectAndToggleHierarchyExpanded(_)
                         | ProjectMessage::NavigateExplorer(_)
-                        | ProjectMessage::PreviewHierarchyNode(_)
-                        | ProjectMessage::OpenHierarchyNode(_)
-                        | ProjectMessage::OpenHierarchyNodeInCompanion(_)
-                ) {
+                );
+                if focus_explorer {
                     state.shell.focus(crate::FocusTarget::Explorer);
                 }
                 let modal_before = workspace.modal().is_some();
@@ -4323,6 +4390,28 @@ impl NativeDesktop {
                     state.shell.close_global_search();
                 }
                 let effects = workspace.update(message);
+                if activates_card
+                    && effects.iter().any(|effect| {
+                        matches!(
+                            effect,
+                            ProjectEffect::OpenDocumentInPrimary(_)
+                                | ProjectEffect::OpenDocumentInCompanion(_)
+                        )
+                    })
+                {
+                    state.shell.select_destination(RibbonDestination::Editor);
+                }
+                if let Some(document_id) = effects.iter().find_map(|effect| match effect {
+                    ProjectEffect::OpenDocumentInPrimary(document_id)
+                    | ProjectEffect::OpenDocumentInCompanion(document_id) => {
+                        Some(document_id.clone())
+                    }
+                    _ => None,
+                }) {
+                    state
+                        .shell
+                        .focus(crate::FocusTarget::EditorDocument(document_id));
+                }
                 if begins_metadata_field_creation {
                     state.pending_metadata_field_creation_focus = true;
                 }
@@ -4351,8 +4440,23 @@ impl NativeDesktop {
                         move |result| Message::AppearanceFinished { mode, result },
                     );
                 }
+                let keep_explorer_focus =
+                    focus_explorer && state.shell.focus_target() == crate::FocusTarget::Explorer;
                 let mut direct = Vec::new();
                 let mut tasks = Vec::new();
+                if keep_explorer_focus {
+                    for binding in state.editor_bindings.values() {
+                        if let Err(error) =
+                            binding.update(parchmint_editor_iced::MountedEditorMessage::Blur)
+                        {
+                            self.status = Some(error.to_string());
+                        }
+                    }
+                    tasks.push(iced::widget::operation::focus(
+                        crate::focus::region_id(crate::F6Region::Explorer)
+                            .expect("Explorer has a stable F6 region"),
+                    ));
+                }
                 if focus_modal_initial {
                     tasks.push(iced::widget::operation::focus(
                         crate::focus::modal_cancel_id(),
@@ -4592,15 +4696,11 @@ impl NativeDesktop {
                             let current = state.project.project_ui.as_ref().and_then(|project| {
                                 history_current_document(&project.snapshot, workspace)
                             });
-                            let document_id = current
-                                .as_ref()
-                                .map(|document| document.document_id.clone());
-                            workspace.set_history_current_document(current);
                             if let Some(feeds) = state.service_feeds.as_ref() {
                                 let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
                                     checkpoint_id: checkpoint_id.clone(),
                                 });
-                                let job = feeds.history_preview(checkpoint_id, document_id);
+                                let job = feeds.history_preview(checkpoint_id, current);
                                 tasks.push(Task::perform(
                                     Self::run_service_job(job),
                                     move |result| Message::HistoryPreviewFinished {
@@ -5119,6 +5219,10 @@ impl NativeDesktop {
                             | crate::EditorMessage::CloseTab { .. }
                     )
                 });
+                let reveal_selected_comment = message
+                    .workspace_messages()
+                    .iter()
+                    .any(|message| matches!(message, crate::EditorMessage::SelectComment(_)));
                 if let EditorCenterMessage::SetReplaceDraft { pane, value } = &message {
                     state.editor_hosts.set_replace_draft(*pane, value.clone());
                 }
@@ -5129,6 +5233,12 @@ impl NativeDesktop {
                 }
                 if reveal_focused_document {
                     workspace.reveal_focused_editor_document();
+                }
+                if reveal_selected_comment {
+                    state.shell.select_destination(RibbonDestination::Editor);
+                    state
+                        .shell
+                        .expand_inspector_section(crate::InspectorSection::Comments);
                 }
                 // An empty pane must stop rendering its mounted host in the
                 // same update as the final tab close. Waiting for the
@@ -5252,6 +5362,12 @@ impl NativeDesktop {
                     EditorCenterMessage::DismissSpellingMenu => {
                         state.pending_spelling_menu = None;
                         state.spelling_menu = None;
+                        return Task::none();
+                    }
+                    EditorCenterMessage::DismissCommentComposer => {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelCommentComposer);
                         return Task::none();
                     }
                     EditorCenterMessage::ChooseSpellingAction(action) => {
@@ -5870,6 +5986,7 @@ impl NativeDesktop {
                 .unwrap_or_default(),
             range: anchor_range,
             comment_range,
+            comment_anchor_bounds: word_bounds,
         });
         let request = SpellingMenuRequest::new(
             pane,
@@ -5944,20 +6061,16 @@ impl NativeDesktop {
             let Some(workspace) = state.workspace.as_mut() else {
                 return Task::none();
             };
-            if let Some(document) = state.mounted_documents.get(&context.pane)
-                && let Some(node_id) = workspace
-                    .explorer()
-                    .node_id_for_document(&stable_id_string(document.as_bytes()))
-            {
-                workspace.update(ProjectMessage::SelectHierarchy {
-                    node_id: node_id.to_owned(),
-                    gesture: SelectionGesture::Replace,
-                });
-            }
             workspace
                 .editor_mut()
-                .update(crate::EditorMessage::BeginCommentAtSelection);
-            return Task::none();
+                .update(crate::EditorMessage::BeginCommentAtSelection {
+                    pane: context.pane,
+                    anchor_bounds: context.comment_anchor_bounds,
+                });
+            // The contextual command is a direct invitation to write. Once
+            // the anchored composer is rendered, place the insertion point
+            // there so an author can type immediately.
+            return iced::widget::operation::focus(crate::HarnessTarget::CommentDraft.id());
         }
         if action == SpellingMenuAction::Ignore {
             let mut remaining_issues = state
@@ -6508,6 +6621,12 @@ impl NativeDesktop {
                 if hierarchy_rename.is_some() {
                     state.shell.focus(crate::FocusTarget::Explorer);
                 }
+                let reveal_hierarchy_rename =
+                    hierarchy_rename.as_ref().map_or_else(Task::none, |_| {
+                        iced::widget::operation::snap_to_end(
+                            crate::iced_project_surface::explorer_scroll_id(),
+                        )
+                    });
                 state.pending_hierarchy_rename_focus = hierarchy_rename;
                 let terminal = mutation.map_or_else(Task::none, |ticket| {
                     self.after_persistent_mutation_terminal(
@@ -6516,7 +6635,7 @@ impl NativeDesktop {
                         None,
                     )
                 });
-                Task::batch([reopen, refresh, terminal])
+                Task::batch([reopen, refresh, reveal_hierarchy_rename, terminal])
             }
             Ok(ProjectEffectCompletion::RefreshedSnapshot(snapshot)) => {
                 let snapshot = *snapshot;
@@ -6653,6 +6772,17 @@ impl NativeDesktop {
                     {
                         spellcheck_tasks.push(task);
                     }
+                }
+                if matches!(
+                    state.shell.focus_target(),
+                    crate::FocusTarget::EditorDocument(_)
+                ) && let Some(workspace) = state.workspace.as_ref()
+                    && let Some(binding) = state
+                        .editor_bindings
+                        .get(&workspace.editor().focused_pane())
+                    && let Err(error) = binding.restore_focus()
+                {
+                    self.status = Some(error.to_string());
                 }
                 Task::batch(spellcheck_tasks)
             }
@@ -7332,11 +7462,7 @@ impl NativeDesktop {
                     .values()
                     .find(|binding| binding.view() == view)
                     .ok_or_else(|| "focus restoration targets an unmounted view".to_owned())?;
-                binding
-                    .update(parchmint_editor_iced::MountedEditorMessage::Focus(
-                        0_u64.into(),
-                    ))
-                    .map_err(|error| error.to_string())?;
+                binding.restore_focus().map_err(|error| error.to_string())?;
                 Ok(None)
             }
         }
@@ -10382,8 +10508,23 @@ mod tests {
                 message,
                 kind: NotificationKind::Error,
                 expires_at: None,
+                ..
             }] if message == "Disk full"
         ));
+    }
+
+    #[test]
+    fn dismissing_one_notification_keeps_other_drawer_entries() {
+        let first = WorkspaceNotification::information("Created chapter");
+        let first_id = first.id;
+        let second = WorkspaceNotification::error("Could not save project");
+        let second_id = second.id;
+        let mut notifications = vec![first, second];
+
+        dismiss_workspace_notification(&mut notifications, first_id);
+
+        assert!(notifications.iter().all(|entry| entry.id != first_id));
+        assert!(notifications.iter().any(|entry| entry.id == second_id));
     }
 
     #[test]
@@ -10430,6 +10571,26 @@ mod tests {
         };
         assert!(state.notification_drawer_open);
         assert_eq!(state.notifications.len(), 1);
+
+        let notification_id = state.notifications[0].id;
+        let _ = desktop.update(Message::DismissNotification {
+            window,
+            notification_id,
+        });
+        let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
+            panic!("project window")
+        };
+        assert!(!state.notification_drawer_open);
+        assert!(state.notifications.is_empty());
+
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")
+        else {
+            panic!("project window")
+        };
+        append_workspace_notification(
+            &mut state.notifications,
+            WorkspaceNotification::information("Created milestone"),
+        );
 
         let _ = desktop.update(Message::ClearNotifications { window });
         let NativeWindow::Project(state) = desktop.windows.get(&window).expect("project") else {
@@ -10498,6 +10659,7 @@ mod tests {
                 message,
                 kind: NotificationKind::Error,
                 expires_at: None,
+                ..
             }) if message == "History could not be repaired"
         ));
     }
@@ -11632,7 +11794,8 @@ mod tests {
     fn captured_editor_shortcuts_do_not_duplicate_clipboard_or_text_input_actions() {
         assert!(should_activate_shortcut("file.save", false));
         assert!(should_activate_shortcut("file.close", false));
-        assert!(should_activate_shortcut("format.bold", false));
+        assert!(!should_activate_shortcut("format.bold", false));
+        assert!(should_activate_shortcut("format.bold", true));
         assert!(should_activate_shortcut("edit.undo", true));
         assert!(should_activate_shortcut("edit.redo", true));
         assert!(!should_activate_shortcut("edit.undo", false));

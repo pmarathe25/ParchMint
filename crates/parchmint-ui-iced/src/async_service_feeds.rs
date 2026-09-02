@@ -47,8 +47,9 @@ use parchmint_ui_api::{
 };
 
 use crate::{
-    GlobalSearchResult, HistoryCheckpointCategory, HistoryCheckpointRow, HistoryDocumentPreview,
-    HistoryPreviewData, ProjectTaskPayload,
+    GlobalSearchResult, HistoryCheckpointCategory, HistoryCheckpointRow, HistoryComparison,
+    HistoryCurrentDocument, HistoryDocumentPreview, HistoryPreviewData, ProjectTaskPayload,
+    compare_history_documents,
 };
 
 /// A boxed operation that may call blocking service traits.
@@ -277,7 +278,7 @@ impl AsyncServiceFeeds {
     pub fn history_preview(
         &self,
         checkpoint_id: impl Into<String>,
-        document_id: Option<String>,
+        current_document: Option<HistoryCurrentDocument>,
     ) -> BlockingServiceJob<HistoryPreviewResult> {
         let ports = self.ports.clone();
         let checkpoint_id = checkpoint_id.into();
@@ -285,15 +286,27 @@ impl AsyncServiceFeeds {
             let checkpoint = parse_stable_id(&checkpoint_id, "History checkpoint")?;
             let checkpoint = CheckpointId::from_bytes(checkpoint);
             let preview = ports.history_preview(checkpoint)?;
-            let document = document_id
-                .map(|document| {
+            let document = current_document
+                .as_ref()
+                .map(|current| {
+                    let document = &current.document_id;
                     let document =
-                        DocumentId::from_bytes(parse_stable_id(&document, "History document")?);
+                        DocumentId::from_bytes(parse_stable_id(document, "History document")?);
                     load_checkpoint_document(ports.as_ref(), checkpoint, &preview, document)
                 })
                 .transpose()?
                 .flatten();
-            Ok(HistoryPreviewResult::from_preview(preview, document))
+            let comparison = document
+                .as_ref()
+                .zip(current_document.as_ref())
+                .filter(|(before, after)| before.document_id == after.document_id)
+                .map(|(before, after)| compare_history_documents(&checkpoint_id, before, after));
+            Ok(HistoryPreviewResult::from_preview(
+                preview,
+                document,
+                current_document,
+                comparison,
+            ))
         })
     }
 
@@ -537,12 +550,16 @@ pub struct HistoryPreviewResult {
     pub checkpoint: HistoryCheckpointRow,
     pub resource_paths: Vec<String>,
     pub document: Option<HistoryDocumentPreview>,
+    pub current_document: Option<HistoryCurrentDocument>,
+    pub comparison: Option<HistoryComparison>,
 }
 
 impl HistoryPreviewResult {
     fn from_preview(
         preview: SnapshotResourcePaths,
         document: Option<HistoryDocumentPreview>,
+        current_document: Option<HistoryCurrentDocument>,
+        comparison: Option<HistoryComparison>,
     ) -> Self {
         Self {
             checkpoint: HistoryCheckpointRow::from_summary(preview.checkpoint),
@@ -552,16 +569,20 @@ impl HistoryPreviewResult {
                 .map(|path| path.as_str().to_owned())
                 .collect(),
             document,
+            current_document,
+            comparison,
         }
     }
 
-    pub fn reducer_payload(&self) -> ProjectTaskPayload {
+    pub fn into_reducer_payload(self) -> ProjectTaskPayload {
         ProjectTaskPayload::HistoryPreviewReady {
             preview: HistoryPreviewData {
-                checkpoint: self.checkpoint.clone(),
-                resource_paths: self.resource_paths.iter().cloned().collect(),
-                document: self.document.clone(),
+                checkpoint: self.checkpoint,
+                resource_paths: self.resource_paths,
+                document: self.document,
             },
+            current_document: self.current_document,
+            comparison: self.comparison,
         }
     }
 }
@@ -1920,13 +1941,33 @@ mod tests {
                 bytes: body,
             });
 
+        let document_id = encode_hex(document.as_bytes());
         let preview = feeds(fake)
             .history_preview(
                 encode_hex(checkpoint.as_bytes()),
-                Some(encode_hex(document.as_bytes())),
+                Some(HistoryCurrentDocument {
+                    document_id: document_id.clone(),
+                    title: "Current chapter".to_owned(),
+                    body: String::new(),
+                    semantic: Default::default(),
+                }),
             )
             .run()
             .expect("checkpoint document preview");
+        assert_eq!(
+            preview
+                .comparison
+                .as_ref()
+                .map(|comparison| comparison.document_title.as_str()),
+            Some("Current chapter")
+        );
+        assert_eq!(
+            preview
+                .current_document
+                .as_ref()
+                .map(|document| document.document_id.as_str()),
+            Some(document_id.as_str())
+        );
         let document = preview.document.expect("document content");
         assert_eq!(document.canonical_path, path.as_str());
         assert_eq!(document.semantic.blocks().len(), 1);

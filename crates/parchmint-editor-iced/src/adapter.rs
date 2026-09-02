@@ -410,7 +410,15 @@ impl EditorIcedAdapter {
             let pending = std::mem::take(&mut state.pending_blocks);
             let mut relayouts = Vec::new();
             for (view, mounted) in &mut state.views {
-                for block in &pending {
+                let mut blocks_to_relayout = pending.clone();
+                if !pending.is_empty() {
+                    // The primary cache entry is the complete semantic
+                    // document projection. A split can change a newly-created
+                    // block without listing the primary block itself, but the
+                    // retained surface must still receive that new prose.
+                    blocks_to_relayout.insert(primary);
+                }
+                for block in &blocks_to_relayout {
                     let Some(cached) = mounted.layouts.get_mut(block) else {
                         continue;
                     };

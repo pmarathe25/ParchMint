@@ -10,12 +10,13 @@ use parchmint_ui_api::HistoryMaintenanceStatus;
 use std::collections::BTreeMap;
 
 use crate::{
-    CommentAnchor, ContentState, DragDestination, EditorMessage, EditorPane, F6Region, FocusTarget,
-    HarnessTarget, HierarchyItemKind, HierarchyRowKind, InspectorSection,
-    MetadataFieldApplicability, MetadataFieldTextKind, Point, ProjectFixture, ProjectMessage,
-    ProjectModal, ProjectWorkspace, ReplacementCheckState, ReplacementPreviewRowKind,
-    RestoreLocation, RibbonDestination, SaveState, SelectionGesture, SettingsCategory,
-    SettingsDetail, ShellLayout, SidebarSurface, StatusCount, StyleProperty,
+    CARDS_CARD_CONTENT_HEIGHT, CARDS_DROP_STRIP_HEIGHT, CommentAnchor, ContentState,
+    DragDestination, EditorMessage, EditorPane, F6Region, FocusTarget, HarnessTarget,
+    HierarchyItemKind, HierarchyRowKind, InspectorSection, MetadataFieldApplicability,
+    MetadataFieldTextKind, Point, ProjectFixture, ProjectMessage, ProjectModal, ProjectWorkspace,
+    ReplacementCheckState, ReplacementPreviewRowKind, RestoreLocation, RibbonDestination,
+    SaveState, SelectionGesture, SettingsCategory, SettingsDetail, ShellLayout, SidebarSurface,
+    StatusCount, StyleProperty,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{
         ParchMintTheme, RIBBON_HEIGHT, SPACING_4, SPACING_8, SPACING_12, SPACING_16, SPACING_24,
@@ -61,6 +62,10 @@ pub(crate) enum SidebarPanel {
 pub(crate) fn hierarchy_rename_input_id(_node_id: &str) -> iced::widget::Id {
     // Only one Explorer entry can be edited at a time.
     crate::harness_target::HarnessTarget::ExplorerRename.id()
+}
+
+pub(crate) fn explorer_scroll_id() -> iced::widget::Id {
+    iced::widget::Id::new("parchmint.explorer.scroll")
 }
 
 pub(crate) fn metadata_field_name_input_id() -> iced::widget::Id {
@@ -341,9 +346,36 @@ fn ribbon<'a>(
     destination: RibbonDestination,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    let mode_switch = [
+        ("Editor", RibbonDestination::Editor),
+        ("Cards", RibbonDestination::Cards),
+    ]
+    .into_iter()
+    .fold(row![].spacing(0), |modes, (label, item)| {
+        let selected = matches!(
+            (destination, item),
+            (
+                RibbonDestination::Editor | RibbonDestination::GlobalSearch,
+                RibbonDestination::Editor
+            ) | (RibbonDestination::Cards, RibbonDestination::Cards)
+        );
+        modes.push(harness_target::target(
+            HarnessTarget::Ribbon(item),
+            button(text(label).size(12))
+                .padding([6, 12])
+                .height(32)
+                .on_press(ProjectSurfaceMessage::Navigate(item))
+                .style(move |_, status| mode_switch_button_style(theme, status, selected)),
+        ))
+    });
+    let mode_switch = focus::f6_region(
+        F6Region::ModeSwitch,
+        container(mode_switch)
+            .style(move |_| mode_switch_container_style(theme))
+            .padding(1),
+    );
+
     let destinations = [
-        (Icon::Editor, "Editor", RibbonDestination::Editor),
-        (Icon::Cards, "Cards", RibbonDestination::Cards),
         (Icon::History, "History", RibbonDestination::History),
         (
             Icon::RecentlyDeleted,
@@ -353,7 +385,7 @@ fn ribbon<'a>(
         (Icon::Export, "Export", RibbonDestination::Export),
         (Icon::Settings, "Settings", RibbonDestination::Settings),
     ];
-    let buttons =
+    let utilities =
         destinations
             .into_iter()
             .fold(row![].spacing(4), |row, (icon_kind, label, item)| {
@@ -382,15 +414,6 @@ fn ribbon<'a>(
                     components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ))
             });
-    let buttons = focus::f6_region(F6Region::ModeSwitch, buttons);
-    let active_label = match destination {
-        RibbonDestination::Editor | RibbonDestination::GlobalSearch => "Editor",
-        RibbonDestination::Cards => "Cards",
-        RibbonDestination::History => "History",
-        RibbonDestination::RecentlyDeleted => "Recently Deleted",
-        RibbonDestination::Export => "Export",
-        RibbonDestination::Settings => "Settings",
-    };
     let title = row![icon(Icon::Project), text(project_title).size(16),]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center)
@@ -398,10 +421,9 @@ fn ribbon<'a>(
     container(
         row![
             title,
-            buttons,
-            text(active_label)
-                .size(12)
-                .color(theme.palette().secondary_text)
+            mode_switch,
+            Space::new().width(Length::Fill),
+            utilities,
         ]
         .spacing(16)
         .align_y(iced::alignment::Vertical::Center),
@@ -411,6 +433,36 @@ fn ribbon<'a>(
     .height(Length::Fixed(f32::from(RIBBON_HEIGHT)))
     .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
     .into()
+}
+
+fn mode_switch_container_style(theme: ParchMintTheme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(Background::Color(theme.palette().application)),
+        border: Border {
+            color: theme.palette().border,
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn mode_switch_button_style(
+    theme: ParchMintTheme,
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> iced::widget::button::Style {
+    let mut style = components::button_style(theme, ButtonKind::Quiet, interaction(status, false));
+    if selected {
+        style.background = Some(Background::Color(theme.palette().accent_subtle));
+        style.text_color = theme.palette().accent;
+        style.border = Border {
+            color: theme.palette().accent,
+            width: 1.0,
+            radius: 3.0.into(),
+        };
+    }
+    style
 }
 
 fn left_rail<'a>(
@@ -490,7 +542,7 @@ fn explorer_rail<'a>(
                     ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
                 ),
                 HierarchyRowKind::Group => ProjectSurfaceMessage::Project(
-                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                    ProjectMessage::SelectAndToggleHierarchyExpanded(item.id.to_owned()),
                 ),
                 HierarchyRowKind::Root => unreachable!("roots retain their disclosure control"),
             });
@@ -540,14 +592,6 @@ fn explorer_rail<'a>(
                         }),
                 )
                 .interaction(iced::mouse::Interaction::Pointer);
-                let row = match item.kind {
-                    HierarchyRowKind::Document => {
-                        row.on_double_click(ProjectSurfaceMessage::Project(
-                            ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
-                        ))
-                    }
-                    HierarchyRowKind::Root | HierarchyRowKind::Group => row,
-                };
                 if item.kind == HierarchyRowKind::Root {
                     hierarchy_drag::source(
                         row,
@@ -555,6 +599,7 @@ fn explorer_rail<'a>(
                             node_id: item.id.to_owned(),
                             gesture: SelectionGesture::Replace,
                         }),
+                        None,
                         ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                             source_id: item.id.to_owned(),
                             gesture: SelectionGesture::Replace,
@@ -574,6 +619,11 @@ fn explorer_rail<'a>(
                 Some(on_press) => hierarchy_drag::source(
                     item_row,
                     on_press,
+                    (item.kind == HierarchyRowKind::Document).then(|| {
+                        ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(
+                            item.id.to_owned(),
+                        ))
+                    }),
                     ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                         source_id: item.id.to_owned(),
                         gesture: SelectionGesture::Replace,
@@ -746,7 +796,9 @@ fn explorer_rail<'a>(
         .spacing(4),
         creation_menu,
         selection_shelf,
-        scrollable(rows).height(Length::Fill),
+        scrollable(rows)
+            .id(explorer_scroll_id())
+            .height(Length::Fill),
     ]
     .spacing(8)
     .height(Length::Fill);
@@ -825,13 +877,13 @@ fn hierarchy_drop_strip<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     if !dragging {
-        return Space::new().height(1).into();
+        return Space::new().height(CARDS_DROP_STRIP_HEIGHT).into();
     }
     let active = current == Some(&target);
     harness_target::target_id(
         id,
         mouse_area(
-            container(Space::new().height(if active { 6 } else { 4 }))
+            container(Space::new().height(CARDS_DROP_STRIP_HEIGHT))
                 .width(Length::Fill)
                 .style(move |_| {
                     if active {
@@ -1385,22 +1437,18 @@ fn cards_center<'a>(
     );
     let drag_source = workspace.hierarchy_drag_source().map(str::to_owned);
     let drag_destination = workspace.hierarchy_drag_destination().cloned();
-    let items = cards.items().into_iter().filter(|item| item.visible).fold(
-        column![].spacing(0),
-        |column, item| {
+    let card_window = cards.item_window();
+    let items = cards
+        .windowed_items()
+        .into_iter()
+        .fold(column![].spacing(0), |column, item| {
+            // Cards retain one stable row extent, but each configured field
+            // remains a separate, labelled chip. Colour accelerates scanning;
+            // the label and value continue to carry the meaning.
             let metadata = item.metadata.into_iter().fold(
-                column![].spacing(SPACING_4),
+                row![].spacing(SPACING_4),
                 |metadata, (_, label, value)| {
-                    metadata.push(
-                        row![
-                            text(label)
-                                .size(u32::from(UI_COMPACT.size))
-                                .color(theme.palette().secondary_text),
-                            text(" · ").size(11),
-                            text(value.unwrap_or("—")).size(u32::from(UI_COMPACT.size)),
-                        ]
-                        .spacing(0),
-                    )
+                    metadata.push(card_metadata_chip(label, value, theme))
                 },
             );
             let node_id = item.node_id.to_owned();
@@ -1419,33 +1467,37 @@ fn cards_center<'a>(
                 _ => Space::new().width(28).into(),
             };
             let group = item.kind == HierarchyRowKind::Group;
+            let title = compact_card_projection(item.title, 72);
+            let synopsis = compact_card_projection(item.synopsis, 104);
             let card_content = column![
                 row![
                     disclosure,
-                    text(item.title)
+                    text(title)
                         .size(if group {
                             u32::from(UI_HEADING.size)
                         } else {
                             u32::from(UI_BODY.size)
                         })
-                        .font(if group {
-                            Font {
-                                weight: font::Weight::Bold,
-                                ..Font::DEFAULT
-                            }
-                        } else {
-                            Font::DEFAULT
+                        .font(Font {
+                            weight: if group {
+                                font::Weight::Bold
+                            } else if item.selected {
+                                font::Weight::Semibold
+                            } else {
+                                font::Weight::Normal
+                            },
+                            ..Font::DEFAULT
                         })
                         .width(Length::Fill),
-                    Space::new().width(Length::Fill),
-                    container(metadata).padding([0.0, SPACING_8]).width(220),
                 ]
                 .align_y(iced::alignment::Vertical::Center),
-                text(item.synopsis)
+                text(synopsis)
                     .size(u32::from(UI_BODY.size))
-                    .color(theme.palette().secondary_text),
+                    .color(theme.palette().secondary_text)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                metadata,
             ]
-            .spacing(SPACING_8);
+            .spacing(SPACING_4);
             let before = DragDestination::BeforeSibling(node_id.clone());
             let after = DragDestination::AfterSibling(node_id.clone());
             let middle = if item.kind == HierarchyRowKind::Group {
@@ -1461,7 +1513,9 @@ fn cards_center<'a>(
                 Space::new().width(0).into()
             };
             let drop_state: Element<'a, ProjectSurfaceMessage> = if middle_active {
-                text("Drop inside").size(11).into()
+                text(if group { "Drop inside" } else { "Drop after" })
+                    .size(11)
+                    .into()
             } else {
                 Space::new().height(0).into()
             };
@@ -1479,33 +1533,49 @@ fn cards_center<'a>(
                 } else {
                     [SPACING_8, SPACING_16]
                 })
+                .height(Length::Fixed(CARDS_CARD_CONTENT_HEIGHT))
                 .width(Length::Fill)
                 .style(move |_| {
+                    let mut style =
+                        components::surface(theme, Surface::Elevated, Interaction::Rest);
                     if source_active || middle_active || item.selected {
-                        components::surface(theme, Surface::Panel, Interaction::Selected)
-                    } else {
-                        iced::widget::container::Style::default()
+                        style.background = Some(Background::Color(theme.palette().accent_subtle));
+                        style.border = Border {
+                            color: if item.selected {
+                                theme.palette().focus_ring
+                            } else {
+                                theme.palette().accent
+                            },
+                            width: 1.0,
+                            radius: 4.0.into(),
+                        };
                     }
+                    style
                 }),
             ])
             .on_enter(ProjectSurfaceMessage::Project(
                 ProjectMessage::SetDragDestination(Some(middle)),
             ));
-            let card_body = match item.kind {
-                HierarchyRowKind::Document => card_body.on_double_click(
-                    ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(node_id.clone())),
+            // Cards deliberately share Explorer's group interaction: a group
+            // is a structural disclosure, so one click expands or collapses
+            // it. Documents keep a selection click and activate on double
+            // click, leaving Inspector as the single editing surface.
+            let press = match item.kind {
+                HierarchyRowKind::Group | HierarchyRowKind::Root => ProjectSurfaceMessage::Project(
+                    ProjectMessage::SelectAndToggleHierarchyExpanded(node_id.clone()),
                 ),
-                HierarchyRowKind::Root | HierarchyRowKind::Group => {
-                    card_body.on_double_click(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ToggleHierarchyExpanded(node_id.clone()),
-                    ))
+                HierarchyRowKind::Document => {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                        node_id: node_id.clone(),
+                        gesture: SelectionGesture::Replace,
+                    })
                 }
             };
             let card: Element<'a, ProjectSurfaceMessage> = hierarchy_drag::source(
                 card_body,
-                ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
-                    node_id: node_id.clone(),
-                    gesture: SelectionGesture::Replace,
+                press,
+                (item.kind == HierarchyRowKind::Document).then(|| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(node_id.clone()))
                 }),
                 ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                     source_id: node_id.clone(),
@@ -1538,24 +1608,34 @@ fn cards_center<'a>(
                     drag_destination.as_ref(),
                     theme,
                 ))
-        },
-    );
-    let items = if cards.items().iter().all(|item| !item.visible) {
+        });
+    let items = if cards.visible_item_count() == 0 {
         items.push(text("This section has no cards yet.").size(13))
     } else {
-        items
+        column![
+            Space::new().height(card_window.top_padding),
+            items,
+            Space::new().height(card_window.bottom_padding),
+        ]
+        .spacing(0)
     };
-    let content = column![
-        text(section_title)
-            .size(u32::from(UI_HEADING.size))
-            .line_height(UI_HEADING.line_height),
-        text("Manuscript outline")
-            .size(u32::from(UI_COMPACT.size))
-            .color(theme.palette().secondary_text),
-        sections,
-        scrollable(items).height(Length::Fill),
-    ]
-    .spacing(SPACING_12);
+    let content =
+        column![
+            text(section_title)
+                .size(u32::from(UI_HEADING.size))
+                .line_height(UI_HEADING.line_height),
+            text("Manuscript outline")
+                .size(u32::from(UI_COMPACT.size))
+                .color(theme.palette().secondary_text),
+            sections,
+            scrollable(items)
+                .id(HarnessTarget::CardsList.id())
+                .on_scroll(|viewport| ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetCardsScroll(viewport.absolute_offset().y)
+                ))
+                .height(Length::Fill),
+        ]
+        .spacing(SPACING_12);
     let content = container(content)
         .padding([SPACING_32 + SPACING_4, SPACING_24])
         .width(Length::Fill)
@@ -1565,6 +1645,74 @@ fn cards_center<'a>(
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Center)
         .into()
+}
+
+/// Collapses multiline, user-authored Card content into a bounded one-line
+/// preview without splitting a Unicode code point. Inspector remains the
+/// complete source of title, Synopsis, and metadata values.
+fn compact_card_projection(value: &str, maximum_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some((truncate_at, _)) = compact.char_indices().nth(maximum_chars) else {
+        return compact;
+    };
+    format!("{}…", &compact[..truncate_at])
+}
+
+/// Uses a stable field-name hash so the same metadata field receives the same
+/// theme-aware tint in every project. Field values deliberately do not affect
+/// the colour: their text is the content authors scan and edit.
+fn card_metadata_chip<'a>(
+    label: &'a str,
+    value: Option<&'a str>,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    let (background, border) = card_metadata_chip_colors(theme, label);
+    let value = compact_card_projection(value.unwrap_or("—"), 24);
+    container(
+        text(format!("{label}: {value}"))
+            .size(u32::from(UI_COMPACT.size))
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .padding([2.0, SPACING_4])
+    .style(move |_| iced::widget::container::Style {
+        background: Some(Background::Color(background)),
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: 3.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+fn card_metadata_chip_colors(theme: ParchMintTheme, label: &str) -> (Color, Color) {
+    let palette = theme.palette();
+    let tints = [
+        palette.accent,
+        palette.success,
+        palette.warning,
+        palette.saving,
+        palette.comment_active,
+        palette.comment_resolved,
+    ];
+    let tint = tints[(stable_metadata_label_hash(label) as usize) % tints.len()];
+    (Color { a: 0.16, ..tint }, Color { a: 0.55, ..tint })
+}
+
+fn stable_metadata_label_hash(label: &str) -> u64 {
+    // FNV-1a is sufficient for selecting from this small visual palette and,
+    // unlike the standard-library hasher, remains stable across processes.
+    let normalized = label
+        .split_whitespace()
+        .map(|word| word.to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
 }
 
 fn search_center<'a>(
@@ -1733,62 +1881,83 @@ fn history_center<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let history = workspace.history();
-    let checkpoints =
-        history
-            .windowed_checkpoints()
-            .fold(column![].spacing(SPACING_4), |column, checkpoint| {
-                let checkpoint_id = checkpoint.checkpoint_id.clone();
-                let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
-                let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
-                    column.push(text(heading).size(11).color(theme.palette().secondary_text))
-                } else {
-                    column
-                };
+    let checkpoint_window = history.checkpoint_window();
+    let checkpoints = history
+        .visible_checkpoints()
+        .skip(checkpoint_window.start)
+        .take(
+            checkpoint_window
+                .end
+                .saturating_sub(checkpoint_window.start),
+        )
+        .fold(column![], |column, checkpoint| {
+            let checkpoint_id = checkpoint.checkpoint_id.clone();
+            let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
+            let word_delta = history
+                .comparison()
+                .filter(|comparison| comparison.checkpoint_id == checkpoint_id)
+                .map(|comparison| format!(" · {:+} words", comparison.word_count_delta()))
+                .unwrap_or_default();
+            let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
+                column.push(
+                    container(text(heading).size(11).color(theme.palette().secondary_text))
+                        .height(Length::Fixed(
+                            crate::project_workspace::HISTORY_TIMELINE_HEADING_HEIGHT,
+                        ))
+                        .align_y(iced::alignment::Vertical::Center),
+                )
+            } else {
                 column
-                    .push(
-                        column![
-                            harness_target::target_id(
-                                harness_target::history_checkpoint_id(&checkpoint_id),
-                                button(text(checkpoint.label()).size(u32::from(UI_BODY.size)))
-                                    .padding([SPACING_4, 0.0])
-                                    .width(Length::Fill)
-                                    .on_press(ProjectSurfaceMessage::Project(
-                                        ProjectMessage::SelectHistoryCheckpoint(
-                                            checkpoint_id.clone(),
-                                        ),
-                                    ))
-                                    .style(move |_, status| components::button_style(
-                                        theme,
-                                        ButtonKind::Quiet,
-                                        interaction(status, selected),
-                                    )),
-                            ),
-                            text(format!(
-                                "{} · {} · Version {}",
-                                checkpoint.category.label(),
-                                checkpoint.affected_summary(),
-                                checkpoint.sequence,
-                            ))
-                            .size(u32::from(UI_COMPACT.size))
-                            .color(theme.palette().secondary_text),
-                        ]
-                        .spacing(SPACING_4)
-                        .padding(SPACING_8)
-                        .height(Length::Fixed(72.0)),
+            };
+            column
+                .push(
+                    column![
+                        harness_target::target_id(
+                            harness_target::history_checkpoint_id(&checkpoint_id),
+                            button(text(checkpoint.label()).size(u32::from(UI_BODY.size)))
+                                .padding([SPACING_4, 0.0])
+                                .width(Length::Fill)
+                                .on_press(ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SelectHistoryCheckpoint(checkpoint_id.clone(),),
+                                ))
+                                .style(move |_, status| components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, selected),
+                                )),
+                        ),
+                        text(format!(
+                            "{} · {} · Version {}{}",
+                            checkpoint.category.label(),
+                            checkpoint.affected_summary(),
+                            checkpoint.sequence,
+                            word_delta,
+                        ))
+                        .size(u32::from(UI_COMPACT.size))
+                        .color(theme.palette().secondary_text),
+                    ]
+                    .spacing(SPACING_4)
+                    .padding(SPACING_8)
+                    .height(Length::Fixed(
+                        crate::project_workspace::HISTORY_CHECKPOINT_ROW_HEIGHT,
+                    )),
+                )
+                .push(
+                    container(
+                        Space::new()
+                            .height(crate::project_workspace::HISTORY_TIMELINE_DIVIDER_HEIGHT),
                     )
-                    .push(
-                        container(Space::new().height(1))
-                            .width(Length::Fill)
-                            .style(move |_| iced::widget::container::Style {
-                                background: Some(Background::Color(theme.palette().divider)),
-                                ..Default::default()
-                            }),
-                    )
-            });
+                    .width(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(Background::Color(theme.palette().divider)),
+                        ..Default::default()
+                    }),
+                )
+        });
     let checkpoints = column![
-        Space::new().height(history.checkpoint_window_start() as f32 * 72.0),
+        Space::new().height(checkpoint_window.top_padding),
         checkpoints,
-        Space::new().height(history.checkpoint_window_bottom_padding()),
+        Space::new().height(checkpoint_window.bottom_padding),
     ];
     let restore: Element<'a, ProjectSurfaceMessage> = history
         .selected_checkpoint_id()
@@ -1903,6 +2072,12 @@ fn history_center<'a>(
                 .spacing(8),
             )
             .into()
+        }
+        None if history.error().is_some() => Space::new().height(0).into(),
+        None if history.preview().is_some() => {
+            text("This checkpoint has no version of the current document to compare.")
+                .size(12)
+                .into()
         }
         None if history.selected_checkpoint_id().is_some() => {
             text("Loading checkpoint comparison…").size(12).into()
@@ -3704,6 +3879,7 @@ fn inspector<'a>(
         }
         for (thread_index, thread) in threads.into_iter().enumerate() {
             let thread_id = thread.id().to_owned();
+            let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
             let state = if thread.resolved() {
                 "Resolved"
             } else {
@@ -3717,35 +3893,50 @@ fn inspector<'a>(
             let root = thread.messages().first();
             let root_body = root.map(|message| message.body()).unwrap_or("Comment");
             let anchor_summary = comment_anchor_summary(thread.anchor());
+            let mut thread_summary = row![
+                column![
+                    text(root_body).size(u32::from(UI_BODY.size)),
+                    text(anchor_summary)
+                        .size(u32::from(UI_COMPACT.size))
+                        .color(theme.palette().secondary_text),
+                ]
+                .spacing(SPACING_4),
+                Space::new().width(Length::Fill),
+            ]
+            .spacing(SPACING_8);
+            if selected_thread {
+                thread_summary = thread_summary.push(
+                    text("Selected").size(u32::from(UI_LABEL.size)).font(Font {
+                        weight: font::Weight::Semibold,
+                        ..Font::DEFAULT
+                    }),
+                );
+            }
+            thread_summary = thread_summary.push(
+                text(state)
+                    .size(u32::from(UI_LABEL.size))
+                    .font(Font {
+                        weight: font::Weight::Semibold,
+                        ..Font::DEFAULT
+                    })
+                    .color(state_color),
+            );
             let mut card = column![
-                button(
-                    row![
-                        column![
-                            text(root_body).size(u32::from(UI_BODY.size)),
-                            text(anchor_summary)
-                                .size(u32::from(UI_COMPACT.size))
-                                .color(theme.palette().secondary_text),
-                        ]
-                        .spacing(SPACING_4),
-                        Space::new().width(Length::Fill),
-                        text(state)
-                            .size(u32::from(UI_LABEL.size))
-                            .font(Font {
-                                weight: font::Weight::Semibold,
-                                ..Font::DEFAULT
-                            })
-                            .color(state_color),
-                    ]
-                    .spacing(SPACING_8)
-                )
-                .width(Length::Fill)
-                .padding([4, 0])
-                .on_press(ProjectSurfaceMessage::EditorCenter(
-                    EditorCenterMessage::Workspace(EditorMessage::SelectComment(thread_id.clone()))
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                })
+                button(thread_summary)
+                    .width(Length::Fill)
+                    .padding([4, 0])
+                    .on_press(ProjectSurfaceMessage::EditorCenter(
+                        EditorCenterMessage::Workspace(EditorMessage::SelectComment(
+                            thread_id.clone()
+                        ))
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    })
             ]
             .spacing(SPACING_8);
             if let Some(root) = root {
@@ -4062,14 +4253,27 @@ fn inspector<'a>(
                     .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
                 );
             }
-            comments = comments.push(card).push(
-                container(Space::new().height(1))
-                    .width(Length::Fill)
-                    .style(move |_| iced::widget::container::Style {
-                        background: Some(Background::Color(theme.palette().divider)),
-                        ..Default::default()
-                    }),
-            );
+            comments = comments
+                .push(
+                    container(card)
+                        .width(Length::Fill)
+                        .padding(8)
+                        .style(move |_| {
+                            if selected_thread {
+                                components::surface(theme, Surface::Panel, Interaction::Selected)
+                            } else {
+                                iced::widget::container::Style::default()
+                            }
+                        }),
+                )
+                .push(
+                    container(Space::new().height(1))
+                        .width(Length::Fill)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(Background::Color(theme.palette().divider)),
+                            ..Default::default()
+                        }),
+                );
         }
         // A document-level comment is always available: authors often need to
         // leave a note about a chapter before selecting specific prose.
@@ -4119,6 +4323,86 @@ fn inspector<'a>(
         if let Some(feedback) = editor.comment_feedback() {
             comments = comments.push(text(feedback).size(12));
         }
+        // Comment mutation belongs beside the text it affects. Keep this
+        // Inspector section as a compact document index: clicking an entry
+        // navigates to its anchor, while the anchored editor popover owns all
+        // drafting and thread actions.
+        let _legacy_comment_controls = comments;
+        let mut comments = column![].spacing(SPACING_8);
+        let threads = editor.inspector_comments();
+        if threads.is_empty() {
+            comments = comments.push(
+                column![
+                    text("No comments").size(13),
+                    text("Select text, then choose Add Comment from its context menu.")
+                        .size(12)
+                        .color(theme.palette().secondary_text),
+                ]
+                .spacing(2),
+            );
+        }
+        for thread in threads {
+            let thread_id = thread.id().to_owned();
+            let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
+            let state = if thread.resolved() {
+                "Resolved"
+            } else {
+                "Unresolved"
+            };
+            let state_color = if thread.resolved() {
+                theme.palette().comment_resolved
+            } else {
+                theme.palette().comment_active
+            };
+            let root_body = thread
+                .messages()
+                .first()
+                .map_or("Comment", crate::CommentMessageView::body);
+            let summary = row![
+                column![
+                    text(root_body).size(u32::from(UI_BODY.size)),
+                    text(comment_anchor_summary(thread.anchor()))
+                        .size(u32::from(UI_COMPACT.size))
+                        .color(theme.palette().secondary_text),
+                ]
+                .spacing(SPACING_4),
+                Space::new().width(Length::Fill),
+                text(state)
+                    .size(u32::from(UI_LABEL.size))
+                    .font(Font {
+                        weight: font::Weight::Semibold,
+                        ..Font::DEFAULT
+                    })
+                    .color(state_color),
+            ]
+            .spacing(SPACING_8);
+            comments = comments.push(
+                container(
+                    button(summary)
+                        .width(Length::Fill)
+                        .padding([6, 4])
+                        .on_press(ProjectSurfaceMessage::EditorCenter(
+                            EditorCenterMessage::Workspace(EditorMessage::SelectComment(thread_id)),
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                )
+                .width(Length::Fill)
+                .padding(6)
+                .style(move |_| {
+                    if selected_thread {
+                        components::surface(theme, Surface::Panel, Interaction::Selected)
+                    } else {
+                        iced::widget::container::Style::default()
+                    }
+                }),
+            );
+        }
         let [synopsis_expanded, metadata_expanded, comments_expanded] = expanded;
         let mut sections = column![
             button(
@@ -4160,11 +4444,22 @@ fn inspector<'a>(
             sections = sections.push(metadata);
         }
         if document_selected && editor.production_comments_enabled() {
+            let comment_summary = if editor.inspector_unresolved_comment_count() > 0 {
+                format!(
+                    "· {} unresolved",
+                    editor.inspector_unresolved_comment_count()
+                )
+            } else {
+                format!("· {} comments", editor.inspector_comment_count())
+            };
             sections = sections.push(
                 button(
                     row![
                         text(if comments_expanded { "⌄" } else { "›" }).size(12),
                         text("COMMENTS").size(12),
+                        text(comment_summary)
+                            .size(u32::from(UI_COMPACT.size))
+                            .color(theme.palette().secondary_text),
                     ]
                     .spacing(6),
                 )
@@ -4768,6 +5063,7 @@ mod tests {
         DocumentId, MetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
         MetadataTextKind, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
     };
+    use parchmint_editor_api::{BlockId, CanonicalComment, CommentId, EditorSelection};
     use parchmint_preferences::ResolvedAppearance;
     use parchmint_ui_api::ProjectSnapshot;
 
@@ -4801,6 +5097,38 @@ mod tests {
                 .is_file(),
             "checked-in tiny-skia fixture hash is required for {stem}"
         );
+    }
+
+    #[test]
+    fn card_metadata_chip_colours_are_stable_for_normalized_field_labels() {
+        let light = ParchMintTheme::new(ResolvedAppearance::Light);
+        let dark = ParchMintTheme::new(ResolvedAppearance::Dark);
+
+        assert_eq!(
+            stable_metadata_label_hash("Point of view"),
+            stable_metadata_label_hash("  point   OF\tview ")
+        );
+        assert_eq!(
+            card_metadata_chip_colors(light, "Point of view"),
+            card_metadata_chip_colors(light, "point OF view")
+        );
+        assert_ne!(
+            card_metadata_chip_colors(light, "Point of view"),
+            card_metadata_chip_colors(dark, "Point of view"),
+            "chip tints must follow the active theme"
+        );
+    }
+
+    #[test]
+    fn cards_render_labelled_metadata_chips_without_using_colour_as_the_label() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+        );
+
+        assert!(simulator.find("Point of view: first person").is_ok());
     }
 
     #[test]
@@ -4868,6 +5196,15 @@ mod tests {
         assert!(simulator.find("Edit").is_err());
         assert!(simulator.find("New group").is_err());
         assert!(simulator.find("New document").is_err());
+    }
+
+    #[test]
+    fn compact_card_projection_preserves_unicode_and_collapses_multiline_values() {
+        assert_eq!(
+            compact_card_projection("  A\nlong\tSynopsis  ", 64),
+            "A long Synopsis"
+        );
+        assert_eq!(compact_card_projection("éclair", 1), "é…");
     }
 
     #[test]
@@ -5051,7 +5388,7 @@ mod tests {
     }
 
     #[test]
-    fn comment_inspector_keeps_document_comment_creation_available_when_empty() {
+    fn comment_inspector_explains_that_creation_starts_from_selected_text() {
         let (mut workspace, ids) = production_workspace();
         workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -5072,16 +5409,75 @@ mod tests {
         assert!(simulator.find("No comments").is_ok());
         assert!(
             simulator
-                .find("Add a document comment below, or select text to anchor one.")
+                .find("Select text, then choose Add Comment from its context menu.")
                 .is_ok()
         );
-        assert!(simulator.find("New comment").is_ok());
-        assert!(simulator.find("Add at selection").is_ok());
-        assert!(simulator.find("Add to document").is_ok());
+        assert!(simulator.find("New comment").is_err());
+        assert!(simulator.find("Add at selection").is_err());
+        assert!(simulator.find("Add to document").is_err());
     }
 
     #[test]
-    fn comment_inspector_opens_the_composer_after_selected_text_invocation() {
+    fn selected_comment_is_rendered_first_in_the_read_only_inspector_index() {
+        let (mut workspace, ids) = production_workspace();
+        workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: ids.live_node,
+            gesture: SelectionGesture::Replace,
+        });
+        let selected = CommentId::from_bytes([0x22; 16]);
+        workspace.editor_mut().reconcile_document_comments(
+            &ids.live_document,
+            &[
+                CanonicalComment::new(
+                    CommentId::from_bytes([0x11; 16]),
+                    EditorSelection::new(1.into(), 4.into()),
+                    "Earlier thread",
+                    BlockId::from_bytes([0x33; 16]),
+                ),
+                CanonicalComment::new(
+                    selected,
+                    EditorSelection::new(5.into(), 8.into()),
+                    "Selected thread",
+                    BlockId::from_bytes([0x33; 16]),
+                ),
+            ],
+        );
+        let selected_id = id_string(selected.as_bytes());
+        workspace
+            .editor_mut()
+            .update(EditorMessage::SelectComment(selected_id.clone()));
+        assert_eq!(
+            workspace.editor().selected_comment(),
+            Some(selected_id.as_str())
+        );
+        assert_eq!(
+            workspace.editor().inspector_comments()[0].id(),
+            selected_id.as_str()
+        );
+
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+            ),
+        );
+        assert!(simulator.find("Selected thread").is_ok());
+        assert!(simulator.find("Edit message").is_err());
+        assert!(simulator.find("Reply to thread").is_err());
+        let snapshot = simulator
+            .snapshot(&theme.iced_theme())
+            .expect("selected comment Inspector render");
+        assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
+    }
+
+    #[test]
+    fn comment_inspector_stays_read_only_when_the_editor_composer_is_open() {
         let (mut workspace, ids) = production_workspace();
         workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -5090,7 +5486,16 @@ mod tests {
         });
         workspace
             .editor_mut()
-            .update(EditorMessage::BeginCommentAtSelection);
+            .update(EditorMessage::BeginCommentAtSelection {
+                pane: EditorPane::Primary,
+                anchor_bounds: crate::Rect::new(24.0, 36.0, 30.0, 14.0),
+            });
+        assert!(
+            workspace
+                .editor()
+                .comment_composer(EditorPane::Primary)
+                .is_some()
+        );
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
@@ -5103,9 +5508,9 @@ mod tests {
             ),
         );
 
-        assert!(simulator.find("New comment").is_ok());
-        assert!(simulator.find("Add at selection").is_ok());
-        assert!(simulator.find("Add to document").is_ok());
+        assert!(simulator.find("No comments").is_ok());
+        assert!(simulator.find("New comment").is_err());
+        assert!(simulator.find("Add at selection").is_err());
     }
 
     #[test]
@@ -5254,6 +5659,22 @@ mod tests {
         let ticket = workspace.begin_task(crate::ProjectTask::PreviewHistory {
             checkpoint_id: checkpoint_id.clone(),
         });
+        let checkpoint_document = crate::HistoryDocumentPreview {
+            document_id: "chapter-one".to_owned(),
+            canonical_path: "documents/chapter-one.html".to_owned(),
+            semantic: semantic(&["The blue house", "Keep", "Remove me"]),
+        };
+        let current_document = crate::HistoryCurrentDocument {
+            document_id: "chapter-one".to_owned(),
+            title: "Chapter One".to_owned(),
+            body: "<p>The green house</p><p>Keep</p><p>Added one</p><p>Added two</p>".to_owned(),
+            semantic: semantic(&["The green house", "Keep", "Added one", "Added two"]),
+        };
+        let comparison = crate::project_workspace::compare_history_documents(
+            &checkpoint_id,
+            &checkpoint_document,
+            &current_document,
+        );
         assert!(
             workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
                 ticket,
@@ -5261,21 +5682,13 @@ mod tests {
                     preview: crate::HistoryPreviewData {
                         checkpoint,
                         resource_paths: vec!["documents/chapter-one.html".to_owned()],
-                        document: Some(crate::HistoryDocumentPreview {
-                            document_id: "chapter-one".to_owned(),
-                            canonical_path: "documents/chapter-one.html".to_owned(),
-                            semantic: semantic(&["The blue house", "Keep", "Remove me"]),
-                        }),
+                        document: Some(checkpoint_document),
                     },
+                    current_document: Some(current_document),
+                    comparison: Some(comparison),
                 },
             ))
         );
-        workspace.set_history_current_document(Some(crate::HistoryCurrentDocument {
-            document_id: "chapter-one".to_owned(),
-            title: "Chapter One".to_owned(),
-            body: "<p>The green house</p><p>Keep</p><p>Added one</p><p>Added two</p>".to_owned(),
-            semantic: semantic(&["The green house", "Keep", "Added one", "Added two"]),
-        }));
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
@@ -5292,6 +5705,11 @@ mod tests {
         assert!(simulator.find("1").is_ok());
         assert!(simulator.find("blue").is_ok());
         assert!(simulator.find("green").is_ok());
+        assert!(
+            simulator
+                .find("Named snapshot · 1 document · Version 2 · +2 words")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -5615,7 +6033,7 @@ mod tests {
     }
 
     #[test]
-    fn explorer_group_click_toggles_while_cards_keep_selection_and_double_click_toggle() {
+    fn explorer_and_cards_group_clicks_toggle_the_shared_hierarchy() {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
 
         let mut explorer = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
@@ -5633,7 +6051,7 @@ mod tests {
         let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
         assert!(explorer_messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectAndToggleHierarchyExpanded(node_id))
                 if node_id == "part-one"
         )));
         assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
@@ -5663,7 +6081,7 @@ mod tests {
         let explorer_messages = explorer_surface.into_messages().collect::<Vec<_>>();
         assert!(explorer_messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectAndToggleHierarchyExpanded(node_id))
                 if node_id == "part-one"
         )));
         assert!(apply_project_messages(&mut explorer, explorer_messages).is_empty());
@@ -5687,12 +6105,13 @@ mod tests {
         let card_messages = cards_surface.into_messages().collect::<Vec<_>>();
         assert!(card_messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy { node_id, .. })
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectAndToggleHierarchyExpanded(node_id))
                 if node_id == "part-one"
         )));
         assert!(apply_project_messages(&mut cards, card_messages).is_empty());
+        assert_eq!(cards.explorer().selected_ids(), ["part-one"]);
         assert!(
-            cards
+            !cards
                 .explorer()
                 .rows()
                 .into_iter()
@@ -5708,19 +6127,16 @@ mod tests {
         );
         cards_surface
             .click("Part One")
-            .expect("first Cards group click");
-        cards_surface
-            .click("Part One")
             .expect("second Cards group click");
         let card_messages = cards_surface.into_messages().collect::<Vec<_>>();
         assert!(card_messages.iter().any(|message| matches!(
             message,
-            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(node_id))
+            ProjectSurfaceMessage::Project(ProjectMessage::SelectAndToggleHierarchyExpanded(node_id))
                 if node_id == "part-one"
         )));
         assert!(apply_project_messages(&mut cards, card_messages).is_empty());
         assert!(
-            !cards
+            cards
                 .explorer()
                 .rows()
                 .into_iter()
@@ -5835,12 +6251,12 @@ mod tests {
                     && destination == &DragDestination::IntoGroup("research".to_owned())
         ));
         assert!(
-            state.effects.iter().any(|effect| matches!(
+            !state.effects.iter().any(|effect| matches!(
                 effect,
                 crate::ProjectEffect::OpenDocumentInPrimary(document_id)
                     if document_id == "chapter-one"
             )),
-            "a document click still opens its replaceable preview"
+            "reselecting the active document must not remount its preview"
         );
         assert_eq!(
             state
@@ -5891,11 +6307,7 @@ mod tests {
         );
 
         let (state, _) = emulator.into_state();
-        assert!(matches!(
-            state.effects.as_slice(),
-            [crate::ProjectEffect::OpenDocumentInPrimary(document_id)]
-                if document_id == "chapter-one"
-        ));
+        assert!(state.effects.is_empty());
         assert_eq!(state.workspace.explorer().selected_ids(), ["chapter-one"]);
         assert!(state.workspace.hierarchy_drag_source().is_none());
     }
@@ -6236,12 +6648,7 @@ mod tests {
                 .click("Chapter One")
                 .expect("visible hierarchy item");
         });
-        assert_eq!(
-            apply_project_messages(&mut workspace, messages),
-            [crate::ProjectEffect::OpenDocumentInPrimary(
-                "chapter-one".to_owned()
-            )]
-        );
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
         assert_eq!(workspace.explorer().selected_ids(), ["chapter-one"]);
 
         let messages = interact(&workspace, RibbonDestination::Cards, |cards| {
@@ -6293,10 +6700,7 @@ mod tests {
                 .click("Chapter One")
                 .expect("second visible editor navigation click");
         });
-        assert!(apply_project_messages(&mut workspace, messages).iter().any(|effect| matches!(
-            effect,
-            crate::ProjectEffect::OpenDocumentInPrimary(document_id) if document_id == "chapter-one"
-        )));
+        assert!(apply_project_messages(&mut workspace, messages).is_empty());
         assert_eq!(
             workspace
                 .editor()
@@ -6476,38 +6880,18 @@ mod tests {
     }
 
     #[test]
-    fn rendered_comment_creation_emits_the_real_editor_persistence_intent() {
+    fn inspector_does_not_render_comment_mutation_controls() {
         let (mut workspace, ids) = production_workspace();
         workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
         workspace.update(ProjectMessage::SelectHierarchy {
             node_id: ids.live_node,
             gesture: SelectionGesture::Replace,
         });
-        let _ = workspace
-            .editor_mut()
-            .update(EditorMessage::SetCommentDraft("A visible note".to_owned()));
-
         let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
-            assert!(editor.find(HarnessTarget::CommentDraft.id()).is_ok());
-            editor
-                .click("Add to document")
-                .expect("visible comment creation action");
+            assert!(editor.find(HarnessTarget::CommentDraft.id()).is_err());
+            assert!(editor.find("Add to document").is_err());
         });
-        assert!(matches!(
-            apply_editor_messages(&mut workspace, messages).as_slice(),
-            [crate::EditorEffect::Command {
-                command: crate::EditorCommand::CreateComment {
-                    body,
-                    document_level: true,
-                },
-                ..
-            }] if body == "A visible note"
-        ));
-        assert!(workspace.editor().comment_draft().is_empty());
-        assert_eq!(
-            workspace.editor().comment_feedback(),
-            Some("Saving comment…")
-        );
+        assert!(messages.is_empty());
     }
 
     #[test]
@@ -6595,6 +6979,7 @@ mod tests {
     struct ProductionIds {
         group: String,
         live_node: String,
+        live_document: String,
         deleted_node: String,
     }
 
@@ -6682,6 +7067,7 @@ mod tests {
             ProductionIds {
                 group: id_string(group.as_bytes()),
                 live_node: id_string(live_node.as_bytes()),
+                live_document: id_string(live_document.as_bytes()),
                 deleted_node: id_string(deleted_group.as_bytes()),
             },
         )

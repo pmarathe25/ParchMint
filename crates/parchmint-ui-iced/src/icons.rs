@@ -7,8 +7,6 @@ use parchmint_design_system::production_icon_svg;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
     Project,
-    Editor,
-    Cards,
     History,
     RecentlyDeleted,
     Export,
@@ -18,14 +16,13 @@ pub(crate) enum Icon {
     BulletedList,
     BlockQuote,
     Link,
+    PageBreak,
 }
 
 impl Icon {
     const fn catalog_name(self) -> &'static str {
         match self {
             Self::Project => "workspace-project",
-            Self::Editor => "workspace-editor",
-            Self::Cards => "workspace-cards",
             Self::History => "workspace-history",
             Self::RecentlyDeleted => "workspace-deleted",
             Self::Export => "workspace-export",
@@ -35,6 +32,7 @@ impl Icon {
             Self::BulletedList => "format-bulleted-list",
             Self::BlockQuote => "format-block-quote",
             Self::Link => "format-link",
+            Self::PageBreak => "format-page-break",
         }
     }
 }
@@ -65,8 +63,6 @@ mod tests {
     #[test]
     fn icon_kinds_resolve_to_checked_in_workspace_vectors() {
         assert_eq!(Icon::Project.catalog_name(), "workspace-project");
-        assert_eq!(Icon::Editor.catalog_name(), "workspace-editor");
-        assert_eq!(Icon::Cards.catalog_name(), "workspace-cards");
         assert_eq!(Icon::History.catalog_name(), "workspace-history");
         assert_eq!(Icon::RecentlyDeleted.catalog_name(), "workspace-deleted");
         assert_eq!(Icon::Export.catalog_name(), "workspace-export");
@@ -82,11 +78,10 @@ mod tests {
         assert_eq!(Icon::BulletedList.catalog_name(), "format-bulleted-list");
         assert_eq!(Icon::BlockQuote.catalog_name(), "format-block-quote");
         assert_eq!(Icon::Link.catalog_name(), "format-link");
+        assert_eq!(Icon::PageBreak.catalog_name(), "format-page-break");
 
         for icon_kind in [
             Icon::Project,
-            Icon::Editor,
-            Icon::Cards,
             Icon::History,
             Icon::RecentlyDeleted,
             Icon::Export,
@@ -96,6 +91,7 @@ mod tests {
             Icon::BulletedList,
             Icon::BlockQuote,
             Icon::Link,
+            Icon::PageBreak,
         ] {
             assert!(production_icon_svg(icon_kind.catalog_name()).is_some());
         }

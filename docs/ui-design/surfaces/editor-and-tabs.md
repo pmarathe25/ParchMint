@@ -9,6 +9,10 @@
   entering the close region. Overflow shrinks tabs uniformly to a minimum that
   still shows the first character, ellipsis, and close control. The tooltip
   contains the full title.
+- Beneath each populated pane's tab strip, show its own compact muted path,
+  such as `Manuscript › Part One › Chapter One`. The document path follows the
+  pane's active tab, not Explorer selection. On narrow panes, ellipsize older
+  ancestors before the document title; paths are context, not navigation.
 - Only the focused pane's active tab is mint. An unfocused active tab uses a
   neutral selected treatment. Local Find is below tabs; Local Replace begins
   collapsed behind a selected-state toggle.

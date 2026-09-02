@@ -2,10 +2,11 @@
 
 The shell is Explorer on the left, a working surface in the middle, and
 Inspector on the right. It begins below the 52 px top ribbon and ends above the
-32 px status bar. The ribbon contains Editor, Cards, History, Recently Deleted,
-Export, and Settings as a single-choice control. Its current destination uses a
-restrained mint indicator without a hard outline. Global Search opens from the
-Explorer header and replaces Explorer in the left sidebar; it is neither a
+32 px status bar. The ribbon places the labeled `Editor | Cards` mode switch
+beside the project title. History, Recently Deleted, Export, and Settings are
+separate icon actions aligned at the right edge, each with a tooltip; their
+current destination uses a restrained mint indicator. Global Search opens from
+the Explorer header and replaces Explorer in the left sidebar; it is neither a
 ribbon destination nor a scoped search.
 
 Sidebars and splitters resize between the minimum and maximum widths defined by

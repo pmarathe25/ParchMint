@@ -291,7 +291,14 @@ fn settings_metadata_and_style_edits_keep_stable_ids_and_emit_only_valid_effects
         parchmint_ui_iced::MetadataFieldApplicability::Documents
     );
 
-    let created = workspace.update(ProjectMessage::CreateMetadataField);
+    assert!(
+        workspace
+            .update(ProjectMessage::CreateMetadataField)
+            .is_empty()
+    );
+    assert_eq!(workspace.settings().metadata_fields().len(), 2);
+    workspace.update(ProjectMessage::SetNewMetadataFieldLabel("New field".into()));
+    let created = workspace.update(ProjectMessage::CommitNewMetadataField);
     let field = workspace
         .settings()
         .metadata_fields()

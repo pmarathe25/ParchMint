@@ -750,7 +750,7 @@ fn author_can_edit_a_document_selected_from_tab_overflow() {
         "opening each chapter must retain its tab before exercising overflow: {tab_titles:?}"
     );
     harness
-        .resize(HarnessWindow::Project, 960.0, 720.0)
+        .resize(HarnessWindow::Project, 1280.0, 720.0)
         .expect("resize the writing workspace to exercise responsive tab overflow");
 
     harness
@@ -1034,34 +1034,25 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .click_text(HarnessWindow::Project, "Add Comment")
         .expect("begin a comment from the popover");
     assert!(
-        visible(&harness, "Write a comment for the selected anchor."),
-        "comment feedback: {}",
-        harness
-            .comment_feedback()
-            .expect("read comment composer feedback")
+        visible(&harness, "New comment"),
+        "the editor, rather than the Inspector, owns the selection-anchored composer"
     );
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::CommentDraft)
-        .expect("focus the comment draft");
     assert!(
         harness
             .target_is_focused(HarnessWindow::Project, HarnessTarget::CommentDraft)
-            .expect("inspect comment-draft focus"),
-        "the comment draft must receive keyboard focus"
+            .expect("inspect anchored comment composer focus"),
+        "the contextual Add Comment action must place the insertion point in its composer"
     );
     harness
         .type_focused(HarnessWindow::Project, "Verify the weather detail.")
-        .expect("write a comment draft");
+        .expect("write a comment draft in the automatically focused anchored composer");
     harness
-        .click_text(HarnessWindow::Project, "Add at selection")
+        .click_text(HarnessWindow::Project, "Add comment")
         .expect("attach the comment to the selection");
     assert!(visible(&harness, "Unresolved"));
     assert!(
         visible(&harness, "Verify the weather detail."),
-        "comment feedback after creation: {}",
-        harness
-            .comment_feedback()
-            .expect("read comment creation feedback")
+        "the Inspector is a document-level index of the newly attached thread"
     );
     harness
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
@@ -1074,6 +1065,13 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
             .expect("read comment-hover diagnostic")
     );
     harness
+        .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "keeper")
+        .expect("move within the commented selection");
+    assert!(
+        visible(&harness, "Attached comment"),
+        "the popover must remain anchored while the cursor moves within its commented text"
+    );
+    harness
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
         .expect("move away from the attached comment anchor");
     assert!(
@@ -1084,6 +1082,23 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
             .expect("read comment-hover diagnostic")
     );
     harness
+        .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
+        .expect("reopen the anchored comment popover");
+    harness
+        .click_text(HarnessWindow::Project, "Edit")
+        .expect("edit the root comment inside the anchored popover");
+    harness
+        .replace_target(
+            HarnessWindow::Project,
+            HarnessTarget::CommentEdit,
+            "Verify the storm detail.",
+        )
+        .expect("replace the comment body in the anchored editor");
+    harness
+        .click_text(HarnessWindow::Project, "Save edit")
+        .expect("save the edited comment");
+    assert!(visible(&harness, "Verify the storm detail."));
+    harness
         .type_into_target(
             HarnessWindow::Project,
             HarnessTarget::CommentReply,
@@ -1093,12 +1108,15 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_text(HarnessWindow::Project, "Reply")
         .expect("submit the comment reply");
-    assert!(visible(&harness, "Reply: Confirmed against the log."));
+    assert!(
+        visible(&harness, "Confirmed against the log."),
+        "the reply must remain visible in the anchored thread after its live projection refresh"
+    );
     harness
         .click_text(HarnessWindow::Project, "Resolve")
         .expect("resolve the comment thread");
     assert!(visible(&harness, "Resolved"));
-    assert!(visible(&harness, "Verify the weather detail."));
+    assert!(visible(&harness, "Verify the storm detail."));
     harness
         .click_text(HarnessWindow::Project, "Delete thread")
         .expect("request comment deletion");

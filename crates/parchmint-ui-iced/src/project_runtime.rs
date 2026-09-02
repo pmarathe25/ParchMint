@@ -456,8 +456,6 @@ impl NativeProjectEffectExecutor {
         effect: EditorEffect,
     ) -> Result<EditorEffectCompletion, ProjectRuntimeError> {
         self.ports.authorize()?;
-        let current = self.current_snapshot().await?;
-        let resolvers = StableIdResolvers::from_snapshot(&current);
 
         match effect {
             EditorEffect::RequestSave => {
@@ -469,6 +467,8 @@ impl NativeProjectEffectExecutor {
                 view,
                 document_id,
             } => {
+                let current = self.current_snapshot().await?;
+                let resolvers = StableIdResolvers::from_snapshot(&current);
                 let document = resolvers.document(&document_id)?;
                 let (load, snapshot) = self.load_document(&current, document).await?;
                 Ok(EditorEffectCompletion::Intent(EditorRuntimeIntent::Mount {
@@ -547,6 +547,7 @@ impl NativeProjectEffectExecutor {
                 comment_id,
                 highlight,
             } => {
+                let current = self.current_snapshot().await?;
                 let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
                 let thread = current
                     .documents
@@ -573,6 +574,7 @@ impl NativeProjectEffectExecutor {
                 ))
             }
             EditorEffect::ShowOrphanedComment { comment_id } => {
+                let current = self.current_snapshot().await?;
                 let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
                 let orphaned = current
                     .documents
@@ -2020,6 +2022,8 @@ mod tests {
     };
     use parchmint_preferences::ResolvedAppearance;
 
+    use crate::SpellingDecoration;
+
     use super::*;
 
     struct FakePorts {
@@ -2568,6 +2572,38 @@ mod tests {
             result,
             Err(ProjectRuntimeError::StaleSnapshot { .. })
         ));
+    }
+
+    #[test]
+    fn presentation_only_editor_effects_survive_an_unrelated_snapshot_change() {
+        let (snapshot, _, _, _) = fixture();
+        let (executor, ports) = executor(snapshot.clone());
+        let mut newer = snapshot;
+        newer.project.revision = ProjectRevision::from(9);
+        ports.replace_snapshot(newer);
+        let view = ViewId::from_bytes([9; 16]);
+
+        let spellcheck = block_on(executor.clone().execute_editor_effect(
+            EditorEffect::SetSpellcheckDecorations {
+                view,
+                decorations: vec![SpellingDecoration::new("ParchMint", FindMatch::new(0, 9))],
+            },
+        ));
+        assert!(matches!(
+            spellcheck,
+            Ok(EditorEffectCompletion::Intent(
+                EditorRuntimeIntent::SetSpellcheckDecorations { view: actual, .. }
+            )) if actual == view
+        ));
+
+        let restore_focus =
+            block_on(executor.execute_editor_effect(EditorEffect::RestoreEditorFocus { view }));
+        assert_eq!(
+            restore_focus,
+            Ok(EditorEffectCompletion::Intent(
+                EditorRuntimeIntent::RestoreFocus { view }
+            ))
+        );
     }
 
     #[test]

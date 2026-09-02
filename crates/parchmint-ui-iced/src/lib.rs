@@ -853,6 +853,12 @@ impl Shell {
         }
     }
 
+    /// Makes a disclosure visible without changing keyboard focus or toggling
+    /// an already-expanded section closed.
+    pub fn expand_inspector_section(&mut self, section: InspectorSection) {
+        self.expanded_inspector_sections.insert(section);
+    }
+
     pub fn focus(&mut self, target: FocusTarget) {
         self.inspector_has_document_context = matches!(target, FocusTarget::EditorDocument(_));
         self.focus_region = match &target {

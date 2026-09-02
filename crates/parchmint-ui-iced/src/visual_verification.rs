@@ -280,8 +280,16 @@ fn production_element(
     } else {
         EditorCenterChrome::Full
     };
-    let editor = editor_center_surface_with_chrome(workspace.editor(), theme, &slots, None, chrome)
-        .map(ProjectSurfaceMessage::EditorCenter);
+    let breadcrumbs = workspace.active_editor_breadcrumbs();
+    let editor = editor_center_surface_with_chrome(
+        workspace.editor(),
+        theme,
+        &slots,
+        None,
+        chrome,
+        &breadcrumbs,
+    )
+    .map(ProjectSurfaceMessage::EditorCenter);
     let destination = match target {
         VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::ErrorRecovery => {
             RibbonDestination::Editor
@@ -376,7 +384,10 @@ fn verification_editor_viewport(
             );
             (
                 center.width,
-                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
+                center.height
+                    - FORMAT_TOOLBAR_HEIGHT
+                    - TAB_STRIP_HEIGHT
+                    - u32::from(crate::iced_editor_surface::EDITOR_BREADCRUMB_HEIGHT),
             )
         }
         VisualTarget::EditorDual => {
@@ -390,7 +401,10 @@ fn verification_editor_viewport(
             };
             (
                 (available_width as f64 * portion).round() as u32,
-                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
+                center.height
+                    - FORMAT_TOOLBAR_HEIGHT
+                    - TAB_STRIP_HEIGHT
+                    - u32::from(crate::iced_editor_surface::EDITOR_BREADCRUMB_HEIGHT),
             )
         }
         VisualTarget::GlobalSearch => {
@@ -869,9 +883,22 @@ fn verification_workspace(
             let _ = workspace.update(ProjectMessage::SelectHistoryCheckpoint(
                 "autosave-chapter-one".to_owned(),
             ));
-            workspace.set_history_current_document(verification_history_current_document(
-                snapshot, &workspace,
-            ));
+            let current_document = verification_history_current_document(snapshot, &workspace);
+            let checkpoint_document = HistoryDocumentPreview {
+                document_id: stable_id(snapshot.documents[0].document_id.as_bytes()),
+                canonical_path: "documents/chapter-one.html".to_owned(),
+                semantic: verification_semantic_body(
+                    snapshot.documents[0].document_id,
+                    history_checkpoint_body,
+                ),
+            };
+            let comparison = current_document.as_ref().map(|current| {
+                crate::project_workspace::compare_history_documents(
+                    "autosave-chapter-one",
+                    &checkpoint_document,
+                    current,
+                )
+            });
             let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
                 checkpoint_id: "autosave-chapter-one".to_owned(),
             });
@@ -889,17 +916,10 @@ fn verification_workspace(
                                 "4 Checkpoint: By morning, the tide had erased every footprint."
                                     .to_owned(),
                             ],
-                            document: Some(HistoryDocumentPreview {
-                                document_id: stable_id(
-                                    snapshot.documents[0].document_id.as_bytes()
-                                ),
-                                canonical_path: "documents/chapter-one.html".to_owned(),
-                                semantic: verification_semantic_body(
-                                    snapshot.documents[0].document_id,
-                                    history_checkpoint_body,
-                                ),
-                            }),
+                            document: Some(checkpoint_document),
                         },
+                        current_document,
+                        comparison,
                     },
                 ))
             );
@@ -1013,7 +1033,7 @@ fn assert_scenario_contract(
             assert_chapter_one_inspector(workspace);
         }
         VisualTarget::Cards => {
-            let cards = workspace.cards().items();
+            let cards = workspace.cards().windowed_items();
             let manuscript_section =
                 stable_id(parchmint_domain::NodeId::manuscript_root().as_bytes());
             assert_eq!(workspace.cards().section_id(), manuscript_section.as_str());

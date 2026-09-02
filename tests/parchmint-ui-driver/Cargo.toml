@@ -14,3 +14,7 @@ workspace = true
 parchmint-desktop = { path = "../../crates/parchmint-desktop", features = ["interaction-harness"] }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+parchmint-domain = { path = "../../crates/parchmint-domain" }
+parchmint-project-format = { path = "../../crates/parchmint-project-format" }

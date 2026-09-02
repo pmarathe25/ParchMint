@@ -61,10 +61,13 @@ fn formatting_commands_and_undo_route_to_the_focused_pane_without_losing_context
     let effects = workspace.update(EditorMessage::Format(FormattingCommand::Bold));
     assert_eq!(
         effects,
-        [EditorEffect::Command {
-            view: companion,
-            command: EditorCommand::ToggleBold,
-        }]
+        [
+            EditorEffect::Command {
+                view: companion,
+                command: EditorCommand::ToggleBold,
+            },
+            EditorEffect::RestoreEditorFocus { view: companion },
+        ]
     );
 
     workspace.update(EditorMessage::FocusFormattingToolbar);

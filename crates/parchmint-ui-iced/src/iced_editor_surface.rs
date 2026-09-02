@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use iced::widget::{
     Space, button, column, container, mouse_area, opaque, pick_list, responsive, row, sensor,
-    stack, text, text_input,
+    stack, text, text_editor, text_input,
 };
 use iced::{
     Background, Element, Font, Length,
@@ -31,6 +31,7 @@ use crate::{
 };
 
 const EDITOR_TOOLBAR_CONTROL_HEIGHT: u16 = COMPACT_CONTROL_HEIGHT + 4;
+pub(crate) const EDITOR_BREADCRUMB_HEIGHT: u16 = 24;
 
 /// Surrounding controls to include around a mounted manuscript pane.
 ///
@@ -167,6 +168,7 @@ pub(crate) enum EditorCenterMessage {
     },
     ChooseSpellingAction(SpellingMenuAction),
     DismissSpellingMenu,
+    DismissCommentComposer,
 }
 
 impl EditorCenterMessage {
@@ -192,46 +194,65 @@ impl EditorCenterMessage {
                 message:
                     MountedEditorMessage::HoverComment {
                         comment_id,
-                        invocation_point,
+                        anchor_bounds,
                     },
                 ..
             } => vec![EditorMessage::SetCommentHover {
                 pane: *pane,
                 comment_id: comment_id.clone(),
-                invocation_point: *invocation_point,
+                anchor_bounds: crate::Rect::new(
+                    anchor_bounds.0,
+                    anchor_bounds.1,
+                    anchor_bounds.2,
+                    anchor_bounds.3,
+                ),
             }],
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
             Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
+            Self::DismissCommentComposer => vec![EditorMessage::CancelCommentComposer],
         }
     }
 }
 
 /// Composes only the editor-center region. Explorer, Inspector, ribbon, and
 /// status bar remain separate project-surface responsibilities.
-pub(crate) fn editor_center_surface(
-    workspace: &EditorWorkspace,
+pub(crate) fn editor_center_surface<'a>(
+    workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
-) -> Element<'static, EditorCenterMessage> {
+) -> Element<'a, EditorCenterMessage> {
+    editor_center_surface_with_breadcrumbs(workspace, theme, slots, spelling_menu, &BTreeMap::new())
+}
+
+/// Composes the editor center with pane-specific hierarchy context.
+pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
+    workspace: &'a EditorWorkspace,
+    theme: ParchMintTheme,
+    slots: &EditorHostSlots,
+    spelling_menu: Option<&SpellingMenu>,
+    breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
+) -> Element<'a, EditorCenterMessage> {
     editor_center_surface_with_chrome(
         workspace,
         theme,
         slots,
         spelling_menu,
         EditorCenterChrome::Full,
+        breadcrumbs,
     )
 }
 
 /// Composes the editor center with an explicit surrounding-chrome policy.
-pub(crate) fn editor_center_surface_with_chrome(
-    workspace: &EditorWorkspace,
+pub(crate) fn editor_center_surface_with_chrome<'a>(
+    workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
     chrome: EditorCenterChrome,
-) -> Element<'static, EditorCenterMessage> {
+    breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
+) -> Element<'a, EditorCenterMessage> {
     let primary = editor_pane_surface(
         workspace,
         EditorPane::Primary,
@@ -239,13 +260,17 @@ pub(crate) fn editor_center_surface_with_chrome(
         slots,
         spelling_menu,
         chrome,
+        breadcrumbs
+            .get(&EditorPane::Primary)
+            .cloned()
+            .unwrap_or_default(),
     );
     // A slot may outlive its mounted Canvas for the remainder of the current
     // Iced event cycle. It must not keep an otherwise empty companion pane
     // visible: closing its last tab is the explicit signal to collapse the
     // split and give the primary pane the full editor width.
     let companion_visible = workspace.pane(EditorPane::Companion).is_populated();
-    let panes: Element<'static, EditorCenterMessage> = if companion_visible {
+    let panes: Element<'a, EditorCenterMessage> = if companion_visible {
         let primary_portion = (workspace.split_ratio() * 1000.0).round() as u16;
         let companion_portion = 1000_u16.saturating_sub(primary_portion);
         row![
@@ -269,6 +294,10 @@ pub(crate) fn editor_center_surface_with_chrome(
                 slots,
                 spelling_menu,
                 chrome,
+                breadcrumbs
+                    .get(&EditorPane::Companion)
+                    .cloned()
+                    .unwrap_or_default(),
             ))
             .width(Length::FillPortion(companion_portion)),
         ]
@@ -279,7 +308,7 @@ pub(crate) fn editor_center_surface_with_chrome(
         container(primary).width(Length::Fill).into()
     };
 
-    let center_content: Element<'static, EditorCenterMessage> = match chrome {
+    let center_content: Element<'a, EditorCenterMessage> = match chrome {
         EditorCenterChrome::Full => column![
             focus::f6_region(
                 F6Region::FormattingToolbar,
@@ -310,11 +339,11 @@ pub(crate) fn editor_center_surface_with_chrome(
     layers.into()
 }
 
-fn spelling_menu_overlay(
-    content: Element<'static, EditorCenterMessage>,
+fn spelling_menu_overlay<'a>(
+    content: Element<'a, EditorCenterMessage>,
     menu: &SpellingMenu,
     theme: ParchMintTheme,
-) -> Element<'static, EditorCenterMessage> {
+) -> Element<'a, EditorCenterMessage> {
     let bounds = menu.bounds();
     stack![
         content,
@@ -425,21 +454,25 @@ fn formatting_toolbar(
                         ..Font::with_name("Source Sans 3")
                     },
                 };
-                row.push(
-                    button(text(label).size(14).font(control_font))
-                        .padding([4, 7])
-                        .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
-                        .on_press(EditorCenterMessage::Workspace(EditorMessage::Format(
-                            command,
-                        )))
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                button_interaction(status, false),
-                            )
-                        }),
-                )
+                let control = button(text(label).size(14).font(control_font))
+                    .padding([4, 7])
+                    .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
+                    .on_press(EditorCenterMessage::Workspace(EditorMessage::Format(
+                        command,
+                    )))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            button_interaction(status, false),
+                        )
+                    });
+                let control: Element<'static, EditorCenterMessage> = if label == "B" {
+                    harness_target::target(HarnessTarget::Bold, control)
+                } else {
+                    control.into()
+                };
+                row.push(control)
             });
     let controls = controls
         .push(formatting_icon_button(
@@ -465,15 +498,18 @@ fn formatting_toolbar(
             FormattingCommand::Link,
             theme,
         ))
-        .push(formatting_text_button(
-            "Scene Break",
-            FormattingCommand::SceneBreak,
-            theme,
+        .push(harness_target::target(
+            HarnessTarget::SceneBreak,
+            formatting_text_button("⁂ Scene Break", FormattingCommand::SceneBreak, theme),
         ))
-        .push(formatting_text_button(
-            "Page Break",
-            FormattingCommand::PageBreak,
-            theme,
+        .push(harness_target::target(
+            HarnessTarget::PageBreak,
+            formatting_icon_button(
+                Icon::PageBreak,
+                "Page Break",
+                FormattingCommand::PageBreak,
+                theme,
+            ),
         ));
     container(controls)
         .padding([6, 8])
@@ -585,14 +621,15 @@ fn link_editor_popover(
         .into()
 }
 
-fn editor_pane_surface(
-    workspace: &EditorWorkspace,
+fn editor_pane_surface<'a>(
+    workspace: &'a EditorWorkspace,
     pane: EditorPane,
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
     chrome: EditorCenterChrome,
-) -> Element<'static, EditorCenterMessage> {
+    breadcrumb: Vec<String>,
+) -> Element<'a, EditorCenterMessage> {
     let state = workspace.pane(pane);
     let tabs = tab_strip(
         state,
@@ -616,7 +653,7 @@ fn editor_pane_surface(
         EditorPane::Primary => HarnessTarget::EditorPrimary,
         EditorPane::Companion => HarnessTarget::EditorCompanion,
     };
-    let body: Element<'static, EditorCenterMessage> = sensor(harness_target::target(
+    let body: Element<'a, EditorCenterMessage> = sensor(harness_target::target(
         target,
         pane_body(state, pane, theme, slots),
     ))
@@ -634,16 +671,19 @@ fn editor_pane_surface(
             .comment_thread(hover.comment_id())
             .map(|thread| (hover.clone(), thread.clone()))
     });
-    let body = match hovered_thread {
-        Some((hover, thread)) => comment_hover_overlay(body, &hover, &thread, theme),
-        None => body,
+    let body = match (workspace.comment_composer(pane), hovered_thread) {
+        (Some(composer), _) => comment_composer_overlay(body, composer, workspace, theme),
+        (None, Some((hover, thread))) => {
+            comment_hover_overlay(body, &hover, &thread, workspace, theme)
+        }
+        (None, None) => body,
     };
     let body = mouse_area(body)
         .on_exit(EditorCenterMessage::Workspace(
             EditorMessage::SetCommentHover {
                 pane,
                 comment_id: None,
-                invocation_point: (0.0, 0.0),
+                anchor_bounds: crate::Rect::default(),
             },
         ))
         .into();
@@ -652,18 +692,18 @@ fn editor_pane_surface(
     } else {
         body
     };
-    let content: Element<'static, EditorCenterMessage> = match chrome {
-        EditorCenterChrome::Full if search.is_open() => {
-            column![tabs, local_search_bar(search, pane, theme, slots), body]
-                .spacing(6)
-                .into()
-        }
-        EditorCenterChrome::Full => {
-            // A collapsed local-find surface is command-only and must not
-            // create a phantom gutter between the tab strip and manuscript
-            // canvas.
-            column![tabs, body].spacing(0).into()
-        }
+    let content: Element<'a, EditorCenterMessage> = match chrome {
+        EditorCenterChrome::Full if search.is_open() => column![
+            tabs,
+            breadcrumb_row(breadcrumb, theme),
+            local_search_bar(search, pane, theme, slots),
+            body
+        ]
+        .spacing(6)
+        .into(),
+        EditorCenterChrome::Full => column![tabs, breadcrumb_row(breadcrumb, theme), body]
+            .spacing(0)
+            .into(),
         EditorCenterChrome::ManuscriptOnly => body,
     };
     hierarchy_drag::target(
@@ -678,71 +718,346 @@ fn editor_pane_surface(
     )
 }
 
-fn comment_hover_overlay(
-    content: Element<'static, EditorCenterMessage>,
-    hover: &crate::CommentHover,
-    thread: &crate::CommentThreadView,
+fn breadcrumb_row(
+    breadcrumb: Vec<String>,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
+    if breadcrumb.is_empty() {
+        return Space::new().height(0).into();
+    }
+    responsive(move |available| {
+        let maximum_chars = (available.width / 7.0).floor().max(12.0) as usize;
+        container(
+            text(compact_breadcrumb(&breadcrumb, maximum_chars))
+                .size(11)
+                .color(theme.palette().secondary_text),
+        )
+        .padding([3, 10])
+        .width(Length::Fill)
+        .height(u32::from(EDITOR_BREADCRUMB_HEIGHT))
+        .align_y(Vertical::Center)
+        .into()
+    })
+    .width(Length::Fill)
+    .height(u32::from(EDITOR_BREADCRUMB_HEIGHT))
+    .into()
+}
+
+fn compact_breadcrumb(breadcrumb: &[String], maximum_chars: usize) -> String {
+    let join = |segments: &[String]| segments.join(" › ");
+    let full = join(breadcrumb);
+    if full.chars().count() <= maximum_chars {
+        return full;
+    }
+
+    let mut first_visible = 0;
+    while first_visible + 1 < breadcrumb.len() {
+        let compact = format!("… › {}", join(&breadcrumb[first_visible + 1..]));
+        if compact.chars().count() <= maximum_chars {
+            return compact;
+        }
+        first_visible += 1;
+    }
+
+    truncate_breadcrumb_label(
+        breadcrumb.last().expect("nonempty breadcrumb"),
+        maximum_chars,
+    )
+}
+
+fn truncate_breadcrumb_label(label: &str, maximum_chars: usize) -> String {
+    if label.chars().count() <= maximum_chars {
+        return label.to_owned();
+    }
+    if maximum_chars <= 1 {
+        return "…".to_owned();
+    }
+    let truncate_at = label
+        .char_indices()
+        .nth(maximum_chars - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(label.len());
+    format!("{}…", &label[..truncate_at])
+}
+
+fn comment_hover_overlay<'a>(
+    content: Element<'a, EditorCenterMessage>,
+    hover: &crate::CommentHover,
+    thread: &crate::CommentThreadView,
+    workspace: &'a EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'a, EditorCenterMessage> {
     let quote = match thread.anchor() {
         crate::CommentAnchor::Range { quote, .. }
         | crate::CommentAnchor::Position { quote, .. }
         | crate::CommentAnchor::Orphaned { quote, .. } => quote.clone(),
         crate::CommentAnchor::Document { .. } => "Whole document".to_owned(),
     };
-    let body = thread
-        .messages()
-        .first()
-        .map(|message| message.body().to_owned())
-        .unwrap_or_else(|| "No comment text.".to_owned());
     let status = if thread.resolved() {
         "Attached comment · Resolved"
     } else {
         "Attached comment"
     };
-    let (x, y) = hover.invocation_point();
-    let card = container(
-        column![
-            text(status).size(11),
-            text(quote).size(12),
-            text(body).size(13),
+    let card = comment_thread_card(status, quote, thread, workspace, theme);
+    anchored_comment_overlay(content, hover.anchor_bounds(), card, theme)
+}
+
+fn comment_composer_overlay<'a>(
+    content: Element<'a, EditorCenterMessage>,
+    composer: crate::CommentComposer,
+    workspace: &'a EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'a, EditorCenterMessage> {
+    let mut card = column![
+        text("New comment").size(12),
+        text("Attached to the selected text")
+            .size(11)
+            .color(theme.palette().secondary_text),
+        text_editor(workspace.comment_draft())
+            .id(HarnessTarget::CommentDraft.id())
+            .placeholder("Write a comment")
+            .on_action(|action| {
+                EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(action))
+            })
+            .height(Length::Fixed(76.0))
+            .style(move |_, status| multiline_field_style(theme, status)),
+        row![
+            comment_popover_action(
+                "Add comment",
+                EditorCenterMessage::Workspace(EditorMessage::CreateComment {
+                    document_level: false,
+                }),
+                theme,
+            ),
+            comment_popover_action(
+                "Cancel",
+                EditorCenterMessage::Workspace(EditorMessage::CancelCommentComposer),
+                theme,
+            ),
         ]
-        .spacing(5),
-    )
-    .width(248)
-    .padding(10)
-    .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest));
-    let dismiss = EditorCenterMessage::Workspace(EditorMessage::SetCommentHover {
-        pane: hover.pane(),
-        comment_id: None,
-        invocation_point: (0.0, 0.0),
-    });
+        .spacing(6),
+    ]
+    .spacing(7);
+    if let Some(feedback) = workspace.comment_feedback().map(str::to_owned) {
+        card = card.push(
+            text(feedback)
+                .size(11)
+                .color(theme.palette().secondary_text),
+        );
+    }
+    anchored_comment_overlay(content, composer.anchor_bounds(), card.into(), theme)
+}
+
+fn comment_thread_card<'a>(
+    status: &str,
+    quote: String,
+    thread: &crate::CommentThreadView,
+    workspace: &'a EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'a, EditorCenterMessage> {
+    let thread_id = thread.id().to_owned();
+    let mut card = column![
+        text(status.to_owned()).size(11),
+        text(quote).size(12).color(theme.palette().secondary_text),
+    ]
+    .spacing(5);
+
+    for message in thread.messages() {
+        let message_id = message.id().to_owned();
+        if workspace.editing_comment_message() == Some((thread_id.as_str(), message_id.as_str())) {
+            let edit_thread = thread_id.clone();
+            card = card
+                .push(
+                    text_editor(
+                        workspace
+                            .comment_reply_draft(&thread_id)
+                            .expect("every rendered comment thread has an edit draft"),
+                    )
+                    .id(HarnessTarget::CommentEdit.id())
+                    .placeholder("Edit comment")
+                    .on_action(move |action| {
+                        EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
+                            thread_id: edit_thread.clone(),
+                            action,
+                        })
+                    })
+                    .height(Length::Fixed(76.0))
+                    .style(move |_, status| multiline_field_style(theme, status)),
+                )
+                .push(
+                    row![
+                        comment_popover_action(
+                            "Save edit",
+                            EditorCenterMessage::Workspace(
+                                EditorMessage::SaveEditedCommentMessage {
+                                    thread_id: thread_id.clone(),
+                                    message_id: message_id.clone(),
+                                },
+                            ),
+                            theme,
+                        ),
+                        comment_popover_action(
+                            "Cancel edit",
+                            EditorCenterMessage::Workspace(
+                                EditorMessage::CancelEditCommentMessage,
+                            ),
+                            theme,
+                        ),
+                    ]
+                    .spacing(6),
+                );
+        } else {
+            card = card.push(
+                column![
+                    text(message.body().to_owned()).size(13),
+                    row![
+                        comment_popover_action(
+                            "Edit",
+                            EditorCenterMessage::Workspace(
+                                EditorMessage::BeginEditCommentMessage {
+                                    thread_id: thread_id.clone(),
+                                    message_id: message_id.clone(),
+                                    body: message.body().to_owned(),
+                                },
+                            ),
+                            theme,
+                        ),
+                        comment_popover_action(
+                            "Delete message",
+                            EditorCenterMessage::Workspace(EditorMessage::DeleteCommentMessage {
+                                thread_id: thread_id.clone(),
+                                message_id,
+                            }),
+                            theme,
+                        ),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(4),
+            );
+        }
+    }
+
+    if workspace
+        .editing_comment_message()
+        .is_none_or(|(editing_thread, _)| editing_thread != thread_id)
+    {
+        let reply_thread = thread_id.clone();
+        card = card.push(
+            text_editor(
+                workspace
+                    .comment_reply_draft(&thread_id)
+                    .expect("every rendered comment thread has a reply draft"),
+            )
+            .id(HarnessTarget::CommentReply.id())
+            .placeholder("Reply to thread")
+            .on_action(move |action| {
+                EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
+                    thread_id: reply_thread.clone(),
+                    action,
+                })
+            })
+            .height(Length::Fixed(76.0))
+            .style(move |_, status| multiline_field_style(theme, status)),
+        );
+    }
+
+    card = card.push(
+        row![
+            comment_popover_action(
+                "Reply",
+                EditorCenterMessage::Workspace(EditorMessage::SubmitCommentReply {
+                    thread_id: thread_id.clone(),
+                }),
+                theme,
+            ),
+            comment_popover_action(
+                if thread.resolved() {
+                    "Reopen"
+                } else {
+                    "Resolve"
+                },
+                EditorCenterMessage::Workspace(EditorMessage::ToggleCommentResolved {
+                    thread_id: thread_id.clone(),
+                    resolved: !thread.resolved(),
+                }),
+                theme,
+            ),
+            comment_popover_action(
+                "Delete thread",
+                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteCommentThread(
+                    thread_id.clone(),
+                )),
+                theme,
+            ),
+        ]
+        .spacing(6),
+    );
+    if workspace.pending_delete_comment() == Some(thread_id.as_str()) {
+        card = card.push(
+            row![
+                text("Delete this thread?").size(11),
+                comment_popover_action(
+                    "Confirm delete",
+                    EditorCenterMessage::Workspace(EditorMessage::ConfirmDeleteCommentThread),
+                    theme,
+                ),
+                comment_popover_action(
+                    "Cancel",
+                    EditorCenterMessage::Workspace(EditorMessage::CancelDeleteCommentThread),
+                    theme,
+                ),
+            ]
+            .spacing(6),
+        );
+    }
+    if let Some(feedback) = workspace.comment_feedback().map(str::to_owned) {
+        card = card.push(
+            text(feedback)
+                .size(11)
+                .color(theme.palette().secondary_text),
+        );
+    }
+    card.into()
+}
+
+fn anchored_comment_overlay<'a>(
+    content: Element<'a, EditorCenterMessage>,
+    anchor: crate::Rect,
+    card: Element<'a, EditorCenterMessage>,
+    theme: ParchMintTheme,
+) -> Element<'a, EditorCenterMessage> {
     stack![
         content,
-        // This full-size presentation layer is deliberately ephemeral: the
-        // next pointer movement clears it. That is the same affordance as a
-        // native hover tooltip and prevents a read-only card obscuring prose
-        // after the pointer leaves its highlighted anchor.
-        mouse_area(
-            container(card)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .padding(iced::Padding {
-                    top: (y + 16.0).max(8.0),
-                    right: 0.0,
-                    bottom: 0.0,
-                    left: (x + 12.0).max(8.0),
-                })
-                .align_x(Horizontal::Left)
-                .align_y(Vertical::Top),
-        )
-        .on_move({
-            let dismiss = dismiss.clone();
-            move |_| dismiss.clone()
+        container(opaque(container(card).width(320).padding(10).style(
+            move |_| components::surface(theme, Surface::Elevated, Interaction::Rest)
+        ),))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(iced::Padding {
+            top: (anchor.bottom() + 8.0).max(8.0),
+            right: 0.0,
+            bottom: 0.0,
+            left: anchor.left().max(8.0),
         })
-        .on_exit(dismiss),
+        .align_x(Horizontal::Left)
+        .align_y(Vertical::Top),
     ]
     .into()
+}
+
+fn comment_popover_action(
+    label: impl Into<String>,
+    message: EditorCenterMessage,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    button(text(label.into()).size(12))
+        .padding([4, 6])
+        .on_press(message)
+        .style(move |_, status| {
+            components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+        })
+        .into()
 }
 
 fn tab_strip(
@@ -1236,14 +1551,34 @@ fn field_interaction(status: iced::widget::text_input::Status) -> Interaction {
     }
 }
 
+fn multiline_field_style(
+    theme: ParchMintTheme,
+    status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    let interaction = match status {
+        iced::widget::text_editor::Status::Active => Interaction::Rest,
+        iced::widget::text_editor::Status::Hovered => Interaction::Hovered,
+        iced::widget::text_editor::Status::Focused { .. } => Interaction::Focused,
+        iced::widget::text_editor::Status::Disabled => Interaction::Disabled,
+    };
+    let field = components::field_style(theme, interaction);
+    iced::widget::text_editor::Style {
+        background: field.background,
+        border: field.border,
+        placeholder: field.placeholder,
+        value: field.value,
+        selection: field.selection,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use iced::{Point, Settings, Size};
     use iced_test::Simulator;
     use parchmint_domain::DocumentId;
     use parchmint_editor_api::{
-        CanonicalDocumentLoad, EditorAdapter as _, EditorCommand as AdapterEditorCommand,
-        EditorCommandKind, EditorCommandOrigin,
+        BlockId, CanonicalComment, CanonicalDocumentLoad, CommentId, EditorAdapter as _,
+        EditorCommand as AdapterEditorCommand, EditorCommandKind, EditorCommandOrigin,
     };
     use parchmint_editor_iced::{
         EditorIcedAdapter, EditorIcedConfig, EditorSurfaceTheme, MountedEditorBinding,
@@ -1279,13 +1614,18 @@ mod tests {
                 } => {
                     if let MountedEditorMessage::HoverComment {
                         comment_id,
-                        invocation_point,
+                        anchor_bounds,
                     } = message
                     {
                         effects.extend(workspace.update(EditorMessage::SetCommentHover {
                             pane,
                             comment_id,
-                            invocation_point,
+                            anchor_bounds: Rect::new(
+                                anchor_bounds.0,
+                                anchor_bounds.1,
+                                anchor_bounds.2,
+                                anchor_bounds.3,
+                            ),
                         }));
                     } else {
                         if !matches!(message, MountedEditorMessage::ViewportChanged(_)) {
@@ -1307,7 +1647,8 @@ mod tests {
                 | EditorCenterMessage::CommitHierarchyDrop => {}
                 unsupported @ (EditorCenterMessage::BeginSplitResize
                 | EditorCenterMessage::ChooseSpellingAction(_)
-                | EditorCenterMessage::DismissSpellingMenu) => {
+                | EditorCenterMessage::DismissSpellingMenu
+                | EditorCenterMessage::DismissCommentComposer) => {
                     panic!(
                         "the editor flow fixture does not model this center message: {unsupported:?}"
                     );
@@ -1392,6 +1733,43 @@ mod tests {
     }
 
     #[test]
+    fn scene_break_retains_its_visible_label_with_a_divider_glyph() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 64.0),
+            formatting_toolbar(&workspace, theme),
+        );
+
+        simulator
+            .click("⁂ Scene Break")
+            .expect("visible Scene Break control");
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            [EditorCenterMessage::Workspace(EditorMessage::Format(
+                FormattingCommand::SceneBreak
+            ))]
+        );
+    }
+
+    #[test]
+    fn breadcrumbs_preserve_the_active_document_while_compacting_older_ancestors() {
+        let breadcrumb = vec![
+            "Manuscript".to_owned(),
+            "Part One".to_owned(),
+            "Chapter One".to_owned(),
+        ];
+
+        assert_eq!(
+            compact_breadcrumb(&breadcrumb, 80),
+            "Manuscript › Part One › Chapter One"
+        );
+        assert_eq!(compact_breadcrumb(&breadcrumb, 20), "… › Chapter One");
+        assert_eq!(compact_breadcrumb(&breadcrumb, 8), "Chapter…");
+    }
+
+    #[test]
     fn mounted_message_keeps_its_pane_and_view_context() {
         let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let view = workspace.pane(EditorPane::Companion).view();
@@ -1419,7 +1797,7 @@ mod tests {
             view,
             message: MountedEditorMessage::HoverComment {
                 comment_id: Some("comment".to_owned()),
-                invocation_point: (24.0, 36.0),
+                anchor_bounds: (24.0, 36.0, 30.0, 14.0),
             },
         };
         assert_eq!(
@@ -1427,9 +1805,144 @@ mod tests {
             vec![EditorMessage::SetCommentHover {
                 pane: EditorPane::Companion,
                 comment_id: Some("comment".to_owned()),
-                invocation_point: (24.0, 36.0),
+                anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
             }]
         );
+    }
+
+    #[test]
+    fn comment_hover_popover_owns_thread_actions_without_changing_pane_focus() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::SameDocumentTwoViews);
+        let comment_id = "07070707070707070707070707070707".to_owned();
+        workspace.reconcile_document_comments(
+            "chapter-one",
+            &[CanonicalComment::new(
+                CommentId::from_bytes([7; 16]),
+                parchmint_editor_api::EditorSelection::new(1.into(), 4.into()),
+                "Check the weather.",
+                BlockId::from_bytes([3; 16]),
+            )],
+        );
+        workspace.update(EditorMessage::SetCommentHover {
+            pane: EditorPane::Companion,
+            comment_id: Some(comment_id.clone()),
+            anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
+        });
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        slots.insert(
+            EditorPane::Companion,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+
+        simulator.click("Resolve").expect("comment hover popover");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [EditorCenterMessage::Workspace(
+                EditorMessage::ToggleCommentResolved {
+                    thread_id: comment_id.clone(),
+                    resolved: true,
+                }
+            )]
+        );
+
+        let effects = apply_surface_messages(&mut workspace, &mut slots, messages);
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::EditorEffect::Command {
+                command: crate::EditorCommand::SetCommentResolved {
+                    thread_id: selected,
+                    resolved: true,
+                },
+                ..
+            }] if selected == &comment_id
+        ));
+    }
+
+    #[test]
+    fn anchored_comment_composer_routes_creation_without_using_the_inspector() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::BeginCommentAtSelection {
+            pane: EditorPane::Primary,
+            anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
+        });
+        workspace.update(EditorMessage::SetCommentDraft("A visible note".to_owned()));
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+
+        assert!(simulator.find(HarnessTarget::CommentDraft.id()).is_ok());
+        simulator
+            .click("Add comment")
+            .expect("anchored comment creation action");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        let effects = apply_surface_messages(&mut workspace, &mut slots, messages);
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::EditorEffect::Command {
+                command: crate::EditorCommand::CreateComment {
+                    body,
+                    document_level: false,
+                },
+                ..
+            }] if body == "A visible note"
+        ));
+        assert!(workspace.comment_composer(EditorPane::Primary).is_none());
+    }
+
+    #[test]
+    fn anchored_comment_composer_emits_multiline_editor_actions() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::BeginCommentAtSelection {
+            pane: EditorPane::Primary,
+            anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
+        });
+        let mut slots = EditorHostSlots::default();
+        slots.insert(
+            EditorPane::Primary,
+            EditorPaneSlot::state(EditorCenterPaneState::Loading),
+        );
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(960.0, 600.0),
+            editor_center_surface(&workspace, theme, &slots, None),
+        );
+
+        simulator
+            .click(HarnessTarget::CommentDraft.id())
+            .expect("focus the multiline comment composer");
+        assert_eq!(
+            simulator.tap_key(iced::keyboard::key::Named::Enter),
+            iced::event::Status::Captured,
+            "the anchored composer must accept paragraph breaks"
+        );
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(
+                text_editor::Action::Edit(text_editor::Edit::Enter)
+            ))
+        )));
     }
 
     #[test]
@@ -1622,10 +2135,8 @@ mod tests {
         simulator
             .click("Chapter Two")
             .expect("rendered companion tab");
-        assert!(
-            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages(),)
-                .is_empty()
-        );
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(apply_surface_messages(&mut workspace, &mut slots, messages).is_empty());
         assert_eq!(workspace.focused_pane(), EditorPane::Companion);
         assert_eq!(
             workspace.inspector_context(),
@@ -1640,12 +2151,17 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
         simulator.click("B").expect("rendered bold toolbar button");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(matches!(
-            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages()).as_slice(),
-            [crate::EditorEffect::Command {
-                view,
-                command: crate::EditorCommand::ToggleBold,
-            }] if *view == workspace.pane(EditorPane::Companion).view()
+            apply_surface_messages(&mut workspace, &mut slots, messages).as_slice(),
+            [
+                crate::EditorEffect::Command {
+                    view,
+                    command: crate::EditorCommand::ToggleBold,
+                },
+                crate::EditorEffect::RestoreEditorFocus { view: restored_view },
+            ] if *view == workspace.pane(EditorPane::Companion).view()
+                && *restored_view == workspace.pane(EditorPane::Companion).view()
         ));
 
         let mut simulator = Simulator::with_size(
@@ -1656,7 +2172,8 @@ mod tests {
         simulator
             .click("Chapter One")
             .expect("rendered primary tab");
-        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        apply_surface_messages(&mut workspace, &mut slots, messages);
         assert_eq!(workspace.focused_pane(), EditorPane::Primary);
         assert_eq!(
             workspace.inspector_context(),
@@ -1774,7 +2291,8 @@ mod tests {
         );
         simulator.click("Find").expect("visible local Find input");
         assert_eq!(simulator.typewrite("river"), iced::event::Status::Captured);
-        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        apply_surface_messages(&mut workspace, &mut slots, messages);
         assert_eq!(workspace.local_search(companion_view).query(), "river");
         assert!(workspace.local_search(primary_view).query().is_empty());
 
@@ -1784,7 +2302,8 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
         simulator.click("Replace").expect("visible replace toggle");
-        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        apply_surface_messages(&mut workspace, &mut slots, messages);
         assert!(workspace.local_search(companion_view).replace_visible());
 
         let mut simulator = Simulator::with_size(
@@ -1796,7 +2315,8 @@ mod tests {
             .click("Replace with")
             .expect("visible replacement input");
         assert_eq!(simulator.typewrite("scene"), iced::event::Status::Captured);
-        apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages());
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        apply_surface_messages(&mut workspace, &mut slots, messages);
         assert_eq!(
             slots
                 .slot(EditorPane::Companion)
@@ -1820,8 +2340,9 @@ mod tests {
         simulator
             .click("Replace all")
             .expect("visible replace-all control");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(matches!(
-            apply_surface_messages(&mut workspace, &mut slots, simulator.into_messages()).as_slice(),
+            apply_surface_messages(&mut workspace, &mut slots, messages).as_slice(),
             [crate::EditorEffect::Command {
                 view,
                 command: crate::EditorCommand::ReplaceAllFindMatches { replacement },

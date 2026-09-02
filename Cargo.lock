@@ -2686,6 +2686,8 @@ name = "parchmint-ui-driver"
 version = "0.1.0"
 dependencies = [
  "parchmint-desktop",
+ "parchmint-domain",
+ "parchmint-project-format",
  "serde",
  "serde_json",
 ]

@@ -184,6 +184,49 @@ fn shared_edits_relayout_changed_blocks_in_both_panes_on_the_next_frame() {
 }
 
 #[test]
+fn typing_into_a_newly_split_paragraph_refreshes_the_primary_surface_geometry() {
+    let adapter = adapter_with_cache_limit(6);
+    let session = open(&adapter, "First");
+    let mounted_view = view(1);
+    mount(&adapter, session.clone(), mounted_view);
+    let primary = adapter
+        .primary_visible_block(session.clone())
+        .expect("primary visible projection");
+    let primary_block = primary.block();
+    adapter
+        .cache_visible_blocks(session.clone(), mounted_view, [primary])
+        .expect("cache initial document");
+    adapter
+        .execute(
+            session.clone(),
+            EditorCommandOrigin::new(mounted_view),
+            EditorCommand::new(
+                EditorRevision::default(),
+                EditorCommandKind::SplitBlock {
+                    selection: EditorSelection::new(5.into(), 5.into()),
+                },
+            ),
+        )
+        .expect("split the paragraph");
+    adapter.next_frame(session.clone()).expect("refresh split");
+    adapter
+        .input_en_us(session.clone(), mounted_view, "Second")
+        .expect("type into the new paragraph");
+    adapter
+        .next_frame(session.clone())
+        .expect("refresh typed prose");
+
+    assert!(
+        adapter
+            .geometry(session, mounted_view, primary_block)
+            .expect("primary geometry")
+            .draw_scalars()
+            .iter()
+            .any(|scalar| scalar.position == DocumentPosition::from(6))
+    );
+}
+
+#[test]
 fn draw_hit_test_caret_and_selection_share_one_geometry_result() {
     let adapter = adapter_with_cache_limit(6);
     let session = open(&adapter, "alpha");

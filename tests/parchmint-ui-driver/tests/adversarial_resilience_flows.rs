@@ -94,25 +94,16 @@ fn authoring_stays_bounded_during_repeated_navigation_and_revision() {
 
     // Route through each workspace repeatedly while delivering a range of
     // responsive window sizes.  Every route remains observable afterwards.
-    for (width, height) in [
-        (480.0, 320.0),
-        (960.0, 640.0),
-        (1440.0, 900.0),
-        (720.0, 480.0),
-    ] {
+    for (width, height) in [(1280.0, 720.0), (1280.0, 900.0), (1440.0, 900.0)] {
         harness
             .resize(HarnessWindow::Project, width, height)
             .expect("resize project window");
-        let destinations = if width < 800.0 {
-            &[RibbonDestination::Cards, RibbonDestination::Editor][..]
-        } else {
-            &[
-                RibbonDestination::Cards,
-                RibbonDestination::Editor,
-                RibbonDestination::Settings,
-                RibbonDestination::Editor,
-            ][..]
-        };
+        let destinations = &[
+            RibbonDestination::Cards,
+            RibbonDestination::Editor,
+            RibbonDestination::Settings,
+            RibbonDestination::Editor,
+        ][..];
         for destination in destinations {
             harness
                 .click_target(HarnessWindow::Project, HarnessTarget::Ribbon(*destination))

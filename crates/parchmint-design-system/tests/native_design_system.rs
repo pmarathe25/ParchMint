@@ -101,6 +101,7 @@ fn production_icons_are_source_authored_symbolic_vectors() {
             "format-bulleted-list",
             "format-block-quote",
             "format-link",
+            "format-page-break",
         ]
     );
 

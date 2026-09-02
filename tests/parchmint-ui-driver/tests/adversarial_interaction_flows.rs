@@ -173,7 +173,7 @@ fn tab_overflow_escape_keeps_active_tab_before_selecting_a_hidden_tab() {
             .expect("open document as a tab");
     }
     harness
-        .resize(HarnessWindow::Project, 960.0, 720.0)
+        .resize(HarnessWindow::Project, 1280.0, 720.0)
         .expect("constrain the tab strip");
     harness
         .click_target(

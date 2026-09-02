@@ -1,6 +1,6 @@
 # Workspace shell
 
-- **WS-001:** The top mode control must switch between `Editor` and `Cards` without changing underlying data.
+- **WS-001:** The compact top mode control must switch between `Editor` and `Cards` without changing underlying data; History, Recently Deleted, Export, and Project Settings remain separate persistent destinations.
 - **WS-002:** Editor mode must show a collapsible/resizable left sidebar, central editor area, and collapsible/resizable right Inspector.
 - **WS-003:** The left sidebar must provide Explorer and Global Search panels.
 - **WS-004:** The Inspector must provide Synopsis, Metadata, and Comments sections as applicable.

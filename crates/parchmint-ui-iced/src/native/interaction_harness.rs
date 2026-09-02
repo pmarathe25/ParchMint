@@ -507,6 +507,21 @@ impl NativeDesktopHarness {
             .is_focused(desktop.view(id), target.id()))
     }
 
+    /// Returns the shell's semantic keyboard-focus owner without deriving it
+    /// from a widget's current geometry.
+    pub fn focus_target(&self, window: HarnessWindow) -> Result<crate::FocusTarget, HarnessError> {
+        let id = self.window_id(window)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        Ok(state.shell.focus_target())
+    }
+
     /// Reports whether a stable production target is presently in the
     /// rendered window, without changing its focus or state.
     pub fn target_is_visible(
@@ -522,6 +537,84 @@ impl NativeDesktopHarness {
             .expect("surface was created")
             .find_bounds(desktop.view(id), target.id())
             .is_ok())
+    }
+
+    /// Scrolls a semantic production region with the same wheel event a
+    /// desktop author produces. The target bounds are resolved from the live
+    /// surface, so flows remain independent of window dimensions.
+    pub fn scroll_target_by(
+        &mut self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        delta_y: f32,
+    ) -> Result<(), HarnessError> {
+        if !delta_y.is_finite() {
+            return Err(HarnessError::new("scroll delta must be finite"));
+        }
+        let position = self.find_target_bounds(window, target)?.center();
+        self.dispatch_events(
+            window,
+            [
+                Event::Mouse(mouse::Event::CursorMoved { position }),
+                Event::Mouse(mouse::Event::WheelScrolled {
+                    delta: mouse::ScrollDelta::Pixels { x: 0.0, y: delta_y },
+                }),
+            ],
+        )?;
+        self.record(window, format!("scroll target {target:?} by {delta_y}"));
+        Ok(())
+    }
+
+    /// Reports whether a resolved hierarchy row is currently mounted in the
+    /// Cards virtual window, rather than merely present in the outline.
+    pub fn cards_node_is_visible(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<bool, HarnessError> {
+        let id = self.window_id(window)?;
+        self.ensure_surface(id, window)?;
+        let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+        Ok(surfaces
+            .get_mut(&id)
+            .expect("surface was created")
+            .find_bounds(desktop.view(id), harness_target::card_id(node.id()))
+            .is_ok())
+    }
+
+    /// Clicks one mounted Cards row through its stable semantic target.
+    pub fn click_cards_node(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
+        let position = self
+            .find_id_bounds(window, harness_target::card_id(node.id()))?
+            .center();
+        self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        self.record(window, format!("click Cards hierarchy node {node:?}"));
+        Ok(())
+    }
+
+    /// Double-clicks one mounted Cards row through its stable semantic target.
+    /// This exercises the production document-activation gesture without
+    /// accidentally targeting an identically named Explorer row.
+    pub fn double_click_cards_node(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
+        let position = self
+            .find_id_bounds(window, harness_target::card_id(node.id()))?
+            .center();
+        for _ in 0..2 {
+            self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        }
+        self.record(
+            window,
+            format!("double-click Cards hierarchy node {node:?}"),
+        );
+        Ok(())
     }
 
     /// Reports whether a document is rendered as a tab in the requested pane.
@@ -863,6 +956,50 @@ impl NativeDesktopHarness {
         pane: crate::EditorPane,
         text: &str,
     ) -> Result<(), HarnessError> {
+        let position = self.editor_text_position(window, pane, text)?;
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::CursorMoved { position })],
+        )?;
+        self.record(
+            window,
+            format!("move pointer to editor prose {text:?} in {pane:?}"),
+        );
+        Ok(())
+    }
+
+    /// Clicks unique editor prose through its live Canvas geometry. The
+    /// pointer events deliberately exercise the editor surface's native
+    /// double- and triple-click logic instead of injecting a selection.
+    pub fn multi_click_editor_text(
+        &mut self,
+        window: HarnessWindow,
+        pane: crate::EditorPane,
+        text: &str,
+        clicks: u8,
+    ) -> Result<(), HarnessError> {
+        if !(2..=3).contains(&clicks) {
+            return Err(HarnessError::new(format!(
+                "editor multi-click count must be 2 or 3, got {clicks}"
+            )));
+        }
+        let position = self.editor_text_position(window, pane, text)?;
+        for _ in 0..clicks {
+            self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        }
+        self.record(
+            window,
+            format!("{clicks}-click editor prose {text:?} in {pane:?}"),
+        );
+        Ok(())
+    }
+
+    fn editor_text_position(
+        &mut self,
+        window: HarnessWindow,
+        pane: crate::EditorPane,
+        text: &str,
+    ) -> Result<IcedPoint, HarnessError> {
         let id = self.window_id(window)?;
         let local_position = {
             let NativeWindow::Project(state) = self
@@ -900,7 +1037,16 @@ impl NativeDesktopHarness {
                 .draw_scalars()
                 .iter()
                 .find(|scalar| scalar.position.value() == position)
-                .ok_or_else(|| HarnessError::new("editor prose has no live scalar geometry"))?;
+                .ok_or_else(|| {
+                    HarnessError::new(format!(
+                        "editor prose has no live scalar geometry at {position}; rendered positions: {:?}",
+                        geometry
+                            .draw_scalars()
+                            .iter()
+                            .map(|scalar| scalar.position.value())
+                            .collect::<Vec<_>>(),
+                    ))
+                })?;
             IcedPoint::new(
                 scalar.bounds.x + scalar.bounds.width * 0.5,
                 scalar.bounds.y + scalar.bounds.height * 0.5,
@@ -911,16 +1057,10 @@ impl NativeDesktopHarness {
             crate::EditorPane::Companion => HarnessTarget::EditorCompanion,
         };
         let bounds = self.find_target_bounds(window, target)?;
-        let position = IcedPoint::new(bounds.x + local_position.x, bounds.y + local_position.y);
-        self.dispatch_events(
-            window,
-            [Event::Mouse(mouse::Event::CursorMoved { position })],
-        )?;
-        self.record(
-            window,
-            format!("move pointer to editor prose {text:?} in {pane:?}"),
-        );
-        Ok(())
+        Ok(IcedPoint::new(
+            bounds.x + local_position.x,
+            bounds.y + local_position.y,
+        ))
     }
 
     /// Moves the pointer over the one attached comment anchor currently
@@ -1192,11 +1332,12 @@ impl NativeDesktopHarness {
             .map(|workspace| {
                 let history = workspace.history();
                 format!(
-                    "selected={:?}, preview={}, current={}, comparison={}, error={:?}",
+                    "selected={:?}, preview={}, current={}, comparison={}, comparison_delta={:?}, error={:?}",
                     history.selected_checkpoint_id(),
                     history.preview().is_some(),
                     history.current_document().is_some(),
                     history.comparison().is_some(),
+                    history.comparison().map(crate::HistoryComparison::word_count_delta),
                     history.error(),
                 )
             })
@@ -1317,7 +1458,7 @@ impl NativeDesktopHarness {
                     ProjectMessage::PreviewHierarchyNode(node.id().to_owned())
                 }
                 HierarchyRowKind::Group => {
-                    ProjectMessage::ToggleHierarchyExpanded(node.id().to_owned())
+                    ProjectMessage::SelectAndToggleHierarchyExpanded(node.id().to_owned())
                 }
                 HierarchyRowKind::Root => ProjectMessage::SelectHierarchy {
                     node_id: node.id().to_owned(),
@@ -1579,14 +1720,9 @@ impl NativeDesktopHarness {
         width: f32,
         height: f32,
     ) -> Result<(), HarnessError> {
-        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-            return Err(HarnessError::new(format!(
-                "window dimensions must be finite and positive, got {width}×{height}"
-            )));
-        }
+        let size = harness_resize_size(window, width, height)?;
         let id = self.window_id(window)?;
         self.ensure_surface(id, window)?;
-        let size = Size::new(width, height);
         self.surfaces
             .get_mut(&id)
             .expect("surface was created")
@@ -2279,5 +2415,44 @@ impl NativeDesktopHarness {
             }
             runtime::clipboard::Action::Write { .. } => {}
         }
+    }
+}
+
+fn harness_resize_size(
+    window: HarnessWindow,
+    width: f32,
+    height: f32,
+) -> Result<Size, HarnessError> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err(HarnessError::new(format!(
+            "window dimensions must be finite and positive, got {width}×{height}"
+        )));
+    }
+    if window == HarnessWindow::Project
+        && (width < ShellLayout::MIN_WINDOW_SIZE.0 as f32
+            || height < ShellLayout::MIN_WINDOW_SIZE.1 as f32)
+    {
+        return Err(HarnessError::new(format!(
+            "project window dimensions must be at least {}×{}, got {width}×{height}",
+            ShellLayout::MIN_WINDOW_SIZE.0,
+            ShellLayout::MIN_WINDOW_SIZE.1,
+        )));
+    }
+    Ok(Size::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_resizes_honor_the_native_window_minimum() {
+        assert!(harness_resize_size(HarnessWindow::Project, 960.0, 720.0).is_err());
+        assert!(harness_resize_size(HarnessWindow::Project, 1280.0, 719.0).is_err());
+        assert_eq!(
+            harness_resize_size(HarnessWindow::Project, 1280.0, 720.0)
+                .expect("minimum project size is valid"),
+            Size::new(1280.0, 720.0),
+        );
     }
 }

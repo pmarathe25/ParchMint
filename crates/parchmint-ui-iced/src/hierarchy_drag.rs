@@ -10,12 +10,15 @@ use iced::advanced::{
     widget::{Operation, Tree, tree},
 };
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Vector};
+use std::time::{Duration, Instant};
 
 const DRAG_THRESHOLD: f32 = 4.0;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) fn source<'a, Message>(
     content: impl Into<Element<'a, Message>>,
-    on_press: Message,
+    on_click: Message,
+    on_double_click: Option<Message>,
     on_drag_start: Message,
     on_finish: Message,
 ) -> Element<'a, Message>
@@ -24,7 +27,8 @@ where
 {
     HierarchyDragSource {
         content: content.into(),
-        on_press,
+        on_click,
+        on_double_click,
         on_drag_start,
         on_finish,
     }
@@ -86,7 +90,8 @@ pub(crate) struct DropIndicator {
 
 struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
-    on_press: Message,
+    on_click: Message,
+    on_double_click: Option<Message>,
     on_drag_start: Message,
     on_finish: Message,
 }
@@ -249,6 +254,7 @@ struct SourceState {
     last_pointer: Option<Point>,
     press_origin: Option<Point>,
     dragging: bool,
+    last_click: Option<(Point, Instant)>,
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -299,16 +305,37 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            shell,
-            viewport,
-        );
+        // Click and drag ownership belongs to this wrapper. Forwarding a
+        // second press to a nested MouseArea lets Iced's double-click tracker
+        // activate a document before the pointer has moved far enough to be
+        // recognized as a drag. That makes a selected Cards document
+        // disappear into Editor when an author starts to reorder it.
+        let owns_left_pointer = {
+            let state = tree.state.downcast_ref::<SourceState>();
+            match event {
+                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => state
+                    .last_pointer
+                    .filter(|position| layout.bounds().contains(*position))
+                    .or_else(|| cursor.position_over(layout.bounds()))
+                    .is_some(),
+                Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    state.press_origin.is_some()
+                }
+                _ => false,
+            }
+        };
+        if !owns_left_pointer {
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                shell,
+                viewport,
+            );
+        }
 
         let state = tree.state.downcast_mut::<SourceState>();
         match event {
@@ -319,6 +346,7 @@ where
                     && origin.distance(*position) >= DRAG_THRESHOLD
                 {
                     state.dragging = true;
+                    state.last_click = None;
                     shell.publish(self.on_drag_start.clone());
                 }
             }
@@ -330,16 +358,37 @@ where
                 if let Some(position) = position {
                     state.press_origin = Some(position);
                     state.dragging = false;
-                    shell.publish(self.on_press.clone());
                 }
             }
-            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-                if state.press_origin.take().is_some() {
-                    if state.dragging {
-                        shell.publish(self.on_finish.clone());
+            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                if state.press_origin.take().is_some() =>
+            {
+                if state.dragging {
+                    shell.publish(self.on_finish.clone());
+                } else {
+                    // A group click must not also run when that press became
+                    // a drag. In particular, collapsing a Cards group before
+                    // its drag begins can remove its child Cards from the
+                    // virtualized surface mid-gesture.
+                    shell.publish(self.on_click.clone());
+                    let now = Instant::now();
+                    let is_double_click = state.last_click.is_some_and(|(last, at)| {
+                        now.duration_since(at) <= DOUBLE_CLICK_INTERVAL
+                            && last.distance(state.last_pointer.unwrap_or(last)) < DRAG_THRESHOLD
+                    });
+                    if is_double_click {
+                        state.last_click = None;
+                        if let Some(on_double_click) = &self.on_double_click {
+                            shell.publish(on_double_click.clone());
+                        }
+                    } else if self.on_double_click.is_some() {
+                        state.last_click = state
+                            .last_pointer
+                            .or_else(|| cursor.position_over(layout.bounds()))
+                            .map(|position| (position, now));
                     }
-                    state.dragging = false;
                 }
+                state.dragging = false;
             }
             _ => {}
         }
