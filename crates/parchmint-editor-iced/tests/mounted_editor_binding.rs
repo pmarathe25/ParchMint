@@ -1,4 +1,6 @@
-use parchmint_editor_api::{CanonicalDocumentLoad, DocumentId, EditorRevision, ViewId};
+use parchmint_editor_api::{
+    CanonicalDocumentLoad, DocumentId, EditorAdapter, EditorRevision, ViewId,
+};
 use parchmint_editor_iced::{
     EditorIcedAdapter, EditorIcedConfig, EditorSurfaceTheme, EditorViewport, MountedEditorBinding,
     MountedEditorBindingConfig, MountedEditorMessage, MountedEditorSession,
@@ -111,6 +113,54 @@ fn same_document_two_view_bindings_share_changes_and_detach_independently() {
         adapter.view_snapshot(session, ViewId::from_bytes([53; 16])),
         Err(parchmint_editor_api::EditorError::UnknownView { .. })
     ));
+}
+
+#[test]
+fn switching_between_shared_views_does_not_replace_the_prior_views_input() {
+    let adapter = adapter();
+    let primary = MountedEditorBinding::mount(
+        &adapter,
+        config(
+            MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                DocumentId::from_bytes([54; 16]),
+                "alpha alpha",
+            )),
+            55,
+            EditorSurfaceTheme::light(),
+        ),
+    )
+    .expect("primary mount");
+    let session = primary.session();
+    let companion = MountedEditorBinding::mount(
+        &adapter,
+        config(
+            MountedEditorSession::Reuse(session.clone()),
+            56,
+            EditorSurfaceTheme::dark(),
+        ),
+    )
+    .expect("companion mount");
+
+    primary
+        .update(MountedEditorMessage::Focus(3.into()))
+        .expect("focus primary caret");
+    primary
+        .update(MountedEditorMessage::InsertText(" primary".into()))
+        .expect("write primary prose");
+    companion
+        .update(MountedEditorMessage::Focus(3.into()))
+        .expect("focus companion caret");
+    companion
+        .update(MountedEditorMessage::InsertText(" companion".into()))
+        .expect("write companion prose");
+
+    let revision = adapter.revision(session.clone()).expect("read revision");
+    let body = iced::futures::executor::block_on(adapter.project(session, revision))
+        .expect("complete synchronous adapter projection")
+        .body()
+        .to_owned();
+    assert!(body.contains("primary"), "body was {body:?}");
+    assert!(body.contains("companion"), "body was {body:?}");
 }
 
 #[test]

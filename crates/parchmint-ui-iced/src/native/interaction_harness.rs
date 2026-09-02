@@ -1906,6 +1906,30 @@ impl NativeDesktopHarness {
             .ok_or_else(|| HarnessError::new("editor pane has no active document"))
     }
 
+    /// Reports whether both mounted authoring panes share one live editor
+    /// session. This semantic observation supports dual-pane author flows
+    /// without exposing the session capability itself.
+    pub fn editor_panes_share_session(&self) -> Result<bool, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let primary = state
+            .editor_bindings
+            .get(&EditorPane::Primary)
+            .ok_or_else(|| HarnessError::new("primary editor is not mounted"))?;
+        let companion = state
+            .editor_bindings
+            .get(&EditorPane::Companion)
+            .ok_or_else(|| HarnessError::new("companion editor is not mounted"))?;
+        Ok(primary.session() == companion.session())
+    }
+
     /// Describes the live replacement-preview state for deterministic flow
     /// diagnostics when a semantic action is unavailable.
     pub fn replacement_status(&self) -> Result<String, HarnessError> {

@@ -117,6 +117,7 @@ enum HarnessAction {
     ActiveEditorBody,
     ActiveEditorTabTitle,
     ActiveEditorDocumentId(EditorPane),
+    EditorPanesShareSession,
     ReplacementStatus,
     GlobalSearchStatus,
     ExportStatus,
@@ -359,6 +360,12 @@ fn execute_action(
             return harness
                 .active_editor_document_id(pane)
                 .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::EditorPanesShareSession => {
+            return harness
+                .editor_panes_share_session()
+                .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
         HarnessAction::ReplacementStatus => {
@@ -1069,6 +1076,12 @@ impl DesktopInteractionHarness {
     ) -> Result<String, InteractionHarnessError> {
         self.request(HarnessAction::ActiveEditorDocumentId(pane))?
             .into_text()
+    }
+
+    /// Reports whether both mounted panes share a live document session.
+    pub fn editor_panes_share_session(&self) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::EditorPanesShareSession)?
+            .into_bool()
     }
 
     /// Returns the live state of the project-wide replacement preview.
