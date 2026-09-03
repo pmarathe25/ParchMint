@@ -135,6 +135,8 @@ fn repeated_open_focuses_existing_window_without_registering_another_session() {
 fn create_validates_input_and_records_recent_only_after_the_window_opens() {
     let desktop = fixture(AppearanceMode::System, SystemAppearance::Light);
     let runtime = block_on(desktop.bootstrap.start(LaunchRequest::launcher())).unwrap();
+    let failed_project = std::env::temp_dir().join("parchmint-failed-create-window");
+    let new_project = std::env::temp_dir().join("parchmint-new-book");
 
     assert!(matches!(
         runtime.create_project(NewProjectRequest::new("  ", "/tmp/blank-title", None)),
@@ -147,11 +149,7 @@ fn create_validates_input_and_records_recent_only_after_the_window_opens() {
 
     desktop.ui.fail_next_project_open();
     assert!(matches!(
-        runtime.create_project(NewProjectRequest::new(
-            "Failed Book",
-            "/tmp/failed-create-window",
-            None,
-        )),
+        runtime.create_project(NewProjectRequest::new("Failed Book", &failed_project, None,)),
         Err(DesktopError::Ui(_))
     ));
     assert!(
@@ -166,7 +164,7 @@ fn create_validates_input_and_records_recent_only_after_the_window_opens() {
     assert!(matches!(
         runtime.create_project(NewProjectRequest::new(
             "New Book",
-            "/tmp/new-book",
+            &new_project,
             Some("Writer".to_owned()),
         )),
         Ok(OpenProjectResult::Opened { .. })
@@ -174,7 +172,7 @@ fn create_validates_input_and_records_recent_only_after_the_window_opens() {
     let recent = desktop.preferences.snapshot().values.recent_projects;
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].name, "New Book");
-    assert_eq!(recent[0].path, "/tmp/new-book");
+    assert_eq!(recent[0].path, new_project.display().to_string());
     assert!(recent[0].last_opened_unix_seconds > 0);
 }
 
