@@ -183,7 +183,9 @@ pub fn configure_file(data_directory: impl AsRef<Path>) -> io::Result<PathBuf> {
 #[cfg(any(debug_assertions, feature = "capture"))]
 fn open_log_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    options.create(true).append(true);
+    // `append` alone grants append-data access on Windows, which is not
+    // sufficient for `set_len` during bounded-log rotation.
+    options.create(true).write(true).append(true);
     set_no_follow(&mut options);
     options.open(path)
 }
@@ -680,10 +682,7 @@ mod tests {
             .as_nanos();
         let path = std::env::temp_dir().join(format!("parchmint-diagnostics-{nonce}.log"));
         fs::write(&path, vec![b'x'; MAX_LOG_BYTES as usize]).expect("fill test log");
-        let file = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open test log");
+        let file = open_log_file(&path).expect("open test log");
         let mut sink = DiagnosticSink {
             file: Some(file),
             path: Some(path.clone()),
@@ -692,7 +691,10 @@ mod tests {
         let line = "next event\n";
         sink.write_line(line, false);
 
-        assert_eq!(fs::read_to_string(&path).expect("read test log"), line);
+        assert!(
+            fs::read_to_string(&path).expect("read test log") == line,
+            "bounded sink should retain only the post-rotation line"
+        );
         let _ = fs::remove_file(path);
     }
 
