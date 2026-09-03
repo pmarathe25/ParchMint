@@ -404,6 +404,11 @@ fn explorer_focus_routes_undo_and_redo_to_project_history() {
         "project undo should remove the Explorer-created group"
     );
 
+    #[cfg(target_os = "macos")]
+    harness
+        .press_command_shift_key(HarnessWindow::Project, 'z')
+        .expect("redo Explorer project change on macOS");
+    #[cfg(not(target_os = "macos"))]
     harness
         .press_command_key(HarnessWindow::Project, 'y')
         .expect("redo Explorer project change");
