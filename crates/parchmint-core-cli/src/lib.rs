@@ -826,7 +826,7 @@ fn safe_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
         && !path
             .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            .any(|component| matches!(component, Component::ParentDir))
 }
 
 fn project_digest(path: &Path) -> [u8; 32] {
