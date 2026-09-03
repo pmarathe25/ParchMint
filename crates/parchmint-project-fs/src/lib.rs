@@ -5,10 +5,10 @@ use std::{
     error::Error,
     fmt,
     fs::{self, File, OpenOptions, TryLockError},
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -122,6 +122,7 @@ pub struct ProjectRootCapability {
     path: PathBuf,
     root_id: u64,
     lock_token: String,
+    lock_file: Weak<Mutex<File>>,
     identity: FileIdentity,
 }
 
@@ -140,16 +141,19 @@ impl ProjectRootCapability {
 /// The operating-system lock held for one writable project session.
 #[derive(Debug)]
 pub struct ProjectLockLease {
-    file: File,
+    file: Arc<Mutex<File>>,
     path: PathBuf,
     token: String,
 }
 
 impl Drop for ProjectLockLease {
     fn drop(&mut self) {
-        if read_lock_token(&self.path).as_deref() == Ok(self.token.as_str()) {
-            let _ = self.file.set_len(0);
-            let _ = self.file.sync_all();
+        let Ok(mut file) = self.file.lock() else {
+            return;
+        };
+        if read_lock_token(&mut file, &self.path).as_deref() == Ok(self.token.as_str()) {
+            let _ = file.set_len(0);
+            let _ = file.sync_all();
         }
     }
 }
@@ -353,10 +357,12 @@ fn acquire_lock(
         .map_err(|error| FsError::io("record project lock owner", &lock_path, error))?;
     file.sync_all()
         .map_err(|error| FsError::io("flush project lock owner", &lock_path, error))?;
+    let file = Arc::new(Mutex::new(file));
     let root = ProjectRootCapability {
         path,
         root_id,
         lock_token: token.clone(),
+        lock_file: Arc::downgrade(&file),
         identity,
     };
     let lease = ProjectLockLease {
@@ -367,8 +373,13 @@ fn acquire_lock(
     Ok((root, lease))
 }
 
-fn read_lock_token(path: &Path) -> Result<String, FsError> {
-    fs::read_to_string(path).map_err(|error| FsError::io("read project lock owner", path, error))
+fn read_lock_token(file: &mut File, path: &Path) -> Result<String, FsError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| FsError::io("seek project lock owner", path, error))?;
+    let mut token = String::new();
+    file.read_to_string(&mut token)
+        .map_err(|error| FsError::io("read project lock owner", path, error))?;
+    Ok(token)
 }
 
 fn verify_lock_owner(root: &ProjectRootCapability) -> Result<(), FsError> {
@@ -381,7 +392,16 @@ fn verify_lock_owner(root: &ProjectRootCapability) -> Result<(), FsError> {
             path: lock_path.display().to_string(),
         });
     }
-    if read_lock_token(&lock_path)?.as_bytes() != root.lock_token.as_bytes() {
+    let lock_file = root
+        .lock_file
+        .upgrade()
+        .ok_or_else(|| FsError::NotLockOwner {
+            path: root.path.clone(),
+        })?;
+    let mut lock_file = lock_file.lock().map_err(|_| FsError::NotLockOwner {
+        path: root.path.clone(),
+    })?;
+    if read_lock_token(&mut lock_file, &lock_path)?.as_bytes() != root.lock_token.as_bytes() {
         return Err(FsError::NotLockOwner {
             path: root.path.clone(),
         });

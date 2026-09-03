@@ -160,6 +160,35 @@ fn a_dead_process_lock_is_recovered_by_the_new_owner() {
     drop(lease);
 }
 
+#[test]
+fn active_lease_uses_its_retained_lock_handle_for_checked_reads() {
+    let parent = TestDir::new("retained-lock-handle");
+    let project_path = parent.join("novel");
+    let files = NativeProjectFileSystem::new();
+    let (root, lease) = files
+        .create_root(UntrustedProjectPath::new(project_path.clone()))
+        .expect("project root should be created and locked");
+    let manuscript = project_path.join("manuscript");
+    fs::create_dir(&manuscript).expect("manuscript directory should be created");
+    let document = CanonicalRelativePath::parse("manuscript/chapter.html")
+        .expect("document path should be canonical");
+    fs::write(manuscript.join("chapter.html"), b"<p>draft</p>")
+        .expect("document should be written");
+
+    assert_eq!(
+        files
+            .read(&root, &document)
+            .expect("lock owner should be able to read its project"),
+        b"<p>draft</p>"
+    );
+
+    drop(lease);
+    assert!(matches!(
+        files.read(&root, &document),
+        Err(FsError::NotLockOwner { .. })
+    ));
+}
+
 fn lock_helper(mode: &str, path: &Path) -> std::process::Child {
     Command::new(env::current_exe().expect("test executable path should be available"))
         .args(["--exact", "lock_process_helper", "--nocapture"])
