@@ -31,10 +31,12 @@ pub struct TestDir(PathBuf);
 impl TestDir {
     pub fn new(label: &str) -> Self {
         let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "parchmint-history-git2-{label}-{pid}-{sequence}",
-            pid = std::process::id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("temporary directory should resolve")
+            .join(format!(
+                "parchmint-history-git2-{label}-{pid}-{sequence}",
+                pid = std::process::id()
+            ));
         fs::create_dir(&path).expect("test root should be created");
         Self(path)
     }
