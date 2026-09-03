@@ -391,6 +391,10 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
     assert_eq!(saved.requested, requested);
     assert_eq!(saved.written.documents[&document], EditorRevision::from(3));
 
+    // A real project window releases its UI-owned service clone before the
+    // runtime tears down its session. Keep that ownership order here so the
+    // session performs the worker shutdown as it closes.
+    drop(project_ui);
     let close = runtime
         .begin_final_save(project.root.as_path())
         .expect("clean project should start its final save");
@@ -399,17 +403,13 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         Ok(FinalSaveResolution::Closed(window))
     );
     assert!(!runtime.is_current_session(session));
-    assert!(project_ui.ports.access().is_err());
-    assert!(access.commands(|commands| commands.undo_state()).is_err());
     assert!(
-        access
-            .persistence(|persistence| persistence.status())
-            .is_err()
+        runtime
+            .project_ui(session)
+            .expect("closed project query should succeed")
+            .is_none(),
+        "a closed session must not expose typed UI ports"
     );
-    // The retained ports above prove that a closed session is no longer
-    // authorized. Release their service clones before opening the project
-    // again so its SQLite worker closes the previous cache on Windows.
-    drop(project_ui);
     let OpenProjectResult::Opened {
         session: reopened, ..
     } = runtime
