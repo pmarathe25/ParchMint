@@ -406,6 +406,11 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
             .persistence(|persistence| persistence.status())
             .is_err()
     );
+    // The retained ports above prove that a closed session is no longer
+    // authorized. Release their service clones before opening the project
+    // again so its SQLite worker closes the previous cache on Windows.
+    drop(access);
+    drop(project_ui);
     let OpenProjectResult::Opened {
         session: reopened, ..
     } = runtime
@@ -749,6 +754,13 @@ fn live_search_reconciles_body_title_synopsis_metadata_create_delete_save_and_re
         .project_filesystem
         .begin_final_save(session.as_ref())
         .expect("final save should persist the searchable state");
+    // These direct service handles belong to the closing session. They have
+    // already served the search assertions, and retaining them keeps its
+    // SQLite cache open on Windows during the following reopen.
+    drop(delete);
+    drop(create);
+    drop(commands);
+    drop(search);
     drop(session);
 
     let reopened = bootstrap
