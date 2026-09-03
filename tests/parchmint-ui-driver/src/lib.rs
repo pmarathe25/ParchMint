@@ -14,7 +14,7 @@ pub struct IsolatedRun {
 impl IsolatedRun {
     pub fn new(label: &str) -> std::io::Result<Self> {
         static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
-        let root = std::env::temp_dir().join(format!(
+        let root = fs::canonicalize(std::env::temp_dir())?.join(format!(
             "parchmint-ui-{label}-{}-{}",
             std::process::id(),
             NEXT_RUN.fetch_add(1, Ordering::Relaxed)
