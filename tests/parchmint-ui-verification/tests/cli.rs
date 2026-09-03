@@ -152,7 +152,7 @@ fn native_capture_reports_a_child_failure_without_waiting_for_output() {
         .args([
             "native-capture",
             "--desktop",
-            "/bin/false",
+            "false",
             "--target",
             "launcher-default",
             "--appearance",
