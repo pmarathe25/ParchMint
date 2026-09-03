@@ -368,6 +368,13 @@ pub struct CanonicalPersistenceFrontier {
     pub document_summaries: BTreeMap<DomainDocumentId, CanonicalDocumentSummary>,
 }
 
+/// The durable frontier before and after one incremental canonical save.
+#[derive(Debug, Clone, Copy)]
+pub struct CanonicalPersistenceFrontierTransition<'a> {
+    pub previous: &'a CanonicalPersistenceFrontier,
+    pub next: &'a CanonicalPersistenceFrontier,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalDocumentSummary {
     pub revision: u64,
@@ -673,7 +680,7 @@ impl ProjectFormatCodec {
     /// hash-addressed view of the resulting canonical project.
     ///
     /// `existing` may omit document bodies so callers can keep closed
-    /// documents lazy. `baseline` and `previous_frontier` must still describe
+    /// documents lazy. `baseline` and `frontiers.previous` must still describe
     /// every durable document; an incomplete baseline fails instead of
     /// silently producing a partial checkpoint.
     pub fn encode_domain_project_patch(
@@ -683,13 +690,12 @@ impl ProjectFormatCodec {
         existing: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
         baseline: &BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
         previous_paths: &CanonicalProjectPathMap,
-        previous_frontier: &CanonicalPersistenceFrontier,
-        frontier: &CanonicalPersistenceFrontier,
+        frontiers: CanonicalPersistenceFrontierTransition<'_>,
     ) -> Result<CanonicalProjectPatch, FormatError> {
         project
             .validate()
             .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
-        let mut frontier = frontier.clone();
+        let mut frontier = frontiers.next.clone();
         let current_documents = project
             .nodes
             .iter()
@@ -722,7 +728,8 @@ impl ProjectFormatCodec {
                     word_count: update.body.split_whitespace().count(),
                 }
             } else {
-                let summary = previous_frontier
+                let summary = frontiers
+                    .previous
                     .document_summaries
                     .get(document)
                     .ok_or_else(|| {
@@ -3986,8 +3993,10 @@ mod tests {
                 &existing,
                 &metadata,
                 &baseline.paths,
-                &baseline.persistence_frontier,
-                &next_frontier,
+                CanonicalPersistenceFrontierTransition {
+                    previous: &baseline.persistence_frontier,
+                    next: &next_frontier,
+                },
             )
             .unwrap();
         let first_path = &baseline.paths.documents[&first];
@@ -4021,8 +4030,10 @@ mod tests {
                     &existing,
                     &incomplete,
                     &baseline.paths,
-                    &baseline.persistence_frontier,
-                    &next_frontier,
+                    CanonicalPersistenceFrontierTransition {
+                        previous: &baseline.persistence_frontier,
+                        next: &next_frontier,
+                    },
                 )
                 .is_err()
         );
@@ -4044,11 +4055,13 @@ mod tests {
                 &existing,
                 &metadata,
                 &baseline.paths,
-                &baseline.persistence_frontier,
-                &CanonicalPersistenceFrontier {
-                    recovery_project_revision: 2,
-                    document_revisions: BTreeMap::from([(first, 1), (second, 1)]),
-                    ..Default::default()
+                CanonicalPersistenceFrontierTransition {
+                    previous: &baseline.persistence_frontier,
+                    next: &CanonicalPersistenceFrontier {
+                        recovery_project_revision: 2,
+                        document_revisions: BTreeMap::from([(first, 1), (second, 1)]),
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();
@@ -4107,11 +4120,13 @@ mod tests {
                 &existing,
                 &metadata,
                 &baseline.paths,
-                &baseline.persistence_frontier,
-                &CanonicalPersistenceFrontier {
-                    recovery_project_revision: 2,
-                    document_revisions: BTreeMap::from([(first, 1)]),
-                    ..Default::default()
+                CanonicalPersistenceFrontierTransition {
+                    previous: &baseline.persistence_frontier,
+                    next: &CanonicalPersistenceFrontier {
+                        recovery_project_revision: 2,
+                        document_revisions: BTreeMap::from([(first, 1)]),
+                        ..Default::default()
+                    },
                 },
             )
             .unwrap();

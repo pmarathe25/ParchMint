@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use parchmint_desktop::{
     DesktopInteractionHarness, HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
@@ -108,7 +108,7 @@ fn export_settings_survive_a_project_restart() {
     reopened.shutdown().expect("stop export application");
 }
 
-fn create_project(run: &IsolatedRun, project: &PathBuf, title: &str) -> DesktopInteractionHarness {
+fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("launch application");
     harness

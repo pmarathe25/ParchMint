@@ -576,11 +576,11 @@ impl HistoryPreviewResult {
 
     pub fn into_reducer_payload(self) -> ProjectTaskPayload {
         ProjectTaskPayload::HistoryPreviewReady {
-            preview: HistoryPreviewData {
+            preview: Box::new(HistoryPreviewData {
                 checkpoint: self.checkpoint,
                 resource_paths: self.resource_paths,
                 document: self.document,
-            },
+            }),
             current_document: self.current_document,
             comparison: self.comparison,
         }
@@ -1710,7 +1710,7 @@ mod tests {
             category: CheckpointCategory::NamedSnapshot,
             affected_documents: vec![DocumentId::from_bytes([id + 1; 16])],
             name: Some(SnapshotName::new("Draft").expect("snapshot name")),
-            recorded_at_unix_millis: Some(u64::from(sequence)),
+            recorded_at_unix_millis: Some(sequence),
         }
     }
 

@@ -561,7 +561,6 @@ fn formatting_icon_button(
         container(text(tooltip_label).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
-    .into()
 }
 
 fn link_editor_popover(
@@ -1211,7 +1210,6 @@ fn tab_button(
             container(text(tooltip).size(12)).padding([4, 6]),
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         )
-        .into()
     } else {
         activate
     };
@@ -1229,8 +1227,7 @@ fn tab_button(
         close,
         container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
-    )
-    .into();
+    );
     harness_target::target_id(
         harness_target::editor_tab_id(pane, &id),
         mouse_area(
@@ -1261,7 +1258,6 @@ fn tab_button(
             iced::mouse::Interaction::Pointer
         }),
     )
-    .into()
 }
 
 fn flat_tab_button_style(

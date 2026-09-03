@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::Path};
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, FocusTarget, HarnessDropPosition,
@@ -482,7 +482,7 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
     close(harness);
 }
 
-fn create_project(run: &IsolatedRun, project: &PathBuf, title: &str) -> DesktopInteractionHarness {
+fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("launch application");
     harness
@@ -584,7 +584,7 @@ fn add_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) 
         .expect("commit nested document name");
 }
 
-fn seed_large_cards_project(path: &PathBuf, documents: usize) {
+fn seed_large_cards_project(path: &Path, documents: usize) {
     fs::create_dir_all(path.join(".parchmint")).expect("create canonical control directory");
     fs::write(path.join(".parchmint/root-id"), "0000000000000001\n")
         .expect("write canonical project identity");

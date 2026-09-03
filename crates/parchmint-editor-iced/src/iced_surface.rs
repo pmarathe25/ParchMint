@@ -752,16 +752,15 @@ fn comment_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSe
     Some(EditorSelection::new(document, document))
 }
 
+type CommentAnchorBounds = (f32, f32, f32, f32);
+type CommentHit = (Option<String>, CommentAnchorBounds);
+
 #[cfg(test)]
 fn comment_at(content: &SurfaceContent, x: f32, y: f32) -> Option<String> {
     comment_hit(content, x, y).and_then(|(comment, _)| comment)
 }
 
-fn comment_hit(
-    content: &SurfaceContent,
-    x: f32,
-    y: f32,
-) -> Option<(Option<String>, (f32, f32, f32, f32))> {
+fn comment_hit(content: &SurfaceContent, x: f32, y: f32) -> Option<CommentHit> {
     let document = content.geometry.hit_test(x, y)?;
     content.comments.iter().find_map(|decoration| {
         if decoration.range().start() > document || document >= decoration.range().end() {

@@ -3478,7 +3478,7 @@ pub enum ProjectTaskPayload {
         checkpoints: Vec<HistoryCheckpointRow>,
     },
     HistoryPreviewReady {
-        preview: HistoryPreviewData,
+        preview: Box<HistoryPreviewData>,
         current_document: Option<HistoryCurrentDocument>,
         comparison: Option<HistoryComparison>,
     },
@@ -4166,9 +4166,11 @@ impl ProjectWorkspace {
     }
 
     pub fn project_title(&self) -> &str {
-        (!self.project_title.trim().is_empty())
-            .then_some(self.project_title.as_str())
-            .unwrap_or("Untitled Project")
+        if !self.project_title.trim().is_empty() {
+            self.project_title.as_str()
+        } else {
+            "Untitled Project"
+        }
     }
 
     pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
@@ -6370,7 +6372,7 @@ impl ProjectWorkspace {
                 current_document,
                 comparison,
             } => {
-                self.history.preview = Some(preview);
+                self.history.preview = Some(*preview);
                 self.history.current_document = current_document;
                 self.history.comparison = comparison;
                 self.history.error = None;
@@ -7210,7 +7212,7 @@ mod tests {
             workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                 ticket,
                 ProjectTaskPayload::HistoryPreviewReady {
-                    preview: preview.clone(),
+                    preview: Box::new(preview.clone()),
                     current_document: Some(HistoryCurrentDocument {
                         document_id: "chapter-one".to_owned(),
                         title: "Chapter One".to_owned(),
@@ -7397,7 +7399,7 @@ mod tests {
             !workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                 first,
                 ProjectTaskPayload::HistoryPreviewReady {
-                    preview: first_preview,
+                    preview: Box::new(first_preview),
                     current_document: None,
                     comparison: None,
                 },
@@ -7418,7 +7420,7 @@ mod tests {
             workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                 second,
                 ProjectTaskPayload::HistoryPreviewReady {
-                    preview: preview.clone(),
+                    preview: Box::new(preview.clone()),
                     current_document: None,
                     comparison: None,
                 },
@@ -7529,7 +7531,7 @@ mod tests {
             !workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                 second.clone(),
                 ProjectTaskPayload::HistoryPreviewReady {
-                    preview: HistoryPreviewData {
+                    preview: Box::new(HistoryPreviewData {
                         checkpoint: HistoryCheckpointRow {
                             checkpoint_id: "checkpoint".to_owned(),
                             sequence: 1,
@@ -7540,7 +7542,7 @@ mod tests {
                         },
                         resource_paths: Vec::new(),
                         document: None,
-                    },
+                    }),
                     current_document: None,
                     comparison: None,
                 },

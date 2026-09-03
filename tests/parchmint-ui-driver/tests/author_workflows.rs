@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path};
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessDropPosition, HarnessHierarchySurface,
@@ -1510,7 +1510,7 @@ fn collection_editor_can_restore_a_deleted_story() {
     harness.shutdown().expect("stop collection application");
 }
 
-fn create_project(run: &IsolatedRun, project: &PathBuf, title: &str) -> DesktopInteractionHarness {
+fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("launch application");
     harness

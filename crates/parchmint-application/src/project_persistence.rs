@@ -23,9 +23,10 @@ use parchmint_history_api::{
 };
 use parchmint_project_format::{
     CanonicalAnnotations, CanonicalBytes, CanonicalCodec, CanonicalDocumentUpdate,
-    CanonicalDomainUpdate, CanonicalPersistenceFrontier, CanonicalProjectEncoding,
-    CanonicalProjectPatch, CanonicalProjectPathMap, CanonicalRelativePath, CanonicalResource,
-    CanonicalResourceMetadata, ContentHash, FormatError, ProjectFormatCodec,
+    CanonicalDomainUpdate, CanonicalPersistenceFrontier, CanonicalPersistenceFrontierTransition,
+    CanonicalProjectEncoding, CanonicalProjectPatch, CanonicalProjectPathMap,
+    CanonicalRelativePath, CanonicalResource, CanonicalResourceMetadata, ContentHash, FormatError,
+    ProjectFormatCodec,
 };
 use parchmint_project_repository::{AtomicWritePlan, StagedResource};
 use parchmint_recovery_api::{
@@ -542,8 +543,10 @@ impl ProjectPersistenceCoordinator {
             &canonical.resources,
             &canonical.complete_resources,
             &canonical.paths,
-            &canonical.frontier,
-            &persistence_frontier,
+            CanonicalPersistenceFrontierTransition {
+                previous: &canonical.frontier,
+                next: &persistence_frontier,
+            },
         );
         let mut patch = match patch {
             Ok(patch) => patch,

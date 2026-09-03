@@ -906,7 +906,7 @@ fn verification_workspace(
                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                     ticket,
                     ProjectTaskPayload::HistoryPreviewReady {
-                        preview: HistoryPreviewData {
+                        preview: Box::new(HistoryPreviewData {
                             checkpoint: checkpoints[0].clone(),
                             resource_paths: vec![
                                 "1 Current: The harbor held the last of the evening light."
@@ -917,7 +917,7 @@ fn verification_workspace(
                                     .to_owned(),
                             ],
                             document: Some(checkpoint_document),
-                        },
+                        }),
                         current_document,
                         comparison,
                     },

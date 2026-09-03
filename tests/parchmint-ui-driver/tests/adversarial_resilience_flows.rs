@@ -40,7 +40,7 @@ fn authoring_stays_bounded_during_repeated_navigation_and_revision() {
     // ensure the high-count loop below genuinely stresses preview reuse.
     for index in 0..12 {
         let node = harness
-            .hierarchy_node(&format!("Scene {index:02} research marker"))
+            .hierarchy_node(format!("Scene {index:02} research marker"))
             .expect("resolve permanent creation tab");
         harness
             .click_hierarchy_node(HarnessWindow::Project, node)
@@ -57,7 +57,7 @@ fn authoring_stays_bounded_during_repeated_navigation_and_revision() {
     // Repeated Explorer selection must reuse one temporary preview tab.
     for index in 0..12 {
         let node = harness
-            .hierarchy_node(&format!("Scene {index:02} research marker"))
+            .hierarchy_node(format!("Scene {index:02} research marker"))
             .expect("resolve scene preview node");
         harness
             .click_hierarchy_node(HarnessWindow::Project, node)
@@ -81,7 +81,7 @@ fn authoring_stays_bounded_during_repeated_navigation_and_revision() {
     assert_eq!(promoted_tabs, baseline_tabs + 1);
     for index in 0..12 {
         let node = harness
-            .hierarchy_node(&format!("Scene {index:02} research marker"))
+            .hierarchy_node(format!("Scene {index:02} research marker"))
             .expect("resolve repeated scene node");
         harness
             .click_hierarchy_node(HarnessWindow::Project, node)
@@ -132,7 +132,7 @@ fn authoring_stays_bounded_during_repeated_navigation_and_revision() {
         .type_into_target(
             HarnessWindow::Project,
             HarnessTarget::EditorPrimary,
-            &"research ".repeat(24),
+            "research ".repeat(24),
         )
         .expect("write repeated search corpus");
     harness

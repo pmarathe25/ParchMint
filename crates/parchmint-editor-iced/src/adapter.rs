@@ -406,7 +406,9 @@ impl EditorIcedAdapter {
             state.require_open()?;
             let revision = state.core.revision();
             let primary = state.core.primary_block();
-            let projection = state.core.canonical_projection();
+            let projection = state.projections.get(&revision).ok_or_else(|| {
+                invalid("current editor projection is unavailable from the retained budget")
+            })?;
             let pending = std::mem::take(&mut state.pending_blocks);
             let mut relayouts = Vec::new();
             for (view, mounted) in &mut state.views {
@@ -501,9 +503,13 @@ impl EditorIcedAdapter {
                 .get(&view)
                 .ok_or(EditorError::UnknownView { view })?
                 .active_comment;
+            let revision = state.core.revision();
             Ok(state
-                .core
-                .canonical_projection()
+                .projections
+                .get(&revision)
+                .ok_or_else(|| {
+                    invalid("current editor projection is unavailable from the retained budget")
+                })?
                 .comments()
                 .iter()
                 .filter_map(|thread| match &thread.anchor {
@@ -649,7 +655,10 @@ impl EditorIcedAdapter {
     ) -> Result<VisibleEditorBlock, EditorError> {
         self.with_session(session, |state| {
             state.require_open()?;
-            let projection = state.core.canonical_projection();
+            let revision = state.core.revision();
+            let projection = state.projections.get(&revision).ok_or_else(|| {
+                invalid("current editor projection is unavailable from the retained budget")
+            })?;
             Ok(VisibleEditorBlock::from_semantic_with_styles(
                 state.core.primary_block(),
                 projection.semantic(),
@@ -1041,7 +1050,10 @@ impl EditorAdapter for EditorIcedAdapter {
             state.require_open()?;
             state.core.set_style_catalog(styles);
             let primary = state.core.primary_block();
-            let projection = state.core.canonical_projection();
+            let revision = state.core.revision();
+            let projection = state.projections.get(&revision).ok_or_else(|| {
+                invalid("current editor projection is unavailable from the retained budget")
+            })?;
             for mounted in state.views.values_mut() {
                 for (block, cached) in &mut mounted.layouts {
                     if *block == primary {

@@ -802,7 +802,7 @@ fn explorer_rail<'a>(
     ]
     .spacing(8)
     .height(Length::Fill);
-    focus::f6_region(F6Region::Explorer, rail).into()
+    focus::f6_region(F6Region::Explorer, rail)
 }
 
 fn hierarchy_row_indicator(
@@ -3862,7 +3862,6 @@ fn inspector<'a>(
                     components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ),
             )
-            .into()
         };
         let editor = workspace.editor();
         let mut comments = column![].spacing(SPACING_8);
@@ -4545,7 +4544,6 @@ fn status_bar<'a>(
             .padding([4, 6]),
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         )
-        .into()
     } else {
         Space::new().width(0).into()
     };
@@ -5679,11 +5677,11 @@ mod tests {
             workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
                 ticket,
                 crate::ProjectTaskPayload::HistoryPreviewReady {
-                    preview: crate::HistoryPreviewData {
+                    preview: Box::new(crate::HistoryPreviewData {
                         checkpoint,
                         resource_paths: vec!["documents/chapter-one.html".to_owned()],
                         document: Some(checkpoint_document),
-                    },
+                    }),
                     current_document: Some(current_document),
                     comparison: Some(comparison),
                 },

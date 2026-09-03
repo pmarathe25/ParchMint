@@ -1572,10 +1572,8 @@ impl NativeDesktopHarness {
                 "history checkpoint {checkpoint_id:?} is unavailable"
             )));
         }
-        let bounds = self.find_id_bounds(
-            window,
-            harness_target::history_checkpoint_id(&checkpoint_id),
-        )?;
+        let bounds =
+            self.find_id_bounds(window, harness_target::history_checkpoint_id(checkpoint_id))?;
         self.dispatch_events(
             window,
             Self::click_events(bounds.center(), mouse::Button::Left),

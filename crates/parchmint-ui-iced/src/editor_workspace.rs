@@ -1701,9 +1701,7 @@ impl EditorWorkspace {
         self.comment_reply_drafts
             .retain(|thread, _| self.comment_threads.contains_key(thread));
         for thread in self.comment_threads.keys() {
-            self.comment_reply_drafts
-                .entry(thread.clone())
-                .or_insert_with(text_editor::Content::new);
+            self.comment_reply_drafts.entry(thread.clone()).or_default();
         }
         self.collapsed_comment_replies
             .retain(|thread| self.comment_threads.contains_key(thread));
@@ -1997,9 +1995,7 @@ impl EditorWorkspace {
         self.comment_reply_drafts
             .retain(|thread, _| self.comment_threads.contains_key(thread));
         for thread in self.comment_threads.keys() {
-            self.comment_reply_drafts
-                .entry(thread.clone())
-                .or_insert_with(text_editor::Content::new);
+            self.comment_reply_drafts.entry(thread.clone()).or_default();
         }
         self.collapsed_comment_replies
             .retain(|thread| self.comment_threads.contains_key(thread));
@@ -2469,7 +2465,7 @@ impl EditorWorkspace {
             EditorMessage::EditCommentReplyDraft { thread_id, action } => {
                 self.comment_reply_drafts
                     .entry(thread_id)
-                    .or_insert_with(text_editor::Content::new)
+                    .or_default()
                     .perform(action);
                 self.comment_feedback = None;
                 Vec::new()

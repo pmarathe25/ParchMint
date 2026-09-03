@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, FocusTarget, HarnessTarget, HarnessWindow,
@@ -398,7 +398,7 @@ fn history_reloads_prior_checkpoints_after_comment_activity() {
         .expect("stop history-after-comment application");
 }
 
-fn create_project(run: &IsolatedRun, project: &PathBuf, title: &str) -> DesktopInteractionHarness {
+fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("launch application");
     harness

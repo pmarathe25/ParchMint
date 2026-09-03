@@ -340,6 +340,6 @@ mod tests {
         assert_eq!(UI_PAGE_TITLE.family, UI_HEADING.family);
         assert_eq!(UI_PAGE_TITLE.size, 24);
         assert_eq!(UI_PAGE_TITLE.weight, 600);
-        assert!(UI_PAGE_TITLE.line_height < UI_BODY.line_height);
+        const { assert!(UI_PAGE_TITLE.line_height < UI_BODY.line_height) };
     }
 }

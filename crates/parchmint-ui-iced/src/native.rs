@@ -111,14 +111,51 @@ fn worker_launch_failure(operation: &str, error: &std::io::Error) -> String {
     format!("could not start {operation} worker: {error}")
 }
 
+/// Returns whether a keyboard event needs the window-wide fallback router.
+///
+/// The mounted editor and focused widgets receive ordinary text input directly.
+/// Forwarding those events through the desktop reducer as well adds a complete
+/// update turn for every typed scalar without producing a window-wide action.
+fn routes_keyboard_event(event: &keyboard::Event) -> bool {
+    match event {
+        keyboard::Event::ModifiersChanged(_) => true,
+        keyboard::Event::KeyPressed {
+            key:
+                keyboard::Key::Named(
+                    keyboard::key::Named::ArrowUp
+                    | keyboard::key::Named::ArrowDown
+                    | keyboard::key::Named::ArrowLeft
+                    | keyboard::key::Named::ArrowRight
+                    | keyboard::key::Named::Enter
+                    | keyboard::key::Named::Escape
+                    | keyboard::key::Named::F2
+                    | keyboard::key::Named::F6
+                    | keyboard::key::Named::Tab,
+                ),
+            repeat: false,
+            ..
+        } => true,
+        keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character(key),
+            modifiers,
+            repeat: false,
+            ..
+        } => {
+            keyboard_accelerator(key, *modifiers).is_some()
+                || (key.eq_ignore_ascii_case("f") && *modifiers == keyboard::Modifiers::COMMAND)
+        }
+        _ => false,
+    }
+}
+
 fn runtime_event(event: Event, status: event::Status, window: window::Id) -> Option<Message> {
-    matches!(
-        event,
-        Event::Keyboard(_)
-            | Event::Mouse(mouse::Event::ButtonPressed(_))
-            | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-            | Event::Window(window::Event::Resized(_))
-    )
+    (matches!(&event, Event::Keyboard(keyboard) if routes_keyboard_event(keyboard))
+        || matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(_))
+                | Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                | Event::Window(window::Event::Resized(_))
+        ))
     .then_some(Message::RuntimeEvent {
         window,
         event,
@@ -1318,10 +1355,12 @@ struct OpaqueMutationToken {
     kind: OpaqueMutationKind,
 }
 
+type OpaqueMutationLaunch = dyn Fn(&NativeProjectState) -> Task<Message>;
+
 struct PendingOpaqueMutation {
     token: OpaqueMutationToken,
     prior_projects: usize,
-    launch: Arc<dyn Fn(&NativeProjectState) -> Task<Message>>,
+    launch: Arc<OpaqueMutationLaunch>,
 }
 
 #[derive(Default)]
@@ -1911,9 +1950,9 @@ impl NativeDesktop {
         let capture_valid = capture_error.is_none();
         let callbacks = startup.callbacks;
         let (preference_change_sender, preference_changes) = futures_mpsc::unbounded();
-        if let Some(mut changes) = callbacks.preference_changes() {
+        if let Some(changes) = callbacks.preference_changes() {
             std::thread::spawn(move || {
-                while let Some(change) = changes.next() {
+                for change in changes {
                     if preference_change_sender
                         .unbounded_send(change.snapshot.values.recent_projects)
                         .is_err()
@@ -3147,7 +3186,7 @@ impl NativeDesktop {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
-        let content = match self.windows.get(&id) {
+        match self.windows.get(&id) {
             Some(NativeWindow::Launcher) => self.launcher_view(),
             Some(NativeWindow::Project(state)) => state.workspace.as_deref().map_or_else(
                 || {
@@ -3190,8 +3229,7 @@ impl NativeDesktop {
             None => container(text("Opening ParchMint…"))
                 .center(Length::Fill)
                 .into(),
-        };
-        content
+        }
     }
 
     fn title(&self, id: window::Id) -> String {
@@ -3343,7 +3381,7 @@ impl NativeDesktop {
 
     fn activate_shortcut(&mut self, id: window::Id, command: &str) -> Task<Message> {
         let capability = self.capability_for_window(id);
-        let task = match command {
+        match command {
             "search.global" => self.update_project_surface(
                 id,
                 ProjectSurfaceMessage::Project(ProjectMessage::ShowGlobalSearch),
@@ -3492,8 +3530,7 @@ impl NativeDesktop {
                 self.status = Some(format!("Unknown keyboard shortcut command: {command}"));
                 Task::none()
             }
-        };
-        task
+        }
     }
 
     fn runtime_event(
@@ -3571,7 +3608,7 @@ impl NativeDesktop {
                     return Task::none();
                 };
                 (state.shell.focus_target() == crate::FocusTarget::Explorer)
-                    .then(|| match key {
+                    .then_some(match key {
                         keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
                             Some(crate::ExplorerNavigation::Previous)
                         }
@@ -4090,7 +4127,7 @@ impl NativeDesktop {
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-            None => content.into(),
+            None => content,
         }
     }
 
@@ -8377,7 +8414,7 @@ impl NativeDesktop {
             let spawn = Self::launch_worker(
                 "export project",
                 move || {
-                    let result = worker_ports
+                    worker_ports
                         .access()
                         .map_err(|_| NativeTaskOutcome::StaleSession)
                         .and_then(|access| {
@@ -8393,8 +8430,7 @@ impl NativeDesktop {
                                         error.to_string(),
                                     )
                                 })
-                        });
-                    result
+                        })
                 },
                 move |result| {
                     terminal_sender
@@ -9343,12 +9379,11 @@ impl NativeDesktop {
             }
             None => {}
         };
-        let close = if self.windows.is_empty() {
+        if self.windows.is_empty() {
             Task::batch([window::close(id), iced::exit()])
         } else {
             window::close(id)
-        };
-        close
+        }
     }
 
     fn teardown_editor_sessions(state: &mut NativeProjectState) {
@@ -11834,6 +11869,62 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_skips_text_input_but_keeps_global_keyboard_controls() {
+        let window = window::Id::unique();
+        let text_input = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("a".into()),
+            modified_key: keyboard::Key::Character("a".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyA),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: Some("a".into()),
+            repeat: false,
+        });
+        assert!(
+            runtime_event(text_input, event::Status::Ignored, window).is_none(),
+            "the focused widget already receives ordinary text input"
+        );
+
+        let navigation = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
+            modified_key: keyboard::Key::Named(keyboard::key::Named::ArrowUp),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::ArrowUp),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::default(),
+            text: None,
+            repeat: false,
+        });
+        assert!(
+            runtime_event(navigation, event::Status::Ignored, window).is_some(),
+            "Explorer navigation remains a window-wide fallback"
+        );
+        let local_find = Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Character("f".into()),
+            modified_key: keyboard::Key::Character("f".into()),
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyF),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::COMMAND,
+            text: Some("f".into()),
+            repeat: false,
+        });
+        assert!(
+            runtime_event(local_find, event::Status::Ignored, window).is_some(),
+            "local Find remains a window-wide fallback"
+        );
+        assert!(
+            runtime_event(
+                Event::Keyboard(keyboard::Event::ModifiersChanged(
+                    keyboard::Modifiers::SHIFT
+                )),
+                event::Status::Ignored,
+                window,
+            )
+            .is_some(),
+            "pointer selection gestures observe modifier changes"
+        );
+    }
+
+    #[test]
     fn window_wide_left_release_schedules_uncommitted_hierarchy_drag_cleanup() {
         let window = window::Id::unique();
         let Some(Message::RuntimeEvent { event, .. }) = runtime_event(
@@ -11969,7 +12060,7 @@ mod tests {
 
     #[test]
     fn worker_launch_failure_message_names_the_operation() {
-        let error = std::io::Error::new(std::io::ErrorKind::Other, "resource unavailable");
+        let error = std::io::Error::other("resource unavailable");
 
         assert_eq!(
             worker_launch_failure("export project", &error),
@@ -12495,9 +12586,11 @@ mod tests {
 
     #[test]
     fn queued_explicit_save_intent_survives_an_active_save_failure() {
-        let mut autosave = AutosaveState::default();
-        autosave.save_in_flight = true;
-        autosave.explicit_save_waiting = true;
+        let mut autosave = AutosaveState {
+            save_in_flight: true,
+            explicit_save_waiting: true,
+            ..Default::default()
+        };
 
         autosave.save_in_flight = false;
 
