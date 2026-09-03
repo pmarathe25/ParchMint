@@ -823,9 +823,11 @@ impl AtomicFileOps for NativeAtomicFileOps {
 
     fn flush_file(&self, file: &TemporaryFile) -> Result<(), FsError> {
         verify_lock_owner(&file.root)?;
-        File::open(&file.path)
-            .and_then(|open| open.sync_all())
-            .map_err(|error| FsError::io("flush temporary file", &file.path, error))
+        // `write_temporary` uses `write_new_synced`, which flushes the file before
+        // returning it. Reopening the temporary file just to flush it again fails
+        // on Windows while the filesystem is still resolving the newly-created
+        // path.
+        Ok(())
     }
 
     fn replace(&self, file: TemporaryFile, target: &CheckedTarget) -> Result<(), FsError> {
@@ -1116,9 +1118,6 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
 }
 
 fn map_write_error(error: FsError) -> WriteError {
-    if matches!(error, FsError::Io { .. }) {
-        eprintln!("ParchMint atomic write filesystem failure: {error}");
-    }
     match error {
         FsError::UnsafePath { path } => WriteError::UnsafePath(path),
         FsError::NotLockOwner { .. } => WriteError::ForeignRoot,
