@@ -99,7 +99,7 @@ impl NativePlatform {
             registry.clone(),
             before_window_work,
         ));
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        #[cfg(target_os = "macos")]
         native_menu::register_activation_target(&services);
         let platform = Self {
             dialogs: services.clone(),
@@ -462,9 +462,9 @@ pub mod iced_adapter {
                 })?;
             native_menu::attach(capability, binding, &semantic, raw_window, raw_display).map(
                 |kind| match kind {
-                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    #[cfg(target_os = "macos")]
                     native_menu::AttachmentKind::Native => IcedMenuAttachment::Native,
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
                     native_menu::AttachmentKind::InWindow => IcedMenuAttachment::InWindow,
                 },
             )

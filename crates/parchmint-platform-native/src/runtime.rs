@@ -312,6 +312,7 @@ fn write_command(
     output_text(operation, output).map(|_| ())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn home_directory(operation: &'static str) -> Result<PathBuf, PlatformError> {
     env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -469,12 +470,16 @@ mod platform {
                     .arg("org.gnome.desktop.interface")
                     .arg("gtk-theme"),
             )
-        })?;
-        if color_scheme.to_ascii_lowercase().contains("dark") {
-            Ok(SystemAppearance::Dark)
-        } else {
-            Ok(SystemAppearance::Light)
-        }
+        });
+        Ok(match color_scheme {
+            Ok(color_scheme) if color_scheme.to_ascii_lowercase().contains("dark") => {
+                SystemAppearance::Dark
+            }
+            // A headless Linux session may not install or expose the GNOME
+            // schema. Appearance is cosmetic, so use the default instead of
+            // failing desktop startup.
+            Ok(_) | Err(_) => SystemAppearance::Light,
+        })
     }
 }
 

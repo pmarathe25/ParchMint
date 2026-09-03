@@ -5,16 +5,16 @@
 //! winit X11/Wayland handle to muda's GTK-only API.
 
 use parchmint_platform_api::PlatformError;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use parchmint_platform_api::{SemanticMenu, WindowCapability};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttachmentKind {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     Native,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     InWindow,
 }
 
@@ -63,6 +63,48 @@ pub(crate) fn detach(
     } else {
         Err(failed(
             "Iced did not provide a matching X11 or Wayland window/display handle",
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn matching_handles(raw_window: RawWindowHandle, raw_display: RawDisplayHandle) -> bool {
+    matches!(
+        (raw_window, raw_display),
+        (RawWindowHandle::Win32(_), RawDisplayHandle::Windows(_))
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn attach(
+    _window: WindowCapability,
+    _binding: u64,
+    _menu: &SemanticMenu,
+    raw_window: RawWindowHandle,
+    raw_display: RawDisplayHandle,
+) -> Result<AttachmentKind, PlatformError> {
+    if matching_handles(raw_window, raw_display) {
+        // muda requires unsafe HWND attachment on Windows. Keep the semantic
+        // menu in Iced instead, consistent with the existing Linux path.
+        Ok(AttachmentKind::InWindow)
+    } else {
+        Err(failed(
+            "Iced did not provide matching Win32 window/display handles",
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn detach(
+    _window: WindowCapability,
+    raw_window: RawWindowHandle,
+    raw_display: RawDisplayHandle,
+) -> Result<(), PlatformError> {
+    if matching_handles(raw_window, raw_display) {
+        Ok(())
+    } else {
+        Err(failed(
+            "Iced did not provide matching Win32 window/display handles",
         ))
     }
 }
@@ -153,10 +195,8 @@ mod tests {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 mod native {
-    #[cfg(target_os = "windows")]
-    use std::collections::HashMap;
     use std::{
         cell::RefCell,
         sync::{Arc, Mutex, OnceLock, Weak},
@@ -309,92 +349,15 @@ mod native {
         Ok(())
     }
 
-    #[cfg(target_os = "windows")]
-    struct AttachedMenu {
-        hwnd: isize,
-        menu: Menu,
-    }
-
-    #[cfg(target_os = "windows")]
-    thread_local! {
-        static ATTACHED: RefCell<HashMap<WindowCapability, AttachedMenu>> =
-            RefCell::new(HashMap::new());
-    }
-
-    #[cfg(target_os = "macos")]
     struct AttachedMenu {
         window: WindowCapability,
         menu: Menu,
     }
 
-    #[cfg(target_os = "macos")]
     thread_local! {
         static ATTACHED: RefCell<Option<AttachedMenu>> = const { RefCell::new(None) };
     }
 
-    #[cfg(target_os = "windows")]
-    pub(crate) fn attach(
-        window: WindowCapability,
-        binding: u64,
-        semantic: &parchmint_platform_api::SemanticMenu,
-        raw_window: RawWindowHandle,
-        raw_display: RawDisplayHandle,
-    ) -> Result<AttachmentKind, parchmint_platform_api::PlatformError> {
-        let (RawWindowHandle::Win32(handle), RawDisplayHandle::Windows(_)) =
-            (raw_window, raw_display)
-        else {
-            return Err(failed(
-                "Iced did not provide matching Win32 window/display handles",
-            ));
-        };
-        let hwnd = handle.hwnd.get();
-        let menu = build_menu(window, binding, semantic)?;
-        ATTACHED.with(|attached| {
-            let mut attached = attached.borrow_mut();
-            if let Some(previous) = attached.remove(&window) {
-                // SAFETY: Both HWND values came from Iced's live `window::run`
-                // callback. Removal occurs before replacement in that same
-                // event-loop callback.
-                unsafe { previous.menu.remove_for_hwnd(previous.hwnd) }
-                    .map_err(|error| failed(error.to_string()))?;
-            }
-            // SAFETY: `hwnd` is the non-zero Win32 handle supplied by Iced for
-            // the live window executing this callback. The Menu stays retained
-            // in thread-local event-loop storage until rebind or close.
-            unsafe { menu.init_for_hwnd(hwnd) }.map_err(|error| failed(error.to_string()))?;
-            attached.insert(window, AttachedMenu { hwnd, menu });
-            Ok(AttachmentKind::Native)
-        })
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(crate) fn detach(
-        window: WindowCapability,
-        raw_window: RawWindowHandle,
-        raw_display: RawDisplayHandle,
-    ) -> Result<(), parchmint_platform_api::PlatformError> {
-        let (RawWindowHandle::Win32(handle), RawDisplayHandle::Windows(_)) =
-            (raw_window, raw_display)
-        else {
-            return Err(failed(
-                "Iced did not provide matching Win32 window/display handles",
-            ));
-        };
-        ATTACHED.with(|attached| {
-            let Some(previous) = attached.borrow_mut().remove(&window) else {
-                return Ok(());
-            };
-            if previous.hwnd != handle.hwnd.get() {
-                return Err(failed("the Win32 menu handle changed before detach"));
-            }
-            // SAFETY: the retained HWND is compared with the live handle from
-            // this `window::run` callback immediately before removal.
-            unsafe { previous.menu.remove_for_hwnd(previous.hwnd) }
-                .map_err(|error| failed(error.to_string()))
-        })
-    }
-
-    #[cfg(target_os = "macos")]
     pub(crate) fn attach(
         window: WindowCapability,
         binding: u64,
@@ -423,7 +386,6 @@ mod native {
         })
     }
 
-    #[cfg(target_os = "macos")]
     pub(crate) fn detach(
         window: WindowCapability,
         raw_window: RawWindowHandle,
@@ -447,5 +409,5 @@ mod native {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub(crate) use native::{attach, detach, register_activation_target};

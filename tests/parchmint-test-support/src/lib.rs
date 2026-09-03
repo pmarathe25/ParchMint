@@ -303,7 +303,8 @@ impl ScopedProject {
 
 fn temporary_root() -> PathBuf {
     let sequence = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut path = std::env::temp_dir();
+    let temporary = std::env::temp_dir();
+    let mut path = fs::canonicalize(&temporary).unwrap_or(temporary);
     path.push("parchmint-test-support");
     path.push(format!(
         "fixture-{pid}-{seed}",
