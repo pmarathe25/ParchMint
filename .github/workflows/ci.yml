@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".cargo/**"
+      - ".gitattributes"
       - ".github/**"
       - "Cargo.lock"
       - "Cargo.toml"
@@ -23,6 +24,7 @@ on:
       - "v*-rc*"
     paths:
       - ".cargo/**"
+      - ".gitattributes"
       - ".github/**"
       - "Cargo.lock"
       - "Cargo.toml"
