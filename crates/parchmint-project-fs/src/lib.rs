@@ -1116,6 +1116,9 @@ impl<F: AtomicFileOps> AtomicWriter for FsAtomicWriter<F> {
 }
 
 fn map_write_error(error: FsError) -> WriteError {
+    if matches!(error, FsError::Io { .. }) {
+        eprintln!("ParchMint atomic write filesystem failure: {error}");
+    }
     match error {
         FsError::UnsafePath { path } => WriteError::UnsafePath(path),
         FsError::NotLockOwner { .. } => WriteError::ForeignRoot,
