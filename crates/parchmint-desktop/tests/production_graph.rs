@@ -409,7 +409,6 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
     // The retained ports above prove that a closed session is no longer
     // authorized. Release their service clones before opening the project
     // again so its SQLite worker closes the previous cache on Windows.
-    drop(access);
     drop(project_ui);
     let OpenProjectResult::Opened {
         session: reopened, ..
