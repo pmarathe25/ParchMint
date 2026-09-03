@@ -12,7 +12,7 @@ use parchmint_editor_api::{
     SemanticFragmentBlock, SemanticInlineMark, SemanticMarkRange, SharedEditorSession,
     SpellcheckDecoration, StyleCatalogProjection, ViewHostCapability, ViewId,
 };
-use parchmint_editor_core::feasibility::{
+use parchmint_editor_core::paste::{
     PasteBlockKind, PasteMarkKind, PasteSource, SanitizedPaste, sanitize_paste,
 };
 use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession};

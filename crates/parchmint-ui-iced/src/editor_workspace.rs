@@ -1451,7 +1451,7 @@ struct TabPointerDrag {
 
 #[derive(Debug, Clone, Copy)]
 enum EditorWorkspaceSource {
-    Fixture(EditorFixture),
+    Fixture,
     Production,
 }
 
@@ -1501,7 +1501,7 @@ impl EditorWorkspace {
             document_id: "chapter-one".to_owned(),
         };
         Self {
-            source: EditorWorkspaceSource::Fixture(fixture),
+            source: EditorWorkspaceSource::Fixture,
             primary,
             companion,
             focused_pane: EditorPane::Primary,
@@ -1762,24 +1762,6 @@ impl EditorWorkspace {
                     })
             })
         });
-    }
-
-    pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
-        match (self.source, appearance) {
-            (EditorWorkspaceSource::Production, _) => {
-                panic!("production workspaces do not have fixture references")
-            }
-            (
-                EditorWorkspaceSource::Fixture(EditorFixture::DualPane),
-                ResolvedAppearance::Light,
-            ) => "editor-dual-light",
-            (EditorWorkspaceSource::Fixture(EditorFixture::DualPane), ResolvedAppearance::Dark) => {
-                "editor-dual-dark"
-            }
-            (EditorWorkspaceSource::Fixture(EditorFixture::SameDocumentTwoViews), _) => {
-                "editor-same-document-two-views-light"
-            }
-        }
     }
 
     pub fn pane(&self, pane: EditorPane) -> &EditorPaneState {

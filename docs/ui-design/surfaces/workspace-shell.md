@@ -36,9 +36,7 @@ treatment while its pane is shown. When a companion editor is open, an explicit
 until it restores the exact prior sidebar visibility.
 
 Focus, selection, disabled, warning, error, comment, search-match, and save
-states must meet contrast requirements without color alone. Reference boards
-may show roles, hierarchy levels, focus order, and keyboard actions for future
-work, but they do not add a v1 assistive-technology requirement.
+states use contrast, shape, text, or icons so color is never the only cue.
 
 ## Keyboard and focus
 

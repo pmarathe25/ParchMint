@@ -1,7 +1,6 @@
-//! Requirements-first contracts for project-facing Iced views.
+//! Behavioral contracts for project-facing Iced views.
 //!
-//! The Stage 37 implementation supplies the presentation types exercised here.
-//! These tests deliberately stay at the UI boundary: they use deterministic
+//! These tests stay at the UI boundary: they use deterministic
 //! fixture state and presentation effects, never a display server or a service
 //! implementation.
 
@@ -11,7 +10,7 @@ use parchmint_domain::{
     NodeId, Project, ProjectCommand, ProjectExportSetting, ProjectExportSettings, ProjectId,
     apply_project_command,
 };
-use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
+use parchmint_preferences::AppearanceMode;
 use parchmint_ui_api::{
     DocumentSummary, DocumentWordCount, ExportArtifact, ExportArtifactToken, ProjectSnapshot,
 };
@@ -22,58 +21,6 @@ use parchmint_ui_iced::{
     ProjectWorkspace, ReplacementCheckState, ReplacementPreviewRowKind, RestoreLocation,
     RibbonDestination, SaveState, SelectionGesture, ShellLayout, SidebarSurface, StatusCount,
 };
-
-#[test]
-fn project_fixtures_have_requirement_linked_light_dark_references_for_every_view() {
-    let references = [
-        (
-            ProjectFixture::Explorer,
-            "editor-single-light",
-            "editor-single-dark",
-        ),
-        (ProjectFixture::Cards, "cards-light", "cards-dark"),
-        (
-            ProjectFixture::GlobalSearch,
-            "global-search-light",
-            "global-search-dark",
-        ),
-        (ProjectFixture::History, "history-light", "history-dark"),
-        (
-            ProjectFixture::RecentlyDeleted,
-            "recently-deleted-light",
-            "recently-deleted-dark",
-        ),
-        (
-            ProjectFixture::SettingsAppearance,
-            "settings-appearance-light",
-            "settings-appearance-dark",
-        ),
-        (
-            ProjectFixture::Export,
-            "export-project-output-controls-light",
-            "export-project-output-controls-dark",
-        ),
-        (
-            ProjectFixture::ErrorRecovery,
-            "error-recovery-light",
-            "error-recovery-dark",
-        ),
-    ];
-
-    for (fixture, light, dark) in references {
-        let workspace = ProjectWorkspace::from_fixture(fixture);
-        assert_eq!(
-            workspace.fixture_reference(ResolvedAppearance::Light),
-            light,
-            "each project view has a deterministic Light fixture"
-        );
-        assert_eq!(
-            workspace.fixture_reference(ResolvedAppearance::Dark),
-            dark,
-            "each project view has a deterministic Dark fixture"
-        );
-    }
-}
 
 #[test]
 fn explorer_selection_normalizes_descendants_and_dragging_preserves_hierarchy_rules() {

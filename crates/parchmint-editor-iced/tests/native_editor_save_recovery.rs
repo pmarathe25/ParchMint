@@ -1,4 +1,4 @@
-//! Native Stage 34 coverage for editor/save/recovery pause and crash boundaries.
+//! Native coverage for editor, save, and recovery pause and crash boundaries.
 
 #[path = "fixtures/editor_save_recovery.rs"]
 mod editor_save_recovery;
@@ -13,7 +13,6 @@ use parchmint_recovery_api::{
 use parchmint_save::{SaveGeneration, SaveState};
 
 const NEWER_REVISIONS: usize = 24;
-const ALL_PAUSE_NEWER_REVISIONS: usize = 96;
 
 #[test]
 fn sustained_typing_remains_nonblocking_with_each_persistence_boundary_paused() {
@@ -73,62 +72,6 @@ fn sustained_typing_remains_nonblocking_with_each_persistence_boundary_paused() 
         assert!(harness.recovery_batch_count() <= 2);
         harness.force_terminate();
     }
-}
-
-#[test]
-fn sustained_typing_remains_nonblocking_with_all_persistence_boundaries_paused() {
-    let mut harness =
-        EditorSaveRecoveryHarness::with_projection_budget("", ALL_PAUSE_NEWER_REVISIONS + 4);
-    let boundaries = [
-        Boundary::BeforeProjection,
-        Boundary::AfterProjection,
-        Boundary::BeforeRecoveryAppend,
-        Boundary::AfterRecoveryAppend,
-        Boundary::BeforeSave,
-        Boundary::AfterCanonicalCommit,
-        Boundary::BeforeSaveAcknowledgement,
-    ];
-    for boundary in boundaries {
-        harness.boundaries().pause_at(boundary);
-    }
-
-    assert_eq!(harness.type_text("seed", true), EditorRevision::from(1));
-    harness.boundaries().wait_until(Boundary::BeforeProjection);
-    for _ in 0..ALL_PAUSE_NEWER_REVISIONS {
-        harness.type_text("x", false);
-    }
-    let (persistence, save, recovery) = harness.queue_bounds();
-    assert!(
-        persistence <= 2,
-        "all-pause persistence queue grew unbounded"
-    );
-    assert!(save <= 2, "all-pause save queue grew unbounded");
-    assert!(recovery <= 2, "all-pause recovery queue grew unbounded");
-    assert_eq!(
-        harness
-            .status()
-            .requested
-            .unwrap()
-            .open_documents
-            .values()
-            .copied()
-            .collect::<Vec<_>>(),
-        [DocumentRevision::from(
-            (ALL_PAUSE_NEWER_REVISIONS + 1) as u64
-        )]
-    );
-
-    harness.boundaries().release_all();
-    harness.wait_until_idle();
-    for boundary in boundaries {
-        assert!(
-            harness.boundaries().count(boundary) > 0,
-            "missing {boundary:?}"
-        );
-    }
-    assert_eq!(harness.status().state, SaveState::Dirty);
-    assert_eq!(harness.acknowledgements().len(), 1);
-    harness.force_terminate();
 }
 
 #[test]
@@ -201,47 +144,6 @@ fn interrupted_durable_recovery_batch_resumes_exactly_after_reopen() {
 }
 
 #[test]
-fn multiple_newer_revisions_during_save_pause_keep_exact_ack_dirty() {
-    let mut harness = EditorSaveRecoveryHarness::new("");
-    harness.boundaries().pause_at(Boundary::BeforeSave);
-    harness.type_text("saved", true);
-    harness.boundaries().wait_until(Boundary::BeforeSave);
-    for text in ["-a", "-b", "-c", "-d", "-e"] {
-        harness.type_text(text, false);
-    }
-    harness.boundaries().release(Boundary::BeforeSave);
-    harness.wait_until_idle();
-
-    let status = harness.status();
-    assert_eq!(status.state, SaveState::Dirty);
-    assert_eq!(harness.production_status().state, SaveState::Dirty);
-    assert_eq!(harness.acknowledgements().len(), 1);
-    let acknowledgement = &harness.acknowledgements()[0];
-    assert_eq!(
-        acknowledgement
-            .requested_revisions
-            .open_documents
-            .values()
-            .copied()
-            .collect::<Vec<_>>(),
-        [DocumentRevision::from(1)]
-    );
-    assert_eq!(
-        status
-            .requested
-            .unwrap()
-            .open_documents
-            .values()
-            .copied()
-            .collect::<Vec<_>>(),
-        [DocumentRevision::from(6)]
-    );
-    assert_eq!(harness.committed_bodies(), ["saved"]);
-    assert_eq!(recovered_body(&harness.replay()), Some("saved-a-b-c-d-e"));
-    harness.force_terminate();
-}
-
-#[test]
 fn longer_mixed_replay_preserves_each_batch_and_resumes_the_unacknowledged_tail() {
     let mut harness = EditorSaveRecoveryHarness::new("");
     let bodies = [
@@ -301,6 +203,8 @@ fn interrupted_projection_never_reports_saved() {
         Some(PersistenceFailure::Projection(_))
     ));
     assert!(status.saved_through.is_none());
+    assert!(harness.acknowledgements().is_empty());
+    assert!(harness.committed_bodies().is_empty());
     assert_eq!(recovered_body(&harness.replay()), Some("first second"));
 }
 

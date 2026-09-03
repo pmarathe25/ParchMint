@@ -1,4 +1,4 @@
-//! Developer-owned checks for the Stage 38 production composition boundary.
+//! Integration checks for the production composition boundary.
 
 use std::{
     collections::{BTreeMap, BTreeSet},

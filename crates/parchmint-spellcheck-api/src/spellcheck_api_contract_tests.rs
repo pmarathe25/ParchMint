@@ -1,4 +1,4 @@
-//! Requirements-first tests for the public spellcheck boundary.
+//! Behavioral contracts for the public spellcheck boundary.
 //!
 //! These tests use only ParchMint values. The private spelling runtime must
 //! preserve the same stale-result, priority, and cancellation rules.

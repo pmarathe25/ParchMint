@@ -17,7 +17,7 @@ use parchmint_domain::{
 };
 use parchmint_editor_api::{CanonicalDocumentLoad, SemanticDocument};
 use parchmint_editor_core::EditorCoreSession;
-use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
+use parchmint_preferences::AppearanceMode;
 use parchmint_ui_api::{
     ExportArtifact, ExportArtifactToken, HistoryMaintenanceStatus, ProjectSnapshot,
 };
@@ -31,7 +31,7 @@ use crate::{
     RibbonDestination, TabSpec,
 };
 
-/// Requirement-linked project fixture families.
+/// Project fixture families used by deterministic presentation tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectFixture {
     Explorer,
@@ -4173,75 +4173,6 @@ impl ProjectWorkspace {
         }
     }
 
-    pub fn fixture_reference(&self, appearance: ResolvedAppearance) -> &'static str {
-        match (self.source, appearance) {
-            (ProjectWorkspaceSource::Production, _) => {
-                panic!("production workspaces do not have fixture references")
-            }
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::Explorer),
-                ResolvedAppearance::Light,
-            ) => "editor-single-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::Explorer),
-                ResolvedAppearance::Dark,
-            ) => "editor-single-dark",
-            (ProjectWorkspaceSource::Fixture(ProjectFixture::Cards), ResolvedAppearance::Light) => {
-                "cards-light"
-            }
-            (ProjectWorkspaceSource::Fixture(ProjectFixture::Cards), ResolvedAppearance::Dark) => {
-                "cards-dark"
-            }
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::GlobalSearch),
-                ResolvedAppearance::Light,
-            ) => "global-search-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::GlobalSearch),
-                ResolvedAppearance::Dark,
-            ) => "global-search-dark",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::History),
-                ResolvedAppearance::Light,
-            ) => "history-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::History),
-                ResolvedAppearance::Dark,
-            ) => "history-dark",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::RecentlyDeleted),
-                ResolvedAppearance::Light,
-            ) => "recently-deleted-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::RecentlyDeleted),
-                ResolvedAppearance::Dark,
-            ) => "recently-deleted-dark",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::SettingsAppearance),
-                ResolvedAppearance::Light,
-            ) => "settings-appearance-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::SettingsAppearance),
-                ResolvedAppearance::Dark,
-            ) => "settings-appearance-dark",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::Export),
-                ResolvedAppearance::Light,
-            ) => "export-project-output-controls-light",
-            (ProjectWorkspaceSource::Fixture(ProjectFixture::Export), ResolvedAppearance::Dark) => {
-                "export-project-output-controls-dark"
-            }
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::ErrorRecovery),
-                ResolvedAppearance::Light,
-            ) => "error-recovery-light",
-            (
-                ProjectWorkspaceSource::Fixture(ProjectFixture::ErrorRecovery),
-                ResolvedAppearance::Dark,
-            ) => "error-recovery-dark",
-        }
-    }
-
     pub const fn sidebar_surface(&self) -> SidebarSurface {
         self.sidebar
     }
@@ -8308,7 +8239,7 @@ mod tests {
     }
 
     #[test]
-    fn card_activation_mounts_the_document_in_the_stage_36_editor_workspace() {
+    fn card_activation_mounts_the_document_in_the_editor_workspace() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         workspace.update(ProjectMessage::ActivateCard("chapter-three".to_owned()));
         assert_eq!(

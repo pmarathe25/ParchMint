@@ -1,4 +1,4 @@
-//! Requirements-first tests for the framework-neutral desktop UI boundary.
+//! Behavioral contracts for the framework-neutral desktop UI boundary.
 
 use std::sync::Arc;
 

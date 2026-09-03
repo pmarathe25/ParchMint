@@ -1,6 +1,6 @@
 # ParchMint architecture
 
-ParchMint is a native Rust desktop application for planning and writing novels.
+ParchMint is a native Rust desktop application for organizing and writing novels.
 `iced` provides its windows and application interface. The rest of the program
 is split into small crates for writing, project files, History, search, export,
 spellcheck, and operating-system work.
@@ -172,6 +172,5 @@ Each changing value has one owner:
 
 Two panes that show the same document use the same session. They keep separate
 selection and scroll state. The editor keeps text as valid UTF-8 and uses
-ParchMint positions when it maps edits, comments, and selections. V1 supports
-normal keyboard input for en-US writing. IME, bidirectional editing, broader
-language support, and screen-reader integration remain extension work.
+ParchMint positions when it maps edits, comments, and selections. The current
+editor and spellcheck integration target normal `en-US` keyboard input.

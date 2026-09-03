@@ -64,7 +64,7 @@ This reduction is intentionally a developer decision. A user-action trace can
 be replayed automatically, but automatic conversion would preserve the full
 desktop stack and would still be an end-to-end test.
 
-## Release-scale authoring resilience
+## Large-document authoring resilience
 
 `tests/large_document_resilience_flows.rs` exercises the supported
 250,000-word document size through real desktop composition. Its flows cover
@@ -74,8 +74,5 @@ session. They use the harness's virtual clocks, so a long writing session is
 reproducible without sleeping in CI.
 
 The flows assert retained markers, canonical file contents, recovery results,
-and absence of error diagnostics. They deliberately do not assert elapsed time
-or process memory: the headless harness has no reliable host-level measurement
-API. Verify the numerical latency, first-viewport, and memory-stabilization
-budgets with the platform measurement runners described by
-`docs/product/scale-and-performance.md`.
+and absence of error diagnostics. They do not assert elapsed time or process
+memory because the headless harness has no reliable host-level measurement API.

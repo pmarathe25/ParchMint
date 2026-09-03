@@ -15,8 +15,7 @@ pub use parchmint_ui_iced::{
 pub use production::{DesktopInteractionHarness, InteractionHarnessError};
 pub use production::{
     ProductionApplicationGraph, ProductionControls, ProductionFaultKind, ProductionFaultPoint,
-    ProductionHistoryStatus, ProductionMeasurement, ProductionObservation,
-    ProductionProjectSession,
+    ProductionHistoryStatus, ProductionObservation, ProductionProjectSession,
 };
 
 use std::{

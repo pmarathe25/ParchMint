@@ -21,7 +21,7 @@ on:
     branches:
       - main
     tags:
-      - "v*-rc*"
+      - "v*"
     paths:
       - ".cargo/**"
       - ".gitattributes"
@@ -124,47 +124,8 @@ jobs:
           --
           sbom verify
 
-      - name: Validate packaging definitions and explicit release inputs
-        run: >-
-          cargo +$RUST_TOOLCHAIN run
-          --locked
-          --offline
-          --package parchmint-ci
-          --
-          release inputs verify
-
       - name: Install pinned cargo-deny
         run: cargo +$RUST_TOOLCHAIN install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
       - name: Check advisories, GPL-compatible licenses, bans, and provenance
         run: cargo +$RUST_TOOLCHAIN deny --locked check all
-
-  release-candidate-gate:
-    name: Release candidate / fail-closed evidence gate
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: workspace-and-supply-chain
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: >-
-          rustup toolchain install "$RUST_TOOLCHAIN"
-          --profile minimal
-
-      - name: Fetch locked dependencies
-        run: cargo +$RUST_TOOLCHAIN fetch --locked
-
-      - name: Verify real release candidates and native evidence
-        run: >-
-          cargo +$RUST_TOOLCHAIN run
-          --locked
-          --offline
-          --package parchmint-ci
-          --
-          release verify

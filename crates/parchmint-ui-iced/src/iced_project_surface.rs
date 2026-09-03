@@ -5067,9 +5067,29 @@ mod tests {
 
     use super::*;
 
+    fn visual_target(fixture: ProjectFixture) -> crate::VisualTarget {
+        match fixture {
+            ProjectFixture::Explorer => crate::VisualTarget::EditorSingle,
+            ProjectFixture::Cards => crate::VisualTarget::Cards,
+            ProjectFixture::GlobalSearch => crate::VisualTarget::GlobalSearch,
+            ProjectFixture::History => crate::VisualTarget::History,
+            ProjectFixture::RecentlyDeleted => crate::VisualTarget::RecentlyDeleted,
+            ProjectFixture::SettingsAppearance => crate::VisualTarget::SettingsAppearance,
+            ProjectFixture::Export => crate::VisualTarget::Export,
+            ProjectFixture::ErrorRecovery => crate::VisualTarget::ErrorRecovery,
+        }
+    }
+
+    fn visual_appearance(appearance: ResolvedAppearance) -> crate::VisualAppearance {
+        match appearance {
+            ResolvedAppearance::Light => crate::VisualAppearance::Light,
+            ResolvedAppearance::Dark => crate::VisualAppearance::Dark,
+        }
+    }
+
     fn assert_fixture_hash(fixture: ProjectFixture, theme: &Theme, appearance: ResolvedAppearance) {
         let workspace = ProjectWorkspace::from_fixture(fixture);
-        let stem = workspace.fixture_reference(appearance);
+        let stem = visual_target(fixture).reference_id(visual_appearance(appearance));
         let mut simulator = Simulator::<ProjectMessage>::with_size(
             crate::visual_verification::visual_settings(),
             Size::new(1_440.0, 900.0),
@@ -5130,7 +5150,7 @@ mod tests {
     }
 
     #[test]
-    fn every_requirement_linked_project_view_renders_in_light_and_dark() {
+    fn every_project_view_matches_its_light_and_dark_reference() {
         for fixture in [
             ProjectFixture::Explorer,
             ProjectFixture::Cards,

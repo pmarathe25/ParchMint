@@ -74,5 +74,4 @@ focus-ring offsets, pane and splitter limits, and four-pixel default radii with
 deliberate menu and dialog exceptions.
 
 Define visible effects for focus, selection, pressed controls, menus, dialogs,
-tooltips, and errors. Avoid nonessential animation. Reduced-motion preference
-integration is future work.
+tooltips, and errors. Avoid nonessential animation.

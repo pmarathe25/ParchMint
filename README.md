@@ -1,35 +1,49 @@
 # ParchMint
 
-ParchMint is a local-first desktop application for planning and writing novels
-on Windows, macOS, and Linux.
+ParchMint is a local-first desktop application for writing and organizing
+novels on Windows, macOS, and Linux. Projects stay in ordinary files on your
+computer, and the application keeps save history without requiring an online
+account.
 
-## Start here
+## Run from source
 
-Read these documents in this order:
+Install the Rust toolchain listed in `rust-toolchain.toml`, then run:
 
-1. [Product specification](docs/product/README.md) — what the
-   v1 product does and what is outside its scope.
-2. [Architecture](docs/architecture/architecture.md) — how the application is
-   split into crates, where data lives, and how the crates work together.
-3. [UI design](docs/ui-design/README.md) — the visual language, layouts, and
-   presentation of the product.
-4. [Future work](docs/product/future-work.md) — ideas that are outside v1.
+```console
+cargo run --locked -p parchmint-desktop --bin parchmint
+```
 
-The [decisions log](docs/decisions.md) gives short explanations for technical
-choices that affect the whole codebase. It provides context; it does not add
-requirements or override the other documents.
+To build an optimized executable, run:
 
-## Which document wins?
+```console
+cargo build --release --locked -p parchmint-desktop --bin parchmint
+```
 
-When the maintained documents disagree, use this order:
+The executable is written to `target/release/parchmint` on macOS and Linux or
+`target/release/parchmint.exe` on Windows.
 
-1. The product specification controls observable behavior and v1 scope.
-2. The architecture controls ownership, boundaries, canonical formats, and
-   selected technology.
-3. The UI design documentation controls presentation where it does not change
-   product behavior.
+## Documentation
 
-Update the applicable current document when an approved decision changes it.
+- [User guide](docs/user-guide.md) explains projects, writing, search, History,
+  recovery, settings, and export.
+- [Architecture](docs/architecture/architecture.md) explains crate boundaries,
+  data ownership, and background work.
+- [UI design](docs/ui-design/README.md) records the visual language and screen
+  composition.
+- [Documentation index](docs/README.md) links the detailed contributor
+  references.
+
+Tests define supported behavior. Crate-level `README.md` files document the
+interfaces and implementation details for each component.
+
+## Development
+
+```console
+cargo check --workspace --all-targets --locked
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all --check
+```
 
 ## License
 

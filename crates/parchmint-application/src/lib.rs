@@ -480,7 +480,7 @@ struct NativeDocumentState {
     fail_composite_at: Option<DocumentId>,
 }
 
-/// Deterministic native document owner used until the editor integration stage.
+/// Deterministic native document owner for application-level coordination.
 ///
 /// Closed documents become hidden open sessions before a document command.
 /// Composite project edits retain their visibility and do not touch document undo.

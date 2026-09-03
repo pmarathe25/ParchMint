@@ -350,6 +350,46 @@ fn author_opens_existing_global_search_with_the_standard_project_shortcut() {
 }
 
 #[test]
+fn global_search_opened_from_cards_omits_the_editor_surface() {
+    let run = IsolatedRun::new("global-search-route").expect("isolated run");
+    let project = run.root().join("global-search-route.parchmint");
+    let harness = create_project(&run, &project, "Global Search Route");
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .expect("open Cards before searching");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
+        .expect("open global search from Explorer");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::GlobalSearchQuery)
+            .expect("observe global-search query")
+    );
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .expect("observe editor replacement")
+    );
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .expect("return to Editor");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .expect("observe restored editor")
+    );
+    close(harness);
+}
+
+#[test]
 fn history_flow_preserves_meaningful_checkpoints_and_records_restoration() {
     let run = IsolatedRun::new("history-quality-authoring").expect("isolated run");
     let project = run.root().join("history-quality-authoring.parchmint");

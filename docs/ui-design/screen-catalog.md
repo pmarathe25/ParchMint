@@ -1,25 +1,8 @@
 # ParchMint Screen Catalog
 
-This compact catalog identifies the maintained Penpot design surfaces. It records
-stable names and IDs, not delivery status or a separate product specification.
-Product behavior remains in the product specification;
-intended visual and interaction rules remain in the UI design pages.
-
-## Source-page roles
-
-- **00 Cover & Current Status** records the current design, product version,
-  unresolved blockers, and approval state. It is not a decision history.
-- **01 Foundations & Theme Tokens** and **02 Components** are non-product
-  design-system pages.
-- **03 Launcher & Project Creation** through **11 Empty Loading Error Recovery
-  States** contain product screens and product states.
-- **12 Accessibility & Keyboard Focus** contains non-product reference walks.
-  Its keyboard order, focus behavior, and visible-state rules apply to v1.
-  Screen-reader and formal assistive-technology notes are future references.
-- **13 Cross-Platform Variants** contains non-product platform and layout
-  references.
-- **14 Prototype Flows** contains non-product flow documentation.
-- **15 Handoff Inventory** records the contents of the design handoff.
+This catalog maps the stable names used by the Penpot design, generated design
+tokens, and visual tests. The other UI design pages explain how the components
+and screens behave.
 
 The editor's active Light or Dark theme metadata is non-authoritative: it records
 an editor selection only. The complete Light and Dark semantic token sets are
@@ -131,9 +114,10 @@ document in both panes with independent view state.
 | `PM/TreeRow/ActiveDocument` | `e96ec683-a782-802c-8008-660778942c0f` |
 | `PM/WorkspaceTopBar/Export` | `e96ec683-a782-802c-8008-6607f362d598` |
 
-## Product-screen mappings (80)
+## Screen mappings (80)
 
-A `PM / Screen /` entry is a product screen or product state, even when it is a design-only state rather than a Light/Dark baseline. `fixture_id` identifies reproducible intended content and view state.
+A `PM / Screen /` entry identifies a screen or visible state. `fixture_id`
+identifies the reproducible content and view state used by visual tooling.
 
 | Screen ID | PM name | Source page | Penpot board ID | Fixture ID |
 |---|---|---|---|---|

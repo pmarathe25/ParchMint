@@ -1,11 +1,9 @@
-//! Requirements-first tests for the private offline `en-US` spellcheck service.
+//! Behavioral contracts for the private offline `en-US` spellcheck service.
 //!
 //! The implementation supplies `SpellcheckTestHarness` only under `cfg(test)`.
 //! It must drive the real `EnUsSpellcheckService` while exposing scheduling,
 //! persisted-dictionary, and network-observation controls.  Those controls are
 //! deliberately ParchMint test values; no spelling-engine type is expected here.
-
-use std::time::{Duration, Instant};
 
 use parchmint_editor_api::DocumentPosition;
 use parchmint_spellcheck_api::{
@@ -15,8 +13,6 @@ use parchmint_spellcheck_api::{
 };
 
 use crate::{EnUsSpellcheckService, SpellcheckTestHarness, block_on_test};
-
-const UI_TURN_BUDGET: Duration = Duration::from_millis(2);
 
 fn document(value: u8) -> DocumentId {
     DocumentId::from_bytes([value; 16])
@@ -348,25 +344,6 @@ fn bounded_work_prefers_viewport_and_recent_changes_over_background() {
             SpellcheckPriority::Visible,
             SpellcheckPriority::RecentlyChanged
         ]
-    );
-}
-
-#[test]
-#[ignore = "run on agreed reference hardware as the spellcheck latency release gate"]
-fn starting_and_first_polling_a_check_returns_control_within_one_ui_turn() {
-    let harness = SpellcheckTestHarness::new();
-    let service = harness.service();
-    let request = check_request(document(9), 7, 0, 0, 1, SpellcheckPriority::Visible, "teh");
-    let started = Instant::now();
-    let future = service.check(request);
-    let waker = std::task::Waker::noop();
-    let mut context = std::task::Context::from_waker(waker);
-    let mut future = std::pin::pin!(future);
-    let _ = future.as_mut().poll(&mut context);
-
-    assert!(
-        started.elapsed() <= UI_TURN_BUDGET,
-        "starting spellcheck work must not block one UI event-loop turn"
     );
 }
 

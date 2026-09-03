@@ -1,9 +1,7 @@
-//! Requirements-first contracts for the Iced editor workspace.
+//! Behavioral contracts for the Iced editor workspace.
 //!
-//! These tests intentionally name the editor-workspace presentation contract
-//! before the Stage 36 implementation exists.  They stay at the UI boundary:
-//! messages yield adapter-facing effects, while fixture and layout assertions
-//! remain deterministic and headless.
+//! These tests stay at the UI boundary: messages yield adapter-facing effects,
+//! while fixture and layout assertions remain deterministic and headless.
 
 use parchmint_preferences::ResolvedAppearance;
 use parchmint_ui_iced::{
@@ -13,22 +11,9 @@ use parchmint_ui_iced::{
 };
 
 #[test]
-fn dual_pane_and_same_document_fixtures_remain_distinct_in_visual_and_headless_state() {
+fn dual_pane_and_same_document_fixtures_remain_distinct_in_headless_state() {
     let dual = EditorWorkspace::from_fixture(EditorFixture::DualPane);
     let same_document = EditorWorkspace::from_fixture(EditorFixture::SameDocumentTwoViews);
-
-    assert_eq!(
-        dual.fixture_reference(ResolvedAppearance::Light),
-        "editor-dual-light"
-    );
-    assert_eq!(
-        dual.fixture_reference(ResolvedAppearance::Dark),
-        "editor-dual-dark"
-    );
-    assert_eq!(
-        same_document.fixture_reference(ResolvedAppearance::Light),
-        "editor-same-document-two-views-light"
-    );
 
     assert_ne!(
         dual.pane(EditorPane::Primary).active_document(),

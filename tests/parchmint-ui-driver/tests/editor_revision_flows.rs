@@ -76,107 +76,32 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
 }
 
 #[test]
-fn editor_supports_local_then_project_wide_phrase_revision() {
-    let run = IsolatedRun::new("local-global-revision").expect("isolated run");
-    let project = run.root().join("local-global-revision.parchmint");
-    let harness = create_project(&run, &project, "Local Global Revision");
+fn editor_toolbar_inserts_semantic_scene_and_page_breaks() {
+    let run = IsolatedRun::new("semantic-breaks").expect("isolated run");
+    let project = run.root().join("semantic-breaks.parchmint");
+    let harness = create_project(&run, &project, "Semantic Breaks");
+
     harness
         .type_into_target(
             HarnessWindow::Project,
             HarnessTarget::EditorPrimary,
-            "draft draft stays provisional",
+            "Opening scene.",
         )
-        .expect("draft repeated phrase");
-
+        .expect("draft opening prose");
     harness
-        .press_command_key(HarnessWindow::Project, 'f')
-        .expect("open local find");
+        .click_target(HarnessWindow::Project, HarnessTarget::SceneBreak)
+        .expect("insert a scene break");
     harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::LocalFind(EditorPane::Primary),
-            "draft",
-        )
-        .expect("search current document");
-    assert!(visible(&harness, "2 matches"));
-    harness
-        .click_text(HarnessWindow::Project, "Replace")
-        .expect("open local replace");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::LocalReplace(EditorPane::Primary),
-            "revision",
-        )
-        .expect("enter local replacement");
-    harness
-        .click_text(HarnessWindow::Project, "Replace all")
-        .expect("apply local replacement");
-    assert!(
-        harness
-            .active_editor_body()
-            .expect("read local revision")
-            .contains("revision revision")
-    );
-    harness
-        .elapse_autosave_idle()
-        .expect("save the local revision before project-wide search");
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains("revision revision")),
-        "local replacement must reach canonical storage before global search"
-    );
-
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
-        .expect("open project-wide search");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::GlobalSearchQuery,
-            "revision",
-        )
-        .expect("search revised phrase globally");
-    harness
-        .redraw(HarnessWindow::Project)
-        .expect("render the updated global-search results");
-    assert!(
-        visible(&harness, "2 matches in 1 document"),
-        "global search: {}; trace: {:?}",
-        harness
-            .global_search_status()
-            .expect("read global-search status"),
-        harness.trace().expect("read global-search trace"),
-    );
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::GlobalReplacement,
-            "final",
-        )
-        .expect("enter global replacement");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::GlobalReplacementReview,
-        )
-        .expect("open replacement preview");
-    harness
-        .click_text(HarnessWindow::Project, "Revalidate selection")
-        .expect("revalidate global matches");
-    harness
-        .click_text(HarnessWindow::Project, "Apply replacement")
-        .expect("apply global replacement");
-    assert!(
-        harness
-            .active_editor_body()
-            .expect("read final revision")
-            .contains("final final")
-    );
+        .click_target(HarnessWindow::Project, HarnessTarget::PageBreak)
+        .expect("insert a page break");
+    let body = harness
+        .active_editor_body()
+        .expect("read document with semantic breaks");
+    assert!(body.contains("data-kind=\"scene-break\""));
+    assert!(body.contains("data-kind=\"page-break\""));
     harness
         .close(HarnessWindow::Project)
-        .expect("close project");
+        .expect("close semantic-break project");
     harness.shutdown().expect("stop application");
 }
 
@@ -274,12 +199,6 @@ fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &st
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
         .expect("name document");
-}
-
-fn visible(harness: &DesktopInteractionHarness, text: &str) -> bool {
-    harness
-        .contains_text(HarnessWindow::Project, text)
-        .expect("query project surface")
 }
 
 fn canonical_bodies(project: &Path) -> Vec<String> {

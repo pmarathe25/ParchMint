@@ -13,24 +13,24 @@ use parchmint_ui_driver::IsolatedRun;
 const LARGE_DOCUMENT_WORDS: usize = 250_000;
 const LARGE_DOCUMENT_TITLE: &str = "250K Manuscript";
 
-/// Exercises the release-scale document in a two-pane workspace through
+/// Exercises a large document in a two-pane workspace through
 /// repeated continuous-writing autosaves, shared-view verification, History
 /// loading, and a full application restart. The virtual clock makes the long
 /// session deterministic without a wall-clock wait.
 #[test]
-fn release_scale_manuscript_survives_sustained_two_pane_authoring_and_restart() {
-    let run = IsolatedRun::new("release-scale-sustained-authoring").expect("isolated run");
+fn large_manuscript_survives_sustained_two_pane_authoring_and_restart() {
+    let run = IsolatedRun::new("large-document-sustained-authoring").expect("isolated run");
     let project = run
         .root()
-        .join("release-scale-sustained-authoring.parchmint");
+        .join("large-document-sustained-authoring.parchmint");
     seed_large_document_project(
         &project,
-        "Release Scale Sustained Authoring",
+        "Large Document Sustained Authoring",
         &large_body("word"),
     );
 
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("open release-scale project");
+        .expect("open large-document project");
     let _ = harness.take_diagnostics();
     open_in_both_panes(&harness);
     assert!(
@@ -95,7 +95,7 @@ fn release_scale_manuscript_survives_sustained_two_pane_authoring_and_restart() 
     close(harness);
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("reopen release-scale project");
+        .expect("reopen large-document project");
     let body = reopened
         .active_editor_body()
         .expect("read reopened manuscript");
@@ -111,22 +111,22 @@ fn release_scale_manuscript_survives_sustained_two_pane_authoring_and_restart() 
     close(reopened);
 }
 
-/// Runs real project-wide replacement against a release-scale document, then
+/// Runs real project-wide replacement against a large document, then
 /// saves a follow-up revision, loads History, and verifies canonical storage
 /// after a restart. It catches search/replacement work that loses or corrupts
 /// content while operating on a large body.
 #[test]
-fn release_scale_project_wide_revision_preserves_every_match_after_restart() {
-    let run = IsolatedRun::new("release-scale-global-revision").expect("isolated run");
-    let project = run.root().join("release-scale-global-revision.parchmint");
+fn large_document_project_wide_revision_preserves_every_match_after_restart() {
+    let run = IsolatedRun::new("large-document-global-revision").expect("isolated run");
+    let project = run.root().join("large-document-global-revision.parchmint");
     seed_large_document_project(
         &project,
-        "Release Scale Global Revision",
+        "Large Document Global Revision",
         &large_body_with_repeated_marker("draftmarker"),
     );
 
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("open release-scale revision project");
+        .expect("open large-document revision project");
     let _ = harness.take_diagnostics();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
@@ -208,7 +208,7 @@ fn release_scale_project_wide_revision_preserves_every_match_after_restart() {
     assert_eq!(canonical[0].matches('7').count(), 1);
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("reopen revised release-scale project");
+        .expect("reopen revised large-document project");
     let body = reopened
         .active_editor_body()
         .expect("read reopened revision");
@@ -219,20 +219,20 @@ fn release_scale_project_wide_revision_preserves_every_match_after_restart() {
 }
 
 /// Verifies that repeated recovery projections coalesce safely for a
-/// release-scale document and that accepting recovery preserves every late
+/// large document and that accepting recovery preserves every late
 /// author marker after an abandoned session.
 #[test]
-fn release_scale_recovery_replays_repeated_unsaved_authoring_without_loss() {
-    let run = IsolatedRun::new("release-scale-recovery").expect("isolated run");
-    let project = run.root().join("release-scale-recovery.parchmint");
-    seed_large_document_project(&project, "Release Scale Recovery", &large_body("word"));
+fn large_document_recovery_replays_repeated_unsaved_authoring_without_loss() {
+    let run = IsolatedRun::new("large-document-recovery").expect("isolated run");
+    let project = run.root().join("large-document-recovery.parchmint");
+    seed_large_document_project(&project, "Large Document Recovery", &large_body("word"));
 
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("open release-scale recovery project");
+        .expect("open large-document recovery project");
     let _ = harness.take_diagnostics();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
-        .expect("focus release-scale manuscript for recovery authoring");
+        .expect("focus large manuscript for recovery authoring");
     for capture in 1..=6 {
         harness
             .type_focused(HarnessWindow::Project, capture.to_string())
@@ -247,7 +247,7 @@ fn release_scale_recovery_replays_repeated_unsaved_authoring_without_loss() {
         .expect("abandon project without a final save");
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
-        .expect("reopen abandoned release-scale project");
+        .expect("reopen abandoned large-document project");
     assert!(
         reopened
             .contains_text(HarnessWindow::Project, "Recovered changes are ready")
@@ -264,7 +264,7 @@ fn release_scale_recovery_replays_repeated_unsaved_authoring_without_loss() {
     for capture in 1..=6 {
         assert_eq!(body.matches(&capture.to_string()).count(), 1);
     }
-    assert_no_error_diagnostics(&reopened, "accepted release-scale recovery");
+    assert_no_error_diagnostics(&reopened, "accepted large-document recovery");
     close(reopened);
     let canonical = canonical_bodies(&project);
     assert_eq!(canonical.len(), 1);
@@ -337,7 +337,7 @@ fn seed_large_document_project(path: &Path, title: &str, body: &str) {
 
 fn large_body(word: &str) -> String {
     // The initial blank lines give the headless author a stable writing area
-    // above the release-scale corpus. That keeps real pointer input from
+    // above the large-document corpus. That keeps real pointer input from
     // splitting a source word merely because the harness targets its center.
     format!(
         "<p>{}{}</p>",

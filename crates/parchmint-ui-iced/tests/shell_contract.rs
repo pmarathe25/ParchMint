@@ -3,10 +3,9 @@
 use parchmint_platform_api::WindowCapability;
 use parchmint_preferences::{AppearanceMode, ResolvedAppearance};
 use parchmint_ui_iced::{
-    ALL_VISUAL_FIXTURES, DialogKind, EDITOR_DUAL_DEFAULT, EDITOR_SINGLE_DEFAULT, F6Region,
-    FocusTarget, InspectorSection, LAUNCHER_DEFAULT, LauncherState, MenuKind, PaneGeometry,
+    DialogKind, F6Region, FocusTarget, InspectorSection, LauncherState, MenuKind, PaneGeometry,
     RibbonDestination, SUPPORTED_APPEARANCES, Shell, ShellLayout, ShellMessage, ShellTask,
-    TaskCompletion, VisualFixture,
+    TaskCompletion,
 };
 
 #[test]
@@ -169,24 +168,6 @@ fn appearance_changes_propagate_to_every_open_window() {
             .values()
             .all(|shell| shell.resolved_appearance() == ResolvedAppearance::Light)
     );
-}
-
-#[test]
-fn visual_fixture_catalog_has_stable_light_dark_pairs() {
-    assert_eq!(ALL_VISUAL_FIXTURES.len(), 3);
-    for fixture in ALL_VISUAL_FIXTURES {
-        assert!(!fixture.id.is_empty());
-        assert!(!fixture.light_reference.is_empty());
-        assert!(!fixture.dark_reference.is_empty());
-        assert_eq!(
-            (fixture.size.width, fixture.size.height, fixture.size.scale),
-            (1440, 900, 1)
-        );
-        assert_eq!(VisualFixture::from_id(fixture.id), Some(*fixture));
-    }
-    assert_eq!(LAUNCHER_DEFAULT.id, "launcher-default");
-    assert_eq!(EDITOR_SINGLE_DEFAULT.id, "editor-single-default");
-    assert_eq!(EDITOR_DUAL_DEFAULT.id, "editor-dual-default");
 }
 
 #[test]

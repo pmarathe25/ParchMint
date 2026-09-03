@@ -1,4 +1,4 @@
-//! Requirements-first contracts for project-wide search.
+//! Behavioral contracts for project-wide search.
 //!
 //! These tests deliberately use a deterministic model instead of a storage
 //! implementation.  The production index must preserve the same observable

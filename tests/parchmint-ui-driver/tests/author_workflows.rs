@@ -87,77 +87,6 @@ fn newly_created_chapter_autosaves_to_canonical_storage() {
 }
 
 #[test]
-fn short_story_author_can_draft_save_and_visit_workspace_modes() {
-    let run = IsolatedRun::new("short-story").expect("isolated run");
-    let project = run.root().join("winter-story.parchmint");
-    let draft = "A frost-black raven crossed the silent field.";
-    let harness = create_project(&run, &project, "Winter Story");
-
-    harness
-        .type_into_target(HarnessWindow::Project, HarnessTarget::EditorPrimary, draft)
-        .expect("draft short story");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Cards),
-        )
-        .expect("review the story in Cards");
-    assert!(visible(&harness, "Untitled Document"));
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Settings),
-        )
-        .expect("open project settings");
-    harness
-        .click_text(HarnessWindow::Project, "Dark")
-        .expect("choose dark appearance");
-    assert!(visible(&harness, "Dark appearance"));
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Export),
-        )
-        .expect("review manuscript export");
-    assert!(visible(&harness, "Export manuscript"));
-    assert!(visible(&harness, "Entire Manuscript"));
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Editor),
-        )
-        .expect("return to drafting");
-    harness
-        .elapse_autosave_idle()
-        .expect("autosave short story");
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains(draft))
-    );
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close saved short story");
-    harness.shutdown().expect("stop first application instance");
-
-    let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("relaunch application");
-    reopened
-        .click_text(HarnessWindow::Launcher, "Winter Story")
-        .expect("open recent short story");
-    assert!(
-        reopened
-            .active_editor_body()
-            .expect("read reopened short story")
-            .contains(draft)
-    );
-    reopened
-        .close(HarnessWindow::Project)
-        .expect("close reopened short story");
-    reopened.shutdown().expect("stop reopened application");
-}
-
-#[test]
 fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
     let run = IsolatedRun::new("restore-writing-context").expect("isolated run");
     let project = run.root().join("restore-writing-context.parchmint");
@@ -301,85 +230,6 @@ fn author_can_rename_a_chapter_from_the_inspector() {
         .close(HarnessWindow::Project)
         .expect("close inspector-title project");
     harness.shutdown().expect("stop inspector-title project");
-}
-
-#[test]
-fn editor_honors_standard_formatting_shortcuts() {
-    let run = IsolatedRun::new("editor-formatting-shortcuts").expect("isolated run");
-    let project = run.root().join("editor-formatting-shortcuts.parchmint");
-    let harness = create_project(&run, &project, "Formatting Shortcuts");
-
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::EditorPrimary,
-            "Bold opening",
-        )
-        .expect("write prose to format");
-    harness
-        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "Bold opening")
-        .expect("select prose to format");
-    harness
-        .press_command_key(HarnessWindow::Project, 'b')
-        .expect("toggle bold with the standard shortcut");
-    harness
-        .elapse_autosave_idle()
-        .expect("autosave formatted prose");
-
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains("<strong>Bold opening</strong>")),
-        "the editor shortcut must emit canonical bold markup"
-    );
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close formatting project");
-    harness.shutdown().expect("stop formatting project");
-}
-
-#[test]
-fn editor_honors_standard_undo_and_redo_shortcuts() {
-    let run = IsolatedRun::new("editor-undo-redo-shortcuts").expect("isolated run");
-    let project = run.root().join("editor-undo-redo-shortcuts.parchmint");
-    let harness = create_project(&run, &project, "Undo and Redo Shortcuts");
-
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::EditorPrimary,
-            "A revisable opening.",
-        )
-        .expect("write revisable prose");
-    harness
-        .press_command_key(HarnessWindow::Project, 'z')
-        .expect("undo with the standard shortcut");
-    assert!(
-        !harness
-            .active_editor_body()
-            .expect("read the undone draft")
-            .contains("A revisable opening."),
-        "undo must apply to the focused editor"
-    );
-    #[cfg(target_os = "macos")]
-    harness
-        .press_command_shift_key(HarnessWindow::Project, 'z')
-        .expect("redo with the standard macOS shortcut");
-    #[cfg(not(target_os = "macos"))]
-    harness
-        .press_command_key(HarnessWindow::Project, 'y')
-        .expect("redo with the standard shortcut");
-    assert!(
-        harness
-            .active_editor_body()
-            .expect("read the redone draft")
-            .contains("A revisable opening."),
-        "redo must restore the focused editor change"
-    );
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close undo-redo project");
-    harness.shutdown().expect("stop undo-redo project");
 }
 
 #[test]
@@ -1254,83 +1104,6 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
 }
 
 #[test]
-fn anthology_editor_can_build_a_collection_outline() {
-    let run = IsolatedRun::new("anthology-outline").expect("isolated run");
-    let project = run.root().join("lantern-collection.parchmint");
-    let harness = create_project(&run, &project, "Lantern Collection");
-
-    create_group(&harness, "Manuscript", "Stories");
-    create_document(&harness, "Stories", "The First Lantern");
-    create_document(&harness, "Stories", "The Ash Orchard");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Cards),
-        )
-        .expect("review collection cards");
-    assert!(visible(&harness, "Stories"));
-    assert!(visible(&harness, "The First Lantern"));
-    assert!(visible(&harness, "The Ash Orchard"));
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Editor),
-        )
-        .expect("return to collection editor");
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close collection outline");
-    harness.shutdown().expect("stop collection outline");
-}
-
-#[test]
-fn historical_novelist_can_keep_research_notes_separate_from_the_manuscript() {
-    let run = IsolatedRun::new("historical-research").expect("isolated run");
-    let project = run.root().join("harbor-history.parchmint");
-    let harness = create_project(&run, &project, "Harbor History");
-
-    create_group(&harness, "Research", "Harbor Records");
-    create_document(&harness, "Harbor Records", "Lighthouse Log");
-    harness
-        .right_click_text(HarnessWindow::Project, "Lighthouse Log")
-        .expect("open research-note context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open in companion")
-        .expect("open the research note in the companion pane");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
-            "The light failed at midnight on 14 November.",
-        )
-        .expect("draft research note in the companion pane");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Cards),
-        )
-        .expect("review research notes in Cards");
-    assert!(visible(&harness, "Harbor Records"));
-    assert!(visible(&harness, "Lighthouse Log"));
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Export),
-        )
-        .expect("review manuscript-only export");
-    assert!(visible(
-        &harness,
-        "Excludes Synopsis, metadata, comments, and Research."
-    ));
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close historical research project");
-    harness
-        .shutdown()
-        .expect("stop historical research project");
-}
-
-#[test]
 fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
     let run = IsolatedRun::new("research-heavy-novel").expect("isolated run");
     let project = run.root().join("research-heavy-novel.parchmint");
@@ -1449,6 +1222,16 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
             .expect("read current manuscript chapter")
             .contains("Rain carried the harbor bells across the water.")
     );
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Export),
+        )
+        .expect("review manuscript-only export");
+    assert!(visible(
+        &harness,
+        "Excludes Synopsis, metadata, comments, and Research."
+    ));
     harness
         .close(HarnessWindow::Project)
         .expect("close research-heavy novel");

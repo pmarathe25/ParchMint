@@ -1,7 +1,7 @@
 //! Application-owned editor projection, save, and recovery coordination.
 //!
-//! This seam is constructible before the desktop service graph; Stage 38 owns
-//! only the final production graph assembly.
+//! The desktop service graph supplies this coordinator with concrete save and
+//! recovery services.
 
 use std::{
     collections::BTreeMap,

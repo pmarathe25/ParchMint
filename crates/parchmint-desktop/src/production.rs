@@ -18,7 +18,6 @@ mod dependencies {
         },
         task::{Context, Poll, Wake, Waker},
         thread,
-        time::Duration,
     };
 
     pub(super) use parchmint_application::{
@@ -185,26 +184,13 @@ pub enum ProductionObservation {
     },
 }
 
-/// One raw measurement collected by a real runner.
-///
-/// Stage 38 intentionally assigns no pass/fail threshold to these values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductionMeasurement {
-    pub operation: String,
-    pub elapsed: Duration,
-    pub resident_bytes: Option<u64>,
-    pub platform: String,
-    pub hardware_profile: Option<String>,
-}
-
 #[derive(Debug, Default)]
 struct ControlState {
     faults: BTreeMap<ProductionFaultPoint, VecDeque<ProductionFaultKind>>,
     observations: Vec<ProductionObservation>,
-    measurements: Vec<ProductionMeasurement>,
 }
 
-/// Shared observation, one-shot fault, and raw-measurement controls.
+/// Shared observation and one-shot fault controls.
 ///
 /// Production uses an empty instance. Tests must explicitly enqueue faults;
 /// consuming a fault records the exact boundary and kind.
@@ -229,22 +215,6 @@ impl ProductionControls {
             .lock()
             .expect("production controls mutex poisoned")
             .observations
-            .clone()
-    }
-
-    pub fn record_measurement(&self, measurement: ProductionMeasurement) {
-        self.state
-            .lock()
-            .expect("production controls mutex poisoned")
-            .measurements
-            .push(measurement);
-    }
-
-    pub fn measurements(&self) -> Vec<ProductionMeasurement> {
-        self.state
-            .lock()
-            .expect("production controls mutex poisoned")
-            .measurements
             .clone()
     }
 

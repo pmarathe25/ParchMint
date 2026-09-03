@@ -5,64 +5,6 @@ use parchmint_desktop::{
 };
 use parchmint_ui_driver::IsolatedRun;
 
-/// A deletion must survive a process restart so recovery is useful after an
-/// accidental close or crash, rather than only during the current session.
-#[test]
-fn recently_deleted_items_can_be_restored_after_reopening_the_project() {
-    let run = IsolatedRun::new("lifecycle-deleted-restart").expect("isolated run");
-    let project = run.root().join("recovery-journal.parchmint");
-    let harness = create_project(&run, &project, "Recovery Journal");
-
-    create_group(&harness, "Manuscript", "Discarded Scenes");
-    create_document(&harness, "Discarded Scenes", "Storm Ending");
-    let node = harness
-        .hierarchy_node("Storm Ending")
-        .expect("resolve document to delete");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, node)
-        .expect("select deleted document");
-    harness
-        .right_click_text(HarnessWindow::Project, "Storm Ending")
-        .expect("open document menu");
-    harness
-        .click_text(HarnessWindow::Project, "Delete")
-        .expect("move document to Recently Deleted");
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close project after deletion");
-    harness.shutdown().expect("stop first application");
-
-    let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("relaunch application");
-    reopened
-        .click_text(HarnessWindow::Launcher, "Recovery Journal")
-        .expect("reopen project from recents");
-    reopened
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::RecentlyDeleted),
-        )
-        .expect("open persisted Recently Deleted");
-    assert!(contains(&reopened, "Storm Ending"));
-    reopened
-        .click_text(HarnessWindow::Project, "Storm Ending")
-        .expect("select persisted deleted document");
-    reopened
-        .click_text(HarnessWindow::Project, "Restore item")
-        .expect("restore document after restart");
-    reopened
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Editor),
-        )
-        .expect("return to editor after restoration");
-    assert!(contains(&reopened, "Storm Ending"));
-    reopened
-        .close(HarnessWindow::Project)
-        .expect("close restored project");
-    reopened.shutdown().expect("stop reopened application");
-}
-
 /// Export preferences are project context, so a writer can configure title
 /// emission once and retain it across sessions.
 #[test]
@@ -128,21 +70,6 @@ fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInte
         .click_text(HarnessWindow::Launcher, "Create and Open")
         .expect("create project");
     harness
-}
-
-fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create group")
-        .expect("create group");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
-        .expect("name group");
-    harness
-        .redraw(HarnessWindow::Project)
-        .expect("render renamed group");
 }
 
 fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {

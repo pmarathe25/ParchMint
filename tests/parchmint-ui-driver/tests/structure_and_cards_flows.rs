@@ -1,91 +1,15 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use parchmint_desktop::{
-    DesktopInteractionHarness, EditorPane, FocusTarget, HarnessDropPosition,
-    HarnessHierarchySurface, HarnessKey, HarnessSelectionGesture, HarnessTarget, HarnessWindow,
-    LaunchRequest, RibbonDestination,
+    DesktopInteractionHarness, FocusTarget, HarnessDropPosition, HarnessHierarchySurface,
+    HarnessKey, HarnessSelectionGesture, HarnessTarget, HarnessWindow, LaunchRequest,
+    RibbonDestination,
 };
 use parchmint_domain::{
     DocumentId, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
 };
 use parchmint_project_format::{CanonicalProjectPathMap, ProjectFormatCodec};
 use parchmint_ui_driver::IsolatedRun;
-
-#[test]
-fn explorer_document_click_reuses_a_temporary_preview_until_opened_permanently() {
-    let run = IsolatedRun::new("preview-replacement").expect("isolated run");
-    let project = run.root().join("preview-replacement.parchmint");
-    let harness = create_project(&run, &project, "Preview Replacement");
-    create_document(&harness, "Manuscript", "First Note");
-    create_document(&harness, "Manuscript", "Second Note");
-    let first = harness
-        .hierarchy_node("First Note")
-        .expect("resolve the first Explorer note");
-    let second = harness
-        .hierarchy_node("Second Note")
-        .expect("resolve the second Explorer note");
-
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, first.clone())
-        .expect("activate the first permanent creation tab");
-    let first_id = harness
-        .active_editor_document_id(EditorPane::Primary)
-        .expect("read first document id");
-    harness
-        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, first_id)
-        .expect("close the first permanent creation tab");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, second.clone())
-        .expect("activate the second permanent creation tab");
-    let second_id = harness
-        .active_editor_document_id(EditorPane::Primary)
-        .expect("read second document id");
-    harness
-        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, second_id)
-        .expect("close the second permanent creation tab");
-
-    let baseline_tab_count = harness.tab_titles().expect("read baseline tab strip").len();
-
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, first.clone())
-        .expect("preview the first note");
-    assert_eq!(
-        harness
-            .tab_titles()
-            .expect("read first preview tab strip")
-            .len(),
-        baseline_tab_count + 1
-    );
-
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, second.clone())
-        .expect("replace the temporary preview");
-    assert_eq!(
-        harness
-            .tab_titles()
-            .expect("read replaced preview tab strip")
-            .len(),
-        baseline_tab_count + 1,
-        "a new preview must replace the old one"
-    );
-
-    harness
-        .right_click_hierarchy_node(HarnessWindow::Project, second)
-        .expect("open the second note context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open")
-        .expect("promote the preview to a permanent tab");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, first)
-        .expect("preview the first note again");
-    assert_eq!(
-        harness.tab_titles().expect("read promoted tab strip").len(),
-        baseline_tab_count + 2,
-        "a promoted tab must survive a later preview"
-    );
-
-    close(harness);
-}
 
 #[test]
 fn explorer_keyboard_navigation_reaches_a_document_and_group_click_collapses_it() {

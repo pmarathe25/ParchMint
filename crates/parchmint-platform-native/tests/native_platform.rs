@@ -1,4 +1,4 @@
-//! Requirements-first native integration contracts.
+//! Native platform integration contracts.
 //!
 //! These tests exercise native services with the production capability
 //! registry. The Iced crate separately tests its private registration adapter.

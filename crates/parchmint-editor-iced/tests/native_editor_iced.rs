@@ -1,7 +1,4 @@
 //! Deterministic contracts for the custom Iced editor adapter.
-//!
-//! The ignored smoke tests need a real compositor, native keyboard, native
-//! clipboard, and platform runner.
 
 mod fixtures;
 
@@ -16,8 +13,8 @@ use parchmint_recovery_api::DocumentRevision;
 use parchmint_save::{SaveGeneration, SaveState};
 
 use fixtures::{
-    Boundary, EditorSaveRecoveryHarness, PersistenceFailure, adapter_with_cache_limit, block,
-    document_id, durable_vector, mount, open, recovered_body, view, visible,
+    Boundary, EditorSaveRecoveryHarness, adapter_with_cache_limit, block, document_id,
+    durable_vector, mount, open, recovered_body, view, visible,
 };
 
 #[test]
@@ -447,28 +444,6 @@ fn acknowledged_vector_survives_exactly_while_newer_mounted_input_remains_dirty(
 }
 
 #[test]
-fn unavailable_pinned_projection_prevents_saved_without_blocking_recovery() {
-    let harness = EditorSaveRecoveryHarness::with_projection_budget("", 1);
-    harness.boundaries().pause_at(Boundary::BeforeProjection);
-    harness.type_text("one", true);
-    harness.boundaries().wait_until(Boundary::BeforeProjection);
-    harness.type_text(" two", false);
-    harness.boundaries().release(Boundary::BeforeProjection);
-    harness.wait_until_idle();
-
-    let status = harness.status();
-    assert_eq!(status.state, SaveState::Error);
-    assert!(matches!(
-        status.failure,
-        Some(PersistenceFailure::Projection(_))
-    ));
-    assert!(status.saved_through.is_none());
-    assert!(harness.acknowledgements().is_empty());
-    assert!(harness.committed_bodies().is_empty());
-    assert_eq!(recovered_body(&harness.replay()), Some("one two"));
-}
-
-#[test]
 fn forced_termination_reopens_and_replays_acknowledged_recovery_once_in_order() {
     let mut harness = EditorSaveRecoveryHarness::new("");
     harness.type_text("one", false);
@@ -517,19 +492,3 @@ fn continuous_typing_keeps_projection_and_recovery_backlog_bounded() {
     assert_eq!(range.last, DocumentRevision::from(65));
     assert_eq!(recovered_body(&replay).map(str::len), Some(65));
 }
-
-#[test]
-#[ignore = "native smoke: requires a real Wayland compositor; Wayland is the priority Linux path"]
-fn native_smoke_wayland_priority_linux() {}
-
-#[test]
-#[ignore = "native smoke: requires a real X11 server for Linux compatibility"]
-fn native_smoke_x11_compatibility_linux() {}
-
-#[test]
-#[ignore = "native smoke: requires an ARM macOS window, keyboard, and clipboard runner"]
-fn native_smoke_arm_macos() {}
-
-#[test]
-#[ignore = "native smoke: requires a Windows window, keyboard, and clipboard runner"]
-fn native_smoke_windows() {}

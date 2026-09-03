@@ -249,7 +249,6 @@ pub(super) trait DocumentEngine {
         style: String,
     ) -> Result<EngineChange, EngineError>;
     fn snapshot(&self) -> SemanticDocumentSnapshot;
-    fn text(&self) -> &str;
     fn scalar_len(&self) -> usize;
 }
 
@@ -827,9 +826,6 @@ impl DocumentEngine for PrivateTextEngine {
 
     fn snapshot(&self) -> SemanticDocumentSnapshot {
         self.document.clone().expect("loaded engine")
-    }
-    fn text(&self) -> &str {
-        &self.text
     }
     fn scalar_len(&self) -> usize {
         self.text.chars().count()
