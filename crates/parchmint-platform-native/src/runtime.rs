@@ -222,6 +222,7 @@ fn output_text(operation: &'static str, output: Output) -> Result<String, Platfo
         .map_err(|error| failed(operation, error.to_string()))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn command_output(operation: &'static str, command: &mut Command) -> Result<String, PlatformError> {
     let output = command
         .output()
@@ -318,6 +319,7 @@ fn home_directory(operation: &'static str) -> Result<PathBuf, PlatformError> {
         .ok_or_else(|| failed(operation, "HOME is not available"))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn environment_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
@@ -510,7 +512,8 @@ mod platform {
     pub(super) fn read_clipboard(
         formats: ClipboardFormats,
     ) -> Result<UntrustedClipboardContent, PlatformError> {
-        let plain = command_output_raw("read clipboard", Command::new("pbpaste"));
+        let mut plain_command = Command::new("pbpaste");
+        let plain = command_output_raw("read clipboard", &mut plain_command);
         let html = formats.accepts_html().then(|| {
             command_output_raw(
                 "read clipboard HTML",
@@ -525,7 +528,8 @@ mod platform {
     }
 
     pub(super) fn write_clipboard(value: &str) -> Result<(), PlatformError> {
-        write_command("write clipboard", Command::new("pbcopy"), value)
+        let mut command = Command::new("pbcopy");
+        write_command("write clipboard", &mut command, value)
     }
 
     pub(super) fn open_external(intent: &ValidatedExternalIntent) -> Result<(), PlatformError> {

@@ -640,6 +640,7 @@ enum Message {
         result: Result<UntrustedClipboardContent, String>,
     },
     AutosaveTick(Instant),
+    #[cfg(any(test, target_os = "linux"))]
     SystemAppearanceObserved(SystemAppearance),
     #[cfg(not(target_os = "linux"))]
     SystemThemeMode(iced::theme::Mode),
@@ -647,6 +648,7 @@ enum Message {
         generation: u64,
         result: Result<Option<ResolvedAppearance>, String>,
     },
+    #[cfg(target_os = "linux")]
     SystemAppearanceStreamFailed(String),
     SaveFinished {
         window: window::Id,
@@ -2313,6 +2315,7 @@ impl NativeDesktop {
                 result,
             } => self.finish_clipboard_read(window, request, result),
             Message::AutosaveTick(now) => self.autosave_tick(now),
+            #[cfg(any(test, target_os = "linux"))]
             Message::SystemAppearanceObserved(appearance) => {
                 self.system_appearance_event(appearance)
             }
@@ -2338,6 +2341,7 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            #[cfg(target_os = "linux")]
             Message::SystemAppearanceStreamFailed(error) => {
                 self.status = Some(error);
                 Task::none()

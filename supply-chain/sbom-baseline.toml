@@ -2607,6 +2607,7 @@ dependencies = [
     "parchmint-project-repository",
     "parchmint-recovery-api",
     "parchmint-save",
+    "same-file",
     "serde",
     "serde_json",
     "sha2 0.11.0",
@@ -2679,6 +2680,17 @@ dependencies = [
     "parchmint-search-api",
     "parchmint-spellcheck-api",
     "parchmint-workspace-state",
+]
+
+[[package]]
+name = "parchmint-ui-driver"
+version = "0.1.0"
+dependencies = [
+    "parchmint-desktop",
+    "parchmint-domain",
+    "parchmint-project-format",
+    "serde",
+    "serde_json",
 ]
 
 [[package]]

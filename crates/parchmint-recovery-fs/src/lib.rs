@@ -119,9 +119,12 @@ impl FsRecoveryJournal {
     fn verify_root(&self) -> Result<(), RecoveryError> {
         let metadata = fs::symlink_metadata(&self.root)
             .map_err(|error| recovery_io("inspect recovery root", error))?;
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || file_identity_from_metadata(&metadata) != self.root_identity
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(unsafe_recovery_path(&self.root));
+        }
+        if file_identity(&self.root)
+            .map_err(|error| recovery_io("identify recovery root", error))?
+            != self.root_identity
         {
             return Err(unsafe_recovery_path(&self.root));
         }
@@ -148,11 +151,7 @@ impl FsRecoveryJournal {
         let path = self.checked_file(name)?;
         let before = file_identity(&path).map_err(|error| recovery_io(operation, error))?;
         let mut file = File::open(&path).map_err(|error| recovery_io(operation, error))?;
-        if file_identity_from_metadata(
-            &file
-                .metadata()
-                .map_err(|error| recovery_io(operation, error))?,
-        ) != before
+        if file_identity_from_file(&file).map_err(|error| recovery_io(operation, error))? != before
         {
             return Err(unsafe_recovery_path(&path));
         }
@@ -179,11 +178,9 @@ impl FsRecoveryJournal {
             .append(true)
             .open(&path)
             .map_err(|error| recovery_io("open journal for append", error))?;
-        if file_identity_from_metadata(
-            &file
-                .metadata()
-                .map_err(|error| recovery_io("identify open journal", error))?,
-        ) != before
+        if file_identity_from_file(&file)
+            .map_err(|error| recovery_io("identify open journal", error))?
+            != before
         {
             return Err(unsafe_recovery_path(&path));
         }
@@ -1403,14 +1400,38 @@ fn replacement_backup(target: &Path) -> PathBuf {
     target.with_file_name(format!(".{name}.previous"))
 }
 
+#[cfg(not(windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileIdentity {
     platform_a: u64,
     platform_b: u64,
 }
 
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+struct FileIdentity(same_file::Handle);
+
+#[cfg(not(windows))]
 fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     fs::symlink_metadata(path).map(|metadata| file_identity_from_metadata(&metadata))
+}
+
+#[cfg(windows)]
+fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    same_file::Handle::from_path(path).map(FileIdentity)
+}
+
+#[cfg(not(windows))]
+fn file_identity_from_file(file: &File) -> io::Result<FileIdentity> {
+    file.metadata()
+        .map(|metadata| file_identity_from_metadata(&metadata))
+}
+
+#[cfg(windows)]
+fn file_identity_from_file(file: &File) -> io::Result<FileIdentity> {
+    file.try_clone()
+        .and_then(same_file::Handle::from_file)
+        .map(FileIdentity)
 }
 
 #[cfg(unix)]
@@ -1419,15 +1440,6 @@ fn file_identity_from_metadata(metadata: &fs::Metadata) -> FileIdentity {
     FileIdentity {
         platform_a: metadata.dev(),
         platform_b: metadata.ino(),
-    }
-}
-
-#[cfg(windows)]
-fn file_identity_from_metadata(metadata: &fs::Metadata) -> FileIdentity {
-    use std::os::windows::fs::MetadataExt;
-    FileIdentity {
-        platform_a: metadata.volume_serial_number().map_or(0, u64::from),
-        platform_b: metadata.file_index().unwrap_or(0),
     }
 }
 

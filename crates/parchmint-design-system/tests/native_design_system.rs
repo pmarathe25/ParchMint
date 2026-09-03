@@ -98,6 +98,8 @@ fn production_icons_are_source_authored_symbolic_vectors() {
             "workspace-deleted",
             "workspace-export",
             "workspace-settings",
+            "explorer-folder-closed",
+            "explorer-folder-open",
             "format-bulleted-list",
             "format-block-quote",
             "format-link",
@@ -110,7 +112,9 @@ fn production_icons_are_source_authored_symbolic_vectors() {
         assert!(icon.contains("<svg"));
         assert!(icon.contains("viewBox=\"0 0"));
         assert!(icon.contains("fill=\"currentColor\""));
-        if !name.starts_with("launcher-") {
+        if !matches!(*name, "explorer-folder-closed" | "explorer-folder-open")
+            && !name.starts_with("launcher-")
+        {
             assert!(icon.contains("transform=\"translate(-"));
         }
     }

@@ -4,7 +4,10 @@
 //! `window::run` callback produced them. Linux deliberately does not pass a
 //! winit X11/Wayland handle to muda's GTK-only API.
 
-use parchmint_platform_api::{PlatformError, SemanticMenu, WindowCapability};
+use parchmint_platform_api::PlatformError;
+#[cfg(target_os = "linux")]
+use parchmint_platform_api::{SemanticMenu, WindowCapability};
+#[cfg(target_os = "linux")]
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

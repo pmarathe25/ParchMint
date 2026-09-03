@@ -16,6 +16,14 @@ owner = "@parchmint-maintainers"
 reason = "The advisory records an unmaintained transitive font parser, not a vulnerability. Iced has no patched dependency path yet; reevaluate when its font stack changes."
 expires = "2026-11-10"
 
+[[exception]]
+id = "RUSTSEC-2026-0206"
+check = "advisory"
+package = "rustybuzz@0.20.1"
+owner = "@parchmint-maintainers"
+reason = "The advisory records an unmaintained transitive text-shaping crate, not a vulnerability. Iced's pinned rendering stack has no patched dependency path yet; reevaluate when that stack changes."
+expires = "2026-11-10"
+
 # Every exception uses this shape. Expired entries fail CI.
 # [[exception]]
 # id = "RUSTSEC-YYYY-NNNN"

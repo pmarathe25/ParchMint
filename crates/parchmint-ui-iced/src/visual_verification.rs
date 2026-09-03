@@ -1380,7 +1380,7 @@ mod tests {
                 crate::EditorPane::Primary,
                 &single,
             ),
-            parchmint_editor_iced::EditorViewport::new(840.0, 736.0)
+            parchmint_editor_iced::EditorViewport::new(840.0, 712.0)
                 .expect("single-pane allocation"),
         );
 
@@ -1393,7 +1393,7 @@ mod tests {
         for pane in [crate::EditorPane::Primary, crate::EditorPane::Companion] {
             assert_eq!(
                 verification_editor_viewport(VisualTarget::EditorDual, pane, &dual),
-                parchmint_editor_iced::EditorViewport::new(416.0, 736.0)
+                parchmint_editor_iced::EditorViewport::new(416.0, 712.0)
                     .expect("dual-pane allocation"),
             );
         }
@@ -1449,7 +1449,7 @@ mod tests {
             production_element(target, appearance),
         );
 
-        assert!(simulator.find("Inspector").is_ok());
+        assert!(simulator.find("INSPECTOR · Chapter One").is_ok());
         assert!(simulator.find("No selection").is_err());
         for content in [
             "Chapter One",
