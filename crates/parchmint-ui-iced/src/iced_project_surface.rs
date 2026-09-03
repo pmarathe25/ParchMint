@@ -5071,7 +5071,7 @@ mod tests {
         let workspace = ProjectWorkspace::from_fixture(fixture);
         let stem = workspace.fixture_reference(appearance);
         let mut simulator = Simulator::<ProjectMessage>::with_size(
-            Settings::default(),
+            crate::visual_verification::visual_settings(),
             Size::new(1_440.0, 900.0),
             fixture_surface(&workspace),
         );
