@@ -802,6 +802,7 @@ fn make_writable(path: &Path) {
 }
 
 #[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)] // Windows has no mode bits to preserve.
 fn make_writable(path: &Path) {
     let mut permissions = fs::metadata(path)
         .expect("Git object metadata should be readable")
