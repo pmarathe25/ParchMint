@@ -1544,7 +1544,7 @@ fn draw_atomic_block(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{borrow::Cow, path::PathBuf};
 
     use iced::{Settings, Size, Theme};
     use iced_test::{Simulator, simulator::Snapshot};
@@ -1561,6 +1561,32 @@ mod tests {
             scalar_width: 8.0,
             line_height: 20.0,
             caret_width: 1.0,
+        }
+    }
+
+    fn deterministic_settings() -> Settings {
+        // The production editor ships these faces. Loading them explicitly
+        // keeps tiny-skia snapshot hashes independent of runner font caches.
+        Settings {
+            default_font: iced::Font::with_name("Source Sans 3"),
+            fonts: vec![
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Regular.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Medium.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Semibold.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-Bold.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
+                )),
+            ],
+            ..Settings::default()
         }
     }
 
@@ -1608,7 +1634,7 @@ mod tests {
         let surface = mounted_surface(&adapter, session, view, block, EditorSurfaceTheme::light())
             .expect("mounted surface");
         let mut simulator = Simulator::with_size(
-            Settings::default(),
+            deterministic_settings(),
             Size::new(viewport.width, viewport.height),
             surface.element(),
         );
@@ -2172,7 +2198,7 @@ mod tests {
         .expect("surface");
         let element = surface.element();
         let mut simulator = Simulator::with_size(
-            Settings::default(),
+            deterministic_settings(),
             Size::new(viewport.width, viewport.height),
             element,
         );
@@ -2316,7 +2342,7 @@ mod tests {
         .expect("mounted surface");
         let element = surface.element();
         let mut simulator = Simulator::with_size(
-            Settings::default(),
+            deterministic_settings(),
             Size::new(viewport.width, viewport.height),
             element,
         );
@@ -2577,7 +2603,7 @@ mod tests {
         .expect("surface");
         let element = surface.element();
         let mut simulator =
-            Simulator::with_size(Settings::default(), Size::new(240.0, 100.0), element);
+            Simulator::with_size(deterministic_settings(), Size::new(240.0, 100.0), element);
 
         // The first snapshot is the initial render contract: it must contain
         // the caret from the mounted presentation, before input is accepted.

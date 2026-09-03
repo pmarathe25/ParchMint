@@ -1085,7 +1085,10 @@ impl TemporaryDirectory {
             .duration_since(UNIX_EPOCH)
             .expect("test clock should follow the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("parchmint-desktop-{label}-{nonce}"));
+        let temporary = std::env::temp_dir();
+        let path = fs::canonicalize(&temporary)
+            .unwrap_or(temporary)
+            .join(format!("parchmint-desktop-{label}-{nonce}"));
         fs::create_dir_all(&path).expect("temporary parent should be created");
         Self(path)
     }

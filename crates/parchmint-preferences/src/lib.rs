@@ -6,7 +6,7 @@
 use std::{
     error::Error,
     fmt,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     future::Future,
     io::Write,
     path::{Path, PathBuf},
@@ -17,6 +17,9 @@ use std::{
         mpsc,
     },
 };
+
+#[cfg(unix)]
+use std::fs::File;
 
 use parchmint_editor_api::EventStream;
 use serde::{Deserialize, Serialize};
