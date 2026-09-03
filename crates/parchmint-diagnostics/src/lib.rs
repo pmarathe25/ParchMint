@@ -18,7 +18,7 @@ use std::time::Duration;
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Mutex, MutexGuard, OnceLock,
@@ -99,6 +99,9 @@ impl DiagnosticSink {
                 return;
             }
             self.bytes_written = 0;
+        }
+        if file.seek(SeekFrom::End(0)).is_err() {
+            return;
         }
         if file.write_all(line.as_bytes()).is_ok() {
             self.bytes_written = self.bytes_written.saturating_add(line_bytes);
@@ -183,9 +186,11 @@ pub fn configure_file(data_directory: impl AsRef<Path>) -> io::Result<PathBuf> {
 #[cfg(any(debug_assertions, feature = "capture"))]
 fn open_log_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
-    // `append` alone grants append-data access on Windows, which is not
-    // sufficient for `set_len` during bounded-log rotation.
-    options.create(true).write(true).append(true);
+    // Windows append access deliberately omits write-data permission, which
+    // `set_len` needs for bounded-log rotation. The sink serializes writes and
+    // seeks to the end before each one, so a normal writable descriptor is
+    // both sufficient and portable.
+    options.create(true).write(true);
     set_no_follow(&mut options);
     options.open(path)
 }
