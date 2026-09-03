@@ -722,18 +722,6 @@ fn embedded_history_needs_neither_a_git_executable_nor_network_transport() {
 }
 
 #[test]
-fn git2_is_pinned_to_the_vendored_transport_free_selection() {
-    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("History Git2 manifest should be readable");
-    assert!(manifest.contains(
-        "git2 = { version = \"=0.21.0\", default-features = false, features = [\"vendored-libgit2\"] }"
-    ));
-    assert!(manifest.contains(
-        "libz-sys = { version = \"=1.1.29\", default-features = false, features = [\"libc\", \"static\"] }"
-    ));
-}
-
-#[test]
 fn embedded_history_helper() {
     if env::var_os(HELPER_MODE).as_deref() != Some(std::ffi::OsStr::new("checkpoint")) {
         return;

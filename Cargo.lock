@@ -2370,44 +2370,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "parchmint-ci"
-version = "0.1.0"
-dependencies = [
- "sha2 0.11.0",
- "toml",
-]
-
-[[package]]
 name = "parchmint-contracts"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
-]
-
-[[package]]
-name = "parchmint-core-cli"
-version = "0.1.0"
-dependencies = [
- "parchmint-application",
- "parchmint-contracts",
- "parchmint-domain",
- "parchmint-export-api",
- "parchmint-export-html",
- "parchmint-history-api",
- "parchmint-history-git2",
- "parchmint-project-format",
- "parchmint-project-fs",
- "parchmint-project-repository",
- "parchmint-recovery-api",
- "parchmint-recovery-fs",
- "parchmint-save",
- "parchmint-search-api",
- "parchmint-search-sqlite",
- "parchmint-test-support",
- "serde_json",
- "sha2 0.11.0",
 ]
 
 [[package]]

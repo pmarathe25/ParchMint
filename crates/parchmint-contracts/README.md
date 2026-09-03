@@ -3,8 +3,8 @@
 ## What it does
 
 `parchmint-contracts` defines the durable JSON shapes that ParchMint reads and
-writes across versions. It covers document annotation sidecars, recovery
-records, and machine-readable CLI output.
+writes across versions. It covers document annotation sidecars and recovery
+records.
 
 The crate does not define every ParchMint file format. The project-format and
 export crates own their HTML, TOML, CSS, and text codecs. Those crates keep
@@ -20,11 +20,9 @@ JSON Schema source
       +--> checksum and clean-regeneration check
 ```
 
-The schema is the source of truth for the generated bindings in
-`src/generated.rs`. Contributors edit a schema, update the bindings, and keep
-its fixtures valid. A pinned `typify` generation pipeline is planned but is not
-yet wired into this crate; today `generated.rs` is hand-maintained and kept
-honest by the regeneration-diff test described below.
+The schema is the source of truth for the bindings in `src/generated.rs`.
+Contributors edit a schema, update the bindings, and keep its fixtures valid.
+Tests check that the bindings and schemas stay in sync.
 
 ## Interface
 
@@ -51,9 +49,9 @@ pub enum ContractError {
 ```
 
 Generated Rust bindings (`generated::*`) provide the remaining API: one
-versioned type per schema (`AnnotationSidecarV1`, `RecoveryRecordV1`,
-`CliOutputV1`). A single `SCHEMA_MANIFEST` constant records each schema's
-version and source checksum. Schemas carry ParchMint stable IDs in serialized
+versioned type per schema (`AnnotationSidecarV1` and `RecoveryRecordV1`). A
+single `SCHEMA_MANIFEST` constant records each schema's version and source
+checksum. Schemas carry ParchMint stable IDs in serialized
 text form (strings), not as typed library handles. The hand-written
 `AnnotationThread`, `AnnotationMessage`, `AnnotationAnchor`, and
 `AnnotationValue` types model lossless annotation sidecar content; the

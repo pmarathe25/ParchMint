@@ -126,8 +126,6 @@ one another in the workspace.
 
 ### Tools for development
 
-- [`parchmint-core-cli`](../../crates/parchmint-core-cli/README.md) runs the real core
-  without starting the desktop UI.
 - [`parchmint-test-support`](../../tests/parchmint-test-support/README.md) provides shared
   fixtures, controlled tasks, and failure injection.
 - [`parchmint-ui-verification`](../../tests/parchmint-ui-verification/README.md) decodes,

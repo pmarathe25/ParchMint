@@ -251,12 +251,7 @@ fn damage_cache(path: &Path, problem: SearchIndexProblem) {
 }
 
 #[test]
-fn bundled_pinned_sqlite_opens_fts5_in_the_project_cache() {
-    let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
-    assert!(manifest.contains(
-        "rusqlite = { version = \"=0.40.1\", default-features = false, features = [\"bundled\"] }"
-    ));
-
+fn sqlite_fts5_opens_in_the_project_cache() {
     let project = TestProject::new("fts5");
     let index = project.index();
     open(

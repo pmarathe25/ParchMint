@@ -30,12 +30,9 @@ repository you are changing. Tests are the authority for supported behavior.
 - Shared fixtures and native test controls are described in
   [`tests/parchmint-test-support/README.md`](tests/parchmint-test-support/README.md).
 
-## Release and repository policy
+## Other repository areas
 
 - [`packaging/README.md`](packaging/README.md) covers native package inputs.
-- `supply-chain/` contains dependency exceptions, tool pins, bundled artifact
-  records, and the SBOM baseline.
-- `tools/parchmint-ci/` contains repository policy checks.
 - `third_party/` contains the patched Iced renderer; inspect its history and
   consumers before editing it.
 

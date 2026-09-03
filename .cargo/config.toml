@@ -1,3 +1,0 @@
-[alias]
-parchmint-ci = "run --locked --package parchmint-ci --"
-

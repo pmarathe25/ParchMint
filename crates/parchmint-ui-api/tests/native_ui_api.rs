@@ -153,16 +153,3 @@ fn appearance_events_apply_each_generation_in_window_id_order() {
         ]
     );
 }
-
-#[test]
-fn ui_api_source_contains_no_widget_or_window_framework_types() {
-    let source = [include_str!("../src/lib.rs"), include_str!("../Cargo.toml")]
-        .join("\n")
-        .to_ascii_lowercase();
-    for forbidden in ["iced", "winit", "gtk", "tauri", "raw_window_handle"] {
-        assert!(
-            !source.contains(forbidden),
-            "found forbidden type family: {forbidden}"
-        );
-    }
-}

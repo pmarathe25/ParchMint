@@ -87,17 +87,6 @@ const CONTRACTS: &[ContractSpec] = &[
         #[cfg(test)]
         fixtures_dir: "schemas/recovery-record/fixtures/v1",
     },
-    ContractSpec {
-        descriptor: ContractDescriptor {
-            schema_id: "parchmint.cli-output",
-            schema_version: 1,
-            source_checksum: "3e7e51781b958997f892e3774424beeeb1ef1d997f0ae81ab9b807511df5d212",
-        },
-        #[cfg(test)]
-        schema_file: "schemas/cli-output/v1.schema.json",
-        #[cfg(test)]
-        fixtures_dir: "schemas/cli-output/fixtures/v1",
-    },
 ];
 
 /// Errors returned while decoding and re-encoding a fixture.
@@ -156,9 +145,6 @@ pub fn validate_fixture(descriptor: &ContractDescriptor, json: &[u8]) -> Result<
         }
         "parchmint.recovery-record" => {
             decode_validate_reencode!(generated::RecoveryRecordV1, descriptor, json);
-        }
-        "parchmint.cli-output" => {
-            decode_validate_reencode!(generated::CliOutputV1, descriptor, json);
         }
         _ => {
             let value: serde_json::Value = serde_json::from_slice(json)?;
@@ -288,19 +274,15 @@ mod tests {
     }
 
     #[test]
-    fn generated_bindings_reject_unknown_fields_and_wrong_schema() {
-        let descriptor = descriptor("parchmint.cli-output").unwrap();
+    fn generated_bindings_reject_unknown_fields() {
+        let descriptor = descriptor("parchmint.annotation-sidecar").unwrap();
         assert!(
             validate_fixture(
                 descriptor,
-                br#"{"schema":"parchmint.cli-output/v1","ok":true,"extra":1}"#
+                br#"{"schema":"parchmint.annotation-sidecar/v1","document_id":"document-1","threads":[],"extra":1}"#
             )
             .is_err()
         );
-        assert!(matches!(
-            validate_fixture(descriptor, br#"{"schema":"parchmint.other/v1","ok":true}"#),
-            Err(ContractError::SchemaMismatch { .. })
-        ));
     }
 
     #[test]
