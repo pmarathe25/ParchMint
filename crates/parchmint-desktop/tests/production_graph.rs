@@ -390,6 +390,40 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         .expect("explicit save should durably complete");
     assert_eq!(saved.requested, requested);
     assert_eq!(saved.written.documents[&document], EditorRevision::from(3));
+    let checkpoint = access
+        .history(|history| history.preview(saved.checkpoint))
+        .unwrap()
+        .unwrap();
+    let bodies = checkpoint
+        .resources
+        .keys()
+        .filter(|path| path.as_str().ends_with(".html"))
+        .map(|path| {
+            access
+                .history(|history| history.read_resource(saved.checkpoint, path))
+                .unwrap()
+                .unwrap()
+                .bytes
+        })
+        .collect::<Vec<_>>();
+    assert!(bodies.iter().any(|body| body == b"<p>second edit</p>"));
+    let annotations = checkpoint
+        .resources
+        .keys()
+        .filter(|path| path.as_str().starts_with("annotations/"))
+        .map(|path| {
+            access
+                .history(|history| history.read_resource(saved.checkpoint, path))
+                .unwrap()
+                .unwrap()
+                .bytes
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        annotations
+            .iter()
+            .any(|bytes| String::from_utf8_lossy(bytes).contains("Edited durable note"))
+    );
 
     // A real project window releases its UI-owned service clone before the
     // runtime tears down its session. Keep that ownership order here so the

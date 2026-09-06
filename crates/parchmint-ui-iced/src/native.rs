@@ -2,6 +2,7 @@
 
 #[cfg(feature = "interaction-harness")]
 mod interaction_harness;
+mod worker_pool;
 
 #[cfg(feature = "interaction-harness")]
 pub use interaction_harness::*;
@@ -107,7 +108,7 @@ const INSPECTOR_COMMIT_DELAY: Duration = Duration::from_millis(700);
 /// current work as soon as History opens.
 const HISTORY_PAGE_SIZE: usize = 20;
 
-fn worker_launch_failure(operation: &str, error: &std::io::Error) -> String {
+fn worker_launch_failure(operation: &str, error: &dyn fmt::Display) -> String {
     format!("could not start {operation} worker: {error}")
 }
 
@@ -564,7 +565,8 @@ pub fn run_native_desktop(startup: NativeDesktopStartup) -> Result<(), NativeDes
 #[derive(Debug, Clone)]
 enum Message {
     WindowOpened(window::Id),
-    CaptureFrameTick,
+    CaptureFrameTick(window::Id),
+    CaptureWake,
     CaptureScreenshot(window::Screenshot),
     CaptureEncoded(Result<NativeCapturePng, String>),
     RuntimeEvent {
@@ -664,6 +666,7 @@ enum Message {
     EditorEffectFinished {
         window: window::Id,
         mutation: Option<OpaqueMutationToken>,
+        target: Option<(EditorPane, u64)>,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     },
     SpellcheckFinished {
@@ -2008,6 +2011,78 @@ impl NativeDesktop {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        for native in self.windows.values_mut() {
+            let NativeWindow::Project(state) = native else {
+                continue;
+            };
+            let Some(workspace) = state.workspace.as_mut() else {
+                continue;
+            };
+            // Sessions own per-document focus, but keyboard input has one
+            // owner across documents. A newly mounted Research pane must not
+            // leave the previous document's retained Canvas accepting keys.
+            for (&pane, binding) in &state.editor_bindings {
+                if pane != workspace.editor().focused_pane()
+                    && let Err(error) = binding.host().blur()
+                {
+                    self.status = Some(error.to_string());
+                }
+            }
+            let marks = state
+                .editor_bindings
+                .get(&workspace.editor().focused_pane())
+                .and_then(|binding| {
+                    state.project.editor_adapter().and_then(|adapter| {
+                        adapter
+                            .active_inline_marks(binding.session(), binding.view())
+                            .ok()
+                    })
+                })
+                .unwrap_or_default();
+            workspace.editor_mut().set_active_inline_marks(marks);
+            for (&pane, &document) in &state.mounted_documents {
+                let document_id = stable_id_string(document.as_bytes());
+                if let Some(binding) = state.editor_bindings.get(&pane)
+                    && let Some(adapter) = state.project.editor_adapter()
+                    && let Ok((words, selected)) =
+                        adapter.word_counts(binding.session(), binding.view())
+                {
+                    let manuscript = workspace
+                        .explorer()
+                        .node_id_for_document(&document_id)
+                        .and_then(|node| workspace.explorer().section_id(node))
+                        .is_some_and(|section| {
+                            section
+                                == stable_id_string(
+                                    parchmint_domain::NodeId::manuscript_root().as_bytes(),
+                                )
+                        });
+                    workspace.editor_mut().update_live_counts(
+                        pane,
+                        document_id,
+                        words,
+                        selected,
+                        manuscript,
+                    );
+                }
+                if !mount_matches_active_document(
+                    workspace.editor().pane(pane).active_document(),
+                    document,
+                ) {
+                    state.editor_hosts.insert(
+                        pane,
+                        crate::iced_editor_surface::EditorPaneSlot::state(
+                            crate::iced_editor_surface::EditorCenterPaneState::Loading,
+                        ),
+                    );
+                }
+            }
+        }
+        task
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::WindowOpened(window) => {
                 if let Some(capture) = self
@@ -2022,7 +2097,8 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
-            Message::CaptureFrameTick => self.capture_after_settled_frame(),
+            Message::CaptureFrameTick(window) => self.capture_after_settled_frame(window),
+            Message::CaptureWake => Task::none(),
             Message::CaptureScreenshot(screenshot) => self.encode_capture(screenshot),
             Message::CaptureEncoded(result) => self.finish_capture(result),
             Message::RuntimeEvent {
@@ -2422,8 +2498,22 @@ impl NativeDesktop {
             Message::EditorEffectFinished {
                 window,
                 mutation,
+                target,
                 result,
-            } => self.finish_editor_effect(window, mutation, result),
+            } => {
+                if let Some((pane, generation)) = target {
+                    let current = self.windows.get(&window).and_then(|native| match native {
+                        NativeWindow::Project(state) => state.workspace.as_ref(),
+                        NativeWindow::Launcher => None,
+                    });
+                    if current.is_none_or(|workspace| {
+                        workspace.editor().pane(pane).mount_generation() != generation
+                    }) {
+                        return Task::none();
+                    }
+                }
+                self.finish_editor_effect(window, mutation, result)
+            }
             Message::SpellcheckFinished {
                 window,
                 ticket,
@@ -3277,9 +3367,16 @@ impl NativeDesktop {
             subscriptions.push(event::listen_with(resize_event));
         }
         if self.capture.is_some() {
-            subscriptions.push(
-                iced::time::every(Duration::from_millis(16)).map(|_| Message::CaptureFrameTick),
-            );
+            // Keep an otherwise idle native window redrawing until capture.
+            // Wakeups do not count as completed frames.
+            subscriptions
+                .push(iced::time::every(Duration::from_millis(32)).map(|_| Message::CaptureWake));
+            // A timer can fire while the native renderer still holds the
+            // loading frame. Count completed draws of the capture window.
+            subscriptions.push(event::listen_raw(|event, _, window| {
+                matches!(event, Event::Window(window::Event::RedrawRequested(_)))
+                    .then_some(Message::CaptureFrameTick(window))
+            }));
         }
         if self.appearance_mode == AppearanceMode::System {
             #[cfg(target_os = "linux")]
@@ -3296,14 +3393,35 @@ impl NativeDesktop {
         Subscription::batch(subscriptions)
     }
 
-    fn capture_after_settled_frame(&mut self) -> Task<Message> {
+    fn capture_after_settled_frame(&mut self, drawn_window: window::Id) -> Task<Message> {
         let Some(capture) = self.capture.as_mut() else {
             return Task::none();
         };
         let Some(window) = capture.window else {
             return Task::none();
         };
-        if !capture.window_opened || capture.screenshot_requested {
+        if window != drawn_window || !capture.window_opened || capture.screenshot_requested {
+            return Task::none();
+        }
+        if let Some(NativeWindow::Project(state)) = self.windows.get(&window)
+            && let Some(workspace) = state.workspace.as_ref()
+            && (matches!(workspace.content_state(), crate::ContentState::Loading)
+                || (matches!(workspace.content_state(), crate::ContentState::Ready)
+                    && [EditorPane::Primary, EditorPane::Companion]
+                        .iter()
+                        .any(|pane| {
+                            workspace
+                                .editor()
+                                .pane(*pane)
+                                .active_document()
+                                .is_some_and(|active| {
+                                    state.mounted_documents.get(pane).is_none_or(|document| {
+                                        stable_id_string(document.as_bytes()) != active
+                                    })
+                                })
+                        })))
+        {
+            capture.settled_frames = 0;
             return Task::none();
         }
         capture.settled_frames = capture.settled_frames.saturating_add(1);
@@ -4085,7 +4203,7 @@ impl NativeDesktop {
         .height(Length::Fill)
         .padding(iced::Padding {
             top: 0.0,
-            right: 54.0,
+            right: 180.0,
             bottom: 4.0,
             left: 0.0,
         })
@@ -4734,9 +4852,40 @@ impl NativeDesktop {
                             self.status = Some("Saving the latest draft before searching…".into());
                         }
                         ProjectEffect::PreviewHistory(checkpoint_id) => {
-                            let current = state.project.project_ui.as_ref().and_then(|project| {
-                                history_current_document(&project.snapshot, workspace)
-                            });
+                            let current = workspace
+                                .focused_history_document()
+                                .and_then(|document_id| {
+                                    let (&pane, _) =
+                                        state.mounted_documents.iter().find(|(_, document)| {
+                                            stable_id_string(document.as_bytes()) == document_id
+                                        })?;
+                                    let binding = state.editor_bindings.get(&pane)?;
+                                    let adapter = state.project.editor_adapter()?;
+                                    let revision = adapter.revision(binding.session()).ok()?;
+                                    let projection = iced::futures::executor::block_on(
+                                        adapter.project(binding.session(), revision),
+                                    )
+                                    .ok()?;
+                                    let title = workspace
+                                        .editor()
+                                        .pane(pane)
+                                        .tabs()
+                                        .iter()
+                                        .find(|tab| tab.id() == document_id)?
+                                        .title()
+                                        .to_owned();
+                                    Some(HistoryCurrentDocument {
+                                        document_id: document_id.to_owned(),
+                                        title,
+                                        body: projection.body().to_owned(),
+                                        semantic: projection.semantic().clone(),
+                                    })
+                                })
+                                .or_else(|| {
+                                    state.project.project_ui.as_ref().and_then(|project| {
+                                        history_current_document(&project.snapshot, workspace)
+                                    })
+                                });
                             if let Some(feeds) = state.service_feeds.as_ref() {
                                 let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
                                     checkpoint_id: checkpoint_id.clone(),
@@ -5220,6 +5369,34 @@ impl NativeDesktop {
                 Task::batch(tasks)
             }
             ProjectSurfaceMessage::EditorCenter(message) => {
+                if matches!(message, EditorCenterMessage::BeginComment) {
+                    return match Self::begin_toolbar_comment(state) {
+                        Ok(()) => {
+                            iced::widget::operation::focus(crate::HarnessTarget::CommentDraft.id())
+                        }
+                        Err(error) => {
+                            self.status = Some(error);
+                            Task::none()
+                        }
+                    };
+                }
+                if let EditorCenterMessage::Mounted {
+                    pane,
+                    view,
+                    mount_generation,
+                    ..
+                } = &message
+                {
+                    let current = workspace.editor().pane(*pane);
+                    if current.view() != *view
+                        || current.mount_generation() != *mount_generation
+                        || state.mounted_documents.get(pane).is_some_and(|document| {
+                            !mount_matches_active_document(current.active_document(), *document)
+                        })
+                    {
+                        return Task::none();
+                    }
+                }
                 if matches!(message, EditorCenterMessage::BeginSplitResize) {
                     state.resizing = Some(SidebarPanel::Editor);
                     return Task::none();
@@ -5353,6 +5530,7 @@ impl NativeDesktop {
                     pane,
                     view,
                     message: parchmint_editor_iced::MountedEditorMessage::Clipboard(intent),
+                    ..
                 } = &message
                 {
                     return match Self::clipboard_task(id, state, *pane, *view, *intent) {
@@ -5373,6 +5551,7 @@ impl NativeDesktop {
                             spelling_range,
                             invocation_point,
                         },
+                    ..
                 } = message
                 {
                     return Self::open_spelling_menu(
@@ -5421,6 +5600,7 @@ impl NativeDesktop {
                     pane,
                     view,
                     message,
+                    ..
                 } = message
                 {
                     let presentation_changed = matches!(
@@ -5429,6 +5609,15 @@ impl NativeDesktop {
                             | parchmint_editor_iced::MountedEditorMessage::ViewportChanged(_)
                     );
                     let completed_word = completes_spellcheck_word(&message);
+                    let prior_revision = state.editor_bindings.get(&pane).and_then(|binding| {
+                        let session = binding.session();
+                        state
+                            .project
+                            .editor_adapter()?
+                            .revision(session.clone())
+                            .ok()
+                            .map(|revision| (session, revision))
+                    });
                     let update = if let Some(binding) = state.editor_bindings.get(&pane) {
                         if binding.view() != view {
                             Err(parchmint_editor_api::EditorError::InvalidCommand {
@@ -5525,20 +5714,24 @@ impl NativeDesktop {
                             // application error.
                             return Task::none();
                         }
-                        Err(error) => self.status = Some(error.to_string()),
+                        Err(error) => {
+                            if let Some((session, before)) = prior_revision
+                                && let Some(adapter) = state.project.editor_adapter()
+                                && let Ok(revision) = adapter.revision(session.clone())
+                                && revision > before
+                            {
+                                workspace.update(ProjectMessage::MarkEditorDirty);
+                                state.autosave.mark_dirty(session, revision, Instant::now());
+                            }
+                            self.status = Some(error.to_string());
+                        }
                     }
                 } else if !effects.is_empty() {
                     let request_save = effects
                         .iter()
                         .any(|effect| matches!(effect, EditorEffect::RequestSave));
                     effects.retain(|effect| !matches!(effect, EditorEffect::RequestSave));
-                    let editor_tasks = Self::editor_effect_tasks(
-                        id,
-                        state.effect_executor.clone(),
-                        &state.project_mutations,
-                        &mut state.opaque_mutations,
-                        effects,
-                    );
+                    let editor_tasks = Self::editor_effect_tasks(id, state, effects);
                     if request_save {
                         if state.project_mutations.blocks_close()
                             || state.opaque_mutations.blocks_close()
@@ -5597,6 +5790,7 @@ impl NativeDesktop {
                         let ticket = AutosaveTicket {
                             dirty_sessions: state.autosave.dirty_sessions.clone(),
                         };
+                        let workspace = state.workspace.as_mut().expect("active workspace");
                         let through_revision = workspace.project_revision();
                         state.autosave.save_in_flight = true;
                         workspace.update(ProjectMessage::StartSave(through_revision));
@@ -5952,6 +6146,62 @@ impl NativeDesktop {
         }
     }
 
+    fn begin_toolbar_comment(state: &mut NativeProjectState) -> Result<(), String> {
+        let workspace = state
+            .workspace
+            .as_mut()
+            .ok_or("project workspace is unavailable")?;
+        let pane = workspace.editor().focused_pane();
+        let binding = state
+            .editor_bindings
+            .get(&pane)
+            .ok_or("Open a document before adding a comment.")?;
+        if state.mounted_documents.get(&pane).is_some_and(|document| {
+            !mount_matches_active_document(
+                workspace.editor().pane(pane).active_document(),
+                *document,
+            )
+        }) {
+            return Err("The selected document is still opening.".into());
+        }
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or("project editor adapter is unavailable")?;
+        let session = binding.session();
+        let view = binding.view();
+        let revision = adapter
+            .revision(session.clone())
+            .map_err(|error| error.to_string())?;
+        let selection = adapter
+            .selection(session.clone(), view)
+            .map_err(|error| error.to_string())?;
+        let block = adapter
+            .primary_visible_block(session.clone())
+            .map_err(|error| error.to_string())?;
+        let geometry = adapter
+            .geometry(session, view, block.block())
+            .map_err(|error| error.to_string())?;
+        let bounds = geometry
+            .selection_rectangles(selection)
+            .first()
+            .copied()
+            .or_else(|| geometry.caret(selection.head()));
+        let anchor_bounds = bounds.map_or(crate::Rect::new(24.0, 24.0, 1.0, 20.0), |bounds| {
+            crate::Rect::new(bounds.x, bounds.y, bounds.width, bounds.height)
+        });
+        workspace
+            .editor_mut()
+            .update(crate::EditorMessage::BeginCommentAtSelection {
+                pane,
+                anchor_bounds,
+            });
+        workspace
+            .editor_mut()
+            .capture_comment_selection(revision, selection);
+        Ok(())
+    }
+
     fn open_spelling_menu(
         window: window::Id,
         state: &mut NativeProjectState,
@@ -6053,13 +6303,7 @@ impl NativeDesktop {
         let effects = workspace
             .editor_mut()
             .update(crate::EditorMessage::OpenSpellingMenu(request));
-        Self::editor_effect_tasks(
-            window,
-            state.effect_executor.clone(),
-            &state.project_mutations,
-            &mut state.opaque_mutations,
-            effects,
-        )
+        Self::editor_effect_tasks(window, state, effects)
     }
 
     fn choose_spelling_action(
@@ -6108,6 +6352,9 @@ impl NativeDesktop {
                     pane: context.pane,
                     anchor_bounds: context.comment_anchor_bounds,
                 });
+            workspace
+                .editor_mut()
+                .capture_comment_selection(context.revision, context.comment_range);
             // The contextual command is a direct invitation to write. Once
             // the anchored composer is rendered, place the insertion point
             // there so an author can type immediately.
@@ -6151,13 +6398,7 @@ impl NativeDesktop {
                     },
                 ));
             }
-            return Self::editor_effect_tasks(
-                window,
-                state.effect_executor.clone(),
-                &state.project_mutations,
-                &mut state.opaque_mutations,
-                effects,
-            );
+            return Self::editor_effect_tasks(window, state, effects);
         }
         if let Err(_error) = adapter.execute(
             binding.session(),
@@ -6184,13 +6425,7 @@ impl NativeDesktop {
                 word: context.word,
                 action,
             });
-        Self::editor_effect_tasks(
-            window,
-            state.effect_executor.clone(),
-            &state.project_mutations,
-            &mut state.opaque_mutations,
-            effects,
-        )
+        Self::editor_effect_tasks(window, state, effects)
     }
 
     fn clipboard_task(
@@ -6443,16 +6678,83 @@ impl NativeDesktop {
 
     fn editor_effect_tasks(
         window: window::Id,
-        executor: Option<NativeProjectEffectExecutor>,
-        project_mutations: &ProjectMutationState,
-        opaque_mutations: &mut OpaqueMutationState,
+        state: &mut NativeProjectState,
         effects: Vec<EditorEffect>,
     ) -> Task<Message> {
-        let Some(executor) = executor else {
-            return Task::none();
-        };
         let mut tasks = Vec::new();
         for effect in effects {
+            // Authoring uses the document and selection which received the
+            // action. Sending it through a task would resolve a reused view
+            // only after a later input event or tab switch.
+            if let EditorEffect::Command { view, command } = effect {
+                let comments_changed = updates_comment_threads(&command);
+                let comment_command = comments_changed.then(|| command.clone());
+                match Self::apply_editor_command(state, view, command) {
+                    Ok(Some((session, revision))) => {
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            if let Some(pane) = [EditorPane::Primary, EditorPane::Companion]
+                                .into_iter()
+                                .find(|pane| workspace.editor().pane(*pane).view() == view)
+                                && let Some(document_id) = workspace
+                                    .editor()
+                                    .pane(pane)
+                                    .active_document()
+                                    .map(str::to_owned)
+                            {
+                                workspace
+                                    .editor_mut()
+                                    .update(crate::EditorMessage::PromoteTab { pane, document_id });
+                            }
+                            if let Some(command) = comment_command.as_ref() {
+                                workspace.editor_mut().complete_comment_command(command);
+                            }
+                            if comments_changed
+                                && let Some(adapter) = state.project.editor_adapter()
+                                && let Ok(projection) = iced::futures::executor::block_on(
+                                    adapter.project(session.clone(), revision),
+                                )
+                            {
+                                workspace.editor_mut().reconcile_document_comments(
+                                    &stable_id_string(projection.document_id().as_bytes()),
+                                    projection.comments(),
+                                );
+                            }
+                            workspace.update(ProjectMessage::MarkEditorDirty);
+                        }
+                        state.autosave.mark_dirty(session, revision, Instant::now());
+                        state.pending_spellchecks.insert(view, Instant::now());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            workspace.report_error("editor", error);
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(executor) = state.effect_executor.clone() else {
+                continue;
+            };
+            let view = match &effect {
+                EditorEffect::MountDocument { view, .. }
+                | EditorEffect::UnmountView { view, .. }
+                | EditorEffect::SetSearchDecorations { view, .. }
+                | EditorEffect::SetSpellcheckDecorations { view, .. }
+                | EditorEffect::NavigateCommentAnchor { view, .. }
+                | EditorEffect::RestoreEditorFocus { view } => Some(*view),
+                _ => None,
+            };
+            let target = state.workspace.as_ref().and_then(|workspace| {
+                [EditorPane::Primary, EditorPane::Companion]
+                    .into_iter()
+                    .find_map(|pane| {
+                        let current = workspace.editor().pane(pane);
+                        (Some(current.view()) == view).then_some((pane, current.mount_generation()))
+                    })
+            });
+            let project_mutations = &state.project_mutations;
+            let opaque_mutations = &mut state.opaque_mutations;
             let mutation = editor_effect_requires_durability(&effect)
                 .then(|| opaque_mutations.begin(OpaqueMutationKind::ProjectDictionary));
             if let Some(token) = mutation {
@@ -6469,6 +6771,7 @@ impl NativeDesktop {
                                     Message::EditorEffectFinished {
                                         window,
                                         mutation: Some(token),
+                                        target: None,
                                         result: Err(ProjectRuntimeError::InvalidEffect(
                                             "project dictionary executor is unavailable",
                                         )),
@@ -6480,6 +6783,7 @@ impl NativeDesktop {
                                 move |result| Message::EditorEffectFinished {
                                     window,
                                     mutation: Some(token),
+                                    target: None,
                                     result,
                                 },
                             )
@@ -6491,6 +6795,7 @@ impl NativeDesktop {
                         move |result| Message::EditorEffectFinished {
                             window,
                             mutation: Some(token),
+                            target: None,
                             result,
                         },
                     ));
@@ -6502,6 +6807,7 @@ impl NativeDesktop {
                                 Message::EditorEffectFinished {
                                     window,
                                     mutation: Some(token),
+                                    target: None,
                                     result: Err(ProjectRuntimeError::InvalidEffect(
                                         "project dictionary executor is unavailable",
                                     )),
@@ -6513,6 +6819,7 @@ impl NativeDesktop {
                             move |result| Message::EditorEffectFinished {
                                 window,
                                 mutation: Some(token),
+                                target: None,
                                 result,
                             },
                         )
@@ -6525,6 +6832,7 @@ impl NativeDesktop {
                     move |result| Message::EditorEffectFinished {
                         window,
                         mutation: None,
+                        target,
                         result,
                     },
                 ));
@@ -6858,6 +7166,14 @@ impl NativeDesktop {
                 document,
                 range,
             }) => {
+                if !state.workspace.as_ref().is_some_and(|workspace| {
+                    mount_matches_active_document(
+                        workspace.editor().pane(document.pane).active_document(),
+                        document.load.document_id,
+                    )
+                }) {
+                    return Task::none();
+                }
                 Self::accept_hydrated_snapshot(state, *snapshot);
                 if let Err(error) = Self::mount_resolved_document(state, document, self.appearance)
                 {
@@ -6975,7 +7291,11 @@ impl NativeDesktop {
 
     fn accept_hydrated_snapshot(state: &mut NativeProjectState, mut snapshot: ProjectSnapshot) {
         if let Some(current) = state.project.project_ui.as_ref().map(|ui| &ui.snapshot) {
-            for loaded in &current.documents {
+            // Loading a chapter is a read, not a project mutation. Its captured
+            // outline and summaries may predate a save or an optimistic rename.
+            let loaded_documents = std::mem::take(&mut snapshot.documents);
+            snapshot = current.as_ref().clone();
+            for loaded in loaded_documents {
                 let same_frontier = snapshot
                     .document_summaries
                     .iter()
@@ -6987,7 +7307,7 @@ impl NativeDesktop {
                         .iter()
                         .any(|candidate| candidate.document_id == loaded.document_id)
                 {
-                    snapshot.documents.push(loaded.clone());
+                    snapshot.documents.push(loaded);
                 }
             }
         }
@@ -6995,9 +7315,8 @@ impl NativeDesktop {
         if let Some(project_ui) = state.project.project_ui.as_mut() {
             project_ui.snapshot = Arc::clone(&snapshot);
         }
-        if let Some(workspace) = state.workspace.as_mut() {
-            workspace.reconcile_snapshot(&snapshot);
-        }
+        // Do not reconcile presentation here: that would replace live titles,
+        // comments, word counts, and pending hierarchy changes with saved data.
         state.effect_executor = state
             .effect_executor
             .as_ref()
@@ -7173,6 +7492,14 @@ impl NativeDesktop {
         document: ResolvedDocumentMount,
         appearance: ResolvedAppearance,
     ) -> Result<(), String> {
+        if !state.workspace.as_ref().is_some_and(|workspace| {
+            mount_matches_active_document(
+                workspace.editor().pane(document.pane).active_document(),
+                document.load.document_id,
+            )
+        }) {
+            return Ok(());
+        }
         let view = state
             .workspace
             .as_ref()
@@ -7293,6 +7620,16 @@ impl NativeDesktop {
         let mounted_revision = adapter
             .revision(mounted_session.clone())
             .map_err(|error| error.to_string())?;
+        let projection = iced::futures::executor::block_on(
+            adapter.project(mounted_session.clone(), mounted_revision),
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.editor_mut().reconcile_document_comments(
+                &stable_id_string(document_id.as_bytes()),
+                projection.comments(),
+            );
+        }
         state
             .autosave
             .projected_sessions
@@ -7514,12 +7851,63 @@ impl NativeDesktop {
         view: parchmint_editor_api::ViewId,
         command: crate::EditorCommand,
     ) -> Result<Option<(parchmint_editor_api::SharedEditorSession, EditorRevision)>, String> {
+        let prior_revision = state
+            .editor_bindings
+            .values()
+            .find(|binding| binding.view() == view)
+            .and_then(|binding| {
+                let session = binding.session();
+                state
+                    .project
+                    .editor_adapter()?
+                    .revision(session.clone())
+                    .ok()
+                    .map(|revision| (session, revision))
+            });
+        let result = Self::execute_editor_command(state, view, command);
+        // A layout or presentation failure can happen after the document
+        // transaction succeeds. Keep that accepted revision on the save and
+        // recovery frontier even when the action reports an error.
+        if result.is_err()
+            && let Some((session, before)) = prior_revision
+            && let Some(adapter) = state.project.editor_adapter()
+            && let Ok(revision) = adapter.revision(session.clone())
+            && revision > before
+        {
+            if let Some(workspace) = state.workspace.as_mut() {
+                workspace.update(ProjectMessage::MarkEditorDirty);
+            }
+            state.autosave.mark_dirty(session, revision, Instant::now());
+        }
+        result
+    }
+
+    fn execute_editor_command(
+        state: &mut NativeProjectState,
+        view: parchmint_editor_api::ViewId,
+        command: crate::EditorCommand,
+    ) -> Result<Option<(parchmint_editor_api::SharedEditorSession, EditorRevision)>, String> {
         let binding = state
             .editor_bindings
             .values()
             .find(|binding| binding.view() == view)
             .ok_or_else(|| "editor command targets an unmounted view".to_owned())?;
         let session = binding.session();
+        if let Some(workspace) = state.workspace.as_ref()
+            && let Some(pane) = [EditorPane::Primary, EditorPane::Companion]
+                .into_iter()
+                .find(|pane| workspace.editor().pane(*pane).view() == view)
+            && state.mounted_documents.get(&pane).is_some_and(|document| {
+                !mount_matches_active_document(
+                    workspace.editor().pane(pane).active_document(),
+                    *document,
+                )
+            })
+        {
+            return Err(
+                "The selected document is still opening. Try the action once it is ready.".into(),
+            );
+        }
         let adapter = state
             .project
             .editor_adapter()
@@ -7643,7 +8031,16 @@ impl NativeDesktop {
             crate::EditorCommand::CreateComment {
                 body,
                 document_level,
+                anchor,
             } => {
+                let selection = if let Some((observed, captured)) = anchor {
+                    if observed != before {
+                        return Err("The document changed while you were writing the comment. Your draft is retained; select its text again before adding it.".into());
+                    }
+                    captured
+                } else {
+                    selection
+                };
                 let document = state
                     .mounted_documents
                     .iter()
@@ -8270,13 +8667,7 @@ impl NativeDesktop {
             ));
         }
         self.status = None;
-        Self::editor_effect_tasks(
-            window,
-            state.effect_executor.clone(),
-            &state.project_mutations,
-            &mut state.opaque_mutations,
-            effects,
-        )
+        Self::editor_effect_tasks(window, state, effects)
     }
 
     fn launch_worker<T, F, D>(operation: &'static str, work: F, deliver: D) -> Result<(), String>
@@ -8285,24 +8676,21 @@ impl NativeDesktop {
         F: FnOnce() -> T + Send + 'static,
         D: FnOnce(T) -> bool + Send + 'static,
     {
-        std::thread::Builder::new()
-            .name(format!("parchmint-{}", operation.replace(' ', "-")))
-            .spawn(move || {
-                #[cfg(feature = "diagnostics")]
-                let activity = diagnostics::blocking_worker(operation);
-                let result = work();
-                let delivered = deliver(result);
-                #[cfg(feature = "diagnostics")]
-                activity.complete(if delivered {
-                    diagnostics::WorkerDelivery::Accepted
-                } else {
-                    diagnostics::WorkerDelivery::Dropped
-                });
-                #[cfg(not(feature = "diagnostics"))]
-                let _ = delivered;
-            })
-            .map(|_| ())
-            .map_err(|error| worker_launch_failure(operation, &error))
+        worker_pool::submit(move || {
+            #[cfg(feature = "diagnostics")]
+            let activity = diagnostics::blocking_worker(operation);
+            let result = work();
+            let delivered = deliver(result);
+            #[cfg(feature = "diagnostics")]
+            activity.complete(if delivered {
+                diagnostics::WorkerDelivery::Accepted
+            } else {
+                diagnostics::WorkerDelivery::Dropped
+            });
+            #[cfg(not(feature = "diagnostics"))]
+            let _ = delivered;
+        })
+        .map_err(|error| worker_launch_failure(operation, &error))
     }
 
     async fn run_service_job<T: Send + 'static>(job: BlockingServiceJob<T>) -> NativeTaskResult<T> {
@@ -10760,6 +11148,45 @@ mod tests {
     }
 
     #[test]
+    fn native_capture_counts_only_draws_of_its_open_target_window() {
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let target = launcher_window(&desktop);
+        desktop.capture = Some(NativeCaptureState {
+            request: NativeCaptureRequest::new(
+                NativeCaptureTarget::Launcher,
+                ResolvedAppearance::Light,
+                std::env::temp_dir().join(format!("parchmint-settled-{}.png", std::process::id())),
+            )
+            .unwrap(),
+            window: Some(target),
+            window_opened: false,
+            settled_frames: 0,
+            screenshot_requested: false,
+        });
+        let _ = desktop.capture_after_settled_frame(target);
+        assert_eq!(desktop.capture.as_ref().unwrap().settled_frames, 0);
+        desktop.capture.as_mut().unwrap().window_opened = true;
+        let _ = desktop.update(Message::CaptureWake);
+        assert_eq!(desktop.capture.as_ref().unwrap().settled_frames, 0);
+        let _ = desktop.capture_after_settled_frame(window::Id::unique());
+        assert_eq!(desktop.capture.as_ref().unwrap().settled_frames, 0);
+        for _ in 0..2 {
+            let _ = desktop.capture_after_settled_frame(target);
+            assert!(!desktop.capture.as_ref().unwrap().screenshot_requested);
+        }
+        let _ = desktop.capture_after_settled_frame(target);
+        assert!(desktop.capture.as_ref().unwrap().screenshot_requested);
+    }
+
+    #[test]
     fn native_capture_request_requires_a_new_absolute_png_path() {
         let relative = NativeCaptureRequest::new(
             NativeCaptureTarget::Launcher,
@@ -11830,6 +12257,55 @@ mod tests {
     }
 
     #[test]
+    fn document_hydration_does_not_reconcile_over_live_outline_state() {
+        let project = legacy_project(PathBuf::from("/tmp/hydration-race.parchmint"), 250);
+        let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks,
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let before = state
+            .workspace
+            .as_ref()
+            .unwrap()
+            .editor()
+            .pane(EditorPane::Primary)
+            .active_document()
+            .map(str::to_owned);
+        let rows = state.workspace.as_ref().unwrap().explorer().rows().len();
+        let stale = ProjectSnapshot {
+            project: parchmint_domain::Project::new(parchmint_domain::ProjectId::from_bytes(
+                [1; 16],
+            )),
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        };
+        NativeDesktop::accept_hydrated_snapshot(state, stale);
+        assert_eq!(
+            state.workspace.as_ref().unwrap().explorer().rows().len(),
+            rows
+        );
+        assert_eq!(
+            state
+                .workspace
+                .as_ref()
+                .unwrap()
+                .editor()
+                .pane(EditorPane::Primary)
+                .active_document(),
+            before.as_deref()
+        );
+    }
+
+    #[test]
     fn captured_editor_shortcuts_do_not_duplicate_clipboard_or_text_input_actions() {
         assert!(should_activate_shortcut("file.save", false));
         assert!(should_activate_shortcut("file.close", false));
@@ -12122,6 +12598,173 @@ mod tests {
             " retaineddraft"
         );
         remounted.detach().expect("remounted tab detaches");
+    }
+
+    #[test]
+    fn formatting_is_applied_before_a_later_selection_or_document_switch() {
+        let project = legacy_project(PathBuf::from("/tmp/editor-dispatch.parchmint"), 161);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p>Manuscript words</p>",
+            EditorSelection::new(0.into(), 10.into()),
+            MountedEditorClipboardIntent::Copy,
+        );
+        state.project.editor = Some(adapter.clone());
+        state.editor_bindings.insert(EditorPane::Primary, binding);
+
+        let _pending = NativeDesktop::editor_effect_tasks(
+            window,
+            state,
+            vec![EditorEffect::Command {
+                view: request.view,
+                command: crate::EditorCommand::ToggleBold,
+            }],
+        );
+
+        // Native events may change selection or mount a Research note before
+        // any returned task runs. The authoring action must already be done.
+        let revision = adapter.revision(request.editor_session.clone()).unwrap();
+        let projection =
+            block_on(adapter.project(request.editor_session.clone(), revision)).unwrap();
+        assert_eq!(
+            projection.body(),
+            "<p><strong>Manuscript</strong> words</p>"
+        );
+        assert_eq!(
+            state.autosave.dirty_sessions.get(&request.editor_session),
+            Some(&revision)
+        );
+
+        adapter
+            .cache_visible_blocks(request.editor_session.clone(), request.view, [])
+            .unwrap();
+        let result = NativeDesktop::apply_editor_command(
+            state,
+            request.view,
+            crate::EditorCommand::ToggleItalic,
+        );
+        assert!(
+            result.is_err(),
+            "missing layout must report a presentation failure"
+        );
+        let accepted = adapter.revision(request.editor_session.clone()).unwrap();
+        assert!(
+            accepted > revision,
+            "the document transaction completed before rendering failed"
+        );
+        assert_eq!(
+            state.autosave.dirty_sessions.get(&request.editor_session),
+            Some(&accepted)
+        );
+        assert!(
+            block_on(adapter.project(request.editor_session, accepted))
+                .unwrap()
+                .body()
+                .contains("<em>")
+        );
+    }
+
+    #[test]
+    fn queued_canvas_input_cannot_follow_a_reused_pane_into_another_document() {
+        let project = legacy_project(PathBuf::from("/tmp/stale-editor-input.parchmint"), 162);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let editor = state.workspace.as_mut().unwrap().editor_mut();
+        let view = editor.pane(EditorPane::Primary).view();
+        let mount_generation = editor.pane(EditorPane::Primary).mount_generation();
+        editor.update(crate::EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: crate::TabSpec::new("new-chapter", "New chapter"),
+        });
+        editor.update(crate::EditorMessage::FocusPane(EditorPane::Companion));
+        let adapter = Arc::new(EditorIcedAdapter::new(Default::default()).unwrap());
+        let binding = MountedEditorBinding::mount(
+            adapter.as_ref(),
+            MountedEditorBindingConfig::new(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    parchmint_domain::DocumentId::from_bytes([163; 16]),
+                    "<p>New chapter</p>",
+                )),
+                project.window,
+                view,
+                EditorViewport::new(400.0, 300.0).unwrap(),
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .unwrap();
+        let session = binding.session();
+        state.project.editor = Some(adapter.clone());
+        state.editor_bindings.insert(EditorPane::Primary, binding);
+
+        let _task = desktop.update(Message::ProjectSurface {
+            window,
+            message: ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Mounted {
+                pane: EditorPane::Primary,
+                view,
+                mount_generation,
+                message: parchmint_editor_iced::MountedEditorMessage::InsertText(
+                    "WRONG DOCUMENT".into(),
+                ),
+            }),
+        });
+        assert_eq!(
+            adapter.revision(session.clone()).unwrap(),
+            EditorRevision::default()
+        );
+        assert_eq!(
+            block_on(adapter.project(session.clone(), EditorRevision::default()))
+                .unwrap()
+                .body(),
+            "<p>New chapter</p>"
+        );
+        let NativeWindow::Project(state) = &desktop.windows[&window] else {
+            panic!("project")
+        };
+        assert_eq!(
+            state.workspace.as_ref().unwrap().editor().focused_pane(),
+            EditorPane::Companion
+        );
+        assert!(state.autosave.dirty_sessions.is_empty());
+        let focus_before = adapter
+            .view_snapshot(session.clone(), view)
+            .unwrap()
+            .presentation
+            .focused;
+        let _late_completion = desktop.update(Message::EditorEffectFinished {
+            window,
+            mutation: None,
+            target: Some((EditorPane::Primary, mount_generation)),
+            result: Ok(EditorEffectCompletion::Intent(
+                EditorRuntimeIntent::RestoreFocus { view },
+            )),
+        });
+        assert_eq!(
+            adapter
+                .view_snapshot(session, view)
+                .unwrap()
+                .presentation
+                .focused,
+            focus_before
+        );
     }
 
     #[test]

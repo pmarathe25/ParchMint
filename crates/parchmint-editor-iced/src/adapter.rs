@@ -15,7 +15,7 @@ use parchmint_editor_api::{
 use parchmint_editor_core::paste::{
     PasteBlockKind, PasteMarkKind, PasteSource, SanitizedPaste, sanitize_paste,
 };
-use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession};
+use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession, PreparedEditorProjection};
 use parchmint_platform_api::{UntrustedClipboardContent, WindowCapability};
 
 use crate::layout::{BlockLayoutGeometry, EditorLayoutMetrics, EditorViewport, VisibleEditorBlock};
@@ -163,7 +163,7 @@ struct SessionRuntime {
     core: EditorCoreSession,
     views: BTreeMap<ViewId, MountedView>,
     pending_blocks: BTreeSet<BlockId>,
-    projections: BTreeMap<EditorRevision, CanonicalProjection>,
+    projections: BTreeMap<EditorRevision, PreparedEditorProjection>,
     subscribers: Vec<mpsc::Sender<EditorEvent>>,
     closed: bool,
 }
@@ -261,7 +261,7 @@ impl EditorIcedAdapter {
         load: CanonicalDocumentLoad,
     ) -> Result<SharedEditorSession, EditorError> {
         let core = EditorCoreSession::open(load)?;
-        let initial = core.canonical_projection();
+        let initial = core.prepare_projection();
         let mut runtime = self.lock()?;
         let live_sessions = runtime
             .sessions
@@ -633,6 +633,31 @@ impl EditorIcedAdapter {
         })
     }
 
+    pub fn active_inline_marks(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Vec<SemanticInlineMark>, EditorError> {
+        self.with_session(session, |state| state.core.active_inline_marks(view))
+    }
+
+    pub fn word_counts(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<(usize, Option<usize>), EditorError> {
+        self.with_session(session, |state| {
+            let projection = state
+                .projections
+                .get(&state.core.revision())
+                .ok_or_else(|| invalid("current projection is unavailable"))?;
+            Ok((
+                projection.word_count(),
+                state.core.selection_word_count(view)?,
+            ))
+        })
+    }
+
     pub fn active_style(
         &self,
         session: SharedEditorSession,
@@ -711,19 +736,13 @@ impl EditorIcedAdapter {
             .checked_add(inserted)
             .ok_or_else(|| invalid("inserted text position overflowed"))?;
         let revision = self.revision(session.clone())?;
-        self.execute(
-            session,
-            EditorCommandOrigin::new(view),
-            EditorCommand::new(
+        self.with_session(session, |state| {
+            state.core.advance_input_caret(
+                view,
                 revision,
-                EditorCommandKind::SetSelection {
-                    selection: EditorSelection::new(
-                        DocumentPosition::from(caret),
-                        DocumentPosition::from(caret),
-                    ),
-                },
-            ),
-        )
+                EditorSelection::new(DocumentPosition::from(caret), DocumentPosition::from(caret)),
+            )
+        })
     }
 
     fn replace_sanitized_selection_at(
@@ -879,7 +898,7 @@ impl EditorIcedAdapter {
         state
             .pending_blocks
             .extend(applied.changed_blocks().iter().copied());
-        let projection = state.core.canonical_projection();
+        let projection = state.core.prepare_projection();
         state.projections.insert(projection.revision(), projection);
         while state.projections.len() > self.config.projection_budget.retained_revisions {
             let Some(oldest) = state.projections.keys().next().copied() else {
@@ -1135,7 +1154,7 @@ impl EditorAdapter for EditorIcedAdapter {
                 invalid("requested projection revision is outside the retained budget")
             })
         });
-        Box::pin(async move { projection })
+        Box::pin(async move { projection.map(|prepared| prepared.canonical()) })
     }
 
     fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent> {

@@ -1,6 +1,120 @@
 use super::*;
 use crate::document_engine::SemanticBlockSnapshot;
 
+#[test]
+fn caret_formatting_is_view_local_and_applies_until_toggled_off() {
+    let mut session = EditorCoreSession::open(load("<p>Start </p>")).unwrap();
+    session.attach_view(view(1)).unwrap();
+    session.attach_view(view(2)).unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::SetSelection {
+                    selection: selection(6, 6),
+                },
+            ),
+        )
+        .unwrap();
+    let toggle = session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::ToggleInlineMark {
+                    range: selection(6, 6),
+                    mark: InlineMarkKind::Bold,
+                },
+            ),
+        )
+        .unwrap();
+    assert!(!toggle.document_changed());
+    assert_eq!(
+        session.active_inline_marks(view(1)).unwrap(),
+        vec![SemanticInlineMark::Bold]
+    );
+    assert!(session.active_inline_marks(view(2)).unwrap().is_empty());
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::InsertText {
+                    at: position(6),
+                    text: "bold".into(),
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                1,
+                EditorCommandKind::SetSelection {
+                    selection: selection(10, 10),
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                1,
+                EditorCommandKind::ToggleInlineMark {
+                    range: selection(10, 10),
+                    mark: InlineMarkKind::Bold,
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                1,
+                EditorCommandKind::InsertText {
+                    at: position(10),
+                    text: " plain".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let body = session.canonical_projection().body().to_owned();
+    assert!(body.contains("Start <strong>bold</strong> plain"), "{body}");
+    session
+        .execute(origin(view(2)), command(2, EditorCommandKind::Undo))
+        .unwrap();
+    session
+        .execute(origin(view(2)), command(3, EditorCommandKind::Redo))
+        .unwrap();
+    assert_eq!(session.canonical_projection().body(), body);
+}
+
+#[test]
+fn prepared_projection_retains_its_exact_revision_across_later_edits() {
+    let mut session = EditorCoreSession::open(load("<p>Original</p>")).unwrap();
+    session.attach_view(view(1)).unwrap();
+    let captured = session.prepare_projection();
+    let expected = session.canonical_projection();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::InsertText {
+                    at: position(0),
+                    text: "New ".into(),
+                },
+            ),
+        )
+        .unwrap();
+    assert_eq!(captured.canonical(), expected);
+    assert_ne!(captured.canonical(), session.canonical_projection());
+}
+
 fn document(value: u8) -> DocumentId {
     DocumentId::from_bytes([value; 16])
 }

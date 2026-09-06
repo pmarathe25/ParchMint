@@ -75,7 +75,8 @@ baseline. It never changes either input.
 `native-capture` launches the production `parchmint` executable and uses its
 Iced 0.14 `window::screenshot` render-target flow. It requests a 1440 x 900
 logical window at 2x scale by default. The desktop waits for three
-non-blocking settled-frame ticks, encodes the RGBA PNG in a background task,
+completed draws of the target window after document mounting, encodes the RGBA
+PNG in a background task,
 refuses an existing output, reports the actual render-target dimensions, and
 exits by default. A compositor may clamp the requested window; the default
 still writes the true screenshot so comparison emits a dimension-mismatch

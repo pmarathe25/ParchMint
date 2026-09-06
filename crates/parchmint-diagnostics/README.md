@@ -9,3 +9,7 @@ The log is line-oriented. Each event has a timestamp, an in-process sequence
 number, level, component, operation, and safe fields. Callers must not log
 document text. The logger is best-effort, so an unavailable log file does not
 change application behavior.
+
+The file stays within 1 MiB. In-memory captures retain the most recent 4,096
+events, so an ordinary desktop session does not accumulate an unbounded event
+list while no test harness is draining it.

@@ -3863,6 +3863,7 @@ pub struct ProjectWorkspace {
     hierarchy_rename: Option<HierarchyRename>,
     inspector_title_rename: Option<String>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
+    open_created_after_rename: Option<String>,
     last_activated_document: Option<String>,
     synopsis_editors: BTreeMap<String, text_editor::Content>,
     /// Locally authored Synopsis text which has not yet been observed in an
@@ -3959,6 +3960,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             inspector_title_rename: None,
             pending_hierarchy_creation: None,
+            open_created_after_rename: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
@@ -4021,6 +4023,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             inspector_title_rename: None,
             pending_hierarchy_creation: None,
+            open_created_after_rename: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
@@ -4993,6 +4996,10 @@ impl ProjectWorkspace {
                 let Some(rename) = self.hierarchy_rename.take() else {
                     return Vec::new();
                 };
+                let open_created = self
+                    .open_created_after_rename
+                    .take()
+                    .filter(|node_id| node_id == &rename.node_id);
                 let title = rename.title.trim().to_owned();
                 if title.is_empty()
                     || self
@@ -5001,16 +5008,23 @@ impl ProjectWorkspace {
                         .get(&rename.node_id)
                         .is_none_or(|node| node.title == title)
                 {
-                    return Vec::new();
+                    return open_created
+                        .map(|id| self.open_hierarchy_node(id, None, false))
+                        .unwrap_or_default();
                 }
                 self.explorer.rename(&rename.node_id, title.clone());
-                vec![ProjectEffect::CommitNodeTitle {
+                let mut effects = vec![ProjectEffect::CommitNodeTitle {
                     node_id: rename.node_id,
                     title,
-                }]
+                }];
+                if let Some(id) = open_created {
+                    effects.extend(self.open_hierarchy_node(id, None, false));
+                }
+                effects
             }
             ProjectMessage::CancelHierarchyRename => {
                 self.hierarchy_rename = None;
+                self.open_created_after_rename = None;
                 Vec::new()
             }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
@@ -6123,6 +6137,8 @@ impl ProjectWorkspace {
         let title = node.title.clone();
         self.explorer.select(&node_id, SelectionGesture::Replace);
         self.explorer.expanded.insert(pending.parent_id);
+        self.open_created_after_rename =
+            (expected_kind == HierarchyNodeKind::Document).then(|| node_id.clone());
         self.hierarchy_rename = Some(HierarchyRename { node_id, title });
     }
 

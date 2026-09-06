@@ -13,6 +13,75 @@ use parchmint_ui_driver::IsolatedRun;
 const LARGE_DOCUMENT_WORDS: usize = 250_000;
 const LARGE_DOCUMENT_TITLE: &str = "250K Manuscript";
 
+#[test]
+#[ignore = "opt-in optimized full-application save and reopen measurement"]
+fn chapter_save_and_reopen_performance() {
+    use std::time::Instant;
+    let run = IsolatedRun::new("chapter-save-performance").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let body = format!(
+        "<p></p>{}",
+        format!(
+            "<p>{}</p>",
+            "The harbor lantern shines through the rain tonight. ".repeat(10)
+        )
+        .repeat(250)
+    );
+    seed_large_document_project(&project, "Chapter performance", &body);
+    let started = Instant::now();
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    let open_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut saves = Vec::new();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+        .unwrap();
+    for index in 0..5 {
+        harness
+            .type_focused(HarnessWindow::Project, format!("saved-marker-{index} "))
+            .unwrap();
+        assert!(
+            harness
+                .active_editor_body()
+                .unwrap()
+                .contains(&format!("saved-marker-{index}")),
+            "typed marker {index} missing; prefix: {:?}; diagnostics: {:?}",
+            harness
+                .active_editor_body()
+                .unwrap()
+                .chars()
+                .take(300)
+                .collect::<String>(),
+            harness.take_diagnostics()
+        );
+        let started = Instant::now();
+        harness
+            .press_command_key(HarnessWindow::Project, 's')
+            .unwrap();
+        saves.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            canonical_bodies(&project)
+                .iter()
+                .any(|body| body.contains(&format!("saved-marker-{index}")))
+        );
+    }
+    close(harness);
+    let started = Instant::now();
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    let reopen_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let body = reopened.active_editor_body().unwrap();
+    for index in 0..5 {
+        assert!(body.contains(&format!("saved-marker-{index}")));
+    }
+    saves.sort_by(f64::total_cmp);
+    eprintln!(
+        "20k-word full application: open={open_ms:.2}ms save_median={:.2}ms save_max={:.2}ms reopen={reopen_ms:.2}ms",
+        saves[2], saves[4]
+    );
+    close(reopened);
+}
+
 /// Exercises a large document in a two-pane workspace through
 /// repeated continuous-writing autosaves, shared-view verification, History
 /// loading, and a full application restart. The virtual clock makes the long

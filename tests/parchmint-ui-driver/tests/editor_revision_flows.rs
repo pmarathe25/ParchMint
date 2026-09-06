@@ -2,8 +2,309 @@ use std::path::Path;
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessTarget, HarnessWindow, LaunchRequest,
+    RibbonDestination,
 };
 use parchmint_ui_driver::IsolatedRun;
+
+#[test]
+fn visible_explorer_buttons_create_and_open_a_named_chapter() {
+    let run = IsolatedRun::new("visible-creation-actions").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Visible creation");
+    harness
+        .click_text(HarnessWindow::Project, "New group")
+        .unwrap();
+    harness
+        .replace_text_and_submit(HarnessWindow::Project, "New Group", "Part One")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "New document")
+        .unwrap();
+    harness
+        .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Chapter One")
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "The chapter begins.",
+        )
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("The chapter begins.")
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(
+        canonical_bodies(&project)
+            .iter()
+            .any(|body| body.contains("The chapter begins."))
+    );
+}
+
+#[test]
+fn finishing_research_creation_by_clicking_the_editor_never_duplicates_input() {
+    let run = IsolatedRun::new("research-pointer-routing").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Independent panes");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "Manuscript must stay unchanged.",
+        )
+        .unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Research")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create document")
+        .unwrap();
+    // The Research tab is opened by committing the name on blur. This click
+    // initially lands in the still-full-width manuscript editor.
+    harness
+        .type_at(HarnessWindow::Project, (760.0, 300.0), "One owner.")
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorCompanion,
+            "Research only.",
+        )
+        .unwrap();
+    harness.elapse_autosave_idle().unwrap();
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    let bodies = canonical_bodies(&project);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("<p>Manuscript must stay unchanged.One owner.</p>")),
+        "{bodies:?}"
+    );
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains("One owner."))
+            .count(),
+        1,
+        "{bodies:?}"
+    );
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|body| body.contains("Research only."))
+            .count(),
+        1,
+        "{bodies:?}"
+    );
+}
+
+#[test]
+fn toolbar_typing_marks_and_history_compare_the_live_unsaved_draft() {
+    let run = IsolatedRun::new("typing-format-history").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Typing and History");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "B").unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "Bold words")
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "B").unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, " plain words")
+        .unwrap();
+    harness.elapse_autosave_idle().unwrap();
+    let body = harness.active_editor_body().unwrap();
+    assert!(
+        body.contains("<strong>Bold words</strong> plain words"),
+        "{body}"
+    );
+    harness
+        .type_focused(HarnessWindow::Project, " unsavedmarker")
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::History),
+        )
+        .unwrap();
+    harness
+        .click_history_checkpoint(HarnessWindow::Project, 0)
+        .unwrap();
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, " unsavedmarker")
+            .unwrap(),
+        "History's Current side must include the live draft"
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(
+        canonical_bodies(&project)
+            .iter()
+            .any(|body| body.contains("unsavedmarker"))
+    );
+}
+
+#[test]
+fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
+    let run = IsolatedRun::new("manuscript-research-integrity").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Research beside the novel");
+    let manuscript = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "Mara returns to the harbor.",
+        )
+        .unwrap();
+    create_group(&harness, "Research", "Characters");
+    create_document(&harness, "Characters", "Mara's background");
+    harness
+        .right_click_text(HarnessWindow::Project, "Mara's background")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Open in companion")
+        .unwrap();
+    let research = harness
+        .active_editor_document_id(EditorPane::Companion)
+        .unwrap();
+    assert_ne!(manuscript, research);
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorCompanion,
+            "Mara grew up inland and fears deep water.",
+        )
+        .unwrap();
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Document · 8 words")
+            .unwrap()
+    );
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 5 words")
+            .unwrap()
+    );
+    harness
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "harbor")
+        .unwrap();
+    harness
+        .scroll_target_by(HarnessWindow::Project, HarnessTarget::EditorCompanion, 80.0)
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "B").unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Comment")
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::CommentDraft,
+            "Check this against Mara's background.",
+        )
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Add comment")
+        .unwrap();
+    harness.elapse_autosave_idle().unwrap();
+
+    let bodies = canonical_bodies(&project);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("<strong>harbor</strong>"))
+    );
+    let research_body = bodies
+        .iter()
+        .find(|body| body.contains("grew up inland"))
+        .unwrap();
+    assert!(!research_body.contains("<strong>"));
+    let annotations = std::fs::read_to_string(
+        project
+            .join("annotations")
+            .join(format!("{manuscript}.json")),
+    )
+    .unwrap();
+    assert!(annotations.contains("Check this against Mara's background."));
+    assert!(annotations.contains("harbor"));
+    let research_annotations = project.join("annotations").join(format!("{research}.json"));
+    assert!(
+        !std::fs::read_to_string(research_annotations)
+            .unwrap_or_default()
+            .contains("Check this")
+    );
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::History),
+        )
+        .unwrap();
+    let checkpoints = harness.history_checkpoints().unwrap();
+    assert!(!checkpoints.is_empty());
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::History),
+        )
+        .unwrap();
+    assert_eq!(
+        harness.history_checkpoints().unwrap().len(),
+        checkpoints.len(),
+        "saving unchanged writing must not add an empty checkpoint"
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert_eq!(canonical_bodies(&project), bodies);
+    assert_eq!(
+        std::fs::read_to_string(
+            project
+                .join("annotations")
+                .join(format!("{manuscript}.json"))
+        )
+        .unwrap(),
+        annotations
+    );
+    assert_eq!(
+        reopened
+            .active_editor_document_id(EditorPane::Primary)
+            .unwrap(),
+        manuscript
+    );
+    assert_eq!(
+        reopened
+            .active_editor_document_id(EditorPane::Companion)
+            .unwrap(),
+        research
+    );
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
 
 #[test]
 fn editor_can_research_and_revise_the_same_document_from_both_panes() {

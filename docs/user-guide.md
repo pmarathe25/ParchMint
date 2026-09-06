@@ -36,8 +36,10 @@ Drag the dividers to resize Explorer, the editor panes, and Inspector. Press
 
 ## Organize a novel
 
-Use **+ New** in Explorer or a row's context menu to create a group or
-document. Groups can contain other groups and documents. Documents cannot have
+Use **New document** or **New group** at the bottom of Explorer. The label above
+them shows the destination. **+ New** and row context menus offer the same
+actions. Enter a name to finish creation; a new Research document opens in the
+companion pane. Groups can contain other groups and documents. Documents cannot have
 children.
 
 A single click selects a document and opens it as a replaceable preview tab.
@@ -64,6 +66,10 @@ paragraph styles, bold, italic, underline, strikethrough, lists, block quotes,
 links, scene breaks, and page breaks. Project styles can be configured in
 **Settings > Styles**.
 
+The B/I/U/S buttons show the active formatting. With no text selected, toggle a
+button to format the text you type next. Document and manuscript word counts
+update while you write; Research words do not increase the manuscript total.
+
 Open a document in the companion pane when you want two documents side by
 side. You can also open the same document in both panes. In that case edits,
 formatting, comments, undo history, save state, and word count are shared, while
@@ -75,14 +81,21 @@ Metadata fields**.
 
 ## Add and review comments
 
-Select text, or place the cursor for a position comment, then open the editor
-context menu and choose **Add Comment**. The thread card beside the text lets
+Select text, or place the cursor for a position comment, then select **Comment**
+in the formatting toolbar. You can also choose **Add Comment** from the editor
+context menu. The thread card beside the text lets
 you reply, edit or delete messages, resolve or reopen the thread, and delete
 the thread.
 
 Inspector lists all comments for the active document. Select a comment there
 to reveal its location in the editor. Comments stay with the project but are
 excluded from manuscript export.
+
+A comment draft stays attached to the document and selection where you started
+it, including when you consult Research in the other pane. If that document
+changes before submission, ParchMint retains the draft and asks you to select
+its text again. Scrolling through Research keeps the formatting toolbar aimed
+at the editor you last focused; click the Research text to edit it instead.
 
 ## Search and replace
 

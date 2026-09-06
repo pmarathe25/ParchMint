@@ -25,6 +25,18 @@ use sha2::{Digest, Sha256};
 const FORMAT_CONTROL_V1: &[u8] = b"1\n";
 const ANNOTATION_SCHEMA_V1: &str = "parchmint.annotation-sidecar/v1";
 
+/// Stable identity assigned to a document in a manifest without a structure
+/// extension. History and project opening must use the same legacy mapping.
+pub fn legacy_document_id(path: &CanonicalRelativePath) -> DomainDocumentId {
+    let mut digest = Sha256::new();
+    digest.update(b"document\0");
+    digest.update(path.as_str().as_bytes());
+    let digest = digest.finalize();
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
+    DomainDocumentId::from_bytes(id)
+}
+
 /// A format version understood by this build of ParchMint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormatVersion {

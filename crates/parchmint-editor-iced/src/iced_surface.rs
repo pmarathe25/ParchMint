@@ -803,7 +803,6 @@ impl SurfaceHandle {
             .clone()
     }
 
-    #[cfg(test)]
     fn is_focused(&self) -> bool {
         self.content
             .lock()
@@ -1490,6 +1489,14 @@ impl MountedEditorHost {
             self.config.view(),
             self.config.block(),
         )
+    }
+
+    /// Releases input ownership when another document pane becomes active.
+    pub fn blur(&self) -> Result<(), EditorError> {
+        if self.surface.is_focused() {
+            self.update(MountedEditorMessage::Blur)?;
+        }
+        Ok(())
     }
 
     /// Rebinds only the semantic colors; the shared session is unaffected.

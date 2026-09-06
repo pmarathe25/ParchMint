@@ -39,6 +39,14 @@ from a complete snapshot of the newest required revision. Edits never wait on
 the queue, but a save cannot be acknowledged for a revision whose projection
 was never delivered.
 
+`prepare_projection` captures an immutable revision and its semantic document.
+Its `canonical` method serializes that captured revision on demand. Each undo
+and redo stack retains at most 256 operations and approximately 64 MiB of
+payload, except that the latest operation remains undoable even if it alone
+exceeds that size. Entries retain changed paragraphs and omit unchanged prefix
+and suffix paragraphs. Formatting toggled at a collapsed caret applies to
+subsequent typing without creating a document revision until text is entered.
+
 ## Interface
 
 `parchmint-editor-iced` uses this crate through a small ParchMint-owned API.
@@ -166,8 +174,8 @@ struct EditorSession<E: DocumentEngine> {
     comments: BTreeMap<CommentId, StoredComment>,
     anchors: Vec<CanonicalAnchor>,
     styles: StyleCatalogProjection,
-    undo: Vec<UndoEntry>,
-    redo: Vec<UndoEntry>,
+    undo: UndoHistory,
+    redo: UndoHistory,
     mappings: Vec<RevisionMapping>,
     projections: ProjectionQueue,
 }
@@ -202,9 +210,9 @@ fn execute(
 }
 ```
 
-Undo restoration reloads the engine's before-edit snapshot and reverses the
-stored position mapping; redo reloads the after-edit snapshot with the forward
-mapping.
+Undo reconstructs the before-edit document from the retained paragraph changes
+and reverses the stored position mapping. Redo applies the after-edit paragraphs
+and the forward mapping.
 
 Projection work runs away from the UI loop. Each edit offers a canonical
 projection of the session's current state. The queue keeps a bounded pending

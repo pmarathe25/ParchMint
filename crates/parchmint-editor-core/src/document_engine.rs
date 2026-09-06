@@ -249,6 +249,8 @@ pub(super) trait DocumentEngine {
         style: String,
     ) -> Result<EngineChange, EngineError>;
     fn snapshot(&self) -> SemanticDocumentSnapshot;
+    fn inline_marks(&self, selection: EditorSelection) -> Vec<SemanticInlineMark>;
+    fn text(&self) -> &str;
     fn scalar_len(&self) -> usize;
 }
 
@@ -259,6 +261,52 @@ pub(super) struct PrivateTextEngine {
 }
 
 impl DocumentEngine for PrivateTextEngine {
+    fn inline_marks(&self, selection: EditorSelection) -> Vec<SemanticInlineMark> {
+        let Some(document) = &self.document else {
+            return Vec::new();
+        };
+        let start = selection.start().value() as usize;
+        let end = selection.end().value() as usize;
+        let mut offset = 0;
+        let mut common: Option<Vec<SemanticInlineMark>> = None;
+        for block in &document.blocks {
+            let len = block.text.chars().count();
+            if selection.is_collapsed() && start >= offset && start <= offset + len {
+                let local = start - offset;
+                return block
+                    .marks
+                    .iter()
+                    .filter(|mark| {
+                        if local == 0 {
+                            mark.start == 0 && mark.end > 0
+                        } else {
+                            mark.start < local && mark.end >= local
+                        }
+                    })
+                    .map(|mark| mark.mark.clone())
+                    .collect();
+            }
+            let local_start = start.saturating_sub(offset).min(len);
+            let local_end = end.saturating_sub(offset).min(len);
+            if local_start < local_end {
+                let marks = block
+                    .marks
+                    .iter()
+                    .filter(|mark| {
+                        range_fully_marked(&block.marks, local_start, local_end, &mark.mark)
+                    })
+                    .map(|mark| mark.mark.clone())
+                    .collect::<Vec<_>>();
+                match &mut common {
+                    Some(common) => common.retain(|mark| marks.contains(mark)),
+                    None => common = Some(marks),
+                }
+            }
+            offset += len + 1;
+        }
+        common.unwrap_or_default()
+    }
+
     fn load(&mut self, document: SemanticDocumentSnapshot) -> Result<(), EngineError> {
         if document.blocks.is_empty() {
             return Err(EngineError::InvalidSnapshot);
@@ -324,6 +372,19 @@ impl DocumentEngine for PrivateTextEngine {
         let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
         let (block_index, local_start) = locate_position(&document.blocks, at, true)?;
         let block = &mut document.blocks[block_index];
+        let existing = block
+            .marks
+            .iter()
+            .map(|mark| mark.mark.clone())
+            .collect::<Vec<_>>();
+        for mark in existing {
+            remove_mark(
+                &mut block.marks,
+                local_start,
+                local_start + inserted_len,
+                &mark,
+            );
+        }
         for mark in marks {
             add_mark(
                 &mut block.marks,
@@ -829,6 +890,9 @@ impl DocumentEngine for PrivateTextEngine {
     }
     fn scalar_len(&self) -> usize {
         self.text.chars().count()
+    }
+    fn text(&self) -> &str {
+        &self.text
     }
 }
 

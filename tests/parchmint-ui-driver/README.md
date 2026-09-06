@@ -1,7 +1,9 @@
 # ParchMint UI driver
 
 The UI driver exercises ParchMint's real desktop composition without creating
-operating-system windows. It uses Iced's headless renderer to click and type in
+operating-system windows. It loads the desktop's bundled fonts and delivers
+redraw notifications between input events so panes wrap to their allocated
+viewport. It uses Iced's headless renderer to click and type in
 the rendered widget tree, routes the resulting messages through the native
 desktop update loop, and runs the production project and persistence services.
 
@@ -74,5 +76,10 @@ session. They use the harness's virtual clocks, so a long writing session is
 reproducible without sleeping in CI.
 
 The flows assert retained markers, canonical file contents, recovery results,
-and absence of error diagnostics. They do not assert elapsed time or process
-memory because the headless harness has no reliable host-level measurement API.
+and absence of error diagnostics. The opt-in
+`chapter_save_and_reopen_performance` test measures wall-clock open, save, and
+reopen times for a 20,000-word chapter in an optimized build. The editor
+binding's `chapter_authoring_performance` test measures typing, selection,
+scrolling, chapter switching, projection time, and Linux process memory for
+eight chapters plus Research. These measurements are reported, not
+machine-independent pass/fail latency thresholds.

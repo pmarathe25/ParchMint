@@ -37,6 +37,8 @@ an error.
 
 The production application writes a bounded, rotating debug log at
 `logs/parchmint-debug.log` under its application data directory. The log
+is enabled by the default `diagnostics` feature in debug and release builds.
+Build with `--no-default-features` to omit diagnostics. The log
 truncates before it exceeds 1 MiB. It records project and editor effect starts,
 completions, ignored stale completions, and the technical causes of
 user-visible failures. It records action names, session identifiers, and

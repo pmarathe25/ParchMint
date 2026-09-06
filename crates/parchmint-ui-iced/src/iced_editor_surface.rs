@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, pick_list, responsive, row, sensor,
-    stack, text, text_editor, text_input,
+    Space, button, column, container, mouse_area, opaque, pick_list, responsive, row, scrollable,
+    sensor, stack, text, text_editor, text_input,
 };
 use iced::{
     Background, Element, Font, Length,
@@ -148,6 +148,7 @@ impl EditorHostSlots {
 /// workspace and mounted messages through their existing owners.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EditorCenterMessage {
+    BeginComment,
     BeginSplitResize,
     HierarchyDropTarget(EditorPane),
     ClearHierarchyDropTarget(EditorPane),
@@ -160,6 +161,7 @@ pub(crate) enum EditorCenterMessage {
     Mounted {
         pane: EditorPane,
         view: ViewId,
+        mount_generation: u64,
         message: MountedEditorMessage,
     },
     SetReplaceDraft {
@@ -177,7 +179,8 @@ impl EditorCenterMessage {
     /// local search state; mounted messages also establish that focus.
     pub(crate) fn workspace_messages(&self) -> Vec<EditorMessage> {
         match self {
-            Self::BeginSplitResize
+            Self::BeginComment
+            | Self::BeginSplitResize
             | Self::HierarchyDropTarget(_)
             | Self::ClearHierarchyDropTarget(_)
             | Self::CommitHierarchyDrop => Vec::new(),
@@ -186,7 +189,10 @@ impl EditorCenterMessage {
                 vec![EditorMessage::FocusPane(*pane), message.clone()]
             }
             Self::Mounted {
-                message: MountedEditorMessage::Blur | MountedEditorMessage::ViewportChanged(_),
+                message:
+                    MountedEditorMessage::Blur
+                    | MountedEditorMessage::ViewportChanged(_)
+                    | MountedEditorMessage::Scroll { .. },
                 ..
             } => Vec::new(),
             Self::Mounted {
@@ -440,6 +446,13 @@ fn formatting_toolbar(
         text_commands
             .into_iter()
             .fold(row![style_selector].spacing(4), |row, (label, command)| {
+                let mark = match label {
+                    "B" => parchmint_editor_api::SemanticInlineMark::Bold,
+                    "I" => parchmint_editor_api::SemanticInlineMark::Italic,
+                    "U" => parchmint_editor_api::SemanticInlineMark::Underline,
+                    _ => parchmint_editor_api::SemanticInlineMark::Strikethrough,
+                };
+                let active = workspace.active_inline_marks().contains(&mark);
                 let control_font = match label {
                     "B" => Font {
                         weight: font::Weight::Bold,
@@ -457,14 +470,19 @@ fn formatting_toolbar(
                 let control = button(text(label).size(14).font(control_font))
                     .padding([4, 7])
                     .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
-                    .on_press(EditorCenterMessage::Workspace(EditorMessage::Format(
-                        command,
-                    )))
+                    .on_press_maybe(
+                        workspace
+                            .pane(workspace.focused_pane())
+                            .is_populated()
+                            .then_some(EditorCenterMessage::Workspace(EditorMessage::Format(
+                                command,
+                            ))),
+                    )
                     .style(move |_, status| {
                         components::button_style(
                             theme,
                             ButtonKind::Quiet,
-                            button_interaction(status, false),
+                            button_interaction(status, active),
                         )
                     });
                 let control: Element<'static, EditorCenterMessage> = if label == "B" {
@@ -510,15 +528,37 @@ fn formatting_toolbar(
                 FormattingCommand::PageBreak,
                 theme,
             ),
-        ));
-    container(controls)
-        .padding([6, 8])
-        .width(Length::Fill)
-        // The Penpot toolbar is a flat panel. An elevated surface adds a
-        // large scrim shadow that is repeatedly repainted while its controls
-        // hover, causing the visible dark flicker across the whole bar.
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
-        .into()
+        ))
+        .push(
+            button(text("Comment").size(13))
+                .padding([4, 7])
+                .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
+                .on_press_maybe(
+                    workspace
+                        .pane(workspace.focused_pane())
+                        .is_populated()
+                        .then_some(EditorCenterMessage::BeginComment),
+                )
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        button_interaction(status, false),
+                    )
+                }),
+        );
+    container(
+        scrollable(controls).direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new(),
+        )),
+    )
+    .padding([6, 8])
+    .width(Length::Fill)
+    // The Penpot toolbar is a flat panel. An elevated surface adds a
+    // large scrim shadow that is repeatedly repainted while its controls
+    // hover, causing the visible dark flicker across the whole bar.
+    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+    .into()
 }
 
 fn formatting_text_button(
@@ -640,9 +680,11 @@ fn editor_pane_surface<'a>(
     );
     let search = workspace.local_search(state.view());
     let view = state.view();
+    let mount_generation = state.mount_generation();
     let viewport_message = move |size: iced::Size| EditorCenterMessage::Mounted {
         pane,
         view,
+        mount_generation,
         message: MountedEditorMessage::ViewportChanged(
             EditorViewport::new(size.width.max(1.0), size.height.max(1.0))
                 .expect("sensor clamps editor viewport dimensions"),
@@ -656,7 +698,12 @@ fn editor_pane_surface<'a>(
         target,
         pane_body(state, pane, theme, slots),
     ))
-    .key((pane, view))
+    .key((
+        pane,
+        view,
+        mount_generation,
+        slots.slot(pane).and_then(EditorPaneSlot::host).is_some(),
+    ))
     .on_show(viewport_message)
     .on_resize(viewport_message)
     .into();
@@ -1490,10 +1537,12 @@ fn pane_body(
         .and_then(EditorPaneSlot::host)
         .map(|host| {
             let view = state.view();
+            let mount_generation = state.mount_generation();
             host.element()
                 .map(move |message| EditorCenterMessage::Mounted {
                     pane,
                     view,
+                    mount_generation,
                     message,
                 })
         })
@@ -1607,6 +1656,7 @@ mod tests {
                     pane,
                     view,
                     message,
+                    ..
                 } => {
                     if let MountedEditorMessage::HoverComment {
                         comment_id,
@@ -1641,7 +1691,8 @@ mod tests {
                 EditorCenterMessage::HierarchyDropTarget(_)
                 | EditorCenterMessage::ClearHierarchyDropTarget(_)
                 | EditorCenterMessage::CommitHierarchyDrop => {}
-                unsupported @ (EditorCenterMessage::BeginSplitResize
+                unsupported @ (EditorCenterMessage::BeginComment
+                | EditorCenterMessage::BeginSplitResize
                 | EditorCenterMessage::ChooseSpellingAction(_)
                 | EditorCenterMessage::DismissSpellingMenu
                 | EditorCenterMessage::DismissCommentComposer) => {
@@ -1772,6 +1823,7 @@ mod tests {
         let message = EditorCenterMessage::Mounted {
             pane: EditorPane::Companion,
             view,
+            mount_generation: workspace.pane(EditorPane::Companion).mount_generation(),
             message: MountedEditorMessage::InsertText("x".to_owned()),
         };
         assert_eq!(
@@ -1791,6 +1843,7 @@ mod tests {
         let message = EditorCenterMessage::Mounted {
             pane: EditorPane::Companion,
             view,
+            mount_generation: workspace.pane(EditorPane::Companion).mount_generation(),
             message: MountedEditorMessage::HoverComment {
                 comment_id: Some("comment".to_owned()),
                 anchor_bounds: (24.0, 36.0, 30.0, 14.0),
@@ -1898,10 +1951,13 @@ mod tests {
                 command: crate::EditorCommand::CreateComment {
                     body,
                     document_level: false,
+                    ..
                 },
                 ..
             }] if body == "A visible note"
         ));
+        assert!(workspace.comment_composer(EditorPane::Primary).is_some());
+        workspace.complete_comment_creation();
         assert!(workspace.comment_composer(EditorPane::Primary).is_none());
     }
 
@@ -1948,9 +2004,26 @@ mod tests {
         let message = EditorCenterMessage::Mounted {
             pane: EditorPane::Companion,
             view,
+            mount_generation: workspace.pane(EditorPane::Companion).mount_generation(),
             message: MountedEditorMessage::ViewportChanged(
                 EditorViewport::new(480.0, 320.0).expect("viewport"),
             ),
+        };
+        assert!(message.workspace_messages().is_empty());
+    }
+
+    #[test]
+    fn scrolling_research_does_not_redirect_manuscript_formatting() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let pane = workspace.pane(EditorPane::Companion);
+        let message = EditorCenterMessage::Mounted {
+            pane: EditorPane::Companion,
+            view: pane.view(),
+            mount_generation: pane.mount_generation(),
+            message: MountedEditorMessage::Scroll {
+                delta_y: 80.0,
+                viewport: EditorViewport::new(400.0, 300.0).unwrap(),
+            },
         };
         assert!(message.workspace_messages().is_empty());
     }

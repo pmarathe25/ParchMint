@@ -1344,8 +1344,7 @@ fn application_state(
             (NodeId::research_root(), 0usize),
         ]);
         for path in &resources.document_paths {
-            let document_id =
-                DocumentId::from_bytes(stable_id(b"document", path.as_str().as_bytes()));
+            let document_id = parchmint_project_format::legacy_document_id(path);
             canonical_paths.documents.insert(document_id, path.clone());
             let node_id = NodeId::from_bytes(stable_id(b"node", path.as_str().as_bytes()));
             let parent = if path.as_str().starts_with("research/") {

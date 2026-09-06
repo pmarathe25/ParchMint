@@ -799,6 +799,45 @@ fn explorer_rail<'a>(
         scrollable(rows)
             .id(explorer_scroll_id())
             .height(Length::Fill),
+        container(
+            column![
+                text(format!(
+                    "Add to {}",
+                    workspace
+                        .explorer_creation_parent_id()
+                        .and_then(|id| explorer.title(id))
+                        .unwrap_or("Manuscript")
+                ))
+                .size(11),
+                row![
+                    explorer_creation_button(
+                        "New document",
+                        ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
+                            parent_id: workspace
+                                .explorer_creation_parent_id()
+                                .unwrap_or("manuscript")
+                                .to_owned(),
+                            kind: HierarchyItemKind::Document,
+                        }),
+                        theme
+                    ),
+                    explorer_creation_button(
+                        "New group",
+                        ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
+                            parent_id: workspace
+                                .explorer_creation_parent_id()
+                                .unwrap_or("manuscript")
+                                .to_owned(),
+                            kind: HierarchyItemKind::Group,
+                        }),
+                        theme
+                    ),
+                ]
+                .spacing(4)
+            ]
+            .spacing(4)
+        )
+        .padding([4, 0]),
     ]
     .spacing(8)
     .height(Length::Fill);
@@ -1026,6 +1065,8 @@ fn explorer_creation_action<'a>(
     message: ProjectSurfaceMessage,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    // Pop-up menu actions commit on press before click-away handling removes
+    // the menu. Persistent footer controls use normal release-click buttons.
     mouse_area(
         container(text(label).size(12))
             .padding([6, 8])
@@ -1034,6 +1075,21 @@ fn explorer_creation_action<'a>(
     .on_press(message)
     .interaction(iced::mouse::Interaction::Pointer)
     .into()
+}
+
+fn explorer_creation_button<'a>(
+    label: &'static str,
+    message: ProjectSurfaceMessage,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    button(text(label).size(12))
+        .padding([6, 8])
+        .height(ShellLayout::MIN_HIT_TARGET)
+        .on_press(message)
+        .style(move |_, status| {
+            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+        })
+        .into()
 }
 
 fn comment_action<'a>(
@@ -4333,7 +4389,7 @@ fn inspector<'a>(
             comments = comments.push(
                 column![
                     text("No comments").size(13),
-                    text("Select text, then choose Add Comment from its context menu.")
+                    text("Select text, then choose Comment in the toolbar.")
                         .size(12)
                         .color(theme.palette().secondary_text),
                 ]
@@ -5212,6 +5268,13 @@ mod tests {
         );
 
         assert!(simulator.find("Edit").is_err());
+        assert!(simulator.find("New group").is_ok());
+        assert!(simulator.find("New document").is_ok());
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(840.0, 700.0),
+            cards_center(&workspace, theme),
+        );
         assert!(simulator.find("New group").is_err());
         assert!(simulator.find("New document").is_err());
     }
@@ -5427,7 +5490,7 @@ mod tests {
         assert!(simulator.find("No comments").is_ok());
         assert!(
             simulator
-                .find("Select text, then choose Add Comment from its context menu.")
+                .find("Select text, then choose Comment in the toolbar.")
                 .is_ok()
         );
         assert!(simulator.find("New comment").is_err());

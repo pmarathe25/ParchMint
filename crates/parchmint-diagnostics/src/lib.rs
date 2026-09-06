@@ -16,7 +16,7 @@ use std::time::Duration;
 
 #[cfg(any(debug_assertions, feature = "capture"))]
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -31,6 +31,8 @@ use std::{
 const LOG_FILE_NAME: &str = "parchmint-debug.log";
 #[cfg(any(debug_assertions, feature = "capture"))]
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+#[cfg(any(debug_assertions, feature = "capture"))]
+const MAX_CAPTURED_EVENTS: usize = 4096;
 #[cfg(any(debug_assertions, feature = "capture"))]
 const MAX_TIMING_GROUPS: usize = 64;
 #[cfg(any(debug_assertions, feature = "capture"))]
@@ -125,9 +127,17 @@ fn next_sequence() -> u64 {
 }
 
 #[cfg(any(debug_assertions, feature = "capture"))]
-fn captured_events() -> &'static Mutex<Vec<DiagnosticEvent>> {
-    static EVENTS: OnceLock<Mutex<Vec<DiagnosticEvent>>> = OnceLock::new();
-    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+fn captured_events() -> &'static Mutex<VecDeque<DiagnosticEvent>> {
+    static EVENTS: OnceLock<Mutex<VecDeque<DiagnosticEvent>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+#[cfg(any(debug_assertions, feature = "capture"))]
+fn retain_event(events: &mut VecDeque<DiagnosticEvent>, event: DiagnosticEvent) {
+    if events.len() == MAX_CAPTURED_EVENTS {
+        events.pop_front();
+    }
+    events.push_back(event);
 }
 
 /// Removes and returns events collected by a debug/test diagnostics capture.
@@ -271,10 +281,10 @@ fn capture_event(
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect(),
     };
-    captured_events()
+    let mut events = captured_events()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(event);
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    retain_event(&mut events, event);
 }
 
 #[cfg(any(debug_assertions, feature = "capture"))]
@@ -618,6 +628,30 @@ mod tests {
         let mut rendered = String::new();
         append_escaped(&mut rendered, "one two=three\nfour");
         assert_eq!(rendered, "one\\ two\\=three\\nfour");
+    }
+
+    #[test]
+    fn long_sessions_keep_only_the_latest_bounded_diagnostic_events() {
+        let mut events = VecDeque::new();
+        for sequence in 0..(MAX_CAPTURED_EVENTS as u64 + 100) {
+            retain_event(
+                &mut events,
+                DiagnosticEvent {
+                    sequence,
+                    timestamp_millis: 0,
+                    level: Level::Info,
+                    target: "editor".into(),
+                    message: "completed".into(),
+                    fields: BTreeMap::new(),
+                },
+            );
+        }
+        assert_eq!(events.len(), MAX_CAPTURED_EVENTS);
+        assert_eq!(events.front().unwrap().sequence, 100);
+        assert_eq!(
+            events.back().unwrap().sequence,
+            MAX_CAPTURED_EVENTS as u64 + 99
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(any(test, feature = "visual-verification"))]
+#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 use std::borrow::Cow;
 
 /// One checked-in Penpot baseline fixture that can be rendered headlessly.
@@ -208,7 +208,7 @@ pub fn capture_visual(
     })
 }
 
-#[cfg(any(test, feature = "visual-verification"))]
+#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 pub(crate) fn visual_settings() -> iced::Settings {
     iced::Settings {
         default_font: iced::Font::with_name("Source Sans 3"),

@@ -612,18 +612,51 @@ fn load_checkpoint_document(
     document: DocumentId,
 ) -> Result<Option<HistoryDocumentPreview>, ServiceFeedError> {
     let document_id = encode_hex(document.as_bytes());
-    let suffix = format!("/{document_id}.html");
-    let mut matches = preview
-        .resource_paths
-        .iter()
-        .filter(|path| path.as_str().ends_with(&suffix));
-    let Some(path) = matches.next().cloned() else {
+    let manifest_path = CanonicalRelativePath::parse("project.toml").expect("static path");
+    let paths = if preview.resource_paths.contains(&manifest_path) {
+        let resource = ports.history_resource(checkpoint, &manifest_path)?;
+        let codec = parchmint_project_format::ProjectFormatCodec::default();
+        let manifest = codec
+            .decode_manifest(&resource.bytes)
+            .map_err(|error| service_error(ServiceKind::History, error))?;
+        // Project identity is immaterial to this read-only path lookup.
+        codec
+            .decode_domain_project(&manifest, parchmint_domain::ProjectId::from_bytes([0; 16]))
+            .map_err(|error| service_error(ServiceKind::History, error))?
+            .map(|(_, paths)| paths.documents)
+    } else {
+        None
+    };
+    let path = if let Some(paths) = paths {
+        paths.get(&document).cloned()
+    } else {
+        let suffix = format!("/{document_id}.html");
+        let mut matches = preview.resource_paths.iter().filter(|path| {
+            let name = path.as_str();
+            (name.starts_with("manuscript/") || name.starts_with("research/"))
+                && name.ends_with(".html")
+                && (name.ends_with(&suffix)
+                    || parchmint_project_format::legacy_document_id(path) == document)
+        });
+        let path = matches.next().cloned();
+        if matches.next().is_some() {
+            return Err(ServiceFeedError::InvalidServiceData {
+                service: ServiceKind::History,
+                reason: format!("checkpoint has duplicate paths for document {document_id}"),
+            });
+        }
+        path
+    };
+    let Some(path) = path else {
         return Ok(None);
     };
-    if matches.next().is_some() {
+    if !preview.resource_paths.contains(&path) {
         return Err(ServiceFeedError::InvalidServiceData {
             service: ServiceKind::History,
-            reason: format!("checkpoint has duplicate paths for document {document_id}"),
+            reason: format!(
+                "checkpoint is missing the manifest's document file: {}",
+                path.as_str()
+            ),
         });
     }
     let resource = ports.history_resource(checkpoint, &path)?;
@@ -1483,6 +1516,7 @@ mod tests {
         history_page: Mutex<Option<HistoryPage>>,
         history_preview: Mutex<Option<SnapshotResourcePaths>>,
         history_resource: Mutex<Option<CheckpointResource>>,
+        history_resources: Mutex<BTreeMap<CanonicalRelativePath, CheckpointResource>>,
         recovery_revision: AtomicU64,
         export_mode: Mutex<FakeExportMode>,
     }
@@ -1561,9 +1595,12 @@ mod tests {
         fn history_resource(
             &self,
             _: CheckpointId,
-            _: &CanonicalRelativePath,
+            path: &CanonicalRelativePath,
         ) -> Result<CheckpointResource, ServiceFeedError> {
             self.check()?;
+            if let Some(resource) = self.history_resources.lock().unwrap().get(path) {
+                return Ok(resource.clone());
+            }
             self.history_resource
                 .lock()
                 .expect("history resource")
@@ -1971,6 +2008,89 @@ mod tests {
         let document = preview.document.expect("document content");
         assert_eq!(document.canonical_path, path.as_str());
         assert_eq!(document.semantic.blocks().len(), 1);
+    }
+
+    #[test]
+    fn legacy_history_preview_resolves_the_same_document_identity_as_project_open() {
+        let fake = FakePorts::default();
+        let checkpoint = CheckpointId::from_bytes([3; 16]);
+        let path = CanonicalRelativePath::parse("manuscript/untitled-document.html").unwrap();
+        let document = parchmint_project_format::legacy_document_id(&path);
+        let preview = SnapshotResourcePaths {
+            checkpoint: summary(3, 9),
+            resource_paths: vec![path.clone()],
+        };
+        fake.history_resource
+            .lock()
+            .unwrap()
+            .replace(CheckpointResource {
+                checkpoint,
+                path: path.clone(),
+                content_hash: parchmint_history_api::ContentHash::from_bytes([8; 32]),
+                bytes: b"<p>Earlier chapter, not an empty checkpoint.</p>".to_vec(),
+            });
+        let loaded = load_checkpoint_document(&fake, checkpoint, &preview, document)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.canonical_path, path.as_str());
+        assert_eq!(
+            loaded.semantic.blocks()[0].text(),
+            "Earlier chapter, not an empty checkpoint."
+        );
+        assert!(
+            load_checkpoint_document(
+                &fake,
+                checkpoint,
+                &preview,
+                DocumentId::from_bytes([99; 16])
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn history_uses_the_checkpoint_manifest_path_not_a_guessed_current_filename() {
+        let fake = FakePorts::default();
+        let checkpoint = CheckpointId::from_bytes([3; 16]);
+        let document = DocumentId::from_bytes([4; 16]);
+        let path = CanonicalRelativePath::parse("research/old-lore-name.html").unwrap();
+        let manifest_path = CanonicalRelativePath::parse("project.toml").unwrap();
+        let manifest = format!(
+            "[project]\n[parchmint-structure]\nversion = 1\n[[parchmint-structure.nodes]]\nid = '{}'\nparent = '{}'\norder = 0\ntitle = 'Lore'\nkind = 'document'\ndocument-id = '{}'\npath = '{}'\n",
+            encode_hex(&[7; 16]),
+            encode_hex(NodeId::research_root().as_bytes()),
+            encode_hex(document.as_bytes()),
+            path.as_str()
+        );
+        for (path, bytes) in [
+            (manifest_path.clone(), manifest.into_bytes()),
+            (path.clone(), b"<p>Historical lore</p>".to_vec()),
+        ] {
+            fake.history_resources.lock().unwrap().insert(
+                path.clone(),
+                CheckpointResource {
+                    checkpoint,
+                    path,
+                    content_hash: parchmint_history_api::ContentHash::from_bytes([8; 32]),
+                    bytes,
+                },
+            );
+        }
+        let mut preview = SnapshotResourcePaths {
+            checkpoint: summary(3, 9),
+            resource_paths: vec![manifest_path, path.clone()],
+        };
+        let loaded = load_checkpoint_document(&fake, checkpoint, &preview, document)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.canonical_path, path.as_str());
+        assert_eq!(loaded.semantic.blocks()[0].text(), "Historical lore");
+        preview.resource_paths.pop();
+        assert!(
+            load_checkpoint_document(&fake, checkpoint, &preview, document).is_err(),
+            "missing data must be an error, not a blank preview"
+        );
     }
 
     #[test]

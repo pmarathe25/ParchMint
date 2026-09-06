@@ -46,13 +46,15 @@ recovery work.
 The mounted editor handles keystrokes directly. It can draw the result while
 serialization, file access, and analysis continue in the background.
 
-Background UI tasks use detached native threads. Closing a window or making a
-request stale drops its receiver and suppresses publication, but a native call
+Background UI tasks share four native workers and a queue of at most 128 jobs.
+An overloaded queue reports an error without blocking the input loop.
+Closing a window or making a request stale drops its receiver and suppresses
+publication, but a native call
 already running continues to completion. Search and export cancel only where
 their service APIs expose cancellation; workers owned by a service that joins
 them retain that separate lifecycle. The driver records bounded aggregate
 worker duration, active/peak concurrency, and accepted or dropped delivery for
-operations; it does not queue, limit, or otherwise schedule them.
+operations. Service-owned workers retain their separate concurrency limits.
 
 The editor workspace keeps one presentation record per pane and one local
 search/decorations record per mounted view. Tabs identify documents, while the
@@ -60,6 +62,22 @@ mounted `ViewId` identifies independent cursor, selection, scroll, focus, and
 local-search state. Switching a tab advances that view's mount generation.
 Toolbar and undo messages resolve to the last focused editor view and emit
 adapter-facing effects; toolbar focus does not replace the editor target.
+The native driver applies authoring commands during that input event, before
+another selection or tab change can redirect them. Scrolling a Research pane
+keeps the existing formatting target. Canvas messages and asynchronous editor
+effects carry the pane's mount generation; results from an earlier mount are
+ignored. While a newly selected document loads, the pane shows a loading state.
+Only one retained editor host accepts keyboard input across document sessions.
+Document hydration merges matching revisions into the current snapshot without
+replacing live outline state. History resolves document paths from each
+checkpoint's manifest and compares against the mounted draft, including edits
+that have not yet been saved.
+
+The Comment button and editor context menu open a draft tied to its original
+pane, mount generation, document revision, and text selection. Submission keeps
+that target when the other pane receives focus. If the document changes, the
+draft remains available for the author to select its anchor again. A successful
+comment command clears the draft; a failed command retains it.
 
 Editor completions carry the exact task, request number, view, document,
 document revision, and mount generation. A result is ignored when any field

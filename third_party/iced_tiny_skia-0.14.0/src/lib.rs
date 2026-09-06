@@ -33,9 +33,9 @@ use crate::core::{
     Background, Color, Font, Pixels, Point, Rectangle, Size, Transformation,
 };
 use crate::engine::Engine;
-use crate::graphics::Viewport;
 use crate::graphics::compositor;
 use crate::graphics::text::{Editor, Paragraph};
+use crate::graphics::Viewport;
 
 /// A [`tiny-skia`] graphics renderer for [`iced`].
 ///
@@ -47,6 +47,78 @@ pub struct Renderer {
     default_text_size: Pixels,
     layers: layer::Stack,
     engine: Engine, // TODO: Shared engine
+}
+
+#[cfg(test)]
+mod clipping_tests {
+    use super::*;
+    use crate::core::{alignment, text};
+
+    #[test]
+    fn translated_canvas_text_is_clipped_at_each_display_scale() {
+        for scale in [1.0_f32, 2.0] {
+            for cached in [false, true] {
+                let mut renderer = Renderer::new(Font::DEFAULT, Pixels(20.0));
+                let make_text = |y| graphics::text::Text::Cached {
+                    content: "MMMMMMMM".into(),
+                    bounds: Rectangle::new(
+                        Point::new(2.0, y),
+                        Size::new(200.0, 24.0),
+                    ),
+                    color: Color::BLACK,
+                    size: Pixels(20.0),
+                    line_height: Pixels(24.0),
+                    font: Font::DEFAULT,
+                    align_x: text::Alignment::Left,
+                    align_y: alignment::Vertical::Top,
+                    shaping: text::Shaping::Basic,
+                    clip_bounds: Rectangle::INFINITE,
+                };
+                let text = vec![make_text(2.0), make_text(45.0)];
+                let clip = Rectangle::with_size(Size::new(40.0, 30.0));
+                let transform = Transformation::translate(20.0, 20.0);
+                let (layer, _) = renderer.layers.current_mut();
+                if cached {
+                    layer.draw_text_cache(text.into(), clip, transform);
+                } else {
+                    layer.draw_text_group(text, clip, transform);
+                }
+                let size =
+                    Size::new((200.0 * scale) as u32, (120.0 * scale) as u32);
+                let viewport = Viewport::with_physical_size(size, scale);
+                let mut pixels =
+                    tiny_skia::Pixmap::new(size.width, size.height).unwrap();
+                let mut mask =
+                    tiny_skia::Mask::new(size.width, size.height).unwrap();
+                renderer.draw(
+                    &mut pixels.as_mut(),
+                    &mut mask,
+                    &viewport,
+                    &[Rectangle::with_size(Size::new(200.0, 120.0))],
+                    Color::WHITE,
+                );
+                let mut ink = 0;
+                for y in 0..size.height {
+                    for x in 0..size.width {
+                        let pixel = pixels.pixel(x, y).unwrap();
+                        if pixel.red() != 255
+                            || pixel.green() != 255
+                            || pixel.blue() != 255
+                        {
+                            ink += 1;
+                            assert!(x >= (20.0 * scale) as u32 && x < (60.0 * scale) as u32
+                                && y >= (20.0 * scale) as u32 && y < (50.0 * scale) as u32,
+                                "text escaped its pane at ({x}, {y}), scale={scale}, cached={cached}");
+                        }
+                    }
+                }
+                assert!(
+                    ink > 0,
+                    "the visible part of the text must still be painted"
+                );
+            }
+        }
+    }
 }
 
 impl Renderer {
@@ -178,6 +250,12 @@ impl Renderer {
                     let render_span = debug::render(debug::Primitive::Image);
 
                     for group in &layer.text {
+                        let Some(group_bounds) = (group.clip_bounds()
+                            * scale_factor)
+                            .intersection(&layer_bounds)
+                        else {
+                            continue;
+                        };
                         for text in group.as_slice() {
                             self.engine.draw_text(
                                 text,
@@ -185,9 +263,10 @@ impl Renderer {
                                     * group.transformation(),
                                 pixels,
                                 clip_mask,
-                                layer_bounds,
+                                group_bounds,
                             );
                         }
+                        engine::adjust_clip_mask(clip_mask, layer_bounds);
                     }
 
                     render_span.finish();

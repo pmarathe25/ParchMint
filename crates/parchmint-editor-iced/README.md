@@ -82,6 +82,13 @@ application layer, not the editor.
 
 ## Implementation
 
+The adapter retains immutable prepared projections within its revision budget.
+It serializes canonical HTML and annotations when a projection is requested,
+outside the adapter lock. Typing and rendering use the prepared semantic data.
+The native shell releases input focus on other document hosts when the active
+pane changes. Caret formatting survives the automatic selection advance after
+each typed character; explicit selection changes reset that pending format.
+
 ```rust
 struct MountedView {
     host: ViewHostCapability,

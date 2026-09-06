@@ -9,14 +9,17 @@ mod document_engine;
 pub mod paste;
 mod projection;
 mod semantic_html;
+mod undo;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use document_engine::{
     DocumentEngine, EngineEdit, EngineError, PositionMapping, PrivateTextEngine,
     SemanticDocumentSnapshot,
 };
 use projection::{Projection, ProjectionBatch, ProjectionQueue};
+use undo::UndoHistory;
 
 pub use parchmint_editor_api::{
     AnnotationValue, AsyncResult, AtomicBlockKind, BlockFormatKind, BlockId, CanonicalAnchor,
@@ -32,6 +35,49 @@ const DEFAULT_PROJECTION_CAPACITY: usize = 2;
 const ANCHOR_CONTEXT_SCALARS: usize = 16;
 const MAX_SEMANTIC_FRAGMENT_BLOCKS: usize = 4_096;
 const MAX_SEMANTIC_FRAGMENT_SCALARS: usize = 1_000_000;
+
+/// An immutable revision for rendering now and serialization on a save worker.
+#[derive(Debug, Clone)]
+pub struct PreparedEditorProjection(Arc<PreparedProjectionData>);
+
+#[derive(Debug)]
+struct PreparedProjectionData {
+    source: Projection,
+    semantic: SemanticDocument,
+    word_count: usize,
+}
+
+impl PreparedEditorProjection {
+    pub fn revision(&self) -> EditorRevision {
+        self.0.source.revision
+    }
+
+    pub fn semantic(&self) -> &SemanticDocument {
+        &self.0.semantic
+    }
+
+    pub fn comments(&self) -> &[CanonicalComment] {
+        &self.0.source.comments
+    }
+
+    pub fn word_count(&self) -> usize {
+        self.0.word_count
+    }
+
+    /// Serializes the captured revision without locking the editable session.
+    pub fn canonical(&self) -> CanonicalProjection {
+        let source = &self.0.source;
+        CanonicalProjection::new_semantic(
+            source.document_id,
+            source.revision,
+            semantic_html::serialize(&source.document),
+            self.0.semantic.clone(),
+            source.comments.clone(),
+            source.anchors.clone(),
+            self.0.word_count,
+        )
+    }
+}
 
 /// A monotonic identifier for one document change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,6 +192,7 @@ struct StoredComment {
 
 #[derive(Debug, Clone)]
 struct UndoEntry {
+    unchanged_prefix: usize,
     before: SemanticDocumentSnapshot,
     after: SemanticDocumentSnapshot,
     before_comments: BTreeMap<CommentId, StoredComment>,
@@ -168,11 +215,12 @@ struct EditorSession<E: DocumentEngine> {
     next_transaction: u64,
     next_block: u64,
     views: BTreeMap<ViewId, EditorViewState>,
+    typing_marks: BTreeMap<ViewId, Vec<SemanticInlineMark>>,
     comments: BTreeMap<CommentId, StoredComment>,
     anchors: Vec<CanonicalAnchor>,
     styles: StyleCatalogProjection,
-    undo: Vec<UndoEntry>,
-    redo: Vec<UndoEntry>,
+    undo: UndoHistory,
+    redo: UndoHistory,
     mappings: Vec<RevisionMapping>,
     projections: ProjectionQueue,
 }
@@ -222,11 +270,12 @@ impl<E: DocumentEngine> EditorSession<E> {
             next_transaction: 1,
             next_block,
             views: BTreeMap::new(),
+            typing_marks: BTreeMap::new(),
             comments: stored_comments,
             anchors,
             styles,
-            undo: Vec::new(),
-            redo: Vec::new(),
+            undo: UndoHistory::default(),
+            redo: UndoHistory::default(),
             mappings: Vec::new(),
             projections: ProjectionQueue::new(DEFAULT_PROJECTION_CAPACITY),
         };
@@ -244,6 +293,7 @@ impl<E: DocumentEngine> EditorSession<E> {
     }
 
     fn detach_view(&mut self, view: ViewId) -> Result<EditorViewState, EditorError> {
+        self.typing_marks.remove(&view);
         self.views
             .remove(&view)
             .ok_or(EditorError::UnknownView { view })
@@ -268,6 +318,9 @@ impl<E: DocumentEngine> EditorSession<E> {
         match command.kind() {
             EditorCommandKind::SetSelection { selection } => {
                 self.validate_selection(*selection)?;
+                if self.views.get(&view).map(EditorViewState::selection) != Some(*selection) {
+                    self.typing_marks.remove(&view);
+                }
                 self.views.insert(view, EditorViewState::new(*selection));
                 Ok(AppliedEditorChange {
                     revision: self.revision,
@@ -277,7 +330,7 @@ impl<E: DocumentEngine> EditorSession<E> {
             }
             EditorCommandKind::InsertText { at, text } => {
                 let edit = EngineEdit::new(position(*at)?, 0, text.clone());
-                self.apply_new_edit(edit)
+                self.apply_typing_edit(view, text, edit)
             }
             EditorCommandKind::DeleteRange { range } => {
                 let (at, removed) = self.validated_range(*range)?;
@@ -285,7 +338,7 @@ impl<E: DocumentEngine> EditorSession<E> {
             }
             EditorCommandKind::ReplaceRange { range, text } => {
                 let (at, removed) = self.validated_range(*range)?;
-                self.apply_new_edit(EngineEdit::new(at, removed, text.clone()))
+                self.apply_typing_edit(view, text, EngineEdit::new(at, removed, text.clone()))
             }
             EditorCommandKind::ReplaceRangeWithSemanticText { range, text, marks } => {
                 let (at, removed) = self.validated_range(*range)?;
@@ -321,6 +374,26 @@ impl<E: DocumentEngine> EditorSession<E> {
             }
             EditorCommandKind::ToggleInlineMark { range, mark } => {
                 let (start, length) = self.validated_range(*range)?;
+                if length == 0 {
+                    let mut marks = self
+                        .typing_marks
+                        .get(&view)
+                        .cloned()
+                        .unwrap_or_else(|| self.engine.inline_marks(*range));
+                    let mark = mark.semantic();
+                    if marks.contains(&mark) {
+                        marks.retain(|candidate| candidate != &mark);
+                    } else {
+                        marks.push(mark);
+                    }
+                    self.typing_marks.insert(view, marks);
+                    return Ok(AppliedEditorChange {
+                        revision: self.revision,
+                        transaction: None,
+                        changed_blocks: Vec::new(),
+                    });
+                }
+                self.typing_marks.remove(&view);
                 let end = start
                     .checked_add(length)
                     .ok_or_else(|| invalid("selection range overflows"))?;
@@ -421,6 +494,29 @@ impl<E: DocumentEngine> EditorSession<E> {
         }
     }
 
+    fn apply_typing_edit(
+        &mut self,
+        view: ViewId,
+        text: &str,
+        edit: EngineEdit,
+    ) -> Result<AppliedEditorChange, EditorError> {
+        if let Some(marks) = self.typing_marks.get(&view) {
+            let length = text.chars().count();
+            let marks = marks
+                .iter()
+                .filter(|_| length > 0)
+                .map(|mark| document_engine::EngineMark {
+                    start: 0,
+                    end: length,
+                    mark: mark.clone(),
+                })
+                .collect();
+            self.apply_new_semantic_edit(edit, marks)
+        } else {
+            self.apply_new_edit(edit)
+        }
+    }
+
     fn apply_new_edit(&mut self, edit: EngineEdit) -> Result<AppliedEditorChange, EditorError> {
         let (id, revision) = self.next_change_identity()?;
         let before = self.engine.snapshot();
@@ -430,6 +526,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -461,6 +558,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -534,6 +632,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         );
         self.next_block = next_block;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -561,6 +660,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -594,6 +694,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -643,6 +744,7 @@ impl<E: DocumentEngine> EditorSession<E> {
             );
         }
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -685,6 +787,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         self.finish_change(id, revision, change.mapping())?;
         self.next_block = next_block;
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -705,7 +808,10 @@ impl<E: DocumentEngine> EditorSession<E> {
         let entry = self.undo.pop().ok_or_else(|| invalid("nothing to undo"))?;
         let mapping = entry.forward_mapping.inverse();
         let changed_blocks = entry.changed_blocks.clone();
-        match self.engine.load(entry.before.clone()) {
+        match self
+            .engine
+            .load(entry.restore(self.engine.snapshot(), false))
+        {
             Ok(()) => (),
             Err(error) => {
                 self.undo.push(entry);
@@ -727,7 +833,10 @@ impl<E: DocumentEngine> EditorSession<E> {
         let entry = self.redo.pop().ok_or_else(|| invalid("nothing to redo"))?;
         let mapping = entry.forward_mapping;
         let changed_blocks = entry.changed_blocks.clone();
-        match self.engine.load(entry.after.clone()) {
+        match self
+            .engine
+            .load(entry.restore(self.engine.snapshot(), true))
+        {
             Ok(()) => (),
             Err(error) => {
                 self.redo.push(entry);
@@ -903,6 +1012,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         });
         self.offer_projection();
         self.undo.push(UndoEntry {
+            unchanged_prefix: 0,
             before,
             after,
             before_comments,
@@ -1142,6 +1252,25 @@ impl EditorCoreSession {
             .ok_or(EditorError::UnknownView { view })
     }
 
+    /// Moves the caret after accepted keyboard input without treating that
+    /// automatic movement as a new user formatting selection.
+    pub fn advance_input_caret(
+        &mut self,
+        view: ViewId,
+        revision: EditorRevision,
+        selection: EditorSelection,
+    ) -> Result<(), EditorError> {
+        let marks = self.inner.typing_marks.get(&view).cloned();
+        self.execute(
+            EditorCommandOrigin::new(view),
+            EditorCommand::new(revision, EditorCommandKind::SetSelection { selection }),
+        )?;
+        if let Some(marks) = marks {
+            self.inner.typing_marks.insert(view, marks);
+        }
+        Ok(())
+    }
+
     pub fn active_style(&self, view: ViewId) -> Result<StyleId, EditorError> {
         let position = position(self.selection(view)?.head())?;
         let snapshot = self.inner.engine.snapshot();
@@ -1172,6 +1301,40 @@ impl EditorCoreSession {
                 .ok_or_else(|| invalid("document position overflow"))?;
         }
         Err(invalid("selection is outside semantic blocks"))
+    }
+
+    pub fn selection_word_count(&self, view: ViewId) -> Result<Option<usize>, EditorError> {
+        let selection = self.selection(view)?;
+        if selection.is_collapsed() {
+            return Ok(None);
+        }
+        let (start, length) = selection_range(selection)?;
+        let text = self
+            .inner
+            .engine
+            .text()
+            .chars()
+            .skip(start)
+            .take(length)
+            .collect::<String>();
+        Ok(Some(
+            text.split_whitespace()
+                .filter(|word| *word != "\u{fffc}")
+                .count(),
+        ))
+    }
+
+    pub fn active_inline_marks(
+        &self,
+        view: ViewId,
+    ) -> Result<Vec<SemanticInlineMark>, EditorError> {
+        let selection = self.selection(view)?;
+        Ok(self
+            .inner
+            .typing_marks
+            .get(&view)
+            .cloned()
+            .unwrap_or_else(|| self.inner.engine.inline_marks(selection)))
     }
 
     /// Captures copy data from the current semantic snapshot without exposing
@@ -1227,6 +1390,18 @@ impl EditorCoreSession {
     /// Returns a deterministic snapshot of the current shared state.
     pub fn canonical_projection(&self) -> CanonicalProjection {
         self.inner.projection().canonical()
+    }
+
+    /// Captures render data without serializing HTML on the input thread.
+    pub fn prepare_projection(&self) -> PreparedEditorProjection {
+        let source = self.inner.projection();
+        let semantic = source.document.semantic_projection();
+        let word_count = source.document.word_count();
+        PreparedEditorProjection(Arc::new(PreparedProjectionData {
+            source,
+            semantic,
+            word_count,
+        }))
     }
 
     /// Drains one bounded projection work item for a background consumer.

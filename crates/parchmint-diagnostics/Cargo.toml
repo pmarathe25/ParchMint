@@ -9,8 +9,8 @@ publish.workspace = true
 
 [features]
 # Diagnostics are available in debug builds, or explicitly in release builds
-# with `--features capture`. They are intentionally absent from the default
-# production build.
+# with `--features capture`. The desktop enables this through its default
+# diagnostics feature so release failures also have a local log.
 capture = []
 
 [lints]

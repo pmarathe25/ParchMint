@@ -19,3 +19,6 @@ writing, comments, search, History, recovery, settings, and export.
   and implementation details.
 
 Development and test commands are listed in the repository [README](../README.md).
+
+The [writing workflow improvement plan](improvement-plan.md) records the current
+reliability work, Research requirements, and remaining performance and UI work.

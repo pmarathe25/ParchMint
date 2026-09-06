@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::text_editor;
 use parchmint_domain::{NodeKind, ProjectSection};
-use parchmint_editor_api::{CanonicalComment, CanonicalCommentAnchor, ViewId};
+use parchmint_editor_api::{
+    CanonicalComment, CanonicalCommentAnchor, EditorRevision, EditorSelection, ViewId,
+};
 use parchmint_preferences::ResolvedAppearance;
 use parchmint_ui_api::ProjectSnapshot;
 
@@ -125,6 +127,10 @@ impl EditorPaneState {
 
     pub const fn view(&self) -> ViewId {
         self.view
+    }
+
+    pub(crate) const fn mount_generation(&self) -> u64 {
+        self.mount_generation
     }
 
     pub fn tabs(&self) -> &[TabSpec] {
@@ -392,6 +398,7 @@ pub enum EditorCommand {
     CreateComment {
         body: String,
         document_level: bool,
+        anchor: Option<(EditorRevision, EditorSelection)>,
     },
     ReplyToComment {
         thread_id: String,
@@ -1024,6 +1031,8 @@ impl CommentHover {
 pub(crate) struct CommentComposer {
     pane: EditorPane,
     anchor_bounds: Rect,
+    mount_generation: u64,
+    selection: Option<(EditorRevision, EditorSelection)>,
 }
 
 impl CommentComposer {
@@ -1415,6 +1424,7 @@ pub struct EditorWorkspace {
     toolbar_focused: bool,
     style_names: Vec<String>,
     active_style: String,
+    active_inline_marks: Vec<parchmint_editor_api::SemanticInlineMark>,
     link_editor: LinkEditorState,
     local_search: BTreeMap<ViewId, LocalSearchState>,
     decorations: BTreeMap<ViewId, EditorDecorations>,
@@ -1516,6 +1526,7 @@ impl EditorWorkspace {
                 "Verse".into(),
             ],
             active_style: "Body".into(),
+            active_inline_marks: Vec::new(),
             link_editor: LinkEditorState::default(),
             local_search,
             decorations,
@@ -1602,6 +1613,7 @@ impl EditorWorkspace {
                 .map(|style| style.display_name.clone())
                 .collect(),
             active_style: "Body".into(),
+            active_inline_marks: Vec::new(),
             link_editor: LinkEditorState::default(),
             local_search,
             decorations,
@@ -1928,6 +1940,36 @@ impl EditorWorkspace {
             .filter(|composer| composer.pane() == pane)
     }
 
+    pub(crate) fn capture_comment_selection(
+        &mut self,
+        revision: EditorRevision,
+        selection: EditorSelection,
+    ) {
+        if let Some(composer) = self.comment_composer.as_mut() {
+            composer.selection = Some((revision, selection));
+        }
+    }
+
+    pub(crate) fn complete_comment_creation(&mut self) {
+        self.comment_composer = None;
+        self.comment_draft = text_editor::Content::new();
+        self.comment_feedback = None;
+    }
+
+    pub(crate) fn complete_comment_command(&mut self, command: &EditorCommand) {
+        match command {
+            EditorCommand::CreateComment { .. } => self.complete_comment_creation(),
+            EditorCommand::ReplyToComment { thread_id, .. }
+            | EditorCommand::EditCommentMessage { thread_id, .. } => {
+                self.comment_reply_drafts
+                    .insert(thread_id.clone(), text_editor::Content::new());
+                self.editing_comment_message = None;
+                self.comment_feedback = None;
+            }
+            _ => {}
+        }
+    }
+
     /// Reflects a mounted document's comment projection before its next
     /// autosave refresh. This keeps the Inspector responsive after creating,
     /// replying to, resolving, or deleting a comment.
@@ -2057,6 +2099,17 @@ impl EditorWorkspace {
         &self.active_style
     }
 
+    pub(crate) fn active_inline_marks(&self) -> &[parchmint_editor_api::SemanticInlineMark] {
+        &self.active_inline_marks
+    }
+
+    pub(crate) fn set_active_inline_marks(
+        &mut self,
+        marks: Vec<parchmint_editor_api::SemanticInlineMark>,
+    ) {
+        self.active_inline_marks = marks;
+    }
+
     pub fn status_bar(&self) -> EditorStatusBar {
         let pane = self.pane(self.focused_pane);
         let selection = self
@@ -2075,6 +2128,28 @@ impl EditorWorkspace {
                 .unwrap_or(StatusCount::ActiveDocument(document_words)),
             manuscript_total: self.manuscript_total,
         }
+    }
+
+    pub(crate) fn update_live_counts(
+        &mut self,
+        pane: EditorPane,
+        document: String,
+        words: usize,
+        selected: Option<usize>,
+        manuscript: bool,
+    ) {
+        let previous = self
+            .document_word_counts
+            .insert(document, words)
+            .unwrap_or_default();
+        if manuscript {
+            self.manuscript_total = self
+                .manuscript_total
+                .saturating_sub(previous)
+                .saturating_add(words);
+        }
+        self.selection_word_counts
+            .insert(self.pane(pane).view, selected);
     }
 
     pub fn pane_focus_style(
@@ -2411,13 +2486,26 @@ impl EditorWorkspace {
                     self.comment_feedback = Some("Comment text is required.".into());
                     Vec::new()
                 } else {
-                    self.comment_draft = text_editor::Content::new();
+                    let pane = self
+                        .comment_composer
+                        .map_or(self.focused_pane, |composer| composer.pane);
+                    if self.comment_composer.is_some_and(|composer| {
+                        composer.mount_generation != self.pane(pane).mount_generation
+                    }) {
+                        self.comment_feedback = Some("The comment's document changed. Select its text again before adding the comment.".into());
+                        return Vec::new();
+                    }
                     self.comment_feedback = Some("Saving comment…".into());
-                    self.comment_composer = None;
-                    self.command(EditorCommand::CreateComment {
-                        body,
-                        document_level,
-                    })
+                    vec![EditorEffect::Command {
+                        view: self.pane(pane).view,
+                        command: EditorCommand::CreateComment {
+                            body,
+                            document_level,
+                            anchor: self
+                                .comment_composer
+                                .and_then(|composer| composer.selection),
+                        },
+                    }]
                 }
             }
             EditorMessage::BeginCommentAtSelection {
@@ -2427,8 +2515,9 @@ impl EditorWorkspace {
                 self.comment_composer = Some(CommentComposer {
                     pane,
                     anchor_bounds,
+                    mount_generation: self.pane(pane).mount_generation,
+                    selection: None,
                 });
-                self.comment_draft = text_editor::Content::new();
                 self.comment_feedback = None;
                 Vec::new()
             }
@@ -2463,8 +2552,6 @@ impl EditorWorkspace {
                     self.comment_feedback = Some("Reply text is required.".into());
                     Vec::new()
                 } else {
-                    self.comment_reply_drafts
-                        .insert(thread_id.clone(), text_editor::Content::new());
                     self.command(EditorCommand::ReplyToComment { thread_id, body })
                 }
             }
@@ -2535,9 +2622,6 @@ impl EditorWorkspace {
                     self.comment_feedback = Some("Comment text is required.".into());
                     Vec::new()
                 } else {
-                    self.comment_reply_drafts
-                        .insert(thread_id.clone(), text_editor::Content::new());
-                    self.editing_comment_message = None;
                     self.command(EditorCommand::EditCommentMessage {
                         thread_id,
                         message_id,
@@ -2621,7 +2705,28 @@ impl EditorWorkspace {
     }
 
     fn command(&self, command: EditorCommand) -> Vec<EditorEffect> {
-        let view = self.pane(self.focused_pane).view;
+        let thread = match &command {
+            EditorCommand::ReplyToComment { thread_id, .. }
+            | EditorCommand::EditCommentMessage { thread_id, .. }
+            | EditorCommand::SetCommentResolved { thread_id, .. }
+            | EditorCommand::DeleteCommentThread { thread_id }
+            | EditorCommand::DeleteCommentMessage { thread_id, .. }
+            | EditorCommand::ReattachComment { thread_id }
+            | EditorCommand::ConvertCommentToDocument { thread_id } => Some(thread_id),
+            _ => None,
+        };
+        let document = thread
+            .and_then(|thread| self.comments.get(thread))
+            .map(CommentAnchor::document_id);
+        let pane = [
+            self.focused_pane,
+            EditorPane::Primary,
+            EditorPane::Companion,
+        ]
+        .into_iter()
+        .find(|pane| document.is_some() && self.pane(*pane).active_document() == document)
+        .unwrap_or(self.focused_pane);
+        let view = self.pane(pane).view;
         vec![EditorEffect::Command { view, command }]
     }
 
@@ -3612,7 +3717,7 @@ mod tests {
         workspace.update(EditorMessage::SetCommentDraft("A note".into()));
         assert!(matches!(
             workspace.update(EditorMessage::CreateComment { document_level: false }).as_slice(),
-            [EditorEffect::Command { command: EditorCommand::CreateComment { body, document_level: false }, .. }] if body == "A note"
+            [EditorEffect::Command { command: EditorCommand::CreateComment { body, document_level: false, .. }, .. }] if body == "A note"
         ));
         workspace.update(EditorMessage::BeginEditCommentMessage {
             thread_id: "thread".into(),
@@ -3694,6 +3799,104 @@ mod tests {
     }
 
     #[test]
+    fn manuscript_comment_keeps_its_target_when_research_receives_focus() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let manuscript_view = workspace.pane(EditorPane::Primary).view();
+        let selection = EditorSelection::new(3.into(), 12.into());
+        workspace.update(EditorMessage::BeginCommentAtSelection {
+            pane: EditorPane::Primary,
+            anchor_bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+        });
+        workspace.capture_comment_selection(7.into(), selection);
+        workspace.update(EditorMessage::SetCommentDraft(
+            "Check the character's history".into(),
+        ));
+        workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+        assert_eq!(
+            workspace.update(EditorMessage::CreateComment {
+                document_level: false
+            }),
+            vec![EditorEffect::Command {
+                view: manuscript_view,
+                command: EditorCommand::CreateComment {
+                    body: "Check the character's history".into(),
+                    document_level: false,
+                    anchor: Some((7.into(), selection)),
+                },
+            },]
+        );
+        assert_eq!(
+            workspace.comment_draft().text(),
+            "Check the character's history"
+        );
+        workspace.complete_comment_creation();
+        assert!(workspace.comment_draft().text().is_empty());
+    }
+
+    #[test]
+    fn comment_reply_keeps_its_document_and_draft_until_the_command_succeeds() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let view = workspace.pane(EditorPane::Primary).view();
+        workspace.update(EditorMessage::SetCommentAnchor {
+            comment_id: "manuscript-thread".into(),
+            anchor: CommentAnchor::Document {
+                document_id: "chapter-one".into(),
+            },
+        });
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "manuscript-thread".into(),
+            body: "Checked the research".into(),
+        });
+        workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+        let command = EditorCommand::ReplyToComment {
+            thread_id: "manuscript-thread".into(),
+            body: "Checked the research".into(),
+        };
+        assert_eq!(
+            workspace.update(EditorMessage::SubmitCommentReply {
+                thread_id: "manuscript-thread".into()
+            }),
+            vec![EditorEffect::Command {
+                view,
+                command: command.clone()
+            }]
+        );
+        assert_eq!(
+            workspace.comment_reply_drafts["manuscript-thread"].text(),
+            "Checked the research"
+        );
+        workspace.complete_comment_command(&command);
+        assert!(
+            workspace.comment_reply_drafts["manuscript-thread"]
+                .text()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn changing_the_comment_tab_retains_the_draft_without_editing_another_document() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::BeginCommentAtSelection {
+            pane: EditorPane::Primary,
+            anchor_bounds: Rect::new(0.0, 0.0, 20.0, 20.0),
+        });
+        workspace.update(EditorMessage::SetCommentDraft("Keep this draft".into()));
+        workspace.update(EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: TabSpec::new("another-chapter", "Another chapter"),
+        });
+        assert!(
+            workspace
+                .update(EditorMessage::CreateComment {
+                    document_level: false
+                })
+                .is_empty()
+        );
+        assert_eq!(workspace.comment_draft().text(), "Keep this draft");
+        assert!(workspace.comment_feedback().is_some());
+    }
+
+    #[test]
     fn multiline_comment_editor_actions_preserve_paragraph_breaks() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         for action in [
@@ -3707,7 +3910,7 @@ mod tests {
 
         assert!(matches!(
             workspace.update(EditorMessage::CreateComment { document_level: true }).as_slice(),
-            [EditorEffect::Command { command: EditorCommand::CreateComment { body, document_level: true }, .. }]
+            [EditorEffect::Command { command: EditorCommand::CreateComment { body, document_level: true, .. }, .. }]
                 if body == "Fi\nS"
         ));
     }

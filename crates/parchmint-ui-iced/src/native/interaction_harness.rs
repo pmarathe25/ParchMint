@@ -8,7 +8,7 @@ use std::{
 };
 
 use iced::{
-    Element, Event, Font, Point as IcedPoint, Rectangle, Settings, Size,
+    Element, Event, Point as IcedPoint, Rectangle, Size,
     advanced::{clipboard, widget::Operation},
     event,
     futures::StreamExt,
@@ -186,12 +186,14 @@ struct PersistentSurface {
 
 impl PersistentSurface {
     fn new(size: Size) -> Self {
-        let settings = Settings::default();
-        let default_font = match settings.default_font {
-            Font::DEFAULT => Font::with_name("Fira Sans"),
-            font => font,
-        };
-        let renderer = Renderer::new(default_font, settings.default_text_size);
+        let settings = crate::visual_verification::visual_settings();
+        for font in settings.fonts {
+            iced_test::renderer::graphics::text::font_system()
+                .write()
+                .expect("font system lock")
+                .load_font(font);
+        }
+        let renderer = Renderer::new(settings.default_font, settings.default_text_size);
         Self {
             size,
             renderer,
@@ -1149,7 +1151,7 @@ impl NativeDesktopHarness {
         text: &str,
     ) -> Result<(), HarnessError> {
         let id = self.window_id(window)?;
-        let (view, selection) = {
+        let (view, mount_generation, selection) = {
             let NativeWindow::Project(state) = self
                 .desktop
                 .windows
@@ -1183,6 +1185,13 @@ impl NativeDesktopHarness {
             let end = start.saturating_add(text.chars().count() as u64);
             (
                 binding.view(),
+                state
+                    .workspace
+                    .as_ref()
+                    .expect("mounted workspace")
+                    .editor()
+                    .pane(pane)
+                    .mount_generation(),
                 parchmint_editor_api::EditorSelection::new(start.into(), end.into()),
             )
         };
@@ -1192,6 +1201,7 @@ impl NativeDesktopHarness {
                 crate::iced_editor_surface::EditorCenterMessage::Mounted {
                     pane,
                     view,
+                    mount_generation,
                     message: parchmint_editor_iced::MountedEditorMessage::SetSelection(selection),
                 },
             ),
@@ -1702,7 +1712,7 @@ impl NativeDesktopHarness {
     pub fn contains_text(&self, window: HarnessWindow, text: &str) -> Result<bool, HarnessError> {
         let id = self.window_id(window)?;
         let mut simulator = Simulator::<Message>::with_size(
-            Settings::default(),
+            crate::visual_verification::visual_settings(),
             Self::window_size(window),
             self.desktop.view(id),
         );
@@ -2055,8 +2065,11 @@ impl NativeDesktopHarness {
             .surfaces
             .get(&id)
             .map_or_else(|| Self::window_size(window), |surface| surface.size);
-        let mut simulator =
-            Simulator::<Message>::with_size(Settings::default(), size, self.desktop.view(id));
+        let mut simulator = Simulator::<Message>::with_size(
+            crate::visual_verification::visual_settings(),
+            size,
+            self.desktop.view(id),
+        );
         simulator
             .snapshot(&self.desktop.theme(id))
             .and_then(|snapshot| snapshot.matches_image(path))
@@ -2124,6 +2137,24 @@ impl NativeDesktopHarness {
         self.ensure_surface(id, window)?;
         let mut statuses = Vec::new();
         for event in events {
+            // Native windows redraw between interactions. Deliver those
+            // layout notifications here too, so mounted panes reflow before
+            // hit testing instead of retaining their bootstrap viewport.
+            if !matches!(event, Event::Window(window::Event::RedrawRequested(_))) {
+                let (_, messages) = {
+                    let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+                    surfaces
+                        .get_mut(&id)
+                        .expect("surface was created")
+                        .dispatch(
+                            desktop.view(id),
+                            [Event::Window(
+                                window::Event::RedrawRequested(Instant::now()),
+                            )],
+                        )
+                };
+                self.route_messages(messages)?;
+            }
             let (event_statuses, messages) = {
                 let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
                 surfaces
@@ -2318,7 +2349,11 @@ impl NativeDesktopHarness {
                     runtime::Action::Output(message) => {
                         pending.push_back(self.desktop.update(message));
                     }
-                    runtime::Action::LoadFont { channel, .. } => {
+                    runtime::Action::LoadFont { bytes, channel } => {
+                        iced_test::renderer::graphics::text::font_system()
+                            .write()
+                            .expect("font system lock")
+                            .load_font(bytes);
                         let _ = channel.send(Ok(()));
                     }
                     runtime::Action::Window(action) => self.handle_window_action(action),
