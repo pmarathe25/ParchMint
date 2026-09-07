@@ -159,8 +159,9 @@ jobs:
           $install = Start-Process msiexec.exe -ArgumentList "/i `"$package`" /qn /norestart" -Wait -PassThru
           if ($install.ExitCode -notin @(0, 3010)) { throw "MSI installation failed: $($install.ExitCode)" }
           try {
-            & "$env:ProgramFiles/ParchMint/parchmint.exe" --version
-            if ($LASTEXITCODE -ne 0) { throw "Installed executable failed" }
+            # GUI executables return control before PowerShell updates LASTEXITCODE.
+            $application = Start-Process -FilePath "$env:ProgramFiles/ParchMint/parchmint.exe" -ArgumentList "--version" -NoNewWindow -Wait -PassThru
+            if ($application.ExitCode -ne 0) { throw "Installed executable failed: $($application.ExitCode)" }
             if (!(Test-Path "$env:ProgramData/Microsoft/Windows/Start Menu/Programs/ParchMint.lnk")) {
               throw "Start menu shortcut missing"
             }
