@@ -1,73 +1,57 @@
 # `parchmint-ui-iced`
 
-This crate owns ParchMint's Iced event loop, windows, widgets, and temporary UI
-state. Project commands, persistence, native services, and rich-text sessions
-run through their respective crate interfaces.
+**Purpose:** Own the Iced event loop, windows, widgets, and temporary UI state.
+Project changes, saves, native actions, and rich-text editing use their owning
+crate's interfaces through [ui-api](../parchmint-ui-api/README.md).
 
 ## Interface
 
 `run_native_desktop(NativeDesktopStartup)` runs the application. Startup and
-lifecycle callbacks use ParchMint values. The concrete UI converts those values
-to Iced events and window IDs internally.
+lifecycle callbacks use ParchMint values; Iced events and window IDs stay internal.
+`interaction-harness` exposes `NativeDesktopHarness` for headless input;
+`visual-verification` enables deterministic `capture_visual` PNGs. Normal desktop
+builds enable neither feature.
 
-The optional `interaction-harness` feature exposes `NativeDesktopHarness` for
-headless input. `visual-verification` enables `capture_visual` for deterministic
-PNG captures. The default desktop enables neither feature.
+## Source map
 
-## Implementation
+| File | Responsibility |
+| --- | --- |
+| [native.rs](src/native.rs) | Route input and completions to the owning window; apply editor commands against the originating view and selection |
+| [project_workspace.rs](src/project_workspace.rs) | Explorer, Outline, Inspector, History, search, settings, export, and recovery presentation; shared tree selection and move validation |
+| [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and comment drafts |
+| [project_runtime.rs](src/project_runtime.rs) | Resolve IDs from current snapshots and call application ports |
+| [iced_project_surface.rs](src/iced_project_surface.rs), [iced_editor_surface.rs](src/iced_editor_surface.rs) | Render workspace state |
+| [components.rs](src/components.rs), [design_tokens.rs](src/design_tokens.rs) | Shared controls and Iced theme mapping |
+| [async_service_feeds.rs](src/async_service_feeds.rs) | Search, History previews, and recovery results |
+| [history_project.rs](src/history_project.rs) | Compare checkpoint data with the current project on a worker |
+| [native/worker_pool.rs](src/native/worker_pool.rs) | Four workers and at most 128 queued blocking jobs; overload errors without blocking input |
 
-- [native.rs](src/native.rs) routes input and completions to the owning window.
-  The native driver applies editor commands during the input event, preserving
-  the original view and selection even if focus changes immediately afterward.
-- [project_workspace.rs](src/project_workspace.rs) owns Explorer, Cards,
-  Inspector, History, search, settings, export, and recovery presentation.
-  Explorer and Cards share selection normalization and move validation.
-- [editor_workspace.rs](src/editor_workspace.rs) owns tabs, pane state, local
-  search, and comment drafts. Drafts retain their originating pane, mount
-  generation, revision, and selection; failed submissions keep their text.
-- [project_runtime.rs](src/project_runtime.rs) resolves UI identifiers from the
-  current session snapshot and calls application ports. Project revision checks
-  protect structure; document revisions are validated by the document operation.
-  Recovery recording can advance document state without changing the outline.
-- `iced_project_surface` and `iced_editor_surface` render workspace state.
-  `design_tokens` maps the shared token catalog to an Iced theme.
-- [async_service_feeds.rs](src/async_service_feeds.rs) handles search, History
-  previews, and recovery results. Search accepts only the active query generation.
-  Export and project restore use the session workflow ports supplied by desktop;
-  the UI does not maintain a second exporter or restore executor.
-- [native/worker_pool.rs](src/native/worker_pool.rs) runs blocking UI work on
-  four workers with at most 128 queued jobs. Submission reports overload without
-  blocking input. Services with their own workers keep their own limits.
+Export and restore use desktop-supplied workflow ports. Services with their own
+workers retain their own queue limits.
 
-Style property fields retain local drafts across project snapshots. Enter or
-Apply submits one property change; malformed values retain the draft and show
-an error. Unchanged values do not request another save.
+## Drafts and delayed results
 
-Comment navigation reads the live session’s current anchors, including unsaved
-comments and positions shifted by editing. The Inspector indexes threads; the
-anchored popover owns their drafts and actions.
+Comment drafts retain their originating pane, mount generation, revision, and
+selection; failed submission keeps the text. Inspector indexes threads using
+live anchors, including unsaved comments. The anchored popover owns editing.
 
-Dictionary settings send project words through project commands and global words
-through preference ports. The UI retains input until the resulting word list
-confirms the change. Shared field, button, and menu styles live in `components`.
+Style fields keep local drafts across snapshots. Enter or Apply commits one
+property; invalid values keep their draft and show an error. Unchanged values
+request no save. Dictionary controls retain input until returned words confirm
+the change; project words use commands and global words use preference ports.
 
-A document session is shared across panes; each view keeps independent selection
-and viewport state. Tab switches advance mount generations, and delayed view
-results are ignored when their target no longer matches. Loading a document
-merges matching bodies without replacing newer outline state.
+Shared document sessions serve both panes with independent view state. Tab
+switches advance mount generations. Delayed results must match their target;
+loaded bodies merge without replacing newer outline state. Project revisions
+validate structure, while document operations validate document revisions.
+Recovery recording can advance document state independently of outline changes.
 
-Project mutations and their saves are serialized. Save results acknowledge only
-the captured revisions, leaving later edits dirty. A completed native call can
-outlive its window, but its stale completion cannot update that window. Close
-waits for the final save. History resolves document identities from the selected
-checkpoint’s manifest.
-[history_project.rs](src/history_project.rs) compares the project on a worker,
-including live editor drafts, outline changes, comments, dictionary, and styles.
+Project mutations and saves serialize. Save results acknowledge captured revisions
+and leave later edits dirty. Stale native completions cannot update closed windows;
+close waits for the final save. History resolves IDs from the selected manifest
+and compares live drafts, structure, comments, dictionary, and styles.
 
-The [UI driver](../../tests/parchmint-ui-driver/README.md) verifies these paths
-through rendered controls, including delayed completion delivery and visible
-application failures. Tests define supported behavior.
-
-Spellcheck requests contain at most 4096 scalars around a view’s caret.
-Large paragraphs use the same bounded path; cancelled checks are silent, and
-service errors retain their cause through the spellcheck interface.
+Spelling requests contain at most 4,096 scalars around a view's caret, including
+large paragraphs. Cancellation is silent; service errors preserve their cause.
+The [UI driver](../../tests/parchmint-ui-driver/README.md) checks these paths through
+rendered controls and delayed completion delivery.

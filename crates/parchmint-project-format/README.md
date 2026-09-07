@@ -1,9 +1,9 @@
 # `parchmint-project-format`
 
-This crate reads and writes ParchMint project files. It gives each value one
-standard byte representation, called its canonical form.
+**Purpose:** Encode project values deterministically and decode validated project
+files. A value's standard byte representation is its *canonical form*.
 
-The current saved project consists of these files:
+## Project resources
 
 ```text
 project.toml
@@ -15,61 +15,40 @@ annotations/<document-id>.json
 .parchmint/format-version
 ```
 
-`project.toml` is the project manifest. It defines identity, hierarchy, order,
-titles, Synopsis and metadata values, field definitions, style semantic
-metadata, export settings, the fixed v1 `en-US` language value, deletion
-tombstones, and the paths of the other project files. ParchMint reads this
-manifest to learn which files belong to the project. It stores Git History,
-recovery records,
-caches, and workspace layout outside the canonical resource set. History uses
-the Git repository at the project root, recovery uses `.parchmint/recovery/`,
-the search cache uses `.parchmint/cache/`, word-count summaries are persisted in
-the manifest, and workspace layout uses the platform application-data directory
-keyed by project ID.
+`project.toml` lists project identity, hierarchy and order, titles, Synopsis,
+metadata values and field definitions, style semantics, export settings,
+word-count summaries, deletion tombstones, resource paths, and the fixed `en-US`
+language. The manifest determines which files belong to the project.
 
-Each document's comments are stored in `annotations/<document-id>.json`. The
-codec reads and writes that file together with the matching document body. An
-open document's shared editor session stores the editable text and comments.
-
-## How it works
-
-```text
-bytes -> detect format -> parse -> sanitize -> validate -> project values
-                                                        |
-canonical bytes <- stable encoding and hashing <--------+
-```
+Each document body is read and written with its annotation sidecar. Open editor
+sessions own editable text and comments. History, recovery, caches, and workspace
+layout are separate from canonical resources; see
+[data locations](../../docs/architecture/architecture.md#data-locations-and-ownership).
 
 ## Interface
 
 `CanonicalCodec` detects formats, decodes resources, and encodes canonical bytes.
-`ProjectFormatCodec` implements it and converts manifests
-to domain projects and persistence revision lists.
+`ProjectFormatCodec` implements the current v1 format and assembles domain
+projects and persistence revision lists. Its concrete methods decode manifests,
+styles, dictionaries, and saved revisions, and encode complete domain projects.
+See [lib.rs](src/lib.rs).
 
-See [the source](src/lib.rs) for method signatures.
+[contracts](../parchmint-contracts/README.md) defines annotation JSON records.
+This crate owns HTML, TOML, CSS, and text parsing, sanitization, validation,
+encoding, and hashing.
 
-[`parchmint-contracts`](../parchmint-contracts/README.md) defines the JSON annotation
-shape. This crate owns the HTML, TOML, CSS, and text codecs, checks the project
-rules, and writes their standard byte forms.
+## Encoding rules
 
-`ProjectFormatCodec` is the concrete v1 codec. In addition to the trait, it
-assembles and decodes whole domain projects and persistence frontiers
-(`encode_domain_project*`, `decode_manifest`, `decode_styles`,
-`decode_dictionary`, `decode_domain_project*`, `decode_persistence_frontier`).
+- Text uses UTF-8 and LF. Record, attribute, whitespace, escaping, ID, and
+  dictionary ordering is stable.
+- Equivalent values encode identically. Re-encoding canonical content leaves its
+  bytes unchanged.
+- HTML accepts supported semantic blocks and marks. Scripts, event handlers,
+  remote embeds, arbitrary inline styles, and unsafe links are rejected.
+- Resource paths are relative; traversal, case collisions, and
+  Unicode-normalization collisions are rejected.
+- Invalid input and unknown newer formats fail without modifying project files.
 
-## Implementation
-
-- All text uses UTF-8 and LF.
-- Record, attribute, whitespace, escaping, ID, and dictionary order is stable.
-- Equivalent values have one byte representation. Re-encoding an already
-  canonical document is byte-identical, so a save never rewrites an unchanged
-  document with different formatting.
-- Canonical HTML allows only the supported semantic blocks and marks. Scripts,
-  event handlers, remote embeds, arbitrary inline styles, and unsafe links are
-  rejected before encoding.
-- Canonical paths are relative and reject traversal, case collisions, and
-  Unicode-normalization collisions.
-- Unknown newer formats and invalid inputs fail without changing project files.
-
-Canonical document decoding also supplies the rendered word count. Persistence
-summaries and UI projections use it so markup, attributes, and empty paragraphs
-do not count as prose, and adjacent blocks remain separate words.
+Document decoding also derives rendered word counts for persistence and UI
+summaries. Markup, attributes, and empty paragraphs do not count as prose;
+adjacent blocks retain word boundaries.

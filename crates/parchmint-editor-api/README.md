@@ -1,69 +1,44 @@
 # `parchmint-editor-api`
 
-`parchmint-editor-api` defines the interface between ParchMint and its
-rich-text editor. The application uses it to open documents, attach views, run
-editor commands, observe changes, and create project-file snapshots.
+**Purpose:** Define the rich-text editor contract through ParchMint types.
+Application code opens sessions, attaches views, runs commands, observes changes,
+and requests project-file snapshots through this interface.
 
-One `SharedEditorSession` represents one open document. The session shares text,
-styles, comments, anchors, revision history, and undo across panes. Each
-attached view keeps its own cursor, selection, scroll position, viewport,
-focus, and local search state.
+## Session and view ownership
 
-## How it works
+One `SharedEditorSession` owns an open document's text, styles, comments, anchors,
+revisions, and undo. Both panes share that session. Each view has its own cursor,
+selection, local search, scroll, viewport, and focus; the concrete adapters divide
+logical selection from mounted-widget geometry.
 
-```text
-SharedEditorSession: document, comments, anchors, revision, undo/redo
-├── primary view
-│   ├── core: cursor, selection, local search
-│   └── mounted widget: scroll, viewport, focus, layout
-└── companion view
-    ├── core: cursor, selection, local search
-    └── mounted widget: scroll, viewport, focus, layout
-```
+Commands include the revision they observed. A valid command applies once, maps
+view positions and anchors, and advances the revision. Undo from either pane uses
+the shared document history.
 
-A command includes the document revision it observed. The session applies a
-valid command once, maps positions in attached views and anchors, and advances
-the document revision. Undo from either pane acts on this one shared history.
-
-A `CanonicalProjection` is a deterministic snapshot of one revision in the
-format ParchMint saves. It includes the document body, comments, anchors, the
-derived word count, and the semantic block projection. The session remains
-editable while a projection is built.
+A `CanonicalProjection` is a deterministic project-file snapshot of one revision:
+body, comments, anchors, word count, and semantic blocks. Editing can continue
+while it is built. Requests outside the retained revision budget fail explicitly.
 
 ## Interface
 
-`EditorAdapter` opens shared sessions, attaches views, executes commands,
-returns selection and clipboard values, and projects exact document revisions.
-`DurableProjectionBatch` pairs a document projection with its persistence revisions.
-`CanonicalComment` converts to and from the annotation contract with `From`,
-preserving unknown fields. Persistence, project loading, and History share this
-conversion.
+`EditorAdapter` manages sessions, views, commands, selection, clipboard values,
+and exact-revision projections. `DurableProjectionBatch` pairs a projection with
+its persistence revisions. `CanonicalComment` converts losslessly to and from
+annotation contracts, preserving unknown fields. `style_id_from_canonical`
+resolves semantic style names and stable IDs for commands and layout.
 
-`style_id_from_canonical` resolves semantic paragraph style names and stable
-IDs for both session commands and widget layout.
+`ViewHostCapability` is an opaque identity for a mounted view; callers cannot
+inspect its GUI handle. `SelectionGeometry` positions comment and spelling menus.
+Search and spelling decorations are disposable per-view state.
 
-See [the source](src/lib.rs) for method signatures.
-
-`ViewHostCapability` identifies one mounted editor view. Code outside the editor
-cannot inspect the GUI handle behind it. The API exposes no editor-engine
-documents, transactions, render trees, engine-native selections, or storage.
-
-`SelectionGeometry` positions comment and spelling menus. Search and spellcheck
-decorations belong to one view and can be rebuilt. `close` is idempotent: it
-detaches the mounted views, emits `Closed`, and makes later session operations
-fail with `EditorError::Closed`. Projection requests outside the retained
-revision budget fail explicitly, so a save cannot acknowledge a different
-revision or crash the persistence worker.
-
-Beyond the adapter, this crate defines the durable projection token and error
-contracts used by application-owned persistence coordination. Journal, save,
-and mutable recovery-frontier ownership live in `parchmint-application`. The
-view, command, event, and error values the adapter contract uses
-(`EditorViewState`, `EditorCommandKind`, `EditorEvent`, `EditorCapabilities`,
-`EditorError`) live in this crate.
+`close` is idempotent: it detaches views and emits `Closed`; later session
+operations return `EditorError::Closed`. See [lib.rs](src/lib.rs) for command,
+event, view, capability, persistence-token, and error types.
 
 ## Implementation boundary
 
-`parchmint-editor-core` owns the concrete session, transaction, view-state, and
-projection-queue logic. This crate documents only the contract semantics above;
-editor-engine types and scheduling remain behind the core and Iced adapters.
+[Editor core](../parchmint-editor-core/README.md) owns sessions, transactions,
+logical views, and projection queues. [Editor Iced](../parchmint-editor-iced/README.md)
+owns mounted widgets. Engine documents, transactions, selections, render trees,
+and storage types stay behind those adapters. Application persistence owns the
+journal, saves, and acknowledgements of durable revisions.

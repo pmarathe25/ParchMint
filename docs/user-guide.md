@@ -1,180 +1,159 @@
-# ParchMint user guide
+# User guide
 
-ParchMint keeps a novel in a project directory on your computer. The workspace
-combines a rich-text editor, a structured outline, planning metadata, search,
-saved History, and manuscript export.
+ParchMint keeps your novel in a local project folder. The workspace combines
+rich-text writing, an outline, planning details, search, History, and export.
+See [installation](install.md) for release downloads and setup.
 
-See the [installation guide](install.md) to download and install a release.
+Shortcuts use **Ctrl** on Windows and Linux or **Command** on macOS, called the
+*primary modifier* below.
 
 ## Create or open a project
 
-ParchMint opens on the launcher. Select **Create Project** to choose a project
-title and directory and, optionally, enter an author name. A new project opens
-with one Manuscript document named **Untitled Document** and an empty Research
-section.
+From the launcher, select **Create Project**, enter a title, choose a folder,
+and optionally enter an author name. New projects contain one Manuscript document,
+**Untitled Document**, and an empty Research section.
 
-Select a recent project on the launcher to reopen it, or select **Open Project**
-and choose its directory. ParchMint allows one writable session for a project;
-if it is already open, use its existing window.
+Select a recent project to reopen it, or choose **Open Project** and its folder.
+Each project has one writable session; use its existing window if it is already
+open.
 
-## Find your way around the workspace
+## Navigate the workspace
 
-The workspace has three main areas:
+| Area | Use |
+| --- | --- |
+| Explorer | Organize groups and documents under Manuscript and Research |
+| Editor | Write and format documents in one or two panes |
+| Outline | Review the hierarchy, Synopsis, and metadata as compact rows |
+| Inspector | Edit the selected item's title, Synopsis, and metadata; find document comments |
 
-- **Explorer:** organizes groups and documents under the Manuscript and
-  Research roots.
-- **Editor or Outline:** shows the writing surface or a compact outline of the
-  same project structure.
-- **Inspector:** edits the selected item's title, Synopsis, metadata, and, for
-  documents, provides a comments index.
+The top ribbon switches between **Editor** and **Outline** and opens History,
+Recently Deleted, Export, and Settings. The status bar shows document or selected
+word counts, save state, and sidebar controls.
 
-Use the top ribbon to switch between **Editor** and **Outline**. The actions on
-the right open History, Recently Deleted, Export, and Settings. The bottom
-status bar shows the active document or selected-text word count, current save
-state, and controls for the sidebars.
+Drag dividers to resize sidebars and panes. Press **F6** to move focus between
+workspace regions.
 
-Drag the dividers to resize Explorer, the editor panes, and Inspector. Press
-**F6** to move keyboard focus between the main workspace regions.
+## Organize documents
 
-## Organize a novel
+Select a destination in Explorer, open **+ New**, and choose **Document** or
+**Group**. The menu shows the destination; enter a name to finish. Row context
+menus offer the same actions. Groups can contain groups and documents; documents
+cannot have children.
 
-Select a destination in Explorer, open **+ New**, then choose **Document** or
-**Group**. The menu shows where the item will go. Row context menus offer the
-same actions. Enter a name to finish creation; a new Research document opens in
-the companion pane. Groups can contain other groups and documents. Documents cannot have
-children.
+Drag rows before or after siblings, into a group, or between Manuscript and
+Research. **Shift** selects a range; the primary modifier adds individual rows.
+Copy and paste duplicates selected documents. Cut and paste moves them.
 
-A single click selects a document and opens it as a replaceable preview tab.
-Double-click it, press **Enter**, edit it, or deliberately open it to keep the
-tab. The pane menu offers **Open beside** for the same document in another pane
-and **Focus pane** to hide or restore the sidebars. Manuscript documents normally
-open in the primary pane; Research notes normally open in the companion pane. Closing a tab does not delete its
-document.
+A single click opens a document as a replaceable preview tab. Double-click,
+press **Enter**, edit, or deliberately open it to keep the tab. Manuscript opens
+in the primary pane; Research normally opens in the companion pane. Closing a
+tab leaves its document in the project.
 
-Drag rows to reorder them, move them into a group, or move them between
-Manuscript and Research. Use **Shift** to select a range and **Ctrl** on Windows
-and Linux or **Command** on macOS to add individual rows to the selection.
-Copy and paste duplicates selected documents with new identities. Cut and
-paste moves them.
+The pane menu's **Open beside** shows the document in another pane. **Focus pane**
+hides or restores sidebars. When both panes show the same document, edits,
+comments, undo, saves, and word counts are shared; cursors, selections, scrolling,
+and local searches remain independent.
 
-Outline shows the same hierarchy as compact rows with titles, Synopsis text, and
-configured metadata. Select a row and edit its details in Inspector. Drag a
-row to reorganize the project, or double-click a document row to open it in
-Editor.
+In Outline, select a row to edit its details in Inspector. Drag to reorganize,
+or double-click a document to open Editor.
 
 ## Write and format
 
-The formatting toolbar applies to the focused editor pane. It provides
-paragraph styles, bold, italic, underline, strikethrough, lists, block quotes,
-links, scene breaks, and page breaks. Project styles can be configured in
-**Settings > Styles**. Press **Enter** or **Apply** to save a property value;
-leave it blank to inherit the value. Inheritance, alignment, and on/off properties
-have dropdown controls. Typography, spacing, and pagination are grouped separately.
+The toolbar acts on the focused editor pane. It provides paragraph styles, bold,
+italic, underline, strikethrough, lists, block quotes, links, scene breaks, page
+breaks, and comments. **B/I/U/S** shows active formatting. With no selection,
+a formatting toggle applies to subsequent typing.
 
-The B/I/U/S buttons show the active formatting. With no text selected, toggle a
-button to format the text you type next. Document and manuscript word counts
-update while you write; Research words do not increase the manuscript total.
+Document and manuscript word counts update as you write. Research does not add
+to the manuscript total. Inspector edits the selected item's Synopsis and metadata.
 
-Open a document in the companion pane when you want two documents side by
-side. You can also open the same document in both panes. In that case edits,
-formatting, comments, undo history, save state, and word count are shared, while
-each pane keeps its own cursor, selection, scroll position, and local search.
+Configure project formatting in **Settings → Styles**. Typography, spacing, and
+pagination have separate groups. Press **Enter** or **Apply** to save a property;
+leave it blank to inherit. Dropdowns control inheritance, alignment, and on/off
+properties. **Settings → Metadata fields** controls fields and their display order.
 
-Inspector edits the selected group's or document's Synopsis and metadata.
-Metadata fields and their display order are configured in **Settings >
-Metadata fields**.
+## Comment on writing
 
-## Add and review comments
+Select text or place the cursor, then choose **Comment** in the toolbar or
+**Add Comment** in the editor context menu. The card beside the text supports
+replies, message edits and deletion, resolving or reopening, and thread deletion.
+Inspector lists document comments; select one to reveal its location.
+Comments stay in the project and are excluded from export.
 
-Select text, or place the cursor for a position comment, then select **Comment**
-in the formatting toolbar. You can also choose **Add Comment** from the editor
-context menu. The thread card beside the text lets
-you reply, edit or delete messages, resolve or reopen the thread, and delete
-the thread.
-
-Inspector lists all comments for the active document. Select a comment there
-to reveal its location in the editor. Comments stay with the project but are
-excluded from manuscript export.
-
-A comment draft stays attached to the document and selection where you started
-it, including when you consult Research in the other pane. If that document
-changes before submission, ParchMint retains the draft and asks you to select
-its text again. Scrolling through Research keeps the formatting toolbar aimed
-at the editor you last focused; click the Research text to edit it instead.
+A draft stays attached to its original document and selection while you consult
+Research. If that document changes before submission, ParchMint keeps the draft
+and asks you to select its text again. Scrolling another pane keeps the toolbar
+on the last focused editor; click that pane's text to edit it.
 
 ## Search and replace
 
-Press the primary modifier plus **F** to search within the focused editor view.
-Use **Enter** and **Shift+Enter** to move between matches, and **Escape** to
-close local search.
+Press the primary modifier plus **F** for Find in the focused pane. **Enter** and
+**Shift+Enter** move between matches; **Escape** closes Find.
 
-Open **Global Search** from the Explorer header or press the primary modifier
-plus **Shift+F** to search the whole project. Results are grouped by document.
-Selecting a result opens the document and reveals the match. Adding replacement
-text opens a preview where you can include or exclude matches before applying
-one project-wide replacement.
+Open **Global Search** in the Explorer header or press the primary modifier plus
+**Shift+F**. Results are grouped by document; select a result to reveal its match.
+Enter replacement text to preview changes and include or exclude matches before
+applying one project-wide replacement.
 
-## Save, recover, and restore
+## Save and review History
 
-ParchMint saves in the background after editing becomes idle and during longer
-writing sessions. Structural changes request a save immediately. The status
-bar distinguishes unsaved, saving, saved, and failed states. Use **Save** or
-the primary modifier plus **S** when you want to request an immediate save.
+ParchMint saves after editing becomes idle and during longer writing sessions.
+Structural changes request a save immediately. The status bar shows unsaved,
+saving, saved, or failed state. Choose **Save** or press the primary modifier
+plus **S** to request a save now.
 
-Each completed change is recorded in **History**. Select a saved version to
-compare it with the current project, create a named snapshot for an important
-milestone, or restore the complete project to an earlier state. Restoration
-creates a new version and preserves the existing timeline.
+Completed saves appear in **History**. Select a checkpoint to compare it with the
+current project, or create a named snapshot for a milestone. Comparisons include
+unsaved drafts, added and deleted documents, outline changes, comments, and
+project settings. Opening History does not save a draft.
 
-History includes unsaved drafts, added and deleted documents, outline changes,
-comments, and project settings. Removed lines have a **−** marker and added lines
-have a **+** marker. Text-equivalent formatting changes show the HTML difference;
-stylesheet changes show CSS.
+Removed lines use **−** and added lines use **+**. Formatting-only changes show
+HTML differences; style changes show CSS. Restoring a checkpoint replaces the
+whole project and creates a new History entry, preserving the earlier timeline.
 
-Notification banners have a **Dismiss** button and disappear after five seconds.
-Errors remain in **Notifications** until dismissed or cleared. Banners reserve
-space above the workspace so controls remain accessible.
+Notification banners can be dismissed and expire after five seconds. Errors stay
+available in **Notifications** until dismissed or cleared.
 
-Deleting a group or document removes it from the current outline. Use Undo
-immediately, or open **Recently Deleted** to preview and restore it later.
+## Restore deleted or interrupted work
 
-If ParchMint finds edits newer than the last completed save after an interrupted
-session, it presents a recovery summary before opening the workspace. Choose
-**Recover changes** to apply those edits or **Open last saved version** to discard
-them. **Show technical details** reveals recovery records and revision information.
+Delete removes an item from the outline. Use Undo immediately, or open
+**Recently Deleted** to preview and restore it later.
+
+After an interrupted session, ParchMint offers recovery when it finds edits newer
+than the last completed save. Choose **Recover changes** to keep them or
+**Open last saved version** to discard them. **Show technical details** reveals
+records and revision information.
 
 ## Spellcheck and appearance
 
-Misspelled words have an in-place underline. Open the word's context menu to
-choose a suggestion or add it to a dictionary. Manage project and global words
-in **Settings > Dictionaries**. Spellcheck uses the bundled `en-US` dictionary
-and works offline. Select a scope to add, remove, or search its words. Project
-words travel with the project; global words apply to all projects on this device.
+Misspelled words are underlined. Open a word's context menu for suggestions or to
+add it to a dictionary. Spellcheck uses bundled en-US words and works offline.
 
-Use **Settings > Appearance** to choose System, Light, or Dark. System follows
-the operating-system appearance. The setting applies to every open ParchMint
-window and does not change manuscript formatting or exported output.
+In **Settings → Dictionaries**, select project or global scope to add, remove,
+or search words. Project words travel with the project; global words apply to
+all projects on this device.
+
+**Settings → Appearance** offers System, Light, and Dark. System follows the OS
+appearance. This choice applies to every window without changing manuscript
+formatting or export.
 
 ## Export a manuscript
 
-Open **Export** from the top ribbon, choose an output HTML file, review title,
-page-break, and numbering options, then select **Export**. ParchMint exports the
-entire Manuscript as one self-contained HTML file. Research notes, Synopsis,
-metadata, and comments are not included. After a successful export, use
-**Open** or **Reveal** to inspect the result.
+Open **Export**, choose an output HTML file, review title, page-break, and
+numbering options, then select **Export**. The result is one self-contained HTML
+file containing the whole Manuscript. Research, Synopsis, metadata, and comments
+are excluded. Use **Open** or **Reveal** after completion to inspect the file.
 
 ## Move or back up a project
 
-Close the project, then copy its complete directory. The directory contains the
-current project files and ParchMint's saved History. Open the copied directory
-from the launcher on the destination computer. The `.parchmint/cache/` data
-inside the project can be rebuilt. Recovery data also travels with a complete
-copy; window and tab layout is stored in the operating system's application-data
-directory and does not travel with the project.
+Close the project and copy its complete folder, including hidden files. This
+preserves current writing, saved History, and recovery data. Open the copied
+folder from the launcher on the destination computer.
+
+The `.parchmint/cache/` directory can be rebuilt. Window and tab layout lives in
+the device's application-data directory and does not travel with the project.
 
 ## Keyboard shortcuts
-
-The primary modifier is **Ctrl** on Windows and Linux and **Command** on macOS.
 
 | Action | Windows and Linux | macOS |
 | --- | --- | --- |

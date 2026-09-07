@@ -1,46 +1,28 @@
 # `parchmint-search-api`
 
-This crate defines whole-project search. The search index contains text copied
-from the project files and open editor sessions. ParchMint can rebuild the index
-from those sources. Each editor view handles its own local Find command.
-
-Global replacement uses search hits only as candidates. The application
-rechecks each hit and performs the actual document changes.
-
-## How it works
-
-```text
-document text and revision -> replace indexed document -> receipt
-
-search query -> small batches of possible matches -> revision and text recheck
-             -> navigate or build replacement preview
-```
-
-The application recovers from a deleted or corrupt index by rebuilding it from
-canonical project files.
+**Purpose:** Define project-wide search over a disposable index of project files
+and open editor sessions. Local Find belongs to each editor view. Global
+replacement uses hits as candidates; the application rechecks and applies edits.
 
 ## Interface
 
-`SearchIndex` opens or rebuilds an index, replaces or deletes document
-projections, streams queries through `SearchBatchSink`, cancels generations,
+`SearchIndex` opens or rebuilds an index, replaces or deletes document text
+snapshots, streams queries through `SearchBatchSink`, cancels query generations,
 and verifies integrity. `SearchHit` carries source identity, revision, and range.
+See [lib.rs](src/lib.rs).
 
-See [the source](src/lib.rs) for method signatures.
+## Query and result rules
 
-## Implementation
+Indexed fields are body text, display title, Synopsis, and project-defined
+metadata. Callers supply known field names and ordinary search text. The
+implementation constructs database queries; field-specific ranking is not
+implemented.
 
-The index stores body text, display title, Synopsis, and project-defined
-metadata. Ranking matches differently per field is not yet implemented.
-Callers provide known field names and ordinary search text. The implementation
-builds the database query itself.
+Possible matches are checked against case-sensitive and Unicode whole-word
+rules. The application verifies each hit's revision and range against current
+files or an open editor session before navigation or replacement.
 
-After the index finds possible matches, ParchMint checks case-sensitive and
-Unicode whole-word rules against the current text. It also checks that the
-document revision and text range still match the project file or open editor
-session.
-
-Results arrive in small batches. Each query has a generation number. When a new
-query starts, the application cancels the old query and ignores any old batch
-that arrives later. Search errors do not change project files or save state. A
-missing, corrupt, or incompatible index is deleted and rebuilt. Search runs on
-a background worker and has no network access.
+Results arrive in small batches tagged with a query generation. Starting a query
+cancels its predecessor; late batches from that predecessor are ignored. Missing,
+corrupt, or incompatible indexes are rebuilt from project data. Search runs on a
+worker, has no network access, and cannot change project files or save state.

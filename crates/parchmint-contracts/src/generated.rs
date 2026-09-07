@@ -1,7 +1,7 @@
 //! Generated contract bindings.
 //!
-//! Keep this file deterministic. The schema manifest below is regenerated from
-//! the JSON schemas by the native regeneration-diff test in `lib.rs`.
+//! Keep bindings and schema metadata in sync. The test in `lib.rs` regenerates
+//! the manifest from JSON schemas and compares it with `SCHEMA_MANIFEST`.
 
 use serde::{Deserialize, Serialize};
 

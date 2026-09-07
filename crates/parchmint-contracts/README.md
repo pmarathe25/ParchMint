@@ -1,54 +1,26 @@
 # `parchmint-contracts`
 
-`parchmint-contracts` defines the durable JSON shapes that ParchMint reads and
-writes across versions. It covers document annotation sidecars and recovery
-records.
-
-The crate does not define every ParchMint file format. The project-format and
-export crates own their HTML, TOML, CSS, and text codecs. Those crates keep
-golden fixtures for their own formats.
-
-## How it works
-
-```text
-JSON Schema source
-      |
-      +--> generated Rust types
-      +--> validated JSON fixtures
-      +--> checksum and clean-regeneration check
-```
-
-The schema is the source of truth for the bindings in `src/generated.rs`.
-Contributors edit a schema, update the bindings, and keep its fixtures valid.
-Tests check that the bindings and schemas stay in sync.
+**Purpose:** Define versioned JSON records for annotation sidecars and recovery.
+[Project format](../parchmint-project-format/README.md) owns the HTML, TOML, CSS,
+and text codecs and their project-file rules.
 
 ## Interface
 
-`descriptor` and `validate_fixture` identify and check versioned JSON records.
-`generated` contains the annotation and recovery bindings; `AnnotationThread`,
-`AnnotationMessage`, `AnnotationAnchor`, and `AnnotationValue` preserve annotation content.
+`descriptor` identifies a contract version; `validate_fixture` checks a JSON
+record. [generated.rs](src/generated.rs) defines `AnnotationSidecarV1`,
+`RecoveryRecordV1`, and `SCHEMA_MANIFEST`, which records schema identities,
+versions, checksums, and top-level fields.
 
-See [the source](src/lib.rs) for method signatures.
+`AnnotationThread`, `AnnotationMessage`, `AnnotationAnchor`, and `AnnotationValue`
+preserve annotation content, including unknown nested fields. Serialized stable
+IDs are strings. See [lib.rs](src/lib.rs) for the types and validation methods.
 
-Generated Rust bindings (`generated::*`) provide the remaining API: one
-versioned type per schema (`AnnotationSidecarV1` and `RecoveryRecordV1`). A
-single `SCHEMA_MANIFEST` constant records each schema's version and source
-checksum. Schemas carry ParchMint stable IDs in serialized
-text form (strings), not as typed library handles. The hand-written
-`AnnotationThread`, `AnnotationMessage`, `AnnotationAnchor`, and
-`AnnotationValue` types model lossless annotation sidecar content; the
-project-format crate round-trips them into the annotation sidecar. Project-file
-rules live in `parchmint-project-format`'s `CanonicalCodec`, outside this
-crate.
+## Schema changes
 
-## Implementation
+Keep schemas, Rust bindings, checksums, and fixtures in sync. Tests regenerate
+the schema manifest and compare it with the checked-in value; fixture tests
+exercise decoding and re-encoding. The generated record types reject unknown
+top-level fields with `deny_unknown_fields`.
 
-Every schema change creates a new version: the new schema and its fixtures sit
-beside the old ones, and readers of the old version keep working. The generated
-bindings reject unknown fields outright (`deny_unknown_fields`), so
-forward-compatible additions with documented defaults, reader-side migrations,
-and fields the schema marks safe to ignore are not implemented yet.
-
-ParchMint does not generate other-language bindings or define a general
-external-program protocol in v1. If either becomes a real product boundary,
-its schema belongs in this crate at that time.
+The current contracts are v1. Backwards compatibility is not required; add a
+new reader or migration only when there is a supported use for it.

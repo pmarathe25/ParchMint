@@ -1,18 +1,25 @@
-# ParchMint documentation
+# Documentation
 
-ParchMint stores projects in ordinary files and connects a native writing UI
-to separate editing, persistence, History, search, and export components.
-Tests are the single source of truth for application requirements.
+**Start here:** Choose a guide for your task. The architecture page maps the whole
+system; component READMEs document their own interfaces. Tests define supported
+behavior.
 
-- **Install ParchMint:** The [installation guide](install.md) covers release downloads and updates.
-- **Use the application:** The [user guide](user-guide.md) explains the available workflows.
-- **Understand the system:** The [architecture](architecture/architecture.md) maps
-  crate responsibilities, data ownership, and the edit-to-save flow.
-- **Change a component:** Each crate's `README.md` describes its interface and
-  links to its implementation. Nearby unit and contract tests define behavior.
-- **Verify a workflow:** The [UI driver](../tests/parchmint-ui-driver/README.md)
-  exercises the production event loop and services with controlled native inputs.
-  The [image tools](../tests/parchmint-ui-verification/README.md) capture and compare PNGs.
-- **Keep good ideas:** [Future work](future-work.md) collects concise product and interface follow-ups.
-- **Build and test:** The repository [README](../README.md) lists the pinned,
-  locked development commands.
+## Use ParchMint
+
+- **Install or update:** [Installation guide](install.md).
+- **Write and organize:** [User guide](user-guide.md).
+- **Review proposed features:** [Future work](future-work.md).
+
+## Develop and release
+
+- **Build, test, and lint:** [Repository README](../README.md#development).
+- **Understand ownership and find a crate:** [Architecture](architecture/architecture.md).
+- **Follow repository instructions:** [AGENTS.md](../AGENTS.md).
+- **Build and publish installers:** [Release packaging](../packaging/README.md).
+
+## Verify changes
+
+- **Create project fixtures:** [Test support](../tests/parchmint-test-support/README.md).
+- **Exercise widgets and services:** [UI driver](../tests/parchmint-ui-driver/README.md).
+- **Judge complete UI tasks:** [Usability review](../tests/parchmint-ui-driver/USABILITY.md).
+- **Capture or compare images:** [Visual verification](../tests/parchmint-ui-verification/README.md).

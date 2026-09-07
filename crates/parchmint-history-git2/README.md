@@ -1,50 +1,33 @@
 # `parchmint-history-git2`
 
-This crate implements `HistoryStore` with embedded libgit2. Git repositories,
-commits, references, object IDs, locks, and errors stay inside this crate.
-
-The crate uses `git2` 0.21.0 with vendored libgit2 and controlled static zlib.
-HTTPS, SSH, remote transports, and installed Git are absent.
-
-```toml
-git2 = { version = "=0.21.0", default-features = false, features = ["vendored-libgit2"] }
-```
-
-## How it works
-
-```text
-CheckpointInput
-  -> stage only files that belong to the saved project
-  -> normalize line endings and ignore platform file-mode differences
-  -> commit on app-managed main -> verify objects
-  -> record which CheckpointId belongs to the save intent
-```
+**Purpose:** Implement [HistoryStore](../parchmint-history-api/README.md) with
+vendored libgit2. Git types and errors stay inside this crate; calls require
+neither an installed Git executable nor network access.
 
 ## Interface
 
-`Git2HistoryStore::new` accepts a validated `NativeProjectRoot` and implements
-[`HistoryStore`](../parchmint-history-api/README.md).
+`Git2HistoryStore::new` accepts a validated `NativeProjectRoot`.
+See [lib.rs](src/lib.rs) for methods and [Cargo.toml](Cargo.toml) for pinned
+`git2`, vendored libgit2, and static-zlib dependencies. HTTPS, SSH, and remote
+transports are disabled.
 
-See [the source](src/lib.rs) for method signatures.
+Repositories open per operation because `git2::Repository` is not `Sync`.
+A process-wide gate serializes all stores targeting the same project root.
+Callers receive ParchMint IDs and errors.
 
-Repositories are opened for each operation because `git2::Repository` is not
-`Sync`; a process-wide per-root gate keeps independently constructed stores on
-the same project linear. Callers see ParchMint checkpoint IDs and errors.
+## Storage and failure handling
 
-## Implementation
+The project root is the Git repository root, with one app-managed `main` branch.
+Checkpointing stages only saved project files, normalizes line endings, commits,
+verifies objects, and records the save intent's checkpoint ID. Automatic line-ending
+conversion, executable-mode tracking, and symlink tracking are disabled. Absolute,
+escaping, and unexpected paths are rejected.
 
-The project root is the Git repository root and has one app-managed `main`.
-Automatic line-ending conversion, executable-mode tracking, and symlink
-tracking are disabled. Absolute, escaping, and unexpected paths are rejected.
+Named snapshots use empty commits when needed. Restore reads a checkpoint
+without moving `main`; the normal save path writes the restoration. History
+listing reads only the requested page and returns a continuation cursor.
 
-Named snapshots use empty commits when no project file changed. Restore reads a
-commit and leaves the `main` branch in place. To list History, the crate reads
-only enough commits for the requested page and returns a cursor that continues
-from the next commit.
-
-Only the process that holds the project lock can recover a stale Git lock.
-Invalid Git objects return a History error and leave the current project files
-unchanged. Maintenance pauses for active work, verifies each new pack, and
-removes loose objects only after the pack contains the same data. It keeps every
-commit reachable from retained History. The crate has no network access and
-does not run a Git executable.
+Only the project lock owner can recover a stale Git lock. Invalid objects return
+a History error without changing current files. Maintenance pauses for active
+work, verifies new packs before removing equivalent loose objects, and keeps
+every commit reachable from retained History.

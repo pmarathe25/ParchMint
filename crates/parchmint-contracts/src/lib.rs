@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, error::Error, fmt};
 
-/// A lossless JSON value retained for fields introduced by compatible readers.
+/// A lossless JSON value for unknown annotation fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnnotationValue {
     Null,

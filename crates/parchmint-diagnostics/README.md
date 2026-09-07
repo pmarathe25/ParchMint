@@ -1,24 +1,23 @@
 # `parchmint-diagnostics`
 
-This crate records local diagnostics without changing application results.
-Normal release builds record warnings and errors. Debug builds and the explicit
-`capture` feature also retain traces, timing aggregates, and up to 4,096 events.
+**Purpose:** Record bounded local diagnostics without changing application results.
+Normal releases record warnings and errors. Debug builds and the `capture` feature
+also retain traces, timing aggregates, and at most 4,096 events.
 
 ## Interface
 
 `configure_file(data_directory)` opens `logs/parchmint-debug.log`.
-`event!` checks the level before evaluating fields, so disabled trace events
-avoid string formatting and allocation. `event` accepts already prepared fields.
-Callers record operations and identifiers; document text stays out of the log.
+`event!` checks the level before evaluating fields, avoiding formatting and
+allocation for disabled traces. `event` accepts prepared fields. Callers log
+operations and identifiers, never document text. See [lib.rs](src/lib.rs).
 
-## Implementation
+## Storage and overhead
 
-The file stays within 1 MiB and uses a mutex to serialize writes and rotation.
-The final path is opened without following symlinks or Windows reparse points.
-Failures are ignored; before configuration, enabled events go to standard error.
-Warnings and errors write synchronously. Normal release builds omit in-memory
-capture and timing collection, so ordinary editing performs no diagnostic I/O.
-`--no-default-features` on the desktop omits diagnostics entirely.
+A mutex serializes writes and rotation; the log stays within 1 MiB. The final
+path rejects symlinks and Windows reparse points. Logging failures are ignored;
+enabled events use standard error before configuration.
 
-See [lib.rs](src/lib.rs) for the logger and [release_logging.rs](tests/release_logging.rs)
-for the check that filtered fields are not evaluated.
+Warnings and errors write synchronously. Normal releases omit in-memory capture
+and timing collection, so ordinary editing performs no diagnostic I/O. The
+[release logging test](tests/release_logging.rs) verifies that filtered fields
+are not evaluated. The desktop's `--no-default-features` build omits diagnostics.

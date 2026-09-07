@@ -1,50 +1,46 @@
-# ParchMint UI driver
+# UI driver
 
-The UI driver exercises ParchMint's real desktop composition without creating
-operating-system windows. It loads the desktop's bundled fonts and delivers
-redraw notifications between input events so panes wrap to their allocated
-viewport. It uses Iced's headless renderer to click and type in
-the rendered widget tree, routes the resulting messages through the native
-desktop update loop, and runs the production project and persistence services.
+**Purpose:** Exercise production widgets, the native update loop, and real
+project services without OS windows. The driver uses bundled fonts, Iced's
+headless renderer, and redraws between input events to preserve viewport layout.
+The `interaction-harness` feature enables this code and `iced_test`; normal
+desktop builds enable neither.
 
-The `interaction-harness` feature contains all harness-only code and pulls in
-the `iced_test` renderer. The production desktop does not enable this feature.
-
-## Completion and failure checks
-
-Every action reports new failure status messages, editor errors, error dialogs,
-failed closes, error notifications, and inline History, search, and recovery errors. A test that injects a failure must assert the returned error;
-clicking a control alone does not establish success. Successful flows check
-saved bytes and reopen the project to verify persistence.
-
-The harness drains task work between actions by default. It does not run native
-timer subscriptions or reproduce every OS scheduling interleaving. Use
-`elapse_recovery_capture`, `advance_autosave_clock`, and `elapse_notifications`
-for timer boundaries. Notification expiry dispatches the production timer and
-also runs any other work due during that interval.
-`hold_completions` runs service work while retaining result messages;
-`release_completions(newest_first)` delivers them in either order after more
-user input. These controls exercise stale snapshots and delayed UI updates
-without sleeps. The JSON Lines driver exposes the same commands.
-
-Shared `create_project`, `create_group`, and `create_document` helpers use rendered
-controls and the real service graph. Specialized keyboard and focus tests retain
-their own input paths.
-
-## Run the acceptance scenarios
-
-The first scenario creates a project, types in the custom editor, triggers the
-60-second autosave boundary without sleeping, closes the project, relaunches
-ParchMint, and opens the project from the recent-project list.
+## Run workflows
 
 ```console
 cargo test -p parchmint-ui-driver --locked -j 1
 ```
 
-## Drive the application from an agent
+Successful persistence flows assert saved bytes and reopen projects. Each action
+reports new failures from status messages, editor errors, dialogs, failed closes,
+notifications, and inline History, search, and recovery errors. A test that injects
+a failure must assert it; a successful click alone does not prove the operation.
 
-Start the JSON Lines driver with an isolated application-data directory. Each
-input line is one command and each output line is one result.
+Shared `create_project`, `create_group`, and `create_document` helpers use rendered
+controls and production services. Keep custom input paths for keyboard and focus
+regressions.
+
+## Control time and completion order
+
+The harness drains task work between actions by default. It does not run native
+timer subscriptions or reproduce every OS scheduling interleaving.
+
+| Control | Effect |
+| --- | --- |
+| `elapse_recovery_capture` | Trigger the recovery capture boundary |
+| `advance_autosave_clock` | Advance autosave without sleeping |
+| `elapse_notifications` | Dispatch notification expiry and other work due in that interval |
+| `hold_completions` | Run services but retain their result messages |
+| `release_completions(newest_first)` | Deliver retained results in either order after further input |
+
+Use these controls to test stale results and timer boundaries without sleeps.
+The JSON Lines command interface exposes the corresponding controls.
+
+## Use the command driver
+
+Each input line is a JSON command; each output line is its result. Use isolated
+application data and a new artifact directory:
 
 ```console
 cargo run --locked -j 1 -p parchmint-ui-driver -- \
@@ -52,65 +48,55 @@ cargo run --locked -j 1 -p parchmint-ui-driver -- \
   --artifacts /tmp/parchmint-agent-run/failure
 ```
 
-Example commands:
+These commands inspect the launcher, open the creation form, fill its title,
+and stop the driver:
 
 ```jsonl
+{"command":"has_window","window":"launcher"}
 {"command":"click_text","window":"launcher","text":"Create Project"}
 {"command":"type_into","window":"launcher","placeholder":"Project title","value":"Flow Novel"}
-{"command":"type_at","window":"project","x":500.0,"y":300.0,"value":"Hello"}
-{"command":"elapse_autosave_idle"}
-{"command":"active_editor_body"}
 {"command":"shutdown"}
 ```
 
-`contains_text` checks text in the constructed widget tree. `text_is_visible`
-checks the current viewport and cached widget state. Neither establishes that an
-overlay leaves the control usable; follow up with a click and assert its result.
-`snapshot` renders the live widget cache, preserving scroll, focus, and overlays.
-It writes `<stem>-tiny-skia.png` and refuses an existing file.
+Pass `--project <folder>` to open an existing disposable project. Commands such
+as `type_at`, `elapse_autosave_idle`, and `active_editor_body` then exercise its
+editor. See [main.rs](src/main.rs) for the complete command schema.
 
-Use the [agent usability review](USABILITY.md) to judge clarity and layout with
-these tools and a native application run.
+`contains_text` inspects the constructed widget tree. `text_is_visible` checks
+the viewport and cached widget state. Follow visibility checks with a click and
+result assertion when overlays could obstruct input. `snapshot` captures live
+scroll, focus, and overlays as `<stem>-tiny-skia.png`, refusing existing output.
 
-The driver writes `failure.json` and a `failure-<renderer>.png` screenshot after
-a command fails. Later failures in the same run use numbered subdirectories so
-each screenshot stays paired with its own report. `failure.json` contains the replayable user-action trace,
-production boundary observations, and structured diagnostics. The trace records
-text lengths and selectors, not document content.
+On failure, the driver writes `failure.json` and `failure-<renderer>.png`.
+Numbered subdirectories keep later failures paired with their reports. Reports
+contain the replayable action trace, production observations, and diagnostics;
+traces record selectors and text lengths instead of document content.
 
-## Harden a UI bug into a focused test
+## Reduce a UI failure to a regression
 
-Use the failure bundle to find the lowest component that reproduces the bug.
+1. Reproduce the failure and retain its artifact bundle.
+2. Find the first unexpected observation or diagnostic event to identify the
+   responsible reducer, adapter, or service.
+3. Reproduce only that boundary's input in a nearby unit or contract test and
+   assert state or output directly.
+4. Run the focused test and original reproduction. Remove the UI scenario if the
+   focused test covers the same behavior. Retain a small integration test for
+   rendering, focus, routing, or interactions across boundaries.
 
-1. Reproduce the bug with the UI driver and keep `failure.json`.
-2. Find the first unexpected production observation or diagnostic event. Its
-   target and operation name identify the reducer, adapter, or service boundary
-   to test.
-3. Recreate only that boundary's input in a colocated unit or contract test.
-   Assert the resulting state or output directly.
-4. Run the focused test and the original UI reproduction. If the focused test
-   covers the same product decision, keep the focused test and remove the UI
-   scenario. Keep a small UI test when the bug depends on rendering, focus,
-   event routing, or several boundaries working together.
+Choose the smaller regression deliberately: replaying an entire action trace
+still exercises the full desktop stack. See [usability review](USABILITY.md) for
+visual judgment and native verification.
 
-This reduction is intentionally a developer decision. A user-action trace can
-be replayed automatically, but automatic conversion would preserve the full
-desktop stack and would still be an end-to-end test.
+## Large documents and performance
 
-## Large-document authoring resilience
+[large_document_resilience_flows.rs](tests/large_document_resilience_flows.rs)
+covers 250,000-word documents through two-pane writing, workspace state, autosave,
+global search and replacement, History, restart, and abandoned-session recovery.
+Virtual clocks avoid real-time waits. Assertions cover retained text markers,
+canonical files, recovered data, and absence of error diagnostics.
 
-`tests/large_document_resilience_flows.rs` exercises the supported
-250,000-word document size through real desktop composition. Its flows cover
-two-pane authoring workspace state and autosave, project-wide search and
-replacement, History loading, restart, and recovery after an abandoned
-session. They use the harness's virtual clocks, so a long writing session is
-reproducible without sleeping in CI.
-
-The flows assert retained markers, canonical file contents, recovery results,
-and absence of error diagnostics. The opt-in
-`chapter_save_and_reopen_performance` test measures wall-clock open, save, and
-reopen times for a 20,000-word chapter in an optimized build. The editor
-binding's `chapter_authoring_performance` test measures typing, selection,
-scrolling, chapter switching, projection time, and Linux process memory for
-eight chapters plus Research. These measurements are reported, not
-machine-independent pass/fail latency thresholds.
+The opt-in `chapter_save_and_reopen_performance` test measures open, save, and
+reopen for a 20,000-word chapter in an optimized build. The editor binding's
+`chapter_authoring_performance` measures typing, selection, scrolling, chapter
+switching, projection, and Linux process memory for eight chapters plus Research.
+These report measurements, not machine-independent latency thresholds.

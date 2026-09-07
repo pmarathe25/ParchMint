@@ -1,89 +1,95 @@
-# Agent usability review
+# Usability review
 
-Run this review when changing authoring flows or preparing a release. Automated
-tests define supported behavior. This procedure asks an agent to exercise those
-behaviors and judge whether the visible result is understandable and usable.
-Keep observations and screenshots in a temporary artifact directory.
+**Purpose:** Check whether supported writing tasks are understandable and usable
+when changing a flow or preparing a release. Tests establish behavior; this review
+adds visual judgment and native input checks. Keep reports and screenshots in a
+temporary artifact directory.
 
-## Prepare the run
+## Prepare
 
-1. Read the [driver README](README.md) and the tests for the affected flow.
-   Build with the pinned toolchain, `--locked`, and one compilation job.
-2. Create an isolated application-data directory and a disposable project.
-   Use short, distinctive text in two Manuscript documents and one Research
-   document. Include a group, an empty document, and a comment. Save a checkpoint,
-   then change a sentence, rename a group, and add or delete a document.
-3. Drive the production widgets through `DesktopInteractionHarness`, or use the
-   JSON Lines command from the README. The Rust harness exposes more gestures,
-   including selection, drag, resizing, and fault injection.
-4. Repeat the important flows in the native release executable. Use isolated
-   application data and the same disposable project. Record the commit, build
-   command, platform, window dimensions, appearance, and display scale. Obtain
-   permission when required to launch the GUI. Mark native steps blocked if no
-   desktop automation is available; headless screenshots do not prove native
-   input behavior.
+1. Read the [driver guide](README.md) and affected tests. Use the pinned toolchain,
+   `--locked`, and one compilation job.
+2. Create isolated application data and a disposable project with two Manuscript
+   documents, one Research document, a group, an empty document, and a comment.
+   Save a checkpoint, then edit a sentence, rename a group, and add or delete a
+   document. Use distinctive sample text.
+3. Drive widgets through `DesktopInteractionHarness` or the JSON Lines driver.
+   The Rust harness also supports selection, drag, resizing, and fault injection.
+4. Repeat key tasks in the native release executable. Record commit, build command,
+   OS, window dimensions, appearance, and scale. Obtain permission when the
+   environment requires GUI approval. Report blocked native steps when automation
+   is unavailable; headless captures do not establish native input behavior.
 
-The checked-in usability flows can produce review screenshots:
+Generate screenshots from the checked-in review flows with a new output directory:
 
 ```console
 PARCHMINT_REVIEW_ARTIFACTS=/tmp/parchmint-review cargo test --locked -j 1 -p parchmint-ui-driver --test usability_flows
 ```
 
-Use a new output directory for each run. These flows cover creation, compact dark
-appearance, notification expiry and retry, and a project-wide History comparison.
-Open the PNGs and record your judgment; passing tests do not approve their layout.
+These cover creation, compact dark appearance, notification expiry and retry,
+and project-wide History comparison. Open the PNGs and assess the layout.
 
 ## Exercise complete tasks
 
-For each task, capture the starting screen, perform the actions, capture the
-result, and assert the data outcome. Check the current viewport with
-`text_is_visible`. Use `contains_text` only when inspecting widget content is
-intentional. Screenshots preserve the harness's live scroll and overlay state.
+Capture before and after, perform the task, and assert its data outcome. Use
+`text_is_visible` for viewport checks; reserve `contains_text` for widget-content
+inspection. Click controls that might be obstructed by overlays.
 
-| Task | Actions and evidence |
-| --- | --- |
-| Create and organize | Select a parent, use **+ New**, name a group and a document, type, save, close, and reopen. Verify the destination, names, and saved text. Repeat in Research and with an empty group. |
-| Rearrange | Drag a document before and after a sibling, into a group, and onto its current location three times. Verify order and contents; harmless repeated actions must not add checkpoints or errors. |
-| Review a comment | Create an unsaved comment, move the caret away, click the Inspector entry, and verify the selected anchor. Insert text before the anchor and repeat. Try both panes, then save and reopen. |
-| Understand a checkpoint | Select the earlier checkpoint after changing several documents and the outline. Identify the old and new sentence without opening a separate editor. Check added and deleted documents, an unsaved draft, comments, and an unchanged checkpoint. Verify that opening History does not save the draft. |
-| Clear transient messages | Trigger a successful structural action, use the workspace while its banner is visible, then dismiss it. Repeat and advance notification time. Inject a recoverable failure, dismiss its dialog, wait, and retrieve the error from Notifications. Verify controls remain clickable and the drawer can close. |
-| Resume interrupted work | Hold completion delivery, continue typing or change panes, then release in both orders. Confirm focus, text, errors, and saved output. Cancel a rename or comment with Escape and immediately perform another task. |
+- **Create and organize:** Select a parent, use **+ New**, name a group and document,
+  type, save, close, and reopen. Check destination, names, and saved text. Repeat
+  in Research and an empty group.
+- **Rearrange:** Drag before and after a sibling, into a group, and onto the current
+  location three times. Check order and contents; no-op actions must add neither
+  checkpoints nor errors.
+- **Review comments:** Create an unsaved comment, move away, and select its Inspector
+  entry. Check the anchor, insert text before it, and repeat in both panes. Save
+  and reopen.
+- **Compare History:** Change several documents and the outline, then select an
+  earlier checkpoint. Identify old and new text, additions, deletions, unsaved
+  drafts, comments, and an unchanged checkpoint. Opening History must not save
+  drafts.
+- **Use notifications:** Trigger a notification, operate the workspace beneath it,
+  and dismiss it. Repeat with expiry. Inject a recoverable failure, dismiss its
+  dialog, wait, and retrieve it from Notifications. Check that controls remain
+  clickable and the drawer closes.
+- **Handle interrupted work:** Hold completions, type or change panes, and release
+  results in both orders. Check focus, text, errors, and saved output. Cancel a
+  rename or comment with Escape and continue another task.
+- **Change settings:** Edit styles and dictionaries in their available scopes.
+  Check draft retention, validation, previews, and saved values after reopening.
+- **Export and restore:** Export a manuscript and inspect the file. Preview and
+  restore deleted items, a History checkpoint, and interrupted-session edits.
+  Check that destinations and consequences are clear before confirming.
 
-Run project windows at their supported minimum of 1280 × 720 and at 1440 × 900,
-in light and dark appearance. Check the launcher at 900 × 620. In the native app,
-also check the platform's normal scale and one larger text/display scale. Use a
-long title, a multiline message, enough rows to scroll, and a long paragraph.
-Check the app after scrolling and resizing, not only on initial load.
+Use project windows at 1280 × 720 and 1440 × 900, and the launcher at 900 × 620,
+in both appearances. In the native app, check normal and larger display scales.
+Include long titles, multiline messages, scrolling lists, and long paragraphs;
+repeat checks after scrolling and resizing.
 
-## Judge the visible result
+## Judge the result
 
-For each task, answer these questions in plain language and cite a screenshot or
-action trace. A reasoned failure is useful even when all assertions pass.
+For each task, cite a screenshot or trace and assess:
 
-- **Discoverability:** Can a new user identify the primary action and destination
-  from the screen? Are repeated controls equivalent shortcuts, or do they suggest
-  competing workflows? Count the visible primary creation entry points.
-- **Feedback:** Is completion visible? Does the result match the action? Can the
-  user tell what a diff removes and adds without relying on color alone?
-- **Access:** Can the user read and operate the next control? Look for clipping,
-  overlapping banners, inaccessible dismiss controls, and unexpected scrolling.
-  Click the affected control; a text selector alone is insufficient.
-- **Continuity:** Does focus stay where typing is expected? Do cancellation,
-  delayed results, error recovery, and route changes preserve the draft?
-- **Responsiveness:** Is typing or navigation noticeably delayed? Record the
-  input, data size, and observed delay. Do not label a run fast from test duration
-  alone, and do not infer native latency from headless execution.
+- **Discoverability:** Can a new user find the primary action and destination?
+  Do duplicate controls suggest different workflows? Count creation entry points.
+- **Clarity:** Is the next step clear with minimal text and controls? Can optional
+  details stay hidden until needed?
+- **Feedback:** Does the result match the action? Are additions and removals clear
+  without relying on color alone?
+- **Access:** Can the user read and click the next control without clipping,
+  overlapping banners, or unexpected scrolling?
+- **Continuity:** Do focus, drafts, and selections survive cancellation, delayed
+  results, errors, and navigation?
+- **Responsiveness:** Record noticeable delays with the input and data size.
+  Headless execution time does not establish native latency.
 
-## Record and harden findings
+## Record and verify findings
 
-For each case, report **pass**, **fail**, or **blocked**, with actions, expected
-outcome linked to a test, actual result, screenshot paths, and the reason for the
-judgment. Distinguish a subjective concern from a demonstrated data failure.
-Include warnings and errors from the isolated diagnostics log. Do not copy real
-user document text into a report.
+Report each case as **pass**, **fail**, or **blocked**, with actions, expected
+behavior linked to tests, actual result, artifact paths, and reasoning. Separate
+subjective concerns from demonstrated data failures. Include isolated diagnostic
+warnings and errors without copying real user prose.
 
-Turn reproducible failures into focused regressions. Keep a UI test for routing,
-visibility, timing, or interactions across components; use a component test for
-an isolated rule. Run the regression after fixing the issue, then repeat the
-visual review. A screenshot comparison measures rendering similarity and cannot
-approve the task on its own.
+Follow the [regression reduction procedure](README.md#reduce-a-ui-failure-to-a-regression)
+for reproducible failures. After a fix, run the regression and repeat the visual
+review. Pixel similarity alone cannot establish usability.

@@ -1,38 +1,35 @@
-# Repository Guidelines
+# Repository guidelines
 
-Use this file as a map. Read the linked documentation for the part of the
-repository you are changing. Tests are the authority for supported behavior.
+**Purpose:** Map contributor instructions to the code being changed. Read the
+relevant linked documentation before editing. Tests define supported behavior.
 
 ## Start here
 
-- [`README.md`](README.md) explains what ParchMint is and lists the main build,
-  run, test, lint, and format commands.
-- [`docs/README.md`](docs/README.md) is the documentation index.
-- [`docs/user-guide.md`](docs/user-guide.md) explains how people use the
-  application.
-- [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
-  describes application flow, data ownership, and crate boundaries.
+- [README.md](README.md): application overview and build, run, test, lint, and
+  format commands.
+- [Documentation index](docs/README.md): guides by task.
+- [User guide](docs/user-guide.md): application workflows.
+- [Architecture](docs/architecture/architecture.md): flow, ownership, and crate
+  boundaries.
 
-## Find implementation details
+## Read the component guide
 
-- Read the `README.md` in the relevant directory under `crates/` before
-  changing a component. It defines that crate's role, public contract, and
-  implementation notes.
-- Use nearby unit and contract tests for component behavior. Contract test
-  modules use the `*_contract_tests.rs` suffix.
-- Read [`tests/parchmint-ui-driver/README.md`](tests/parchmint-ui-driver/README.md)
-  before changing headless end-to-end flows.
-- Read [`tests/parchmint-ui-verification/README.md`](tests/parchmint-ui-verification/README.md)
-  before changing UI captures, comparisons, or reference images.
-- Shared fixtures and native test controls are described in
-  [`tests/parchmint-test-support/README.md`](tests/parchmint-test-support/README.md).
+Read a crate's `README.md` before changing it. Each guide defines its role,
+public contract, and implementation notes. Use nearby unit and contract tests
+for behavior; contract modules use the `*_contract_tests.rs` suffix.
 
-## Other repository areas
+- Before changing headless flows, read the
+  [UI driver guide](tests/parchmint-ui-driver/README.md).
+- Before changing captures, comparisons, or references, read
+  [visual verification](tests/parchmint-ui-verification/README.md).
+- For shared fixtures and native test controls, read
+  [test support](tests/parchmint-test-support/README.md).
+- For native installers, read [packaging](packaging/README.md).
+- Before editing `third_party/`, inspect the patched renderer's history and
+  consumers.
 
-- [`packaging/README.md`](packaging/README.md) covers native package inputs.
-- `third_party/` contains the patched Iced renderer; inspect its history and
-  consumers before editing it.
+## Build constraints
 
 Use the pinned Rust toolchain and locked Cargo commands. This workstation has
-limited memory, so run compilation commands with one job and do not run them
-in parallel.
+limited memory: compile with one job and never run compilation commands in
+parallel.

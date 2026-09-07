@@ -1,9 +1,9 @@
 # Install ParchMint
 
-Download the package for your computer from
+Download your computer's package from
 [GitHub Releases](https://github.com/pmarathe25/ParchMint/releases).
-Open **Assets** to find the installers; the **Source code** downloads are for
-building the application yourself.
+Choose an installer under **Assets**. The **Source code** downloads are for
+building from source.
 
 | Computer | Package suffix |
 | --- | --- |
@@ -36,8 +36,8 @@ To remove ParchMint, move it from Applications to the Trash.
 
 ## Linux
 
-In the folder containing the download, install it with `apt` so dependencies are
-installed too. Replace the filename with the version you downloaded:
+From the download folder, use `apt` to install the package and its dependencies.
+Substitute your downloaded filename:
 
 ```sh
 sudo apt install ./ParchMint-0.1.0-linux-x86_64.deb
@@ -46,17 +46,20 @@ sudo apt install ./ParchMint-0.1.0-linux-x86_64.deb
 Open **ParchMint** from the application menu, or run `parchmint` in a terminal.
 To remove the app, run `sudo apt remove parchmint`.
 
-Packages are built on Ubuntu 24.04. If your distribution cannot satisfy their
-runtime dependencies, build from source on that distribution.
+If your distribution cannot satisfy the package's runtime dependencies, build
+from source on that distribution.
 
-## Updates and project files
+## Update
 
 Close ParchMint and install the newer package using the same steps. On macOS,
 choose **Replace** when copying the new app to Applications. Keep projects in
 your own folders; updating or uninstalling the app leaves them in place. Open
 an existing project folder from the launcher after updating.
 
+## Check a download
+
 Each package has a matching `.sha256` file. Compare its recorded hash with
 `Get-FileHash -Algorithm SHA256 <package>` in PowerShell or
 `shasum -a 256 <package>` on macOS. On Linux, put both downloads in the same folder
-and run `sha256sum --check <package>.sha256`.
+and run `sha256sum --check <package>.sha256`. Replace `<package>` with the
+downloaded filename.

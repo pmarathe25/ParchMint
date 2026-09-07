@@ -1,32 +1,30 @@
 # `parchmint-ui-api`
 
-This crate defines the ParchMint values and session-scoped services that the
-native UI uses. It contains no widgets, renderer types, or window handles.
-The desktop crate assembles services and owns the startup lifecycle interface.
+**Purpose:** Define framework-neutral UI values and services for one project
+session. The desktop assembles implementations; the UI owns presentation state.
 
 ## Interface
 
 `ProjectUiPorts` groups query, command, persistence, History, recovery, search,
-export, editor, spelling, preference, and workspace services for one session.
-`access()` checks the session generation and returns `ProjectUiAccess`.
-Each service access checks that the session is still current.
+export, editor, spelling, preference, and workspace services. `access()` validates
+the session generation and returns `ProjectUiAccess`; each service access checks
+that the session remains current.
 
-`ProjectSnapshotQuery` returns the project structure, summaries for all documents,
-and bodies for loaded documents. `snapshot_with_documents` materializes all live
-documents for background reads such as Export and History.
-`ProjectWorkflowPort` exposes multi-step application operations and their results.
+`ProjectSnapshotQuery` returns structure, all document summaries, and loaded
+bodies. `snapshot_with_documents` loads all live bodies for background operations
+such as Export and History. `ProjectWorkflowPort` exposes multi-step application
+operations and results.
 
-`ProjectSessionRegistry` issues and retires generation-tagged session identities.
-`PlatformServices` groups the platform interfaces. `apply_appearance_events`
-delivers each numbered appearance snapshot to windows in stable window-ID order.
-See [lib.rs](src/lib.rs) for the complete interface.
+`ProjectSessionRegistry` issues and retires generation-tagged identities.
+`PlatformServices` groups platform interfaces. `apply_appearance_events` delivers
+numbered theme snapshots in stable window-ID order. See [lib.rs](src/lib.rs).
 
-## Implementation
+## Session boundary
 
-A recreated session has a newer generation. Old ports cannot authorize commands
-against the new session, even when its logical session ID is reused. The native
-UI also checks request and mount generations when asynchronous results return.
+Recreated sessions receive newer generations. Old ports cannot authorize work
+against a replacement even if its logical ID is reused. The UI also checks
+request and mount generations when async results arrive.
 
-Service methods expose ParchMint types. The desktop supplies concrete adapters;
-the UI converts results to its own presentation state. Library-specific storage,
-editor, and native handle types stay inside their implementation crates.
+Service methods expose ParchMint types. Widgets, renderer types, storage-library
+values, editor-engine values, and native handles stay in implementation crates.
+The desktop owns the startup lifecycle interface.

@@ -1,52 +1,31 @@
 # `parchmint-history-api`
 
-This crate defines the interface for saving and reading project History. A
-History implementation stores complete project checkpoints. Callers use
-ParchMint types and do not depend on Git types.
-
-History stores earlier versions in addition to the current project files. If
-History is lost, ParchMint can still open the current project, but the earlier
-checkpoints are gone.
-
-## How it works
-
-```text
-filesystem commit receipt + checkpoint intent
-  -> History verifies the hashes of the written project files
-  -> History returns the existing ID when this checkpoint already exists
-  -> History adds the checkpoint and returns CheckpointId
-
-CheckpointId -> validate complete snapshot -> RestorePlan -> normal save path
-```
-
-A restore plan describes files to write. The normal save path applies the plan
-and creates a new restoration checkpoint; History stays in its existing order.
+**Purpose:** Define complete project checkpoints through ParchMint types.
+Current project files remain usable if History is lost; older checkpoints do not.
 
 ## Interface
 
-`HistoryStore` initializes storage, checkpoints files, pages through History,
-reads checkpoint resources, plans restores, verifies integrity, and maintains
-storage. `CheckpointInput` identifies the save intent and exact file hashes.
+`HistoryStore` initializes storage, creates and lists checkpoints, reads resources,
+plans restores, verifies integrity, and maintains storage. `CheckpointInput`
+identifies a save intent and exact file hashes. Calls run on an application worker;
+the UI receives their asynchronous results. See [lib.rs](src/lib.rs).
 
-See [the source](src/lib.rs) for method signatures.
+## Checkpoint and restore rules
 
-These methods run on an application worker. The UI receives an asynchronous
-result and the worker performs Git operations.
-
-## Implementation
-
-History adds checkpoints in order and does not rewrite earlier checkpoints. A
-retry with the same intent hash and file hashes returns the same checkpoint ID.
-Checkpoint categories record an autosave, explicit save, structural change,
-named snapshot, or restoration. A named snapshot can create a checkpoint even
-when no project file changed.
+A checkpoint verifies the written files against the commit receipt. Retrying the
+same intent and file hashes returns the same `CheckpointId`. Categories distinguish
+autosave, explicit save, structural change, named snapshot, and restoration.
+Named snapshots can create a checkpoint even when files have not changed.
 
 Checkpoints contain the manifest, documents, styles, project dictionary,
-annotations, deletion tombstones, and format control. They exclude recovery,
-caches, workspace state, appearance, and the global dictionary.
+annotations, deletion tombstones, and format control. Recovery, caches, workspace
+layout, appearance, and the global dictionary stay outside History.
 
-The list method returns one page at a time and includes a cursor for the next
-page. Callers can filter checkpoints by affected document. Preview and restore
-always include every project file. Maintenance runs at low priority and keeps
-all retained checkpoints. If History is missing or corrupt, the user can create
-a new History store from the current project files.
+Lists are paginated, with a continuation cursor and optional affected-document
+filter. Preview and restore read complete project snapshots. A `RestorePlan`
+describes writes through the normal save path, creating a new restoration
+checkpoint without rewriting the timeline.
+
+Maintenance runs at low priority and preserves retained checkpoints. Missing or
+corrupt History can be reinitialized from current project files.
+[history-git2](../parchmint-history-git2/README.md) implements this contract.
