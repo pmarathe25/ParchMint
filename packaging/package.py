@@ -93,7 +93,7 @@ def archive(staged, output):
     with zipfile.ZipFile(output, "x", compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in sorted(staged.rglob("*")):
             if path.is_file():
-                info = zipfile.ZipInfo.from_file(path, path.relative_to(staged.parent))
+                info = zipfile.ZipInfo.from_file(path, path.relative_to(staged.parent), strict_timestamps=False)
                 # Windows stat results do not preserve executable Unix mode bits.
                 # Normalize archive modes so every platform produces usable bundles.
                 mode = 0o755 if path.name in ("parchmint", "parchmint.exe") else 0o644

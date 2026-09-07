@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 import plistlib
 import tempfile
@@ -33,6 +34,7 @@ class PackageTests(unittest.TestCase):
             root = Path(temporary)
             binary = root / "binary"
             binary.write_bytes(b"release executable")
+            os.utime(binary, (0, 0))  # Cargo source archives may carry epoch timestamps.
             for platform in ("linux", "macos", "windows"):
                 with self.subTest(platform=platform):
                     staged = root / platform
