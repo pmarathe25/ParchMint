@@ -225,8 +225,8 @@ impl Error for ProjectQueryError {}
 pub trait ProjectSnapshotQuery: Send + Sync {
     fn snapshot(&self) -> Result<ProjectSnapshot, ProjectQueryError>;
 
-    /// Materializes every live document body for an off-loop export workflow.
-    fn snapshot_for_export(&self) -> Result<ProjectSnapshot, ProjectQueryError> {
+    /// Materializes every live document body for an off-loop read workflow.
+    fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ProjectQueryError> {
         self.snapshot()
     }
 

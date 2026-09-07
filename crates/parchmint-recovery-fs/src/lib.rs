@@ -17,10 +17,10 @@ use parchmint_history_api::{
 };
 use parchmint_recovery_api::{
     CompactionReport, DiscardReport, DocumentId, DocumentRevision, DurableRevisionVector,
-    EditorRevisionRange, RecoveryBaseSnapshot, RecoveryBatch, RecoveryError, RecoveryInventory,
-    RecoveryJournal, RecoveryReceipt, RecoveryRecord, RecoveryRecordSummary, RecoveryReplay,
-    RecoveryRevisionVector, ResourceId, VersionedRecoveryPayload, is_covered_by_durable,
-    replay_records,
+    EditorRevisionRange, RecoveryAppendFrontier, RecoveryBaseSnapshot, RecoveryBatch,
+    RecoveryError, RecoveryInventory, RecoveryJournal, RecoveryReceipt, RecoveryRecord,
+    RecoveryRecordSummary, RecoveryReplay, RecoveryRevisionVector, ResourceId,
+    VersionedRecoveryPayload, is_covered_by_durable, replay_records,
 };
 use parchmint_save::{
     AtomicWritePlan, CheckpointIntent, CheckpointIntentState, CheckpointIntentStore,
@@ -358,7 +358,11 @@ impl RecoveryJournal for FsRecoveryJournal {
             self.sync_journal()?;
             return Ok(RecoveryReceipt::for_batch(&batch));
         }
-        batch.validate_after(batches.last())?;
+        let mut frontier = RecoveryAppendFrontier::default();
+        for previous in &batches {
+            frontier.accept(previous)?;
+        }
+        frontier.accept(&batch)?;
         let frame = encode_journal_frame(&batch)?;
         self.append_frame(&frame)?;
         Ok(RecoveryReceipt::for_batch(&batch))
@@ -395,17 +399,16 @@ impl RecoveryJournal for FsRecoveryJournal {
             .lock()
             .map_err(|_| poisoned_recovery_lock())?;
         let frames = self.read_journal()?;
-        let mut previous = None;
+        let mut frontier = RecoveryAppendFrontier::default();
         let mut durable_through = None;
         for frame in &frames {
             let RecoveryRecord::Complete(batch) = &frame.record else {
                 break;
             };
-            if batch.validate_after(previous).is_err() {
+            if frontier.accept(batch).is_err() {
                 break;
             }
             durable_through = Some(batch.revision_vector());
-            previous = Some(batch);
         }
         Ok(RecoveryInventory {
             records: frames
@@ -678,6 +681,7 @@ fn partial_project_revision(bytes: &[u8]) -> Option<ProjectRevision> {
 
 fn validated_batches(frames: &[StoredFrame]) -> Result<Vec<RecoveryBatch>, RecoveryError> {
     let mut batches = Vec::with_capacity(frames.len());
+    let mut frontier = RecoveryAppendFrontier::default();
     for frame in frames {
         let RecoveryRecord::Complete(batch) = &frame.record else {
             return Err(RecoveryError::Storage {
@@ -685,7 +689,7 @@ fn validated_batches(frames: &[StoredFrame]) -> Result<Vec<RecoveryBatch>, Recov
                 reason: "journal contains a quarantined recovery frame".into(),
             });
         };
-        batch.validate_after(batches.last())?;
+        frontier.accept(batch)?;
         batches.push(batch.clone());
     }
     Ok(batches)

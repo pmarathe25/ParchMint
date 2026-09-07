@@ -108,10 +108,12 @@ enum HarnessAction {
     ),
     DragHierarchyNodeToPane(HarnessWindow, HarnessNode, EditorPane),
     ContainsText(HarnessWindow, String),
+    TextIsVisible(HarnessWindow, String),
     Resize(HarnessWindow, f32, f32),
     Redraw(HarnessWindow),
     ElapseAutosaveIdle,
     ElapseRecoveryCapture,
+    ElapseNotifications,
     HoldCompletions,
     ReleaseCompletions(bool),
     AdvanceAutosaveClock(Duration, Duration),
@@ -332,6 +334,12 @@ fn execute_action(
                 .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::TextIsVisible(window, text) => {
+            return harness
+                .text_is_visible(window, &text)
+                .map(HarnessValue::Bool)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::EditorTabIsVisible(window, pane, document_id) => {
             return harness
                 .editor_tab_is_visible(window, pane, &document_id)
@@ -342,6 +350,7 @@ fn execute_action(
         HarnessAction::Redraw(window) => harness.redraw(window),
         HarnessAction::ElapseAutosaveIdle => harness.elapse_autosave_idle(),
         HarnessAction::ElapseRecoveryCapture => harness.elapse_recovery_capture(),
+        HarnessAction::ElapseNotifications => harness.elapse_notifications(),
         HarnessAction::HoldCompletions => {
             harness.hold_completions();
             Ok(())
@@ -1017,6 +1026,15 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    pub fn text_is_visible(
+        &self,
+        window: HarnessWindow,
+        text: impl Into<String>,
+    ) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::TextIsVisible(window, text.into()))?
+            .into_bool()
+    }
+
     pub fn contains_text(
         &self,
         window: HarnessWindow,
@@ -1049,6 +1067,11 @@ impl DesktopInteractionHarness {
     /// Advances the production recovery cadence without waiting on wall time.
     pub fn elapse_recovery_capture(&self) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ElapseRecoveryCapture)?
+            .into_unit()
+    }
+
+    pub fn elapse_notifications(&self) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ElapseNotifications)?
             .into_unit()
     }
 

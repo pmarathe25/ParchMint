@@ -30,7 +30,7 @@ use parchmint_domain::{
     apply_project_command,
 };
 use parchmint_editor_api::{
-    CanonicalCommentAnchor, CanonicalDocumentLoad, CommentId, DocumentPosition, EditorSelection,
+    CanonicalDocumentLoad, CommentId, DocumentPosition, EditorSelection,
     SearchDecoration as AdapterSearchDecoration, SpellcheckDecoration as AdapterSpellDecoration,
     StyleCatalogProjection, ViewId,
 };
@@ -554,54 +554,16 @@ impl NativeProjectEffectExecutor {
                 view,
                 comment_id,
                 highlight,
-            } => {
-                let current = self.current_snapshot().await?;
-                let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
-                let thread = current
-                    .documents
-                    .iter()
-                    .flat_map(|document| &document.comments)
-                    .find(|thread| thread.id == id)
-                    .ok_or_else(|| unknown_id(StableIdKind::Comment, comment_id))?;
-                let CanonicalCommentAnchor::Text {
-                    range,
-                    orphaned: false,
-                    ..
-                } = &thread.anchor
-                else {
-                    return Err(ProjectRuntimeError::InvalidEffect(
-                        "comment has no live text anchor",
-                    ));
-                };
-                Ok(EditorEffectCompletion::Intent(
-                    EditorRuntimeIntent::NavigateCommentAnchor {
-                        view,
-                        comment: highlight.then_some(id),
-                        range: *range,
-                    },
-                ))
-            }
-            EditorEffect::ShowOrphanedComment { comment_id } => {
-                let current = self.current_snapshot().await?;
-                let id = CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?);
-                let orphaned = current
-                    .documents
-                    .iter()
-                    .flat_map(|document| &document.comments)
-                    .any(|thread| {
-                        thread.id == id
-                            && matches!(
-                                thread.anchor,
-                                CanonicalCommentAnchor::Text { orphaned: true, .. }
-                            )
-                    });
-                if !orphaned {
-                    return Err(ProjectRuntimeError::InvalidEffect(
-                        "comment is not orphaned",
-                    ));
-                }
-                Ok(EditorEffectCompletion::GlobalDictionaryUpdated)
-            }
+            } => Ok(EditorEffectCompletion::Intent(
+                EditorRuntimeIntent::NavigateCommentAnchor {
+                    view,
+                    comment: CommentId::from_bytes(parse_stable_hex(&comment_id, "comment")?),
+                    highlight,
+                },
+            )),
+            // The reducer already presents the orphaned thread. It has no live
+            // text location to navigate and need not query persisted comments.
+            EditorEffect::ShowOrphanedComment { .. } => Ok(EditorEffectCompletion::Noop),
         }
     }
 
@@ -642,6 +604,9 @@ impl NativeProjectEffectExecutor {
         commands: impl IntoIterator<Item = ProjectCommand>,
     ) -> Result<ProjectEffectCompletion, ProjectRuntimeError> {
         let commands = commands.into_iter().collect::<Vec<_>>();
+        if commands.is_empty() {
+            return Ok(ProjectEffectCompletion::Unchanged);
+        }
         let mut simulated = self.snapshot.project.clone();
         for command in &commands {
             simulated = apply_project_command(&simulated, simulated.revision, command.clone())
@@ -712,6 +677,7 @@ impl NativeProjectEffectExecutor {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ProjectEffectCompletion {
+    Unchanged,
     RefreshedSnapshot(Box<ProjectSnapshot>),
     WorkflowSnapshot(Box<ProjectSnapshot>),
     TreePaste {
@@ -750,6 +716,7 @@ pub(crate) enum EditorEffectCompletion {
     Intent(EditorRuntimeIntent),
     ProjectMutation(ProjectEffectCompletion),
     GlobalDictionaryUpdated,
+    Noop,
     SavedThrough(u64),
 }
 
@@ -781,8 +748,8 @@ pub(crate) enum EditorRuntimeIntent {
     },
     NavigateCommentAnchor {
         view: ViewId,
-        comment: Option<CommentId>,
-        range: EditorSelection,
+        comment: CommentId,
+        highlight: bool,
     },
     ShowSpellingMenu(SpellingMenu),
     RestoreFocus {
@@ -797,7 +764,6 @@ pub(crate) enum StableIdKind {
     Document,
     MetadataField,
     Style,
-    Comment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1637,9 +1603,7 @@ fn plan_moves(
             .saturating_sub(usize::from(old_parent == parent));
         let index = index.min(available_slots);
         if old_parent == parent && old_index == index {
-            return Err(ProjectRuntimeError::InvalidEffect(
-                "move destination is the current location",
-            ));
+            continue;
         }
         let command = ProjectCommand::move_node(node, parent, index);
         simulated = apply_project_command(&simulated, simulated.revision, command.clone())

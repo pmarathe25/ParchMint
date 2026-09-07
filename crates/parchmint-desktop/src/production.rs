@@ -25,17 +25,13 @@ mod dependencies {
         EditorPersistenceCoordinator, LazyDocumentSummary, NativeDocumentStateOwner,
         NativeProjectCommandDispatcher, PersistenceSaveKind, ProjectPersistenceCoordinator,
     };
-    pub(super) use parchmint_contracts::{AnnotationAnchor, AnnotationThread};
     #[cfg(feature = "diagnostics")]
     pub(super) use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
     pub(super) use parchmint_domain::{
         BlockId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectExportSetting,
         ProjectId, apply_project_command,
     };
-    pub(super) use parchmint_editor_api::{
-        BlockId as EditorBlockId, CanonicalComment, CanonicalCommentAnchor,
-        CanonicalCommentMessage, CommentId, DocumentPosition, EditorRevision, EditorSelection,
-    };
+    pub(super) use parchmint_editor_api::{CanonicalComment, EditorRevision};
     pub(super) use parchmint_editor_iced::{EditorIcedAdapter, EditorIcedConfig};
     pub(super) use parchmint_export_api::{
         CancelOutcome, ExportDefaults, ExportError, ExportHandle, ExportNode, ExportPlan,

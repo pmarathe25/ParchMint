@@ -28,6 +28,9 @@ See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 
+Append and inspection validate the accumulated document revisions and hashes,
+including records separated by edits to other documents.
+
 One worker appends recovery records for each project. It returns a flush receipt
 after every record through the requested revision reaches durable storage. The
 save crate records a planned History checkpoint before replacing project files.

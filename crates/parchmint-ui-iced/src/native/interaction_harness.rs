@@ -204,9 +204,8 @@ impl PersistentSurface {
 
     fn resize(&mut self, size: Size) {
         self.size = size;
-        // Layout and overlay geometry are size-dependent, while focus state
-        // lives in the widgets themselves and is reconstructed by Iced.
-        self.cache = user_interface::Cache::default();
+        // Rebuild layout with new constraints while retaining widget focus,
+        // scroll positions, and open overlays, as the native event loop does.
     }
 
     fn find_bounds<S>(
@@ -1749,6 +1748,17 @@ impl NativeDesktopHarness {
         Ok(simulator.find(text).is_ok())
     }
 
+    /// Checks the current viewport and widget cache, including live scrolling.
+    /// This establishes geometry; screenshots and clicks still verify occlusion.
+    pub fn text_is_visible(
+        &mut self,
+        window: HarnessWindow,
+        text: &str,
+    ) -> Result<bool, HarnessError> {
+        self.window_id(window)?;
+        Ok(self.find_text_bounds(window, text).is_ok())
+    }
+
     /// Resizes a headless production window and dispatches the matching Iced
     /// window event. Author flows use this to exercise responsive layouts
     /// through the same update path as a real desktop resize.
@@ -1817,6 +1827,16 @@ impl NativeDesktopHarness {
             "advance recovery capture clock".to_owned(),
         );
         let task = self.desktop.update(Message::AutosaveTick(now));
+        self.run_task(task)
+    }
+
+    /// Runs the production timer after a bounded elapsed interval, including
+    /// notification expiry. No real time passes and no dirty editor is required.
+    pub fn elapse_notifications(&mut self) -> Result<(), HarnessError> {
+        self.record(HarnessWindow::Project, "elapse notifications".to_owned());
+        let task = self.desktop.update(Message::AutosaveTick(
+            Instant::now() + Duration::from_secs(6),
+        ));
         self.run_task(task)
     }
 
@@ -2086,25 +2106,59 @@ impl NativeDesktopHarness {
     }
 
     pub fn snapshot(
-        &self,
+        &mut self,
         window: HarnessWindow,
         path: impl AsRef<Path>,
     ) -> Result<(), HarnessError> {
+        use iced::advanced::renderer::Headless;
+        use iced::widget::theme::Base;
+        self.redraw(window)?;
         let id = self.window_id(window)?;
-        let size = self
-            .surfaces
-            .get(&id)
-            .map_or_else(|| Self::window_size(window), |surface| surface.size);
-        let mut simulator = Simulator::<Message>::with_size(
-            crate::visual_verification::visual_settings(),
-            size,
+        self.ensure_surface(id, window)?;
+        let theme = self.desktop.theme(id);
+        let base = theme.base();
+        let surface = self.surfaces.get_mut(&id).expect("surface exists");
+        let mut interface = UserInterface::build(
             self.desktop.view(id),
+            surface.size,
+            std::mem::take(&mut surface.cache),
+            &mut surface.renderer,
         );
-        simulator
-            .snapshot(&self.desktop.theme(id))
-            .and_then(|snapshot| snapshot.matches_image(path))
-            .map(|_| ())
-            .map_err(|error| HarnessError::new(error.to_string()))
+        interface.draw(
+            &mut surface.renderer,
+            &theme,
+            &iced::advanced::renderer::Style {
+                text_color: base.text_color,
+            },
+            surface.cursor,
+        );
+        surface.cache = interface.into_cache();
+        let size = Size::new(
+            (surface.size.width * 2.0) as u32,
+            (surface.size.height * 2.0) as u32,
+        );
+        let rgba = surface
+            .renderer
+            .screenshot(size, 2.0, base.background_color);
+        let path = path.as_ref().with_extension("");
+        let path = path.with_file_name(format!(
+            "{}-{}.png",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            surface.renderer.name()
+        ));
+        let write = || -> Result<(), Box<dyn std::error::Error>> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create_new(&path)?;
+            let mut encoder = png::Encoder::new(file, size.width, size.height);
+            encoder.set_color(png::ColorType::Rgba);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&rgba)?;
+            writer.finish()?;
+            Ok(())
+        };
+        write().map_err(|error| HarnessError::new(error.to_string()))
     }
 
     fn find_text_bounds(

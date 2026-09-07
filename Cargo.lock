@@ -2387,7 +2387,6 @@ name = "parchmint-desktop"
 version = "0.1.0"
 dependencies = [
  "parchmint-application",
- "parchmint-contracts",
  "parchmint-diagnostics",
  "parchmint-domain",
  "parchmint-editor-api",

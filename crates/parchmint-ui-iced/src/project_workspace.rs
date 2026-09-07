@@ -2119,6 +2119,7 @@ impl HistoryCheckpointRow {
 pub struct HistoryPreviewData {
     pub checkpoint: HistoryCheckpointRow,
     pub resource_paths: Vec<String>,
+    pub project_changes: Option<Vec<HistoryComparison>>,
     pub document: Option<HistoryDocumentPreview>,
 }
 
@@ -2509,6 +2510,23 @@ pub(crate) fn compare_history_documents(
         document_id: before.document_id.clone(),
         document_title: after.title.clone(),
         lines: comparison_rows(edits),
+    }
+}
+
+pub(crate) fn compare_history_text(
+    checkpoint_id: &str,
+    title: &str,
+    before: &str,
+    after: &str,
+) -> HistoryComparison {
+    HistoryComparison {
+        checkpoint_id: checkpoint_id.to_owned(),
+        document_id: String::new(),
+        document_title: title.to_owned(),
+        lines: comparison_rows(history_line_edits(
+            &before.lines().collect::<Vec<_>>(),
+            &after.lines().collect::<Vec<_>>(),
+        )),
     }
 }
 
@@ -6994,6 +7012,7 @@ mod tests {
                 vec!["chapter-one"],
             ),
             resource_paths: vec!["documents/chapter-one.html".to_owned()],
+            project_changes: None,
             document: Some(HistoryDocumentPreview {
                 document_id: "chapter-one".to_owned(),
                 canonical_path: "documents/chapter-one.html".to_owned(),
@@ -7099,6 +7118,7 @@ mod tests {
                     vec!["chapter-one"],
                 ),
                 resource_paths: Vec::new(),
+                project_changes: None,
                 document: Some(HistoryDocumentPreview {
                     document_id: "chapter-one".to_owned(),
                     canonical_path: "documents/chapter-one.html".to_owned(),
@@ -7129,6 +7149,7 @@ mod tests {
         let preview = HistoryPreviewData {
             checkpoint: checkpoint.clone(),
             resource_paths: vec!["documents/chapter-one.html".to_owned()],
+            project_changes: None,
             document: Some(HistoryDocumentPreview {
                 document_id: "chapter-one".to_owned(),
                 canonical_path: "documents/chapter-one.html".to_owned(),
@@ -7330,6 +7351,7 @@ mod tests {
                 vec!["chapter-one"],
             ),
             resource_paths: vec!["documents/chapter-one.json".to_owned()],
+            project_changes: None,
             document: None,
         };
         assert!(
@@ -7351,6 +7373,7 @@ mod tests {
                 vec!["chapter-one"],
             ),
             resource_paths: vec!["documents/chapter-one.json".to_owned()],
+            project_changes: None,
             document: None,
         };
         assert!(
@@ -7478,6 +7501,7 @@ mod tests {
                             recorded_at_unix_millis: None,
                         },
                         resource_paths: Vec::new(),
+                        project_changes: None,
                         document: None,
                     }),
                     current_document: None,

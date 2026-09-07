@@ -37,6 +37,9 @@ PNG captures. The default desktop enables neither feature.
   four workers with at most 128 queued jobs. Submission reports overload without
   blocking input. Services with their own workers keep their own limits.
 
+Comment navigation reads the live session’s current anchors, including unsaved
+comments and positions shifted by editing.
+
 A document session is shared across panes; each view keeps independent selection
 and viewport state. Tab switches advance mount generations, and delayed view
 results are ignored when their target no longer matches. Loading a document
@@ -45,8 +48,10 @@ merges matching bodies without replacing newer outline state.
 Project mutations and their saves are serialized. Save results acknowledge only
 the captured revisions, leaving later edits dirty. A completed native call can
 outlive its window, but its stale completion cannot update that window. Close
-waits for the final save. History resolves paths from the selected checkpoint's
-manifest and compares them with the current mounted draft.
+waits for the final save. History resolves document identities from the selected
+checkpoint’s manifest.
+[history_project.rs](src/history_project.rs) compares the project on a worker,
+including live editor drafts, outline changes, comments, dictionary, and styles.
 
 The [UI driver](../../tests/parchmint-ui-driver/README.md) verifies these paths
 through rendered controls, including delayed completion delivery and visible

@@ -35,6 +35,9 @@ editable while a projection is built.
 `EditorAdapter` opens shared sessions, attaches views, executes commands,
 returns selection and clipboard values, and projects exact document revisions.
 `DurableProjectionBatch` pairs a document projection with its persistence revisions.
+`CanonicalComment` converts to and from the annotation contract with `From`,
+preserving unknown fields. Persistence, project loading, and History share this
+conversion.
 
 See [the source](src/lib.rs) for method signatures.
 

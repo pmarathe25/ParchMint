@@ -59,8 +59,15 @@ fn append_validation_preserves_order_and_revision_receipts_are_exact() {
         document,
         EditorRevisionRange::new(DocumentRevision::from(2), DocumentRevision::from(2)).unwrap(),
     );
-    assert!(matches!(
+    assert_eq!(
         invalid_document.validate_after(Some(&first)),
+        Ok(()),
+        "a document absent from the preceding batch can continue its saved revision"
+    );
+    let mut with_document = first.clone();
+    with_document.documents = invalid_document.documents.clone();
+    assert!(matches!(
+        invalid_document.validate_after(Some(&with_document)),
         Err(RecoveryError::NonConsecutiveDocumentRevision { .. })
     ));
     let receipt = RecoveryReceipt::for_batch(&second);

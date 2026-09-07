@@ -9,6 +9,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, sync::mpsc};
 
 pub use parchmint_contracts::AnnotationValue;
+use parchmint_contracts::{AnnotationAnchor, AnnotationMessage};
 use parchmint_recovery_api::{RecoveryBatch, RecoveryError, RecoveryReceipt};
 use parchmint_save::SaveError;
 
@@ -352,6 +353,93 @@ pub struct CanonicalComment {
     pub resolved: bool,
     pub anchor: CanonicalCommentAnchor,
     pub unknown_fields: BTreeMap<String, AnnotationValue>,
+}
+
+impl From<&CanonicalComment> for parchmint_contracts::AnnotationThread {
+    fn from(thread: &CanonicalComment) -> Self {
+        Self {
+            id: *thread.id.as_bytes(),
+            messages: thread
+                .messages
+                .iter()
+                .map(|message| AnnotationMessage {
+                    id: *message.id.as_bytes(),
+                    body: message.body.clone(),
+                    unknown_fields: message.unknown_fields.clone(),
+                })
+                .collect(),
+            resolved: thread.resolved,
+            anchor: match &thread.anchor {
+                CanonicalCommentAnchor::Document { unknown_fields } => AnnotationAnchor::Document {
+                    unknown_fields: unknown_fields.clone(),
+                },
+                CanonicalCommentAnchor::Text {
+                    block,
+                    range,
+                    quote,
+                    context_before,
+                    context_after,
+                    orphaned,
+                    unknown_fields,
+                } => AnnotationAnchor::Text {
+                    block: *block.as_bytes(),
+                    start: range.start().value(),
+                    end: range.end().value(),
+                    quote: quote.clone(),
+                    context_before: context_before.clone(),
+                    context_after: context_after.clone(),
+                    orphaned: *orphaned,
+                    unknown_fields: unknown_fields.clone(),
+                },
+            },
+            unknown_fields: thread.unknown_fields.clone(),
+        }
+    }
+}
+
+impl From<parchmint_contracts::AnnotationThread> for CanonicalComment {
+    fn from(thread: parchmint_contracts::AnnotationThread) -> Self {
+        Self {
+            id: CommentId::from_bytes(thread.id),
+            messages: thread
+                .messages
+                .into_iter()
+                .map(|message| CanonicalCommentMessage {
+                    id: CommentId::from_bytes(message.id),
+                    body: message.body,
+                    unknown_fields: message.unknown_fields,
+                })
+                .collect(),
+            resolved: thread.resolved,
+            anchor: match thread.anchor {
+                AnnotationAnchor::Document { unknown_fields } => {
+                    CanonicalCommentAnchor::Document { unknown_fields }
+                }
+                AnnotationAnchor::Text {
+                    block,
+                    start,
+                    end,
+                    quote,
+                    context_before,
+                    context_after,
+                    orphaned,
+                    unknown_fields,
+                } => CanonicalCommentAnchor::Text {
+                    block: BlockId::from_bytes(block),
+                    range: EditorSelection::new(
+                        DocumentPosition::from(start),
+                        DocumentPosition::from(end),
+                    ),
+                    quote,
+                    context_before,
+                    context_after,
+                    orphaned,
+                    unknown_fields,
+                },
+            },
+            unknown_fields: thread.unknown_fields,
+        }
+    }
 }
 
 impl CanonicalComment {

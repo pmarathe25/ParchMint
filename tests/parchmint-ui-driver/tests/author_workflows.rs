@@ -770,6 +770,23 @@ fn author_can_reorder_chapters_from_explorer_and_cards() {
             HarnessDropPosition::After,
         )
         .expect("drag the first card after the second");
+    let checkpoints = harness.history_checkpoints().unwrap();
+    for _ in 0..3 {
+        harness
+            .drag_hierarchy_node(
+                HarnessWindow::Project,
+                HarnessHierarchySurface::Cards,
+                chapter_one.clone(),
+                chapter_two.clone(),
+                HarnessDropPosition::After,
+            )
+            .expect("dropping at the current location is harmless");
+    }
+    assert_eq!(
+        harness.history_checkpoints().unwrap(),
+        checkpoints,
+        "a no-op drop must not create a checkpoint"
+    );
     assert_order(
         &harness,
         &["Chapter Two", "Chapter One"],
@@ -908,6 +925,17 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     assert!(
         visible(&harness, "Verify the weather detail."),
         "the Inspector is a document-level index of the newly attached thread"
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Verify the weather detail.")
+        .expect("navigate to a newly created, unsaved comment from the Inspector");
+    harness
+        .press_command_key(HarnessWindow::Project, 'c')
+        .unwrap();
+    assert_eq!(
+        harness.clipboard_contents().0.as_deref(),
+        Some("lighthouse keeper"),
+        "comment navigation must select its live anchor"
     );
     harness
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)

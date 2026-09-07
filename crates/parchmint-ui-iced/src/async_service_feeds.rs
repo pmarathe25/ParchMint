@@ -10,6 +10,9 @@
     reason = "the controller is wired into the native Iced runtime in a separate integration pass"
 )]
 
+#[path = "history_project.rs"]
+mod history_project;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -310,6 +313,31 @@ impl AsyncServiceFeeds {
         })
     }
 
+    pub fn history_project_preview(
+        &self,
+        checkpoint_id: String,
+        current_document: Option<HistoryCurrentDocument>,
+        drafts: Vec<parchmint_editor_api::CanonicalProjection>,
+    ) -> BlockingServiceJob<HistoryPreviewResult> {
+        let ports = self.ports.clone();
+        let focused = self.history_preview(checkpoint_id.clone(), current_document);
+        BlockingServiceJob::new("compare project History", move || {
+            let mut result = focused.run()?;
+            let checkpoint =
+                CheckpointId::from_bytes(parse_stable_id(&checkpoint_id, "History checkpoint")?);
+            let preview = ports.history_preview(checkpoint)?;
+            let current = ports.snapshot_with_documents()?;
+            result.project_changes = Some(history_project::compare(
+                ports.as_ref(),
+                checkpoint,
+                &preview,
+                current,
+                drafts,
+            )?);
+            Ok(result)
+        })
+    }
+
     pub fn deleted_preview(
         &self,
         node_id: impl Into<String>,
@@ -551,6 +579,7 @@ pub struct HistoryPreviewResult {
     pub resource_paths: Vec<String>,
     pub document: Option<HistoryDocumentPreview>,
     pub current_document: Option<HistoryCurrentDocument>,
+    pub project_changes: Option<Vec<HistoryComparison>>,
     pub comparison: Option<HistoryComparison>,
 }
 
@@ -570,6 +599,7 @@ impl HistoryPreviewResult {
                 .collect(),
             document,
             current_document,
+            project_changes: None,
             comparison,
         }
     }
@@ -579,6 +609,7 @@ impl HistoryPreviewResult {
             preview: Box::new(HistoryPreviewData {
                 checkpoint: self.checkpoint,
                 resource_paths: self.resource_paths,
+                project_changes: self.project_changes,
                 document: self.document,
             }),
             current_document: self.current_document,
@@ -1173,6 +1204,7 @@ pub fn export_request(output_name: impl Into<String>, number_documents: bool) ->
 }
 
 trait ServiceFeedPorts: Send + Sync {
+    fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ServiceFeedError>;
     fn authorize(&self) -> Result<(), ServiceFeedError>;
     fn search_query(
         &self,
@@ -1240,6 +1272,12 @@ impl ProjectUiPortAdapter {
 }
 
 impl ServiceFeedPorts for ProjectUiPortAdapter {
+    fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ServiceFeedError> {
+        self.access()?
+            .snapshot(|query| query.snapshot_with_documents())
+            .map_err(stale_session)?
+            .map_err(|error| service_error(ServiceKind::ProjectQuery, error))
+    }
     fn authorize(&self) -> Result<(), ServiceFeedError> {
         self.access().map(|_| ())
     }
@@ -1543,6 +1581,12 @@ mod tests {
     }
 
     impl ServiceFeedPorts for FakePorts {
+        fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ServiceFeedError> {
+            Err(ServiceFeedError::InvalidState {
+                operation: "test snapshot",
+                reason: "not configured",
+            })
+        }
         fn authorize(&self) -> Result<(), ServiceFeedError> {
             self.check()
         }

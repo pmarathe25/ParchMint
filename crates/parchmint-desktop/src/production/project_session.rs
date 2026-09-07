@@ -1404,9 +1404,9 @@ fn application_state(
                                 "sidecar document ID does not match its path".into(),
                             ));
                         }
-                        sidecar
-                            .typed_threads()
-                            .map(|threads| threads.into_iter().map(editor_thread).collect())
+                        sidecar.typed_threads().map(|threads| {
+                            threads.into_iter().map(CanonicalComment::from).collect()
+                        })
                     })
                     .map_err(|error| {
                         ProjectFilesystemError::failed(
@@ -1579,49 +1579,6 @@ fn recovery_document_content_hash(
         None => digest.update([0]),
     }
     recovery::ContentHash::from_bytes(digest.finalize().into())
-}
-
-fn editor_thread(thread: AnnotationThread) -> CanonicalComment {
-    CanonicalComment {
-        id: CommentId::from_bytes(thread.id),
-        messages: thread
-            .messages
-            .into_iter()
-            .map(|message| CanonicalCommentMessage {
-                id: CommentId::from_bytes(message.id),
-                body: message.body,
-                unknown_fields: message.unknown_fields,
-            })
-            .collect(),
-        resolved: thread.resolved,
-        anchor: match thread.anchor {
-            AnnotationAnchor::Document { unknown_fields } => {
-                CanonicalCommentAnchor::Document { unknown_fields }
-            }
-            AnnotationAnchor::Text {
-                block,
-                start,
-                end,
-                quote,
-                context_before,
-                context_after,
-                orphaned,
-                unknown_fields,
-            } => CanonicalCommentAnchor::Text {
-                block: EditorBlockId::from_bytes(block),
-                range: EditorSelection::new(
-                    DocumentPosition::from(start),
-                    DocumentPosition::from(end),
-                ),
-                quote,
-                context_before,
-                context_after,
-                orphaned,
-                unknown_fields,
-            },
-        },
-        unknown_fields: thread.unknown_fields,
-    }
 }
 
 fn is_document_resource(path: &CanonicalRelativePath) -> bool {

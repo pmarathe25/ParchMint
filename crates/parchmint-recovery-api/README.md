@@ -31,6 +31,9 @@ See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 
+`RecoveryAppendFrontier` validates project order, per-document revisions, and
+resource hashes across interleaved edits. A document’s first retained record can
+continue a saved revision; replay checks that revision against the saved base.
 The journal adds records in order. A `RecoveryReceipt` identifies the last
 record that has reached durable storage.
 

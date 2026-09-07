@@ -178,32 +178,51 @@ impl RecoveryBatch {
 
     /// Checks append order against the immediately preceding valid batch.
     pub fn validate_after(&self, previous: Option<&RecoveryBatch>) -> Result<(), RecoveryError> {
-        self.validate()?;
-        let Some(previous) = previous else {
-            return Ok(());
-        };
-        let expected = previous.project_revision.next();
-        if self.project_revision != expected {
-            return Err(RecoveryError::NonConsecutiveProjectRevision {
-                expected,
-                actual: self.project_revision,
-            });
+        let mut frontier = RecoveryAppendFrontier::default();
+        if let Some(previous) = previous {
+            frontier.accept(previous)?;
         }
-        for (document, range) in &self.documents {
-            let expected = previous
-                .documents
-                .get(document)
-                .map_or_else(|| DocumentRevision::from(1), |range| range.last.next());
-            if range.first != expected {
-                return Err(RecoveryError::NonConsecutiveDocumentRevision {
-                    document: *document,
+        frontier.accept(self)
+    }
+}
+
+/// Checks a retained journal sequence across interleaved document edits.
+/// The first occurrence of a document can continue any saved revision;
+/// replay validates that starting revision against the canonical base.
+#[derive(Debug, Default)]
+pub struct RecoveryAppendFrontier {
+    project: Option<ProjectRevision>,
+    documents: BTreeMap<DocumentId, DocumentRevision>,
+    hashes: BTreeMap<ResourceId, ContentHash>,
+}
+
+impl RecoveryAppendFrontier {
+    /// Advances only after all revision and hash checks pass.
+    pub fn accept(&mut self, batch: &RecoveryBatch) -> Result<(), RecoveryError> {
+        batch.validate()?;
+        if let Some(previous) = self.project {
+            let expected = previous.next();
+            if batch.project_revision != expected {
+                return Err(RecoveryError::NonConsecutiveProjectRevision {
                     expected,
-                    actual: range.first,
+                    actual: batch.project_revision,
                 });
             }
         }
-        for (resource, expected) in &previous.result_hashes {
-            if let Some(actual) = self.base_hashes.get(resource)
+        for (document, range) in &batch.documents {
+            if let Some(previous) = self.documents.get(document) {
+                let expected = previous.next();
+                if range.first != expected {
+                    return Err(RecoveryError::NonConsecutiveDocumentRevision {
+                        document: *document,
+                        expected,
+                        actual: range.first,
+                    });
+                }
+            }
+        }
+        for (resource, actual) in &batch.base_hashes {
+            if let Some(expected) = self.hashes.get(resource)
                 && actual != expected
             {
                 return Err(RecoveryError::HashMismatch {
@@ -213,6 +232,14 @@ impl RecoveryBatch {
                 });
             }
         }
+        self.project = Some(batch.project_revision);
+        self.documents.extend(
+            batch
+                .documents
+                .iter()
+                .map(|(document, range)| (*document, range.last)),
+        );
+        self.hashes.extend(batch.result_hashes.clone());
         Ok(())
     }
 }

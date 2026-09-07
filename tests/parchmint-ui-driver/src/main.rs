@@ -50,8 +50,13 @@ enum Command {
         window: WindowName,
         text: String,
     },
+    TextIsVisible {
+        window: WindowName,
+        text: String,
+    },
     ElapseAutosaveIdle,
     ElapseRecoveryCapture,
+    ElapseNotifications,
     HoldCompletions,
     ReleaseCompletions {
         newest_first: bool,
@@ -168,7 +173,11 @@ fn execute(
         Command::ContainsText { window, text } => {
             harness.contains_text(window.into(), text).map(Value::Bool)
         }
+        Command::TextIsVisible { window, text } => harness
+            .text_is_visible(window.into(), text)
+            .map(Value::Bool),
         Command::ElapseRecoveryCapture => harness.elapse_recovery_capture().map(|()| Value::Null),
+        Command::ElapseNotifications => harness.elapse_notifications().map(|()| Value::Null),
         Command::HoldCompletions => harness.hold_completions().map(|()| Value::Null),
         Command::ReleaseCompletions { newest_first } => harness
             .release_completions(newest_first)
@@ -210,7 +219,14 @@ fn write_failure_bundle(
     command: &Value,
     error: &str,
 ) {
-    if fs::create_dir_all(directory).is_err() {
+    static NEXT_FAILURE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = NEXT_FAILURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let directory = if sequence == 1 {
+        directory.to_owned()
+    } else {
+        directory.join(format!("failure-{sequence}"))
+    };
+    if fs::create_dir_all(&directory).is_err() {
         return;
     }
     let trace = harness.trace().unwrap_or_default();

@@ -4,6 +4,8 @@ This crate captures UI screenshots and compares PNGs. Its library is
 framework-neutral; the command uses the production Iced capture boundary.
 Application requirements live in tests. A screenshot comparison checks rendering;
 the [UI driver](../parchmint-ui-driver/README.md) checks working application flows.
+The [agent usability review](../parchmint-ui-driver/USABILITY.md) combines replayable
+flows with visual judgment. Pixel similarity alone is not a usability verdict.
 
 ## Commands
 

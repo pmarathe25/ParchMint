@@ -21,7 +21,6 @@ workspace = true
 
 [dependencies]
 parchmint-application = { path = "../parchmint-application" }
-parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-diagnostics = { path = "../parchmint-diagnostics", optional = true }
 parchmint-editor-api = { path = "../parchmint-editor-api" }

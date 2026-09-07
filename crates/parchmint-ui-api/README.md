@@ -12,7 +12,8 @@ export, editor, spelling, preference, and workspace services for one session.
 Each service access checks that the session is still current.
 
 `ProjectSnapshotQuery` returns the project structure, summaries for all documents,
-and bodies for loaded documents. Export can request a complete body snapshot.
+and bodies for loaded documents. `snapshot_with_documents` materializes all live
+documents for background reads such as Export and History.
 `ProjectWorkflowPort` exposes multi-step application operations and their results.
 
 `ProjectSessionRegistry` issues and retires generation-tagged session identities.

@@ -150,7 +150,7 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
         Ok(snapshot)
     }
 
-    fn snapshot_for_export(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
+    fn snapshot_with_documents(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
         let mut snapshot = self.snapshot()?;
         snapshot.documents = self
             .documents
@@ -552,7 +552,7 @@ impl ProjectExportPort for ProductionProjectWorkflows {
             if active.handle.status() == parchmint_export_api::ExportStatus::Cancelled {
                 return Ok(ExportOutcome::Cancelled);
             }
-            let snapshot = self.query.snapshot_for_export()?;
+            let snapshot = self.query.snapshot_with_documents()?;
             let project = export_snapshot(&snapshot)?;
             let (sink, output_name, completed_path) =
                 NativeExportSink::acquire(selection.as_path()).map_err(map_export_error)?;

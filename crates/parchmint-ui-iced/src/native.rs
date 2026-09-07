@@ -45,7 +45,6 @@ use parchmint_editor_api::{
     EditorSelection, EventStream, InlineMarkKind, SharedEditorSession, StyleCatalogProjection,
     ViewId,
 };
-use parchmint_editor_core::EditorCoreSession;
 use parchmint_editor_iced::{
     EditorIcedAdapter, EditorSurfaceTheme, EditorViewport, MountedEditorBinding,
     MountedEditorBindingConfig, MountedEditorClipboardIntent, MountedEditorSession,
@@ -1219,7 +1218,7 @@ impl WorkspaceNotification {
             id: next_workspace_notification_id(),
             message: message.into(),
             kind: NotificationKind::Error,
-            expires_at: None,
+            expires_at: Some(Instant::now() + Duration::from_secs(5)),
         }
     }
 }
@@ -1242,10 +1241,20 @@ fn append_workspace_notification(
 }
 
 fn expire_workspace_notifications(notifications: &mut Vec<WorkspaceNotification>, now: Instant) {
+    for notification in notifications.iter_mut() {
+        if notification.kind == NotificationKind::Error
+            && notification
+                .expires_at
+                .is_some_and(|deadline| deadline <= now)
+        {
+            notification.expires_at = None;
+        }
+    }
     notifications.retain(|notification| {
-        notification
-            .expires_at
-            .is_none_or(|expires_at| expires_at > now)
+        notification.kind == NotificationKind::Error
+            || notification
+                .expires_at
+                .is_some_and(|deadline| deadline > now)
     });
 }
 
@@ -2615,6 +2624,22 @@ impl NativeDesktop {
                 };
                 if workspace.accept_completion(ProjectTaskCompletion::for_ticket(ticket, payload)) {
                     workspace.finish_history_page(next_cursor);
+                    if !append
+                        && workspace.history().error().is_none()
+                        && let Some(checkpoint) = workspace
+                            .history()
+                            .selected_checkpoint_id()
+                            .map(str::to_owned)
+                    {
+                        // Returning from authoring must compare the new live
+                        // draft, even when the selected checkpoint is unchanged.
+                        return self.update_project_surface(
+                            window,
+                            ProjectSurfaceMessage::Project(
+                                ProjectMessage::SelectHistoryCheckpoint(checkpoint),
+                            ),
+                        );
+                    }
                 }
                 Task::none()
             }
@@ -3438,6 +3463,17 @@ impl NativeDesktop {
             {
                 errors.insert(format!("modal:{id:?}"), format!("{title}: {detail}"));
             }
+            if let Some(workspace) = state.workspace.as_ref() {
+                for (operation, error) in [
+                    ("history", workspace.history().error()),
+                    ("search", workspace.global_search().error()),
+                    ("recovery", workspace.recovery().error()),
+                ] {
+                    if let Some(error) = error {
+                        errors.insert(format!("{operation}:{id:?}"), error.to_owned());
+                    }
+                }
+            }
             for pane in [EditorPane::Primary, EditorPane::Companion] {
                 if let Some(crate::iced_editor_surface::EditorPaneSlot::State(
                     crate::iced_editor_surface::EditorCenterPaneState::Error(error),
@@ -4161,48 +4197,50 @@ impl NativeDesktop {
             window: id,
             message,
         });
-        let content = column![surface]
-            .spacing(0)
-            .width(Length::Fill)
-            .height(Length::Fill);
-        let toast: Element<'a, Message> = notifications.last().map_or_else(
-            || Space::new().into(),
-            |notification| {
-                let heading = match notification.kind {
-                    NotificationKind::Information => "ParchMint",
-                    NotificationKind::Error => "Error",
-                };
-                let interaction = if notification.kind == NotificationKind::Error {
-                    Interaction::Error
-                } else {
-                    Interaction::Rest
-                };
-                container(
-                    column![
-                        text(heading).size(12),
-                        text(notification.message.clone()).size(13)
-                    ]
-                    .spacing(2),
-                )
-                .padding([8, 12])
-                .width(360)
-                .style(move |_| {
-                    components::surface(theme, components::Surface::Elevated, interaction)
-                })
-                .into()
-            },
-        );
-        let toast = container(toast)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding(iced::Padding {
-                top: 60.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(iced::alignment::Vertical::Top);
+        let toast: Element<'a, Message> = notifications
+            .last()
+            .filter(|entry| entry.expires_at.is_some())
+            .map_or_else(
+                || Space::new().into(),
+                |notification| {
+                    let heading = match notification.kind {
+                        NotificationKind::Information => "ParchMint",
+                        NotificationKind::Error => "Error",
+                    };
+                    let interaction = if notification.kind == NotificationKind::Error {
+                        Interaction::Error
+                    } else {
+                        Interaction::Rest
+                    };
+                    container(
+                        row![
+                            column![
+                                text(heading).size(12),
+                                iced::widget::scrollable(
+                                    text(notification.message.clone()).size(13)
+                                )
+                                .height(Length::Shrink),
+                            ]
+                            .spacing(2)
+                            .width(Length::Fill),
+                            button(text("Dismiss").size(12)).on_press(
+                                Message::DismissNotification {
+                                    window: id,
+                                    notification_id: notification.id,
+                                }
+                            ),
+                        ]
+                        .spacing(8),
+                    )
+                    .padding([8, 12])
+                    .width(Length::Fill)
+                    .max_height(100)
+                    .style(move |_| {
+                        components::surface(theme, components::Surface::Elevated, interaction)
+                    })
+                    .into()
+                },
+            );
         let drawer: Element<'a, Message> = if notification_drawer_open {
             let entries = notifications.iter().rev().take(12).fold(
                 column![].spacing(8),
@@ -4215,10 +4253,12 @@ impl NativeDesktop {
                         row![
                             column![
                                 text(kind).size(11),
-                                text(notification.message.clone()).size(12),
+                                text(notification.message.clone())
+                                    .size(12)
+                                    .width(Length::Fill),
                             ]
-                            .spacing(2),
-                            Space::new().width(Length::Fill),
+                            .spacing(2)
+                            .width(Length::Fill),
                             button(text("Dismiss").size(11)).on_press(
                                 Message::DismissNotification {
                                     window: id,
@@ -4239,12 +4279,15 @@ impl NativeDesktop {
                             .on_press(Message::ClearNotifications { window: id }),
                     ]
                     .align_y(iced::alignment::Vertical::Center),
-                    entries,
+                    iced::widget::scrollable(entries).height(Length::Shrink),
+                    button(text("Close").size(12))
+                        .on_press(Message::ToggleNotificationDrawer { window: id }),
                 ]
                 .spacing(10),
             )
             .padding(12)
             .width(360)
+            .max_height(320)
             .style(move |_| {
                 components::surface(theme, components::Surface::Elevated, Interaction::Rest)
             })
@@ -4276,19 +4319,15 @@ impl NativeDesktop {
                 }),
         )
         .width(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right);
+        // Reserve space for transient messages: they must never cover controls.
+        let content: Element<'a, Message> = stack![
+            column![toast, surface, notification_button].height(Length::Fill),
+            drawer,
+        ]
+        .width(Length::Fill)
         .height(Length::Fill)
-        .padding(iced::Padding {
-            top: 0.0,
-            right: 180.0,
-            bottom: 4.0,
-            left: 0.0,
-        })
-        .align_x(iced::alignment::Horizontal::Right)
-        .align_y(iced::alignment::Vertical::Bottom);
-        let content: Element<'a, Message> = stack![content, toast, drawer, notification_button]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into();
+        .into();
         let modal: Option<Element<'a, Message>> = if close_failure.is_some() {
             Some(Self::native_error_modal(
                 "Couldn't save before closing",
@@ -4665,6 +4704,7 @@ impl NativeDesktop {
                 let keep_explorer_focus =
                     focus_explorer && state.shell.focus_target() == crate::FocusTarget::Explorer;
                 let mut direct = Vec::new();
+                let mut retry_project = false;
                 let mut tasks = Vec::new();
                 if keep_explorer_focus {
                     for binding in state.editor_bindings.values() {
@@ -4918,45 +4958,61 @@ impl NativeDesktop {
                             ));
                         }
                         ProjectEffect::PreviewHistory(checkpoint_id) => {
-                            let current = workspace
-                                .focused_history_document()
-                                .and_then(|document_id| {
-                                    let (&pane, _) =
-                                        state.mounted_documents.iter().find(|(_, document)| {
-                                            stable_id_string(document.as_bytes()) == document_id
-                                        })?;
-                                    let binding = state.editor_bindings.get(&pane)?;
-                                    let adapter = state.project.editor_adapter()?;
-                                    let revision = adapter.revision(binding.session()).ok()?;
-                                    let projection = iced::futures::executor::block_on(
-                                        adapter.project(binding.session(), revision),
-                                    )
-                                    .ok()?;
-                                    let title = workspace
-                                        .editor()
-                                        .pane(pane)
-                                        .tabs()
-                                        .iter()
-                                        .find(|tab| tab.id() == document_id)?
-                                        .title()
-                                        .to_owned();
-                                    Some(HistoryCurrentDocument {
-                                        document_id: document_id.to_owned(),
-                                        title,
-                                        body: projection.body().to_owned(),
-                                        semantic: projection.semantic().clone(),
-                                    })
-                                })
-                                .or_else(|| {
-                                    state.project.project_ui.as_ref().and_then(|project| {
-                                        history_current_document(&project.snapshot, workspace)
-                                    })
-                                });
                             if let Some(feeds) = state.service_feeds.as_ref() {
                                 let ticket = workspace.begin_task(ProjectTask::PreviewHistory {
                                     checkpoint_id: checkpoint_id.clone(),
                                 });
-                                let job = feeds.history_preview(checkpoint_id, current);
+                                let drafts = state
+                                    .project
+                                    .editor_adapter()
+                                    .map(|adapter| {
+                                        deduplicated_editor_sessions(
+                                            state
+                                                .editor_bindings
+                                                .values()
+                                                .map(MountedEditorBinding::session),
+                                            state.retained_editor_sessions.values().cloned(),
+                                        )
+                                        .into_iter()
+                                        .map(|session| {
+                                            let revision = adapter.revision(session.clone())?;
+                                            iced::futures::executor::block_on(
+                                                adapter.project(session, revision),
+                                            )
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()
+                                    })
+                                    .transpose();
+                                let drafts = match drafts {
+                                    Ok(drafts) => drafts.unwrap_or_default(),
+                                    Err(error) => {
+                                        workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+                                            ticket, ProjectTaskPayload::Failed(format!("Could not read the current draft for History: {error}")),
+                                        ));
+                                        continue;
+                                    }
+                                };
+                                let current = workspace.focused_history_document().and_then(|id| {
+                                    let projection = drafts.iter().find(|draft| {
+                                        stable_id_string(draft.document_id().as_bytes()) == id
+                                    })?;
+                                    let title = workspace
+                                        .editor()
+                                        .pane(workspace.editor().focused_pane())
+                                        .tabs()
+                                        .iter()
+                                        .find(|tab| tab.id() == id)?
+                                        .title()
+                                        .to_owned();
+                                    Some(HistoryCurrentDocument {
+                                        document_id: id.to_owned(),
+                                        title,
+                                        body: projection.body().to_owned(),
+                                        semantic: projection.semantic().clone(),
+                                    })
+                                });
+                                let job =
+                                    feeds.history_project_preview(checkpoint_id, current, drafts);
                                 tasks.push(Task::perform(
                                     Self::run_service_job(job),
                                     move |result| Message::HistoryPreviewFinished {
@@ -5431,11 +5487,21 @@ impl NativeDesktop {
                                 }
                                 _ => None,
                             };
-                            state.project_mutations.enqueue(ProjectMutationTicket {
+                            let ticket = ProjectMutationTicket {
                                 effect,
                                 history_action,
                                 synopsis_commit: None,
-                            });
+                            };
+                            if state.project_mutations.failed_effect.as_ref() == Some(&ticket)
+                                || state.project_mutations.failed_save.as_ref() == Some(&ticket)
+                            {
+                                // Repeating the failed action is a retry. Adding
+                                // another queued copy leaves it blocked forever
+                                // behind the failure it was meant to recover from.
+                                retry_project = true;
+                            } else {
+                                state.project_mutations.enqueue(ticket);
+                            }
                         }
                         effect => direct.push(effect),
                     }
@@ -5445,7 +5511,11 @@ impl NativeDesktop {
                     state.effect_executor.clone(),
                     direct,
                 ));
-                tasks.push(Self::launch_next_persistent_mutation(id, state));
+                tasks.push(if retry_project {
+                    Self::retry_project_mutation(id, state)
+                } else {
+                    Self::launch_next_persistent_mutation(id, state)
+                });
                 tasks.push(Self::workspace_persist_task(id, state));
                 Task::batch(tasks)
             }
@@ -6923,6 +6993,14 @@ impl NativeDesktop {
         };
         let history_action = mutation.as_ref().and_then(|ticket| ticket.history_action);
         match result {
+            Ok(ProjectEffectCompletion::Unchanged) => {
+                let terminal = mutation
+                    .map(PersistentMutationTerminal::ProjectDiscarded)
+                    .or_else(|| opaque_mutation.map(PersistentMutationTerminal::OpaqueDiscarded));
+                terminal.map_or_else(Task::none, |terminal| {
+                    self.after_persistent_mutation_terminal(window, terminal, None)
+                })
+            }
             Ok(ProjectEffectCompletion::WorkflowSnapshot(snapshot)) => {
                 let restoring_history = matches!(
                     mutation.as_ref().map(|ticket| &ticket.effect),
@@ -7441,6 +7519,7 @@ impl NativeDesktop {
                     .unwrap_or_else(Task::none);
                 Task::batch([project, refresh])
             }
+            Ok(EditorEffectCompletion::Noop) => Task::none(),
             Ok(EditorEffectCompletion::GlobalDictionaryUpdated) => {
                 self.status = None;
                 let refresh = self
@@ -7895,7 +7974,7 @@ impl NativeDesktop {
             EditorRuntimeIntent::NavigateCommentAnchor {
                 view,
                 comment,
-                range,
+                highlight,
             } => {
                 let binding = state
                     .editor_bindings
@@ -7909,6 +7988,25 @@ impl NativeDesktop {
                 let revision = adapter
                     .revision(binding.session())
                     .map_err(|error| error.to_string())?;
+                let projection =
+                    iced::futures::executor::block_on(adapter.project(binding.session(), revision))
+                        .map_err(|error| error.to_string())?;
+                let Some(thread) = projection
+                    .comments()
+                    .iter()
+                    .find(|thread| thread.id == comment)
+                else {
+                    // A delayed click can outlive deletion of its thread.
+                    return Ok(None);
+                };
+                let CanonicalCommentAnchor::Text {
+                    range,
+                    orphaned: false,
+                    ..
+                } = thread.anchor
+                else {
+                    return Ok(None);
+                };
                 adapter
                     .execute(
                         binding.session(),
@@ -7920,7 +8018,11 @@ impl NativeDesktop {
                     )
                     .map_err(|error| error.to_string())?;
                 adapter
-                    .set_active_comment_decoration(binding.session(), view, comment)
+                    .set_active_comment_decoration(
+                        binding.session(),
+                        view,
+                        highlight.then_some(comment),
+                    )
                     .map_err(|error| error.to_string())?;
                 binding.refresh().map_err(|error| error.to_string())?;
                 Ok(None)
@@ -10716,42 +10818,6 @@ fn stable_id_bytes(value: &str) -> Result<[u8; 16], String> {
     Ok(bytes)
 }
 
-fn history_current_document(
-    snapshot: &ProjectSnapshot,
-    workspace: &ProjectWorkspace,
-) -> Option<HistoryCurrentDocument> {
-    let document_id = workspace.focused_history_document()?;
-    let source = snapshot
-        .documents
-        .iter()
-        .find(|document| stable_id_string(document.document_id.as_bytes()) == document_id)?;
-    let title = snapshot
-        .project
-        .nodes
-        .iter()
-        .find_map(|(_, node)| match node.kind {
-            parchmint_domain::NodeKind::Document(candidate) if candidate == source.document_id => {
-                Some(node.title.clone())
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| "Active document".to_owned());
-    let semantic = EditorCoreSession::open(CanonicalDocumentLoad::new(
-        source.document_id,
-        source.body.clone(),
-    ))
-    .ok()?
-    .canonical_projection()
-    .semantic()
-    .clone();
-    Some(HistoryCurrentDocument {
-        document_id: document_id.to_owned(),
-        title,
-        body: source.body.clone(),
-        semantic,
-    })
-}
-
 fn launcher_recent_projects(projects: Vec<PreferenceRecentProject>) -> Vec<RecentProject> {
     projects
         .into_iter()
@@ -10924,7 +10990,9 @@ mod tests {
     fn transient_notifications_expire_but_errors_remain_in_the_drawer() {
         let mut information = WorkspaceNotification::information("Saved project");
         information.expires_at = Some(Instant::now() - Duration::from_secs(1));
-        let mut notifications = vec![information, WorkspaceNotification::error("Disk full")];
+        let mut error = WorkspaceNotification::error("Disk full");
+        error.expires_at = information.expires_at;
+        let mut notifications = vec![information, error];
 
         expire_workspace_notifications(&mut notifications, Instant::now());
 
@@ -11084,10 +11152,27 @@ mod tests {
             Some(WorkspaceNotification {
                 message,
                 kind: NotificationKind::Error,
-                expires_at: None,
+                expires_at: Some(_),
                 ..
             }) if message == "History could not be repaired"
         ));
+        let _ = desktop.update(Message::AutosaveTick(
+            Instant::now() + Duration::from_secs(6),
+        ));
+        let NativeWindow::Project(state) = desktop.windows.get(&window).unwrap() else {
+            panic!("project")
+        };
+        assert!(
+            matches!(
+                state.notifications.as_slice(),
+                [WorkspaceNotification {
+                    kind: NotificationKind::Error,
+                    expires_at: None,
+                    ..
+                }]
+            ),
+            "error history remains after the banner expires"
+        );
     }
 
     #[test]

@@ -6,17 +6,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use parchmint_contracts::{
-    AnnotationAnchor, AnnotationMessage, AnnotationThread, generated::RecoveryRecordV1,
-};
+use parchmint_contracts::{AnnotationThread, generated::RecoveryRecordV1};
 use parchmint_domain::{
     CheckpointId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectRevision, Resource,
     apply_project_command,
 };
 use parchmint_editor_api::{
-    BlockId, CanonicalComment, CanonicalCommentAnchor, CanonicalCommentMessage,
-    CanonicalProjection, CommentId, DocumentPosition, EditorPersistenceError, EditorRevision,
-    EditorSelection,
+    CanonicalComment, CanonicalProjection, EditorPersistenceError, EditorRevision,
 };
 use parchmint_history_api::{
     CheckpointCategory, CheckpointInput, CheckpointIntentHash, RestorePlan, SnapshotName,
@@ -334,7 +330,7 @@ impl ProjectPersistenceCoordinator {
             &snapshot
                 .comments
                 .iter()
-                .map(contract_thread)
+                .map(AnnotationThread::from)
                 .collect::<Vec<_>>(),
         )?;
         let annotation_bytes = ProjectFormatCodec::default()
@@ -379,7 +375,7 @@ impl ProjectPersistenceCoordinator {
             &projection
                 .comments()
                 .iter()
-                .map(contract_thread)
+                .map(AnnotationThread::from)
                 .collect::<Vec<_>>(),
         )?;
         let annotation_value =
@@ -510,7 +506,11 @@ impl ProjectPersistenceCoordinator {
                         *document,
                         CanonicalDocumentUpdate {
                             body: snapshot.body.clone(),
-                            annotations: snapshot.comments.iter().map(contract_thread).collect(),
+                            annotations: snapshot
+                                .comments
+                                .iter()
+                                .map(AnnotationThread::from)
+                                .collect(),
                         },
                     )
                 })
@@ -575,7 +575,11 @@ impl ProjectPersistenceCoordinator {
                         .map(|(document, snapshot)| {
                             (
                                 *document,
-                                snapshot.comments.iter().map(contract_thread).collect(),
+                                snapshot
+                                    .comments
+                                    .iter()
+                                    .map(AnnotationThread::from)
+                                    .collect(),
                             )
                         })
                         .collect(),
@@ -1416,7 +1420,7 @@ impl ProjectPersistenceCoordinator {
                         )?
                         .typed_threads()?
                         .into_iter()
-                        .map(editor_thread_contract)
+                        .map(CanonicalComment::from)
                         .collect(),
                     None => self.documents.snapshot(document_id)?.comments,
                 };
@@ -1898,7 +1902,7 @@ fn decode_restored_project(
                 .decode_annotations(bytes)?
                 .typed_threads()?
                 .into_iter()
-                .map(editor_thread_contract)
+                .map(CanonicalComment::from)
                 .collect(),
             None => Vec::new(),
         };
@@ -2439,87 +2443,4 @@ fn parse_stable_id(value: &str) -> Result<[u8; 16], ProjectPersistenceError> {
             .map_err(|_| ProjectPersistenceError::UnknownRecoveryAcceptance)?;
     }
     Ok(bytes)
-}
-
-fn contract_thread(thread: &CanonicalComment) -> AnnotationThread {
-    AnnotationThread {
-        id: *thread.id.as_bytes(),
-        messages: thread
-            .messages
-            .iter()
-            .map(|message| AnnotationMessage {
-                id: *message.id.as_bytes(),
-                body: message.body.clone(),
-                unknown_fields: message.unknown_fields.clone(),
-            })
-            .collect(),
-        resolved: thread.resolved,
-        anchor: match &thread.anchor {
-            CanonicalCommentAnchor::Document { unknown_fields } => AnnotationAnchor::Document {
-                unknown_fields: unknown_fields.clone(),
-            },
-            CanonicalCommentAnchor::Text {
-                block,
-                range,
-                quote,
-                context_before,
-                context_after,
-                orphaned,
-                unknown_fields,
-            } => AnnotationAnchor::Text {
-                block: *block.as_bytes(),
-                start: range.start().value(),
-                end: range.end().value(),
-                quote: quote.clone(),
-                context_before: context_before.clone(),
-                context_after: context_after.clone(),
-                orphaned: *orphaned,
-                unknown_fields: unknown_fields.clone(),
-            },
-        },
-        unknown_fields: thread.unknown_fields.clone(),
-    }
-}
-
-fn editor_thread_contract(thread: AnnotationThread) -> CanonicalComment {
-    CanonicalComment {
-        id: CommentId::from_bytes(thread.id),
-        messages: thread
-            .messages
-            .into_iter()
-            .map(|message| CanonicalCommentMessage {
-                id: CommentId::from_bytes(message.id),
-                body: message.body,
-                unknown_fields: message.unknown_fields,
-            })
-            .collect(),
-        resolved: thread.resolved,
-        anchor: match thread.anchor {
-            AnnotationAnchor::Document { unknown_fields } => {
-                CanonicalCommentAnchor::Document { unknown_fields }
-            }
-            AnnotationAnchor::Text {
-                block,
-                start,
-                end,
-                quote,
-                context_before,
-                context_after,
-                orphaned,
-                unknown_fields,
-            } => CanonicalCommentAnchor::Text {
-                block: BlockId::from_bytes(block),
-                range: EditorSelection::new(
-                    DocumentPosition::from(start),
-                    DocumentPosition::from(end),
-                ),
-                quote,
-                context_before,
-                context_after,
-                orphaned,
-                unknown_fields,
-            },
-        },
-        unknown_fields: thread.unknown_fields,
-    }
 }

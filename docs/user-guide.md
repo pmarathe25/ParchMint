@@ -36,10 +36,10 @@ Drag the dividers to resize Explorer, the editor panes, and Inspector. Press
 
 ## Organize a novel
 
-Use **New document** or **New group** at the bottom of Explorer. The label above
-them shows the destination. **+ New** and row context menus offer the same
-actions. Enter a name to finish creation; a new Research document opens in the
-companion pane. Groups can contain other groups and documents. Documents cannot have
+Select a destination in Explorer, open **+ New**, then choose **Document** or
+**Group**. The menu shows where the item will go. Row context menus offer the
+same actions. Enter a name to finish creation; a new Research document opens in
+the companion pane. Groups can contain other groups and documents. Documents cannot have
 children.
 
 A single click selects a document and opens it as a replaceable preview tab.
@@ -117,9 +117,18 @@ bar distinguishes unsaved, saving, saved, and failed states. Use **Save** or
 the primary modifier plus **S** when you want to request an immediate save.
 
 Each completed change is recorded in **History**. Select a checkpoint to
-compare it with the current document, create a named snapshot for an important
+compare it with the current project, create a named snapshot for an important
 milestone, or restore the complete project to an earlier state. Restoration
 creates a new checkpoint and preserves the existing timeline.
+
+History includes unsaved drafts, added and deleted documents, outline changes,
+comments, and project settings. Removed lines have a **−** marker and added lines
+have a **+** marker. Text-equivalent formatting changes show the HTML difference;
+stylesheet changes show CSS.
+
+Notification banners have a **Dismiss** button and disappear after five seconds.
+Errors remain in **Notifications** until dismissed or cleared. Banners reserve
+space above the workspace so controls remain accessible.
 
 Deleting a group or document removes it from the current outline. Use Undo
 immediately, or open **Recently Deleted** to preview and restore it later.

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
+#[cfg(any(feature = "visual-verification", feature = "interaction-harness"))]
 use std::borrow::Cow;
 
 /// One UI fixture that can be rendered headlessly.
@@ -208,7 +208,7 @@ pub fn capture_visual(
     })
 }
 
-#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
+#[cfg(any(feature = "visual-verification", feature = "interaction-harness"))]
 pub(crate) fn visual_settings() -> iced::Settings {
     iced::Settings {
         default_font: iced::Font::with_name("Source Sans 3"),
@@ -902,14 +902,8 @@ fn verification_workspace(
                     ProjectTaskPayload::HistoryPreviewReady {
                         preview: Box::new(HistoryPreviewData {
                             checkpoint: checkpoints[0].clone(),
-                            resource_paths: vec![
-                                "1 Current: The harbor held the last of the evening light."
-                                    .to_owned(),
-                                "2 Current: Mara waited beneath the clock tower.".to_owned(),
-                                "3 Checkpoint: The unopened letter was sealed.".to_owned(),
-                                "4 Checkpoint: By morning, the tide had erased every footprint."
-                                    .to_owned(),
-                            ],
+                            resource_paths: vec![checkpoint_document.canonical_path.clone()],
+                            project_changes: Some(comparison.clone().into_iter().collect()),
                             document: Some(checkpoint_document),
                         }),
                         current_document,
@@ -1578,8 +1572,16 @@ mod tests {
         );
         assert!(simulator.find("Checkpoint").is_ok());
         assert!(simulator.find("Current").is_ok());
-        assert!(simulator.find("unopened").is_ok());
-        assert!(simulator.find("sealed").is_ok());
+        assert!(
+            simulator
+                .find("Mara turned the unopened letter in her fingers.")
+                .is_ok()
+        );
+        assert!(
+            simulator
+                .find("Mara turned the sealed letter in her fingers.")
+                .is_ok()
+        );
     }
 
     #[test]

@@ -292,3 +292,52 @@ fn recovery_paths_cannot_escape_the_recovery_directory() {
         );
     }
 }
+
+#[test]
+fn recovery_keeps_each_documents_revision_across_interleaved_edits_and_reopen() {
+    use parchmint_recovery_api::{DocumentId, RecoveryError};
+    let dir = TestDir::new("interleaved-documents");
+    let first = DocumentId::from_bytes([1; 16]);
+    let second = DocumentId::from_bytes([2; 16]);
+    let make = |project_revision, document, document_revision| {
+        let mut record = batch(
+            project_revision,
+            project_revision as u8,
+            project_revision as u8 + 1,
+        );
+        record.documents = BTreeMap::from([(
+            document,
+            EditorRevisionRange::new(document_revision, document_revision).unwrap(),
+        )]);
+        record
+    };
+    let journal = open(&dir);
+    journal.append(make(1, first, 22.into())).unwrap();
+    journal.append(make(2, second, 45.into())).unwrap();
+    drop(journal);
+    let journal = open(&dir);
+    assert!(
+        matches!(
+            journal.append(make(3, first, 24.into())),
+            Err(RecoveryError::NonConsecutiveDocumentRevision { .. })
+        ),
+        "a nonadjacent document gap must still fail"
+    );
+    let third = make(3, first, 23.into());
+    journal.append(third.clone()).unwrap();
+    assert_eq!(
+        journal.inspect().unwrap().durable_through,
+        Some(third.revision_vector())
+    );
+    let replay = journal
+        .replay(RecoveryBaseSnapshot {
+            revisions: RecoveryRevisionVector::new(
+                ProjectRevision::from(0),
+                BTreeMap::from([(first, 21.into()), (second, 44.into())]),
+            ),
+            hashes: BTreeMap::from([(ResourceId::Manifest, hash(1))]),
+        })
+        .unwrap();
+    assert_eq!(replay.accepted.len(), 3);
+    assert!(replay.isolated.is_empty());
+}

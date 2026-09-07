@@ -798,45 +798,6 @@ fn explorer_rail<'a>(
         scrollable(rows)
             .id(explorer_scroll_id())
             .height(Length::Fill),
-        container(
-            column![
-                text(format!(
-                    "Add to {}",
-                    workspace
-                        .explorer_creation_parent_id()
-                        .and_then(|id| explorer.title(id))
-                        .unwrap_or("Manuscript")
-                ))
-                .size(11),
-                row![
-                    explorer_creation_button(
-                        "New document",
-                        ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
-                            parent_id: workspace
-                                .explorer_creation_parent_id()
-                                .unwrap_or("manuscript")
-                                .to_owned(),
-                            kind: HierarchyItemKind::Document,
-                        }),
-                        theme
-                    ),
-                    explorer_creation_button(
-                        "New group",
-                        ProjectSurfaceMessage::Project(ProjectMessage::RequestCreateHierarchy {
-                            parent_id: workspace
-                                .explorer_creation_parent_id()
-                                .unwrap_or("manuscript")
-                                .to_owned(),
-                            kind: HierarchyItemKind::Group,
-                        }),
-                        theme
-                    ),
-                ]
-                .spacing(4)
-            ]
-            .spacing(4)
-        )
-        .padding([4, 0]),
     ]
     .spacing(8)
     .height(Length::Fill);
@@ -1065,7 +1026,7 @@ fn explorer_creation_action<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     // Pop-up menu actions commit on press before click-away handling removes
-    // the menu. Persistent footer controls use normal release-click buttons.
+    // the menu.
     mouse_area(
         container(text(label).size(12))
             .padding([6, 8])
@@ -1074,21 +1035,6 @@ fn explorer_creation_action<'a>(
     .on_press(message)
     .interaction(iced::mouse::Interaction::Pointer)
     .into()
-}
-
-fn explorer_creation_button<'a>(
-    label: &'static str,
-    message: ProjectSurfaceMessage,
-    theme: ParchMintTheme,
-) -> Element<'a, ProjectSurfaceMessage> {
-    button(text(label).size(12))
-        .padding([6, 8])
-        .height(ShellLayout::MIN_HIT_TARGET)
-        .on_press(message)
-        .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-        })
-        .into()
 }
 
 fn comment_action<'a>(
@@ -2094,40 +2040,7 @@ fn history_center<'a>(
         Space::new().height(0).into()
     };
     let comparison: Element<'a, ProjectSurfaceMessage> = match history.comparison() {
-        Some(comparison) => {
-            let summary = comparison.change_summary();
-            container(
-                column![
-                    text(format!("Comparison · {}", comparison.document_title)).size(15),
-                    row![
-                        container(
-                            column![
-                                text("Checkpoint").size(13),
-                                history_comparison_side(&comparison.lines, true, theme),
-                            ]
-                            .spacing(6)
-                        )
-                        .width(Length::Fill),
-                        container(
-                            column![
-                                text("Current").size(13),
-                                history_comparison_side(&comparison.lines, false, theme),
-                            ]
-                            .spacing(6)
-                        )
-                        .width(Length::Fill),
-                    ]
-                    .spacing(16),
-                    text(format!(
-                        "{} added · {} removed · {} modified lines",
-                        summary.added_lines, summary.removed_lines, summary.modified_lines
-                    ))
-                    .size(12),
-                ]
-                .spacing(8),
-            )
-            .into()
-        }
+        Some(comparison) => history_project_change(comparison, theme),
         None if history.error().is_some() => Space::new().height(0).into(),
         None if history.preview().is_some() => {
             text("This checkpoint has no version of the current document to compare.")
@@ -2137,9 +2050,46 @@ fn history_center<'a>(
         None if history.selected_checkpoint_id().is_some() => {
             text("Loading checkpoint comparison…").size(12).into()
         }
-        None => text("Select a checkpoint to compare it with the current document.")
+        None => text("Select a checkpoint to compare it with the current project.")
             .size(12)
             .into(),
+    };
+    let comparison = if let Some(changes) = history
+        .preview()
+        .and_then(|preview| preview.project_changes.as_ref())
+    {
+        let mut content = column![
+            text("Changes since checkpoint").size(16),
+            text(
+                history
+                    .preview()
+                    .map(|preview| format!(
+                        "{} · Version {}",
+                        preview.checkpoint.label(),
+                        preview.checkpoint.sequence
+                    ))
+                    .unwrap_or_default()
+            )
+            .size(13),
+            row![
+                text("Checkpoint").size(12),
+                text("− removed").size(12),
+                text("Current").size(12),
+                text("+ added").size(12)
+            ]
+            .spacing(12),
+            text("Includes unsaved drafts across the project.").size(12),
+        ]
+        .spacing(12);
+        if changes.is_empty() {
+            content = content.push(text("No changes since this checkpoint."));
+        }
+        for change in changes {
+            content = content.push(history_project_change(change, theme));
+        }
+        content.into()
+    } else {
+        comparison
     };
     let error: Element<'a, ProjectSurfaceMessage> = history
         .error()
@@ -2164,28 +2114,30 @@ fn history_center<'a>(
         .size(12)
         .into(),
     };
-    let list =
-        column![
-            text("Writing timeline")
-                .size(u32::from(UI_PAGE_TITLE.size))
-                .line_height(UI_PAGE_TITLE.line_height)
-                .font(Font {
-                    weight: font::Weight::Semibold,
-                    ..Font::with_name(UI_PAGE_TITLE.family)
-                }),
-            text("Milestones and recoverable project versions")
-                .size(u32::from(UI_BODY.size))
-                .color(theme.palette().secondary_text),
-            milestone,
-            filter,
+    let list = column![
+        text("Writing timeline")
+            .size(u32::from(UI_PAGE_TITLE.size))
+            .line_height(UI_PAGE_TITLE.line_height)
+            .font(Font {
+                weight: font::Weight::Semibold,
+                ..Font::with_name(UI_PAGE_TITLE.family)
+            }),
+        text("Milestones and recoverable project versions")
+            .size(u32::from(UI_BODY.size))
+            .color(theme.palette().secondary_text),
+        milestone,
+        filter,
+        harness_target::target(
+            HarnessTarget::HistoryTimeline,
             scrollable(checkpoints)
                 .on_scroll(|viewport| ProjectSurfaceMessage::Project(
                     ProjectMessage::SetHistoryScroll(viewport.absolute_offset().y)
                 ))
-                .height(Length::Fill),
-            load_more,
-        ]
-        .spacing(SPACING_12);
+                .height(Length::Fill)
+        ),
+        load_more,
+    ]
+    .spacing(SPACING_12);
     let detail = column![
         text("Checkpoint details")
             .size(u32::from(UI_PAGE_TITLE.size))
@@ -2194,12 +2146,15 @@ fn history_center<'a>(
                 weight: font::Weight::Semibold,
                 ..Font::with_name(UI_PAGE_TITLE.family)
             }),
-        text("Compare a version with the current document or restore the whole project.")
+        text("Compare this checkpoint with the current project, including unsaved drafts.")
             .size(u32::from(UI_BODY.size))
             .color(theme.palette().secondary_text),
         error,
         maintenance,
-        scrollable(comparison).height(Length::Fill),
+        harness_target::target(
+            HarnessTarget::HistoryComparison,
+            scrollable(comparison).height(Length::Fill)
+        ),
         row![Space::new().width(Length::Fill), restore].spacing(12),
     ]
     .spacing(SPACING_16);
@@ -2442,69 +2397,68 @@ fn semantic_preview<'a>(
         .into()
 }
 
-fn history_comparison_side(
-    lines: &[crate::HistoryComparisonLine],
-    before: bool,
+fn history_project_change(
+    change: &crate::HistoryComparison,
     theme: ParchMintTheme,
 ) -> Element<'static, ProjectSurfaceMessage> {
-    let rows = lines
-        .iter()
-        .fold(column![].spacing(0), |column, comparison| {
-            let line = if before {
-                comparison.before.as_ref()
-            } else {
-                comparison.after.as_ref()
+    let summary = change.change_summary();
+    let mut content = column![
+        text(change.document_title.clone()).size(15),
+        text(format!(
+            "{} added · {} removed · {} modified lines",
+            summary.added_lines, summary.removed_lines, summary.modified_lines
+        ))
+        .size(12),
+    ]
+    .spacing(4);
+    if change.lines.is_empty() {
+        content = content.push(text("Empty document").size(13));
+    }
+    for line in &change.lines {
+        let sides = match line.kind {
+            crate::HistoryComparisonLineKind::Unchanged => {
+                vec![(" ", line.after.as_ref(), Interaction::Rest)]
+            }
+            _ => vec![
+                ("−", line.before.as_ref(), Interaction::Error),
+                ("+", line.after.as_ref(), Interaction::Selected),
+            ],
+        };
+        for (marker, side, style) in sides {
+            let Some(side) = side else {
+                continue;
             };
-            let Some(line) = line else {
-                return column.push(Space::new().height(26));
-            };
-            let changed_kind = if before {
-                crate::HistoryComparisonSpanKind::Removed
-            } else {
-                crate::HistoryComparisonSpanKind::Added
-            };
-            // `rich_text` does not implement Iced's semantic operation. Keep
-            // these as ordinary zero-gap text widgets so changed words remain
-            // discoverable to assistive and headless UI tooling.
-            let content = line.spans.iter().fold(
-                row![].spacing(0).width(Length::Fill),
-                |content, span_data| {
-                    let color = match span_data.kind {
-                        crate::HistoryComparisonSpanKind::Added => theme.palette().success,
-                        crate::HistoryComparisonSpanKind::Removed => theme.palette().destructive,
-                        crate::HistoryComparisonSpanKind::Unchanged => theme.palette().primary_text,
-                    };
-                    content.push(text(span_data.text.clone()).size(13).color(color))
-                },
-            );
-            let changed = line.spans.iter().any(|span| span.kind == changed_kind);
-            column.push(
+            let body = side
+                .spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect::<String>();
+            content = content.push(
                 container(
                     row![
-                        text(line.line_number.to_string()).size(12).width(30),
-                        content,
+                        text(format!("{marker} {}", side.line_number))
+                            .size(12)
+                            .width(48),
+                        text(body).size(13).width(Length::Fill),
                     ]
                     .spacing(8),
                 )
                 .padding([4, 8])
                 .width(Length::Fill)
-                .style(move |_| {
-                    if changed {
-                        iced::widget::container::Style {
-                            background: Some(Background::Color(if before {
-                                theme.palette().error_subtle
-                            } else {
-                                theme.palette().success_subtle
-                            })),
-                            ..Default::default()
+                .style(move |_| iced::widget::container::Style {
+                    background: match style {
+                        Interaction::Error => Some(Background::Color(theme.palette().error_subtle)),
+                        Interaction::Selected => {
+                            Some(Background::Color(theme.palette().success_subtle))
                         }
-                    } else {
-                        iced::widget::container::Style::default()
-                    }
+                        _ => None,
+                    },
+                    ..Default::default()
                 }),
-            )
-        });
-    rows.into()
+            );
+        }
+    }
+    content.into()
 }
 
 fn semantic_preview_block<'a>(
@@ -5009,8 +4963,9 @@ mod tests {
         );
 
         assert!(simulator.find("Edit").is_err());
-        assert!(simulator.find("New group").is_ok());
-        assert!(simulator.find("New document").is_ok());
+        assert!(simulator.find("+ New").is_ok());
+        assert!(simulator.find("New group").is_err());
+        assert!(simulator.find("New document").is_err());
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
             Size::new(840.0, 700.0),
@@ -5504,6 +5459,7 @@ mod tests {
                     preview: Box::new(crate::HistoryPreviewData {
                         checkpoint,
                         resource_paths: vec!["documents/chapter-one.html".to_owned()],
+                        project_changes: Some(vec![comparison.clone()]),
                         document: Some(checkpoint_document),
                     }),
                     current_document: Some(current_document),
@@ -5524,9 +5480,10 @@ mod tests {
         );
         assert!(simulator.find("Checkpoint").is_ok());
         assert!(simulator.find("Current").is_ok());
-        assert!(simulator.find("1").is_ok());
-        assert!(simulator.find("blue").is_ok());
-        assert!(simulator.find("green").is_ok());
+        assert!(simulator.find("− 1").is_ok());
+        assert!(simulator.find("+ 1").is_ok());
+        assert!(simulator.find("The blue house").is_ok());
+        assert!(simulator.find("The green house").is_ok());
         assert!(
             simulator
                 .find("Named snapshot · 1 document · Version 2 · +2 words")

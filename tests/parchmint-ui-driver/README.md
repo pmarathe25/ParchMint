@@ -13,13 +13,15 @@ the `iced_test` renderer. The production desktop does not enable this feature.
 ## Completion and failure checks
 
 Every action reports new failure status messages, editor errors, error dialogs,
-failed closes, and error notifications. A test that injects a failure must assert the returned error;
+failed closes, error notifications, and inline History, search, and recovery errors. A test that injects a failure must assert the returned error;
 clicking a control alone does not establish success. Successful flows check
 saved bytes and reopen the project to verify persistence.
 
 The harness drains task work between actions by default. It does not run native
 timer subscriptions or reproduce every OS scheduling interleaving. Use
-`elapse_recovery_capture` and `advance_autosave_clock` for timer boundaries.
+`elapse_recovery_capture`, `advance_autosave_clock`, and `elapse_notifications`
+for timer boundaries. Notification expiry dispatches the production timer and
+also runs any other work due during that interval.
 `hold_completions` runs service work while retaining result messages;
 `release_completions(newest_first)` delivers them in either order after more
 user input. These controls exercise stale snapshots and delayed UI updates
@@ -61,8 +63,18 @@ Example commands:
 {"command":"shutdown"}
 ```
 
+`contains_text` checks text in the constructed widget tree. `text_is_visible`
+checks the current viewport and cached widget state. Neither establishes that an
+overlay leaves the control usable; follow up with a click and assert its result.
+`snapshot` renders the live widget cache, preserving scroll, focus, and overlays.
+It writes `<stem>-tiny-skia.png` and refuses an existing file.
+
+Use the [agent usability review](USABILITY.md) to judge clarity and layout with
+these tools and a native application run.
+
 The driver writes `failure.json` and a `failure-<renderer>.png` screenshot after
-a command fails. `failure.json` contains the replayable user-action trace,
+a command fails. Later failures in the same run use numbered subdirectories so
+each screenshot stays paired with its own report. `failure.json` contains the replayable user-action trace,
 production boundary observations, and structured diagnostics. The trace records
 text lengths and selectors, not document content.
 

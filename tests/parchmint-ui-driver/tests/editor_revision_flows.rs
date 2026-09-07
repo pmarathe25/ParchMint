@@ -7,7 +7,7 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
-fn visible_explorer_buttons_create_and_open_a_named_chapter() {
+fn explorer_new_menu_creates_and_opens_a_named_chapter() {
     let run = IsolatedRun::new("visible-creation-actions").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Visible creation");
@@ -19,14 +19,14 @@ fn visible_explorer_buttons_create_and_open_a_named_chapter() {
         )
         .unwrap();
     harness.elapse_recovery_capture().unwrap();
-    harness
-        .click_text(HarnessWindow::Project, "New group")
-        .unwrap();
+    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
+    harness.click_text(HarnessWindow::Project, "Group").unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "New Group", "Part One")
         .unwrap();
+    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
     harness
-        .click_text(HarnessWindow::Project, "New document")
+        .click_text(HarnessWindow::Project, "Document")
         .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Chapter One")
@@ -89,8 +89,9 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
             .unwrap();
         harness.hold_completions().unwrap();
         harness.elapse_recovery_capture().unwrap();
+        harness.click_text(HarnessWindow::Project, "+ New").unwrap();
         harness
-            .click_text(HarnessWindow::Project, "New document")
+            .click_text(HarnessWindow::Project, "Document")
             .unwrap();
         harness
             .type_into_target(
@@ -239,7 +240,10 @@ fn toolbar_typing_marks_and_history_compare_the_live_unsaved_draft() {
         .unwrap();
     assert!(
         harness
-            .contains_text(HarnessWindow::Project, " unsavedmarker")
+            .contains_text(
+                HarnessWindow::Project,
+                "Bold words plain words unsavedmarker"
+            )
             .unwrap(),
         "History's Current side must include the live draft"
     );
