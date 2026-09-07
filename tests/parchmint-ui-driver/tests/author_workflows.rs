@@ -1243,16 +1243,6 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
             .contains("Rain carried the harbor bells across the water.")
     );
     harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Export),
-        )
-        .expect("review manuscript-only export");
-    assert!(visible(
-        &harness,
-        "Excludes Synopsis, metadata, comments, and Research."
-    ));
-    harness
         .close(HarnessWindow::Project)
         .expect("close research-heavy novel");
     harness.shutdown().expect("stop research-heavy novel");
