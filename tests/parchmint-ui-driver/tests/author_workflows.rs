@@ -7,7 +7,7 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
-fn novelist_can_plan_and_draft_a_chaptered_manuscript() {
+fn novelist_can_plan_draft_and_autosave_a_chaptered_manuscript() {
     let run = IsolatedRun::new("chaptered-novel").expect("isolated run");
     let project = run.root().join("glass-harbor.parchmint");
     let draft = "Rain carried the harbor bells across the water.";
@@ -34,12 +34,21 @@ fn novelist_can_plan_and_draft_a_chaptered_manuscript() {
             .contains(draft)
     );
     harness
+        .elapse_autosave_idle()
+        .expect("autosave the new chapter");
+    assert!(
+        canonical_bodies(&project)
+            .iter()
+            .any(|body| body.contains(draft)),
+        "autosave must persist prose for a newly created chapter"
+    );
+    harness
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("switch to Cards");
-    assert!(visible(&harness, "Manuscript outline"));
+    assert!(visible(&harness, "Outline"));
     assert!(visible(&harness, "Part One"));
     assert!(visible(&harness, "Chapter One"));
 
@@ -53,37 +62,6 @@ fn novelist_can_plan_and_draft_a_chaptered_manuscript() {
         .close(HarnessWindow::Project)
         .expect("close chaptered project");
     harness.shutdown().expect("stop first application instance");
-}
-
-#[test]
-fn newly_created_chapter_autosaves_to_canonical_storage() {
-    let run = IsolatedRun::new("chapter-autosave").expect("isolated run");
-    let project = run.root().join("glass-harbor.parchmint");
-    let draft = "Rain carried the harbor bells across the water.";
-    let harness = create_project(&run, &project, "The Glass Harbor");
-
-    create_group(&harness, "Manuscript", "Part One");
-    create_document(&harness, "Part One", "Chapter One");
-    harness
-        .right_click_text(HarnessWindow::Project, "Chapter One")
-        .expect("open chapter context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open")
-        .expect("open chapter in its primary editor pane");
-    harness
-        .type_into_target(HarnessWindow::Project, HarnessTarget::EditorPrimary, draft)
-        .expect("draft chapter prose");
-    harness.elapse_autosave_idle().expect("autosave the draft");
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains(draft)),
-        "autosave should persist prose for a newly created chapter"
-    );
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close chaptered project");
-    harness.shutdown().expect("stop chaptered project");
 }
 
 #[test]
@@ -138,7 +116,7 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
     reopened
         .click_text(HarnessWindow::Launcher, "Restore Writing Context")
         .expect("reopen project");
-    assert!(visible(&reopened, "Manuscript outline"));
+    assert!(visible(&reopened, "Outline"));
     assert!(visible(&reopened, "Harbor Notes"));
     assert!(
         reopened
@@ -188,7 +166,7 @@ fn author_can_configure_metadata_to_appear_on_cards() {
         .expect("persist the named metadata field");
     assert!(visible(&harness, "Point of view"));
     harness
-        .click_text(HarnessWindow::Project, "Visible on cards")
+        .click_text(HarnessWindow::Project, "Show on outline rows")
         .expect("show the metadata field on cards");
     harness
         .click_target(
@@ -486,7 +464,7 @@ fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
             .expect("read retained confirm focus")
     );
     harness
-        .click_text(HarnessWindow::Project, "Confirm")
+        .click_text(HarnessWindow::Project, "Delete field")
         .expect("confirm deletion after keyboard focus traversal");
     assert!(!visible(&harness, "New field"));
     harness
@@ -537,16 +515,16 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         .click_history_checkpoint(HarnessWindow::Project, 1)
         .expect("compare the earlier automatic checkpoint");
     assert!(
-        visible(&harness, "Checkpoint"),
+        visible(&harness, "Saved version"),
         "history status: {}",
         harness.history_status().expect("read history status")
     );
     harness
-        .click_text(HarnessWindow::Project, "Restore “Automatic save”")
+        .click_text(HarnessWindow::Project, "Restore project to this version…")
         .expect("request checkpoint restoration");
     assert!(visible(&harness, "Restore project history"));
     harness
-        .click_text(HarnessWindow::Project, "Confirm")
+        .click_text(HarnessWindow::Project, "Restore project")
         .expect("restore the selected checkpoint");
     assert!(visible(&harness, "Writing timeline"));
     harness
@@ -711,7 +689,7 @@ fn retained_focus_supports_cross_command_local_find_and_replace() {
             "river",
         )
         .expect("enter local search query");
-    assert!(visible(&harness, "2 matches"));
+    assert!(visible(&harness, "1 of 2 matches · Left pane"));
     harness
         .press_key(HarnessWindow::Project, HarnessKey::Enter)
         .expect("navigate from a retained Find focus");
@@ -968,7 +946,14 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
         .expect("reopen the anchored comment popover");
     harness
-        .click_text(HarnessWindow::Project, "Edit")
+        .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
+        .expect("open comment actions");
+    harness
+        .click_target_offset(
+            HarnessWindow::Project,
+            HarnessTarget::CommentMenu(0),
+            (0.5, 1.5),
+        )
         .expect("edit the root comment inside the anchored popover");
     harness
         .replace_target(
@@ -1001,7 +986,14 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     assert!(visible(&harness, "Resolved"));
     assert!(visible(&harness, "Verify the storm detail."));
     harness
-        .click_text(HarnessWindow::Project, "Delete thread")
+        .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
+        .expect("open comment actions");
+    harness
+        .click_target_offset(
+            HarnessWindow::Project,
+            HarnessTarget::CommentMenu(0),
+            (0.5, 3.5),
+        )
         .expect("request comment deletion");
     harness
         .click_text(HarnessWindow::Project, "Confirm delete")
@@ -1048,9 +1040,9 @@ fn revision_author_can_search_and_replace_a_draft_phrase() {
             HarnessTarget::GlobalReplacementReview,
         )
         .expect("review replacement");
-    assert!(visible(&harness, "Replace Preview"));
+    assert!(visible(&harness, "Review replacements"));
     harness
-        .click_text(HarnessWindow::Project, "Revalidate selection")
+        .click_text(HarnessWindow::Project, "Refresh preview")
         .expect("revalidate replacement");
     harness
         .click_text(HarnessWindow::Project, "Apply replacement")
@@ -1101,14 +1093,14 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
             HarnessTarget::GlobalReplacementReview,
         )
         .expect("review replacement");
-    assert!(visible(&harness, "Replace Preview"));
+    assert!(visible(&harness, "Review replacements"));
     harness
-        .click_text(HarnessWindow::Project, "Revalidate selection")
+        .click_text(HarnessWindow::Project, "Refresh preview")
         .expect("revalidate the saved result");
     assert!(
         visible(
             &harness,
-            "Selected matches are revalidated and ready to apply atomically.",
+            "The preview is current. Apply will replace the selected matches together.",
         ),
         "replacement selection was not ready to apply: {}",
         harness
@@ -1119,7 +1111,7 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
         .click_text(HarnessWindow::Project, "Apply replacement")
         .expect("apply the global replacement");
     assert!(
-        !visible(&harness, "Replace Preview"),
+        !visible(&harness, "Review replacements"),
         "replacement did not complete; needs attention={}",
         visible(&harness, "Preview needs attention")
     );

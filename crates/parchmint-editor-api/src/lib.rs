@@ -18,6 +18,25 @@ pub use parchmint_domain::{
     StyleProperties, StyleRole, TextAlignment, ViewId,
 };
 
+/// Resolves a semantic paragraph's reserved style name or stable hexadecimal ID.
+/// Unknown or malformed values have no style identity.
+pub fn style_id_from_canonical(value: &str) -> Option<StyleId> {
+    let reserved = match value {
+        "body" => Some(StyleCatalog::body_id()),
+        "document-title" => Some(StyleCatalog::document_title_id()),
+        "heading-1" => Some(StyleCatalog::heading_1_id()),
+        "heading-2" => Some(StyleCatalog::heading_2_id()),
+        "heading-3" => Some(StyleCatalog::heading_3_id()),
+        "block-quote" => Some(StyleCatalog::block_quote_id()),
+        "verse" => Some(StyleCatalog::verse_id()),
+        _ => None,
+    };
+    if reserved.is_some() {
+        return reserved;
+    }
+    parchmint_domain::decode_stable_id(value).map(StyleId::from_bytes)
+}
+
 /// A `Send` future returned by an editor operation that may settle away from
 /// the UI loop.
 pub type AsyncResult<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;

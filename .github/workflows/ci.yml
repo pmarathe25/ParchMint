@@ -86,22 +86,27 @@ jobs:
         run: cargo +$RUST_TOOLCHAIN test --workspace --locked --offline
 
   release:
-    name: ${{ matrix.platform }} / release archive
+    name: ${{ matrix.platform }} / native package
     needs: workspace
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             platform: linux
+            target: x86_64-unknown-linux-gnu
             suffix: ""
           - os: macos-latest
             platform: macos
+            target: aarch64-apple-darwin
             suffix: ""
           - os: windows-latest
             platform: windows
+            target: x86_64-pc-windows-msvc
             suffix: ".exe"
+    env:
+      RUSTFLAGS: ${{ matrix.platform == 'windows' && '-C target-feature=+crt-static' || '' }}
     defaults:
       run:
         shell: bash
@@ -110,22 +115,109 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        if: matrix.platform == 'windows'
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install Windows packaging tools
+        if: matrix.platform == 'windows'
+        run: dotnet tool install --global wix --version 5.0.2
+      - name: Install Linux packaging tools
+        if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
       - name: Install pinned Rust toolchain
         run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
       - name: Build the desktop with release features only
-        run: cargo +$RUST_TOOLCHAIN build --release --locked -j 1 -p parchmint-desktop --bin parchmint
+        run: cargo +$RUST_TOOLCHAIN build --release --locked -j 1 --target "${{ matrix.target }}" -p parchmint-desktop --bin parchmint
       - name: Verify release diagnostics filtering
-        run: cargo +$RUST_TOOLCHAIN test --release --locked -j 1 -p parchmint-diagnostics --test release_logging
+        run: cargo +$RUST_TOOLCHAIN test --release --locked -j 1 --target "${{ matrix.target }}" -p parchmint-diagnostics --test release_logging
       - name: Verify packaging
         run: python -m unittest discover -s packaging -p 'test_*.py'
       - name: Fetch locked sources for dependency notices
         run: cargo +$RUST_TOOLCHAIN fetch --locked
-      - name: Create portable archive
-        run: python packaging/package.py --binary "target/release/parchmint${{ matrix.suffix }}" --platform "${{ matrix.platform }}" --output release
+      - name: Create native package
+        run: python packaging/package.py --binary "target/${{ matrix.target }}/release/parchmint${{ matrix.suffix }}" --platform "${{ matrix.platform }}" --output release
+      - name: Verify Linux installation
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get install -y ./release/*.deb
+          parchmint --version
+          sudo apt-get remove -y parchmint
+      - name: Verify macOS disk image
+        if: matrix.platform == 'macos'
+        run: |
+          mountpoint=$(mktemp -d)
+          hdiutil attach release/*.dmg -mountpoint "$mountpoint" -readonly -nobrowse
+          trap 'hdiutil detach "$mountpoint"' EXIT
+          "$mountpoint/ParchMint.app/Contents/MacOS/parchmint" --version
+          test -f "$mountpoint/ParchMint.app/Contents/Resources/licenses/dependencies/packages.json"
+      - name: Verify Windows installation
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $package = (Get-Item release/*.msi).FullName
+          $install = Start-Process msiexec.exe -ArgumentList "/i `"$package`" /qn /norestart" -Wait -PassThru
+          if ($install.ExitCode -notin @(0, 3010)) { throw "MSI installation failed: $($install.ExitCode)" }
+          try {
+            & "$env:ProgramFiles/ParchMint/parchmint.exe" --version
+            if ($LASTEXITCODE -ne 0) { throw "Installed executable failed" }
+            if (!(Test-Path "$env:ProgramData/Microsoft/Windows/Start Menu/Programs/ParchMint.lnk")) {
+              throw "Start menu shortcut missing"
+            }
+          } finally {
+            $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$package`" /qn /norestart" -Wait -PassThru
+            if ($uninstall.ExitCode -notin @(0, 3010)) { throw "MSI removal failed: $($uninstall.ExitCode)" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: ParchMint-${{ matrix.platform }}
           path: |
-            release/*.zip
+            release/*.deb
+            release/*.dmg
+            release/*.msi
             release/*.sha256
           if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check release tag matches the package version
+        run: |
+          python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+          if os.environ["RELEASE_TAG"] != f"v{version}":
+              raise SystemExit(f"Release tag must be v{version} to match Cargo.toml")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ParchMint-*
+          merge-multiple: true
+          path: release
+      - name: Verify package checksums
+        working-directory: release
+        run: sha256sum --check *.sha256
+      - name: Publish packages and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$RELEASE_TAG" release/*.deb release/*.dmg release/*.msi release/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "ParchMint ${RELEASE_TAG#v}" \
+            --generate-notes \
+            --notes "Download the installer for your operating system below. See the [installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/docs/install.md)."

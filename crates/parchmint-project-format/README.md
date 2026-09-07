@@ -1,8 +1,7 @@
 # `parchmint-project-format`
 
 This crate reads and writes ParchMint project files. It gives each value one
-standard byte representation, called its canonical form. The crate also upgrades
-older project formats.
+standard byte representation, called its canonical form.
 
 The current saved project consists of these files:
 
@@ -40,15 +39,10 @@ bytes -> detect format -> parse -> sanitize -> validate -> project values
 canonical bytes <- stable encoding and hashing <--------+
 ```
 
-A migration first validates the complete old project. The codec then produces
-the complete new resource set in memory and hands it to the normal save path,
-which writes the set as one transaction. Recording a pre-migration HistoryStore
-checkpoint is not yet implemented.
-
 ## Interface
 
-`CanonicalCodec` detects formats, decodes resources, encodes canonical bytes,
-and plans migrations. `ProjectFormatCodec` implements it and converts manifests
+`CanonicalCodec` detects formats, decodes resources, and encodes canonical bytes.
+`ProjectFormatCodec` implements it and converts manifests
 to domain projects and persistence revision lists.
 
 See [the source](src/lib.rs) for method signatures.
@@ -75,5 +69,7 @@ assembles and decodes whole domain projects and persistence frontiers
 - Canonical paths are relative and reject traversal, case collisions, and
   Unicode-normalization collisions.
 - Unknown newer formats and invalid inputs fail without changing project files.
-- A migration preserves stable IDs when their meaning is unchanged. SQLite,
-  recovery, workspace, and editor-native state are outside migration input.
+
+Canonical document decoding also supplies the rendered word count. Persistence
+summaries and UI projections use it so markup, attributes, and empty paragraphs
+do not count as prose, and adjacent blocks remain separate words.

@@ -6,6 +6,7 @@ directories and reads them through the production format codec.
 ## Interface and implementation
 
 `ScopedProject::from_fixture` copies a fixture and exposes its temporary `root`.
+`CanonicalResourceSet` holds encoded fixture bytes and belongs to test support.
 `canonical_bytes` reads the project resource set; `canonical_document_bytes`
 reads its document resources. Dropping the value removes its temporary directory.
 Fixture copying skips Git metadata and keeps ParchMint control files.

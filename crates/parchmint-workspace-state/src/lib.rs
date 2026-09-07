@@ -3,6 +3,7 @@
 //! Workspace files contain arrangement data only. They are intentionally
 //! separate from project files, project saves, undo, and History.
 
+use parchmint_domain::encode_stable_id as encode_id;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -588,15 +589,6 @@ fn decode_snapshot(stored: StoredWorkspace) -> Result<WorkspaceSnapshot, String>
     })
 }
 
-fn encode_id(bytes: &[u8; 16]) -> String {
-    let mut encoded = String::with_capacity(32);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
-}
-
 fn decode_node_id(encoded: &str) -> Result<NodeId, String> {
     decode_id(encoded).map(NodeId::from_bytes)
 }
@@ -605,20 +597,9 @@ fn decode_view_id(encoded: &str) -> Result<ViewId, String> {
     decode_id(encoded).map(ViewId::from_bytes)
 }
 
-fn decode_id(encoded: &str) -> Result<[u8; 16], String> {
-    if encoded.len() != 32 {
-        return Err(format!(
-            "invalid ID length {}; expected 32 hexadecimal characters",
-            encoded.len()
-        ));
-    }
-    let mut bytes = [0; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        let start = index * 2;
-        *byte = u8::from_str_radix(&encoded[start..start + 2], 16)
-            .map_err(|_| format!("invalid hexadecimal ID {encoded:?}"))?;
-    }
-    Ok(bytes)
+fn decode_id(value: &str) -> Result<[u8; 16], String> {
+    parchmint_domain::decode_stable_id(value)
+        .ok_or_else(|| "stable identifier must contain 32 hexadecimal characters".to_owned())
 }
 
 #[cfg(unix)]

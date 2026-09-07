@@ -269,6 +269,25 @@ impl NativeProjectEffectExecutor {
                 self.execute_commands([ProjectCommand::delete_metadata_field(field)])
                     .await
             }
+            ProjectEffect::LoadGlobalDictionary => {
+                Ok(ProjectEffectCompletion::GlobalDictionaryWords(
+                    self.ports.global_dictionary().await?,
+                ))
+            }
+            ProjectEffect::UpdateGlobalDictionaryWord { word, add } => {
+                self.ports.update_global_dictionary(word, add).await?;
+                Ok(ProjectEffectCompletion::GlobalDictionaryWords(
+                    self.ports.global_dictionary().await?,
+                ))
+            }
+            ProjectEffect::UpdateDictionaryWord { word, add } => {
+                self.execute_commands([if add {
+                    ProjectCommand::add_dictionary_word(word)
+                } else {
+                    ProjectCommand::remove_dictionary_word(word)
+                }])
+                .await
+            }
             ProjectEffect::UpsertStyle(definition) => {
                 self.execute_commands([ProjectCommand::upsert_style(definition)])
                     .await
@@ -408,7 +427,7 @@ impl NativeProjectEffectExecutor {
             | ProjectEffect::BuildReplacementPreview { .. }
             | ProjectEffect::ApplyGlobalReplacement { .. }
             | ProjectEffect::ExportEntireManuscript { .. }
-            | ProjectEffect::ChooseExportDestination { .. }
+            | ProjectEffect::ChooseExportDestination
             | ProjectEffect::CancelExport
             | ProjectEffect::OpenExportResult(_)
             | ProjectEffect::RevealExportResult(_)
@@ -690,6 +709,7 @@ pub(crate) enum ProjectEffectCompletion {
         documents: Vec<ResolvedDocumentMount>,
     },
     ApplyAppearance(ThemeSnapshot),
+    GlobalDictionaryWords(Vec<String>),
     SavedThrough(u64),
     FocusRecoveredEditor,
     NavigateSearch {
@@ -860,6 +880,9 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::ReorderMetadataField { .. } => "reorder-metadata-field",
         ProjectEffect::DeleteMetadataField(_) => "delete-metadata-field",
         ProjectEffect::UpsertStyle(_) => "upsert-style",
+        ProjectEffect::UpdateDictionaryWord { .. }
+        | ProjectEffect::UpdateGlobalDictionaryWord { .. } => "update-dictionary",
+        ProjectEffect::LoadGlobalDictionary => "load-global-dictionary",
         ProjectEffect::DeleteStyle(_) => "delete-style",
         ProjectEffect::SearchProject { .. } => "search-project",
         ProjectEffect::NavigateSearchResult { .. } => "navigate-search-result",
@@ -874,7 +897,7 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::ApplyAppearanceToAllWindows(_) => "apply-appearance",
         ProjectEffect::SetProjectExportSettings(_) => "set-export-settings",
         ProjectEffect::ExportEntireManuscript { .. } => "export-entire-manuscript",
-        ProjectEffect::ChooseExportDestination { .. } => "choose-export-destination",
+        ProjectEffect::ChooseExportDestination => "choose-export-destination",
         ProjectEffect::CancelExport => "cancel-export",
         ProjectEffect::OpenExportResult(_) => "open-export-result",
         ProjectEffect::RevealExportResult(_) => "reveal-export-result",
@@ -960,6 +983,7 @@ trait RuntimeProjectPorts: Send + Sync {
         &self,
         mode: AppearanceMode,
     ) -> RuntimeFuture<Result<ThemeSnapshot, PortError>>;
+    fn global_dictionary(&self) -> RuntimeFuture<Result<Vec<String>, PortError>>;
     fn update_global_dictionary(
         &self,
         word: String,
@@ -1187,6 +1211,23 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 .await
                 .map_err(|error| PortError::Failed {
                     service: "AppearanceService::set_mode",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn global_dictionary(&self) -> RuntimeFuture<Result<Vec<String>, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(PortError::from)?;
+            access
+                .preferences_service()
+                .map_err(PortError::from)?
+                .load()
+                .await
+                .map(|snapshot| snapshot.values.global_dictionary)
+                .map_err(|error| PortError::Failed {
+                    service: "PreferenceService::load",
                     message: error.to_string(),
                 })
         })
@@ -1797,7 +1838,7 @@ fn unsupported_project_effect(effect: &ProjectEffect) -> Option<UnsupportedEffec
             "revision-scoped GlobalReplacement completion feed",
         ),
         ProjectEffect::ExportEntireManuscript { .. }
-        | ProjectEffect::ChooseExportDestination { .. }
+        | ProjectEffect::ChooseExportDestination
         | ProjectEffect::CancelExport => (
             UnsupportedCategory::Export,
             "progress-bearing Exporter completion feed",
@@ -1843,17 +1884,7 @@ fn parse_search_match_id(match_id: &str) -> Result<(String, FindMatch, u64), Pro
 }
 
 fn parse_stable_hex(value: &str, field: &'static str) -> Result<[u8; 16], ProjectRuntimeError> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ProjectRuntimeError::InvalidEffect(field));
-    }
-    let mut bytes = [0_u8; 16];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let pair =
-            std::str::from_utf8(pair).map_err(|_| ProjectRuntimeError::InvalidEffect(field))?;
-        bytes[index] =
-            u8::from_str_radix(pair, 16).map_err(|_| ProjectRuntimeError::InvalidEffect(field))?;
-    }
-    Ok(bytes)
+    parchmint_domain::decode_stable_id(value).ok_or(ProjectRuntimeError::InvalidEffect(field))
 }
 
 #[cfg(test)]
@@ -1881,6 +1912,7 @@ mod tests {
         duplicate_requests: Mutex<Vec<DuplicateSubtreesWorkflow>>,
         project_undo_calls: Mutex<u8>,
         project_redo_calls: Mutex<u8>,
+        global_words: Mutex<Vec<String>>,
     }
 
     impl FakePorts {
@@ -1892,6 +1924,7 @@ mod tests {
                 duplicate_requests: Mutex::new(Vec::new()),
                 project_undo_calls: Mutex::new(0),
                 project_redo_calls: Mutex::new(0),
+                global_words: Mutex::new(Vec::new()),
             }
         }
 
@@ -2028,12 +2061,28 @@ mod tests {
             Box::pin(async move { result })
         }
 
+        fn global_dictionary(&self) -> RuntimeFuture<Result<Vec<String>, PortError>> {
+            let result = self
+                .authorize()
+                .map(|_| self.global_words.lock().unwrap().clone());
+            Box::pin(async move { result })
+        }
+
         fn update_global_dictionary(
             &self,
-            _word: String,
-            _add: bool,
+            word: String,
+            add: bool,
         ) -> RuntimeFuture<Result<(), PortError>> {
-            let result = self.authorize();
+            let result = self.authorize().map(|_| {
+                let mut words = self.global_words.lock().unwrap();
+                if add {
+                    if !words.contains(&word) {
+                        words.push(word);
+                    }
+                } else {
+                    words.retain(|entry| entry != &word);
+                }
+            });
             Box::pin(async move { result })
         }
 
@@ -2159,6 +2208,73 @@ mod tests {
             },
             ports,
         )
+    }
+
+    #[test]
+    fn dictionary_settings_route_global_words_to_preferences_and_project_words_to_commands() {
+        let (snapshot, _, _, _) = fixture();
+        let revision = snapshot.project.revision;
+        let (mut executor, ports) = executor(snapshot);
+        assert_eq!(
+            block_on(executor.clone().execute_project_effect(
+                ProjectEffect::UpdateGlobalDictionaryWord {
+                    word: "airship".into(),
+                    add: true
+                }
+            ))
+            .unwrap(),
+            ProjectEffectCompletion::GlobalDictionaryWords(vec!["airship".into()])
+        );
+        assert_eq!(ports.snapshot.lock().unwrap().project.revision, revision);
+        assert!(
+            ports
+                .snapshot
+                .lock()
+                .unwrap()
+                .project
+                .dictionary
+                .iter()
+                .next()
+                .is_none()
+        );
+        block_on(
+            executor
+                .clone()
+                .execute_project_effect(ProjectEffect::UpdateDictionaryWord {
+                    word: "harbor".into(),
+                    add: true,
+                }),
+        )
+        .unwrap();
+        assert!(
+            ports
+                .snapshot
+                .lock()
+                .unwrap()
+                .project
+                .dictionary
+                .contains("harbor")
+        );
+        executor.snapshot = Arc::new(ports.snapshot.lock().unwrap().clone());
+        assert_eq!(
+            block_on(
+                executor.execute_project_effect(ProjectEffect::UpdateGlobalDictionaryWord {
+                    word: "airship".into(),
+                    add: false
+                })
+            )
+            .unwrap(),
+            ProjectEffectCompletion::GlobalDictionaryWords(Vec::new())
+        );
+        assert!(
+            ports
+                .snapshot
+                .lock()
+                .unwrap()
+                .project
+                .dictionary
+                .contains("harbor")
+        );
     }
 
     fn fixture() -> (ProjectSnapshot, NodeId, DocumentId, MetadataFieldId) {

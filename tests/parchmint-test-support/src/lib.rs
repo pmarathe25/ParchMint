@@ -6,9 +6,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parchmint_project_format::{
-    CanonicalCodec, CanonicalInputSet, CanonicalRelativePath, CanonicalResource,
-    CanonicalResourceSet, FormatError, ProjectFormatCodec,
+    CanonicalBytes, CanonicalCodec, CanonicalInputSet, CanonicalRelativePath, CanonicalResource,
+    FormatError, FormatVersion, ProjectFormatCodec,
 };
+
+/// Canonical fixture bytes, including the format control and resource paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalResourceSet {
+    pub format_version: FormatVersion,
+    pub resources: BTreeMap<CanonicalRelativePath, CanonicalBytes>,
+}
 
 pub struct ScopedProject {
     pub root: PathBuf,

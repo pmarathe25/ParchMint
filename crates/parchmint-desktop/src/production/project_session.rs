@@ -5,6 +5,7 @@ use super::workflow_adapters::{
     SearchRefreshingCommands, SearchRefreshingPersistence,
 };
 use super::*;
+use parchmint_domain::encode_stable_id as stable_id_text;
 
 pub(super) struct ControlledHistory {
     inner: Git2HistoryStore,
@@ -1196,14 +1197,14 @@ impl DocumentSnapshotLoader for CanonicalDocumentLoader {
                 });
             }
         }
-        let body = ProjectFormatCodec::default()
+        let decoded = ProjectFormatCodec::default()
             .decode_document(&bytes)
             .map_err(|error| ApplicationError::DocumentLoad {
                 document,
                 reason: error.to_string(),
-            })?
-            .as_html()
-            .to_owned();
+            })?;
+        let word_count = decoded.word_count();
+        let body = decoded.as_html().to_owned();
         let recovery_hash = recovery_document_content_hash(
             &bytes,
             self.annotation_bytes.get(&document).map(Vec::as_slice),
@@ -1224,7 +1225,7 @@ impl DocumentSnapshotLoader for CanonicalDocumentLoader {
                 CanonicalDocumentSummary {
                     revision,
                     content_hash: ContentHash::from_bytes(Sha256::digest(&bytes).into()),
-                    word_count: body.split_whitespace().count(),
+                    word_count,
                 },
             );
         Ok(DocumentSnapshot {
@@ -1665,10 +1666,6 @@ fn stable_id(namespace: &[u8], value: &[u8]) -> [u8; 16] {
     let mut id = [0; 16];
     id.copy_from_slice(&digest[..16]);
     id
-}
-
-fn stable_id_text(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn history_root_id(project: ProjectId) -> u64 {

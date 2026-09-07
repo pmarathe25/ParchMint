@@ -108,7 +108,11 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
                                 })
                         },
                         |document| {
-                            DocumentWordCount::Known(document.body.split_whitespace().count())
+                            ProjectFormatCodec::default()
+                                .decode_document(document.body.as_bytes())
+                                .map_or(DocumentWordCount::Pending, |document| {
+                                    DocumentWordCount::Known(document.word_count())
+                                })
                         },
                     ),
                 }

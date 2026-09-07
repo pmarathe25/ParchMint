@@ -314,6 +314,12 @@ impl LocalSearchState {
         &self.matches
     }
 
+    pub fn active_match_position(&self) -> Option<usize> {
+        self.active_match
+            .filter(|index| *index < self.matches.len())
+            .map(|index| index + 1)
+    }
+
     pub fn active_match(&self) -> Option<FindMatch> {
         self.active_match
             .and_then(|index| self.matches.get(index))
@@ -687,7 +693,7 @@ impl SpellingMenu {
         let preferred_y = invocation_point.y;
         let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
         let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
-        let mut actions = vec![SpellingMenuAction::AddComment];
+        let mut actions = Vec::new();
         if request.include_spelling_actions {
             actions.extend(
                 request
@@ -708,6 +714,7 @@ impl SpellingMenu {
             });
             actions.push(SpellingMenuAction::Ignore);
         }
+        actions.push(SpellingMenuAction::AddComment);
         Self {
             pane: request.pane,
             word: request.word,
@@ -1289,6 +1296,7 @@ pub enum EditorMessage {
         anchor: CommentAnchor,
     },
     SelectComment(String),
+    SetCommentActionsOpen(bool),
     SetCommentHover {
         pane: EditorPane,
         comment_id: Option<String>,
@@ -1436,6 +1444,7 @@ pub struct EditorWorkspace {
     comments: BTreeMap<String, CommentAnchor>,
     comment_threads: BTreeMap<String, CommentThreadView>,
     hovered_comment: Option<CommentHover>,
+    comment_actions_open: bool,
     comment_composer: Option<CommentComposer>,
     selected_comment: Option<String>,
     comment_draft: text_editor::Content,
@@ -1538,6 +1547,7 @@ impl EditorWorkspace {
             comments: BTreeMap::new(),
             comment_threads: BTreeMap::new(),
             hovered_comment: None,
+            comment_actions_open: false,
             comment_composer: None,
             selected_comment: None,
             comment_draft: text_editor::Content::new(),
@@ -1625,6 +1635,7 @@ impl EditorWorkspace {
             comments: snapshot_comment_anchors(snapshot),
             comment_threads: snapshot_comment_threads(snapshot),
             hovered_comment: None,
+            comment_actions_open: false,
             comment_composer: None,
             selected_comment: None,
             comment_draft: text_editor::Content::new(),
@@ -2456,11 +2467,18 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::SelectComment(comment_id) => self.select_comment(comment_id),
+            EditorMessage::SetCommentActionsOpen(open) => {
+                self.comment_actions_open = open;
+                Vec::new()
+            }
             EditorMessage::SetCommentHover {
                 pane,
                 comment_id,
                 anchor_bounds,
             } => {
+                if self.comment_actions_open {
+                    return Vec::new();
+                }
                 self.hovered_comment = comment_id
                     .filter(|comment_id| self.comment_threads.contains_key(comment_id))
                     .map(|comment_id| CommentHover {
@@ -2522,6 +2540,8 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::CancelCommentComposer => {
+                self.comment_actions_open = false;
+                self.hovered_comment = None;
                 self.comment_composer = None;
                 self.comment_draft = text_editor::Content::new();
                 self.comment_feedback = None;
@@ -2563,6 +2583,7 @@ impl EditorWorkspace {
                 resolved,
             }),
             EditorMessage::RequestDeleteCommentThread(thread) => {
+                self.comment_actions_open = false;
                 self.pending_delete_comment = Some(thread);
                 self.comment_feedback = Some("Confirm thread deletion.".into());
                 Vec::new()
@@ -2587,15 +2608,19 @@ impl EditorWorkspace {
             EditorMessage::DeleteCommentMessage {
                 thread_id,
                 message_id,
-            } => self.command(EditorCommand::DeleteCommentMessage {
-                thread_id,
-                message_id,
-            }),
+            } => {
+                self.comment_actions_open = false;
+                self.command(EditorCommand::DeleteCommentMessage {
+                    thread_id,
+                    message_id,
+                })
+            }
             EditorMessage::BeginEditCommentMessage {
                 thread_id,
                 message_id,
                 body,
             } => {
+                self.comment_actions_open = false;
                 self.comment_reply_drafts
                     .insert(thread_id.clone(), text_editor::Content::with_text(&body));
                 self.editing_comment_message = Some((thread_id, message_id));
@@ -3085,9 +3110,10 @@ impl HydratedDocuments {
                     revision: document.revision,
                     visibility: document.visibility,
                     content_hash: None,
-                    word_count: parchmint_ui_api::DocumentWordCount::Known(count_words(
-                        &document.body,
-                    )),
+                    word_count: count_words(&document.body).map_or(
+                        parchmint_ui_api::DocumentWordCount::Pending,
+                        parchmint_ui_api::DocumentWordCount::Known,
+                    ),
                 });
         }
         let mut ordered = Vec::new();
@@ -3111,9 +3137,11 @@ impl HydratedDocuments {
         let word_counts = summaries
             .iter()
             .filter_map(|(id, document)| match document.word_count {
-                parchmint_ui_api::DocumentWordCount::Pending => loaded
-                    .get(id)
-                    .map(|document| (id.clone(), count_words(&document.body))),
+                parchmint_ui_api::DocumentWordCount::Pending => {
+                    loaded.get(id).and_then(|document| {
+                        count_words(&document.body).map(|count| (id.clone(), count))
+                    })
+                }
                 parchmint_ui_api::DocumentWordCount::Known(words) => Some((id.clone(), words)),
             })
             .collect();
@@ -3185,8 +3213,12 @@ fn production_view_id(snapshot: &ProjectSnapshot, pane: EditorPane) -> ViewId {
     ViewId::from_bytes(bytes)
 }
 
-fn count_words(body: &str) -> usize {
-    body.split_whitespace().count()
+fn count_words(body: &str) -> Option<usize> {
+    use parchmint_project_format::CanonicalCodec;
+    parchmint_project_format::ProjectFormatCodec::default()
+        .decode_document(body.as_bytes())
+        .ok()
+        .map(|document| document.word_count())
 }
 
 fn snapshot_comment_anchors(snapshot: &ProjectSnapshot) -> BTreeMap<String, CommentAnchor> {
@@ -3550,12 +3582,12 @@ mod tests {
         assert_eq!(
             menu.actions(),
             [
-                SpellingMenuAction::AddComment,
                 SpellingMenuAction::Replace("the".to_owned()),
                 SpellingMenuAction::Replace("tech".to_owned()),
                 SpellingMenuAction::AddToDictionary(SpellingDictionaryScope::Project),
                 SpellingMenuAction::RemoveFromDictionary(SpellingDictionaryScope::Global),
                 SpellingMenuAction::Ignore,
+                SpellingMenuAction::AddComment,
             ]
         );
     }
@@ -3968,11 +4000,15 @@ mod tests {
             "a live edit must not dismiss a card that is still anchored to the same thread"
         );
 
+        workspace.update(EditorMessage::SetCommentActionsOpen(true));
         workspace.update(EditorMessage::SetCommentHover {
             pane: EditorPane::Primary,
             comment_id: None,
             anchor_bounds: Rect::default(),
         });
+        assert!(workspace.hovered_comment(EditorPane::Primary).is_some());
+        workspace.update(EditorMessage::CancelCommentComposer);
+        assert!(!workspace.comment_actions_open);
         assert!(workspace.hovered_comment(EditorPane::Primary).is_none());
 
         workspace.reconcile_document_comments("chapter-one", &[]);

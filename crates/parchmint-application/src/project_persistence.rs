@@ -1,3 +1,4 @@
+pub(crate) use parchmint_domain::encode_stable_id as stable_id_text;
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -2429,18 +2430,7 @@ fn persistence_status(status: EditorPersistenceStatus) -> PersistenceStatus {
     }
 }
 
-pub(crate) fn stable_id_text(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn parse_stable_id(value: &str) -> Result<[u8; 16], ProjectPersistenceError> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ProjectPersistenceError::UnknownRecoveryAcceptance);
-    }
-    let mut bytes = [0; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| ProjectPersistenceError::UnknownRecoveryAcceptance)?;
-    }
-    Ok(bytes)
+    parchmint_domain::decode_stable_id(value)
+        .ok_or(ProjectPersistenceError::UnknownRecoveryAcceptance)
 }

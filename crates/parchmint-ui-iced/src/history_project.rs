@@ -1,4 +1,6 @@
 //! Project-wide History comparison. Runs entirely on the service worker.
+use parchmint_domain::{NodeId, NodeKind, Project, ProjectExportSetting, ProjectSection};
+
 use super::*;
 use parchmint_editor_api::{CanonicalCommentAnchor, CanonicalProjection};
 use parchmint_project_format::{CanonicalCodec, ProjectFormatCodec};

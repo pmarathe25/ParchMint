@@ -5,6 +5,13 @@ novels on Windows, macOS, and Linux. Projects stay in ordinary files on your
 computer, and the application keeps save history without requiring an online
 account.
 
+## Install
+
+Download the installer for your computer from
+[GitHub Releases](https://github.com/pmarathe25/ParchMint/releases): Windows MSI,
+macOS DMG, or Linux DEB. See the [installation guide](docs/install.md) for platform
+instructions and updates. Rust is only needed when building from source.
+
 ## Run from source
 
 Install the Rust toolchain listed in `rust-toolchain.toml`, then run:
@@ -21,7 +28,7 @@ cargo build --release --locked -j 1 -p parchmint-desktop --bin parchmint
 
 The executable is written to `target/release/parchmint` on macOS and Linux or
 `target/release/parchmint.exe` on Windows. See [packaging](packaging/README.md)
-for portable release archives.
+for native release packages.
 
 ## Documentation
 

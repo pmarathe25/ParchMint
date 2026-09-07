@@ -231,7 +231,7 @@ fn large_document_project_wide_revision_preserves_every_match_after_restart() {
         )
         .expect("review project-wide replacement");
     harness
-        .click_text(HarnessWindow::Project, "Revalidate selection")
+        .click_text(HarnessWindow::Project, "Refresh preview")
         .expect("revalidate large-document replacement");
     harness
         .click_text(HarnessWindow::Project, "Apply replacement")
@@ -319,7 +319,7 @@ fn large_document_recovery_replays_repeated_unsaved_authoring_without_loss() {
         .expect("reopen abandoned large-document project");
     assert!(
         reopened
-            .contains_text(HarnessWindow::Project, "Recovered changes are ready")
+            .contains_text(HarnessWindow::Project, "Unsaved changes found")
             .expect("read recovery affordance"),
         "the unsaved recovery journal must be offered"
     );

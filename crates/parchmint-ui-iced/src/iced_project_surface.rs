@@ -1,13 +1,17 @@
 //! Private Iced composition for production and deterministic project workspaces.
 
+use crate::components::semantic_pick_list as pick_list;
+
 use iced::widget::{
-    Space, button, checkbox, column, container, mouse_area, opaque, rich_text, row, scrollable,
-    sensor, span, stack, text, text_editor, text_input,
+    Space, checkbox, column, container, mouse_area, opaque, rich_text, row, scrollable, sensor,
+    span, stack, text, text_editor,
 };
 use iced::{Background, Border, Color, Element, Font, Length, font};
 use parchmint_editor_api::{SemanticBlock, SemanticBlockKind, SemanticInlineMark};
 use parchmint_ui_api::HistoryMaintenanceStatus;
 use std::collections::BTreeMap;
+
+use crate::components::{semantic_button as button, semantic_text_input as text_input};
 
 use crate::{
     CARDS_CARD_CONTENT_HEIGHT, CARDS_DROP_STRIP_HEIGHT, CommentAnchor, ContentState,
@@ -182,7 +186,7 @@ fn project_surface_with_layout<'a>(
     layout: &ShellLayout,
     inspector_expansion: [bool; 3],
 ) -> Element<'a, ProjectSurfaceMessage> {
-    let ribbon = ribbon(project_title, destination, theme);
+    let ribbon = ribbon(project_title, destination, theme, layout.ribbon().width());
     let center = center_view(workspace, destination, theme, editor_child);
     // Cards shares the persistent authoring shell from its reference board;
     // the remaining project destinations retain their dedicated full-area
@@ -284,7 +288,7 @@ fn project_surface_with_layout<'a>(
         stack![
             base,
             opaque(
-                container(modal_view(modal, theme))
+                container(modal_view(modal, workspace, theme))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(iced::alignment::Horizontal::Center)
@@ -344,10 +348,11 @@ fn ribbon<'a>(
     project_title: &'a str,
     destination: RibbonDestination,
     theme: ParchMintTheme,
+    width: u32,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let mode_switch = [
         ("Editor", RibbonDestination::Editor),
-        ("Cards", RibbonDestination::Cards),
+        ("Outline", RibbonDestination::Cards),
     ]
     .into_iter()
     .fold(row![].spacing(0), |modes, (label, item)| {
@@ -378,7 +383,7 @@ fn ribbon<'a>(
         (Icon::History, "History", RibbonDestination::History),
         (
             Icon::RecentlyDeleted,
-            "Recently Deleted",
+            "Deleted",
             RibbonDestination::RecentlyDeleted,
         ),
         (Icon::Export, "Export", RibbonDestination::Export),
@@ -389,19 +394,27 @@ fn ribbon<'a>(
             .into_iter()
             .fold(row![].spacing(4), |row, (icon_kind, label, item)| {
                 let selected = item == destination;
+                let labeled = width >= 1_180;
+                let utility_width = if labeled { 96 } else { 42 };
+                let mut label_content = row![icon_sized(icon_kind, 18)]
+                    .spacing(6)
+                    .align_y(iced::alignment::Vertical::Center);
+                if labeled {
+                    label_content = label_content.push(text(label).size(12));
+                }
                 let control: Element<'a, ProjectSurfaceMessage> = harness_target::target(
                     HarnessTarget::Ribbon(item),
                     column![
-                        button(icon(icon_kind))
-                            .width(42)
+                        button(label_content)
+                            .width(utility_width)
                             .height(38)
-                            .padding([5, 0])
+                            .padding([5, 8])
                             .on_press(ProjectSurfaceMessage::Navigate(item))
                             .style(move |_, status| flat_selection_button_style(
                                 theme, status, selected
                             )),
                         container(Space::new().height(2))
-                            .width(42)
+                            .width(utility_width)
                             .height(2)
                             .style(move |_| ribbon_indicator_style(theme, selected)),
                     ]
@@ -409,14 +422,36 @@ fn ribbon<'a>(
                 );
                 row.push(stationary_tooltip::tooltip(
                     control,
-                    container(text(label).size(12)).padding([4, 6]),
+                    container(
+                        text(if item == RibbonDestination::RecentlyDeleted {
+                            "Recently Deleted"
+                        } else {
+                            label
+                        })
+                        .size(12),
+                    )
+                    .padding([4, 6]),
                     components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ))
             });
-    let title = row![icon(Icon::Project), text(project_title).size(16),]
+    let title_width = if width >= 1_180 { 250 } else { 190 };
+    let title = stationary_tooltip::tooltip(
+        row![
+            icon(Icon::Project),
+            text(compact_card_projection(
+                project_title,
+                if width >= 1_180 { 25 } else { 18 }
+            ))
+            .size(16)
+            .wrapping(text::Wrapping::None)
+            .width(Length::Fill)
+        ]
         .spacing(10)
         .align_y(iced::alignment::Vertical::Center)
-        .width(230);
+        .width(title_width),
+        container(text(project_title).size(12)).padding([4, 6]),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
+    );
     container(
         row![
             title,
@@ -493,34 +528,28 @@ fn explorer_rail<'a>(
         .fold(column![].spacing(SPACING_4), |column, item| {
             let depth = hierarchy_depth(explorer, item.parent_id);
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Root => button(icon_sized(
-                    if item.expanded {
-                        Icon::ExplorerFolderOpen
-                    } else {
-                        Icon::ExplorerFolderClosed
-                    },
-                    16,
-                ))
-                .padding(SPACING_4)
-                .width(20)
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                })
-                .into(),
-                HierarchyRowKind::Group => container(icon_sized(
-                    if item.expanded {
-                        Icon::ExplorerFolderOpen
-                    } else {
-                        Icon::ExplorerFolderClosed
-                    },
-                    16,
-                ))
-                .width(20)
-                .align_x(iced::alignment::Horizontal::Center)
-                .into(),
+                HierarchyRowKind::Root => {
+                    button(text(if item.expanded { "▾" } else { "▸" }).size(16))
+                        .padding(SPACING_4)
+                        .width(20)
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        })
+                        .into()
+                }
+                HierarchyRowKind::Group => {
+                    container(text(if item.expanded { "▾" } else { "▸" }).size(16))
+                        .width(20)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .into()
+                }
                 HierarchyRowKind::Document => Space::new().width(20).into(),
             };
             let title = if item.cut_pending {
@@ -753,9 +782,39 @@ fn explorer_rail<'a>(
             Space::new().height(0).into()
         }
     };
+    let drag_status: Element<'a, ProjectSurfaceMessage> =
+        if let Some(source) = workspace.hierarchy_drag_source() {
+            let source = explorer.title(source).unwrap_or("Selected items");
+            let destination = match workspace.hierarchy_drag_destination() {
+                Some(DragDestination::BeforeSibling(id)) => {
+                    format!("before {}", explorer.title(id).unwrap_or("item"))
+                }
+                Some(DragDestination::AfterSibling(id)) => {
+                    format!("after {}", explorer.title(id).unwrap_or("item"))
+                }
+                Some(DragDestination::IntoGroup(id)) => {
+                    format!("inside {}", explorer.title(id).unwrap_or("group"))
+                }
+                Some(DragDestination::EditorPane(pane)) => format!(
+                    "in the {} editor",
+                    if *pane == EditorPane::Primary {
+                        "left"
+                    } else {
+                        "right"
+                    }
+                ),
+                None => "to a folder or insertion line".to_owned(),
+            };
+            text(format!("Move “{source}” {destination}"))
+                .size(12)
+                .color(theme.palette().accent)
+                .into()
+        } else {
+            Space::new().height(0).into()
+        };
     let rail = column![
         row![
-            text("EXPLORER").size(12),
+            text("Explorer").size(12),
             Space::new().width(Length::Fill),
             harness_target::target(
                 HarnessTarget::ExplorerAdd,
@@ -798,6 +857,7 @@ fn explorer_rail<'a>(
         scrollable(rows)
             .id(explorer_scroll_id())
             .height(Length::Fill),
+        container(drag_status).height(36),
     ]
     .spacing(8)
     .height(Length::Fill);
@@ -1037,21 +1097,6 @@ fn explorer_creation_action<'a>(
     .into()
 }
 
-fn comment_action<'a>(
-    label: &'static str,
-    message: ProjectSurfaceMessage,
-    theme: ParchMintTheme,
-) -> Element<'a, ProjectSurfaceMessage> {
-    mouse_area(
-        container(text(label).size(12))
-            .padding([6, 8])
-            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
-    )
-    .on_press(message)
-    .interaction(iced::mouse::Interaction::Pointer)
-    .into()
-}
-
 fn comment_anchor_summary(anchor: &CommentAnchor) -> String {
     match anchor {
         CommentAnchor::Range { quote, .. } => format!("“{quote}”"),
@@ -1118,9 +1163,9 @@ fn global_search_rail<'a>(
         stationary_tooltip::tooltip(
             button(
                 text(if search.case_sensitive() {
-                    "Aa ✓"
+                    "Case ✓"
                 } else {
-                    "Aa"
+                    "Case"
                 })
                 .size(12)
             )
@@ -1139,18 +1184,25 @@ fn global_search_rail<'a>(
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
         stationary_tooltip::tooltip(
-            button(text(if search.whole_word() { "W ✓" } else { "W" }).size(12))
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::SetGlobalSearchOptions {
-                        case_sensitive: search.case_sensitive(),
-                        whole_word: !search.whole_word()
-                    }
-                ))
-                .style(move |_, status| components::button_style(
-                    theme,
-                    ButtonKind::Quiet,
-                    interaction(status, search.whole_word())
-                )),
+            button(
+                text(if search.whole_word() {
+                    "Word ✓"
+                } else {
+                    "Word"
+                })
+                .size(12)
+            )
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::SetGlobalSearchOptions {
+                    case_sensitive: search.case_sensitive(),
+                    whole_word: !search.whole_word()
+                }
+            ))
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                interaction(status, search.whole_word())
+            )),
             container(text("Match whole word").size(12)).padding([4, 6]),
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
@@ -1171,7 +1223,7 @@ fn global_search_rail<'a>(
             let title = workspace
                 .explorer()
                 .title_for_document(document_id)
-                .unwrap_or(document_id);
+                .unwrap_or("Unavailable document");
             let match_count = matches.len();
             let rows = matches
                 .into_iter()
@@ -1226,8 +1278,9 @@ fn global_search_rail<'a>(
             column.push(
                 column![
                     row![
-                        text(title).size(u32::from(UI_LABEL.size)),
-                        Space::new().width(Length::Fill),
+                        text(title)
+                            .size(u32::from(UI_LABEL.size))
+                            .width(Length::Fill),
                         text(search_match_count_label(match_count))
                             .size(u32::from(UI_COMPACT.size))
                             .color(theme.palette().secondary_text),
@@ -1408,10 +1461,6 @@ fn cards_center<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let cards = workspace.cards();
-    let section_title = workspace
-        .explorer()
-        .title(cards.section_id())
-        .unwrap_or("Project");
     let sections = workspace.explorer().root_ids().into_iter().fold(
         row![].spacing(SPACING_12),
         |sections, section_id| {
@@ -1454,17 +1503,12 @@ fn cards_center<'a>(
             );
             let node_id = item.node_id.to_owned();
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Group => container(icon_sized(
-                    if item.expanded {
-                        Icon::ExplorerFolderOpen
-                    } else {
-                        Icon::ExplorerFolderClosed
-                    },
-                    16,
-                ))
-                .width(28)
-                .align_x(iced::alignment::Horizontal::Center)
-                .into(),
+                HierarchyRowKind::Group => {
+                    container(text(if item.expanded { "▾" } else { "▸" }).size(16))
+                        .width(28)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .into()
+                }
                 _ => Space::new().width(28).into(),
             };
             let group = item.kind == HierarchyRowKind::Group;
@@ -1509,7 +1553,12 @@ fn cards_center<'a>(
             let middle_active = drag_destination.as_ref() == Some(&middle);
             let source_active = drag_source.as_deref() == Some(node_id.as_str());
             let drag_state: Element<'a, ProjectSurfaceMessage> = if source_active {
-                text("Moving").size(11).into()
+                text(format!(
+                    "Moving “{}”",
+                    compact_card_projection(item.title, 24)
+                ))
+                .size(11)
+                .into()
             } else {
                 Space::new().width(0).into()
             };
@@ -1542,11 +1591,7 @@ fn cards_center<'a>(
                     if source_active || middle_active || item.selected {
                         style.background = Some(Background::Color(theme.palette().accent_subtle));
                         style.border = Border {
-                            color: if item.selected {
-                                theme.palette().focus_ring
-                            } else {
-                                theme.palette().accent
-                            },
+                            color: theme.palette().accent,
                             width: 1.0,
                             radius: 4.0.into(),
                         };
@@ -1622,12 +1667,9 @@ fn cards_center<'a>(
     };
     let content =
         column![
-            text(section_title)
+            text("Outline")
                 .size(u32::from(UI_HEADING.size))
                 .line_height(UI_HEADING.line_height),
-            text("Manuscript outline")
-                .size(u32::from(UI_COMPACT.size))
-                .color(theme.palette().secondary_text),
             sections,
             scrollable(items)
                 .id(HarnessTarget::CardsList.id())
@@ -1698,7 +1740,7 @@ fn card_metadata_chip_colors(theme: ParchMintTheme, label: &str) -> (Color, Colo
         palette.comment_resolved,
     ];
     let tint = tints[(stable_metadata_label_hash(label) as usize) % tints.len()];
-    (Color { a: 0.16, ..tint }, Color { a: 0.55, ..tint })
+    (Color { a: 0.08, ..tint }, Color { a: 0.25, ..tint })
 }
 
 fn stable_metadata_label_hash(label: &str) -> u64 {
@@ -1765,7 +1807,14 @@ fn search_center<'a>(
                     format!("All matches ({})", preview.included_match_ids().len()),
                     None,
                 ),
-                ReplacementPreviewRowKind::Document => (item.node_id.to_owned(), None),
+                ReplacementPreviewRowKind::Document => (
+                    workspace
+                        .explorer()
+                        .title_for_document(item.node_id)
+                        .unwrap_or("Unavailable document")
+                        .to_owned(),
+                    None,
+                ),
                 ReplacementPreviewRowKind::Match => {
                     let snippet = format!(
                         "{}{}{}",
@@ -1773,7 +1822,15 @@ fn search_center<'a>(
                         item.matching_text.unwrap_or_default(),
                         item.suffix.unwrap_or_default()
                     );
-                    (snippet, Some(item.node_id.to_owned()))
+                    (
+                        format!(
+                            "{snippet} → {}{}{}",
+                            item.prefix.unwrap_or_default(),
+                            workspace.global_search().replacement(),
+                            item.suffix.unwrap_or_default()
+                        ),
+                        Some(item.node_id.to_owned()),
+                    )
                 }
             };
             let state_label = match item.check_state {
@@ -1821,14 +1878,14 @@ fn search_center<'a>(
     } else if let Some(error) = preview.validation_error() {
         format!("Preview needs attention: {error}")
     } else if preview.is_revalidated() {
-        "Selected matches are revalidated and ready to apply atomically.".to_owned()
+        "The preview is current. Apply will replace the selected matches together.".to_owned()
     } else {
-        "Selection changed. Revalidate before applying.".to_owned()
+        "The project or selection changed. Refresh the preview before applying.".to_owned()
     };
     let revalidate = if preview.is_validating() {
-        button(text("Revalidate selection"))
+        button(text("Refresh preview"))
     } else {
-        button(text("Revalidate selection")).on_press(ProjectSurfaceMessage::Project(
+        button(text("Refresh preview")).on_press(ProjectSurfaceMessage::Project(
             ProjectMessage::OpenReplacementPreview,
         ))
     };
@@ -1841,7 +1898,7 @@ fn search_center<'a>(
     };
     column![
         row![
-            text("Replace Preview").size(22),
+            text("Review replacements").size(22),
             Space::new().width(Length::Fill),
             button(text("Close").size(12)).on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::CloseReplacementPreview
@@ -1849,6 +1906,8 @@ fn search_center<'a>(
         ]
         .align_y(iced::alignment::Vertical::Center),
         replacement,
+        text("Replaces document body text only; titles, synopsis, metadata, and comments stay as they are.").size(12),
+        text(validation).size(13),
         text(format!(
             "{} selected match{} ready to replace",
             preview.included_match_ids().len(),
@@ -1859,7 +1918,6 @@ fn search_center<'a>(
             },
         ))
         .size(13),
-        text(validation).size(13),
         row![
             button(text("Select all").size(12)).on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::SelectAllReplacementMatches
@@ -1969,8 +2027,8 @@ fn history_center<'a>(
                 .find(|checkpoint| checkpoint.checkpoint_id == checkpoint_id)
                 .map(|checkpoint| (checkpoint_id, checkpoint.label()))
         })
-        .map(|(checkpoint_id, label)| {
-            button(text(format!("Restore “{label}”")).size(12))
+        .map(|(checkpoint_id, _label)| {
+            button(text("Restore project to this version…").size(12))
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::RequestHistoryRestore {
                         checkpoint_id: checkpoint_id.to_owned(),
@@ -2043,14 +2101,14 @@ fn history_center<'a>(
         Some(comparison) => history_project_change(comparison, theme),
         None if history.error().is_some() => Space::new().height(0).into(),
         None if history.preview().is_some() => {
-            text("This checkpoint has no version of the current document to compare.")
+            text("This version does not contain the current document.")
                 .size(12)
                 .into()
         }
         None if history.selected_checkpoint_id().is_some() => {
-            text("Loading checkpoint comparison…").size(12).into()
+            text("Loading version comparison…").size(12).into()
         }
-        None => text("Select a checkpoint to compare it with the current project.")
+        None => text("Select a version to compare it with the current project.")
             .size(12)
             .into(),
     };
@@ -2059,20 +2117,24 @@ fn history_center<'a>(
         .and_then(|preview| preview.project_changes.as_ref())
     {
         let mut content = column![
-            text("Changes since checkpoint").size(16),
+            text("Changes since this version").size(16),
             text(
                 history
                     .preview()
                     .map(|preview| format!(
-                        "{} · Version {}",
+                        "{} · {}",
                         preview.checkpoint.label(),
-                        preview.checkpoint.sequence
+                        preview
+                            .checkpoint
+                            .recorded_at_unix_millis
+                            .map(crate::project_workspace::local_version_time)
+                            .unwrap_or_else(|| "Date unavailable".to_owned())
                     ))
                     .unwrap_or_default()
             )
             .size(13),
             row![
-                text("Checkpoint").size(12),
+                text("Saved version").size(12),
                 text("− removed").size(12),
                 text("Current").size(12),
                 text("+ added").size(12)
@@ -2082,7 +2144,7 @@ fn history_center<'a>(
         ]
         .spacing(12);
         if changes.is_empty() {
-            content = content.push(text("No changes since this checkpoint."));
+            content = content.push(text("No changes since this version."));
         }
         for change in changes {
             content = content.push(history_project_change(change, theme));
@@ -2139,14 +2201,14 @@ fn history_center<'a>(
     ]
     .spacing(SPACING_12);
     let detail = column![
-        text("Checkpoint details")
+        text("Version details")
             .size(u32::from(UI_PAGE_TITLE.size))
             .line_height(UI_PAGE_TITLE.line_height)
             .font(Font {
                 weight: font::Weight::Semibold,
                 ..Font::with_name(UI_PAGE_TITLE.family)
             }),
-        text("Compare this checkpoint with the current project, including unsaved drafts.")
+        text("Compare this saved version with the current project, including unsaved drafts.")
             .size(u32::from(UI_BODY.size))
             .color(theme.palette().secondary_text),
         error,
@@ -2155,7 +2217,30 @@ fn history_center<'a>(
             HarnessTarget::HistoryComparison,
             scrollable(comparison).height(Length::Fill)
         ),
-        row![Space::new().width(Length::Fill), restore].spacing(12),
+        column![
+            text(
+                history
+                    .selected_checkpoint_id()
+                    .and_then(|id| history
+                        .checkpoints()
+                        .iter()
+                        .find(|row| row.checkpoint_id == id))
+                    .map(|row| format!(
+                        "Selected version: {} · {}",
+                        row.label(),
+                        row.recorded_at_unix_millis
+                            .map(crate::project_workspace::local_version_time)
+                            .unwrap_or_else(|| "Date unavailable".to_owned())
+                    ))
+                    .unwrap_or_default()
+            )
+            .size(13),
+            text("Restoring replaces the entire current project.")
+                .size(12)
+                .color(theme.palette().secondary_text),
+            restore,
+        ]
+        .spacing(8),
     ]
     .spacing(SPACING_16);
     row![
@@ -2234,19 +2319,29 @@ fn deleted_center<'a>(
     };
     let preview: Element<'a, ProjectSurfaceMessage> = match deleted.selected_preview() {
         Some(preview) => {
-            let (node_id, using_fallback, former_location) = items
+            let (node_id, using_fallback, restore_location) = items
                 .iter()
                 .find(|item| Some(item.node_id) == selected_item_id)
                 .map(|item| {
                     (
                         item.node_id.to_owned(),
-                        matches!(item.restore_location, RestoreLocation::SectionRoot(_)),
-                        restore_location_label(workspace, item.former_location),
+                        item.former_location != item.restore_location,
+                        restore_location_label(workspace, item.restore_location),
                     )
                 })
                 .expect("selected deleted item has a presentation row");
-            let mut actions = row![
-                Space::new().width(Length::Fill),
+            let actions = row![
+                text(format!(
+                    "Restore to {}{}",
+                    restore_location,
+                    if using_fallback {
+                        " · original folder is unavailable"
+                    } else {
+                        ""
+                    }
+                ))
+                .size(12)
+                .width(Length::Fill),
                 button(text("Restore item").size(12))
                     .on_press(ProjectSurfaceMessage::Project(
                         ProjectMessage::RestoreDeleted(node_id.clone()),
@@ -2258,27 +2353,9 @@ fn deleted_center<'a>(
                     )),
             ]
             .spacing(8);
-            if using_fallback {
-                actions = actions.push(
-                    button(text("Use section root").size(12))
-                        .on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::UseRestoreFallback(node_id),
-                        ))
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Secondary,
-                                interaction(status, true),
-                            )
-                        }),
-                );
-            }
+
             container(
                 column![
-                    text("Deleted document contents").size(16).font(Font {
-                        weight: font::Weight::Bold,
-                        ..Font::DEFAULT
-                    }),
                     container(
                         column![
                             row![
@@ -2300,22 +2377,7 @@ fn deleted_center<'a>(
                         Surface::Manuscript,
                         Interaction::Rest,
                     )),
-                    row![
-                        container(
-                            text(format!(
-                            "Read-only preview · restoring returns the item to {former_location}."
-                        ))
-                            .size(12)
-                        )
-                        .padding(12)
-                        .width(Length::Fill)
-                        .style(move |_| iced::widget::container::Style {
-                            background: Some(Background::Color(theme.palette().sidebar)),
-                            ..Default::default()
-                        }),
-                        actions,
-                    ]
-                    .spacing(12),
+                    actions,
                 ]
                 .spacing(14)
                 .height(Length::Fill),
@@ -2359,26 +2421,11 @@ fn deleted_center<'a>(
         .width(420)
         .height(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        container(
-            column![
-                text("Deleted item preview").size(24),
-                text(
-                    items
-                        .iter()
-                        .find(|item| Some(item.node_id) == selected_item_id)
-                        .map(|item| item.title)
-                        .unwrap_or("Select an item to preview"),
-                )
-                .size(14),
-                preview,
-            ]
-            .spacing(18)
-            .height(Length::Fill),
-        )
-        .padding([20, 30])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(|_| iced::widget::container::Style::default()),
+        container(preview)
+            .padding([20, 30])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| iced::widget::container::Style::default()),
     ]
     .height(Length::Fill)
     .into()
@@ -2617,17 +2664,6 @@ fn export_center<'a>(
         crate::ExportState::Failed(error) => error,
     };
     let title_setting = export.project_settings().emit_titles;
-    let next_title_setting = match title_setting {
-        parchmint_domain::ProjectExportSetting::Inherit => {
-            parchmint_domain::ProjectExportSetting::Enabled
-        }
-        parchmint_domain::ProjectExportSetting::Enabled => {
-            parchmint_domain::ProjectExportSetting::Disabled
-        }
-        parchmint_domain::ProjectExportSetting::Disabled => {
-            parchmint_domain::ProjectExportSetting::Inherit
-        }
-    };
     let mut terminal_actions = row![].spacing(8);
     if export.can_cancel() {
         terminal_actions = terminal_actions.push(
@@ -2648,165 +2684,96 @@ fn export_center<'a>(
                 )),
             );
     }
-    let title_control = button(
-        row![
-            text(export_setting_label(title_setting)).size(14),
-            Space::new().width(Length::Fill),
-            text("⌄").size(14),
-        ]
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .width(Length::Fill)
-    .padding([9, 12])
-    .on_press_maybe(export.can_start().then_some(ProjectSurfaceMessage::Project(
-        ProjectMessage::SetExportTitleSetting(next_title_setting),
-    )))
-    .style(move |_, status| {
-        components::button_style(theme, ButtonKind::Secondary, interaction(status, false))
-    });
-    let page_break_control = button(
-        row![
-            text(export_setting_label(
-                if export.project_settings().starts_new_page {
-                    parchmint_domain::ProjectExportSetting::Enabled
-                } else {
-                    parchmint_domain::ProjectExportSetting::Disabled
+    let title_control: Element<'a, ProjectSurfaceMessage> = if export.can_configure() {
+        harness_target::target(
+            HarnessTarget::ExportTitles,
+            pick_list(
+                vec!["Default · include", "Include", "Exclude"],
+                Some(export_setting_label(title_setting)),
+                |value| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetExportTitleSetting(
+                        match value {
+                            "Include" => parchmint_domain::ProjectExportSetting::Enabled,
+                            "Exclude" => parchmint_domain::ProjectExportSetting::Disabled,
+                            _ => parchmint_domain::ProjectExportSetting::Inherit,
+                        },
+                    ))
                 },
-            ))
-            .size(14),
-            Space::new().width(Length::Fill),
-            text("⌄").size(14),
-        ]
-        .align_y(iced::alignment::Vertical::Center),
-    )
-    .width(Length::Fill)
-    .padding([9, 12])
-    .on_press_maybe(export.can_start().then_some(ProjectSurfaceMessage::Project(
-        ProjectMessage::SetExportPageBreak(!export.project_settings().starts_new_page),
-    )))
-    .style(move |_, status| {
-        components::button_style(theme, ButtonKind::Secondary, interaction(status, false))
-    });
+            )
+            .width(Length::Fill),
+        )
+    } else {
+        text(export_setting_label(title_setting)).into()
+    };
+    let page_break_control = checkbox(export.project_settings().starts_new_page)
+        .label("Include manuscript page breaks")
+        .on_toggle_maybe(export.can_configure().then_some(|enabled| {
+            ProjectSurfaceMessage::Project(ProjectMessage::SetExportPageBreak(enabled))
+        }));
     let output_controls = column![
-        text("MANUSCRIPT OUTPUT").size(12),
+        text("Options").size(12),
         row![
-            column![
-                text("Title emission").size(16),
-                text("Controls headings emitted from manuscript node titles.").size(12),
-            ]
-            .spacing(4)
-            .width(Length::FillPortion(3)),
+            text("Include chapter titles")
+                .size(16)
+                .width(Length::FillPortion(3)),
             container(title_control).width(Length::FillPortion(2)),
         ]
         .spacing(32)
         .align_y(iced::alignment::Vertical::Center),
-        Space::new().height(12),
-        row![
-            column![
-                text("Page breaks").size(16),
-                text("Preserves authored page-break atoms in the manuscript.").size(12),
-            ]
-            .spacing(4)
-            .width(Length::FillPortion(3)),
-            container(page_break_control).width(Length::FillPortion(2)),
-        ]
-        .spacing(32)
-        .align_y(iced::alignment::Vertical::Center),
-        Space::new().height(20),
+        page_break_control,
         checkbox(export.numbers_documents())
             .label("Number chapter headings")
-            .on_toggle_maybe(export.can_start().then_some(|enabled| {
+            .on_toggle_maybe(export.can_configure().then_some(|enabled| {
                 ProjectSurfaceMessage::Project(ProjectMessage::SetExportNumbering(enabled))
             })),
     ]
-    .spacing(10);
+    .spacing(20);
     let state: Element<'a, ProjectSurfaceMessage> =
         if matches!(export.state(), crate::ExportState::Ready) {
             Space::new().height(0).into()
         } else {
             text(state).size(12).into()
         };
-    let summary = column![
-        text("SUMMARY").size(12),
-        container(column![
-            text("Entire Manuscript").size(18),
-            text("HTML · UTF-8").size(14),
-            Space::new().height(8),
-            text("Uses project title-emission and page-break settings.").size(13),
-            text("Excludes Synopsis, metadata, comments, and Research.").size(13),
-        ].spacing(10))
-        .padding(16)
-        .height(Length::Fixed(160.0))
-        .style(move |_| iced::widget::container::Style {
-            background: Some(Background::Color(theme.palette().sidebar)),
-            ..Default::default()
-        }),
-        container(text("Export does not change project content. Existing output is replaced only after confirmation.").size(12))
-            .padding(16)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Background::Color(theme.palette().sidebar)),
-                ..Default::default()
-            }),
-        state,
-    ]
-    .spacing(10);
-    let output_file =
-        row![
-            text_input("Output file", export.output_name())
-                .on_input_maybe(export.can_start().then_some(|value| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::SetExportOutputName(value))
-                }))
-                .padding([9, 12])
-                .width(Length::Fill)
-                .style(move |_, status| components::field_style(theme, field_interaction(status))),
-            harness_target::target(
-                HarnessTarget::ExportBrowse,
-                button(text("Browse…"))
-                    .padding([9, 14])
-                    .on_press_maybe((!export.can_cancel()).then_some(
-                        ProjectSurfaceMessage::Project(ProjectMessage::BrowseExportDestination)
+    let output_file = row![
+        container(
+            text(
+                export
+                    .destination()
+                    .unwrap_or("Choose where to save your manuscript")
+            )
+            .size(14)
+        )
+        .width(Length::Fill)
+        .padding([9, 12])
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+        harness_target::target(
+            HarnessTarget::ExportBrowse,
+            button(text("Browse…"))
+                .padding([9, 14])
+                .on_press_maybe(
+                    (!export.can_cancel()).then_some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::BrowseExportDestination
                     ))
-                    .style(move |_, status| components::button_style(
-                        theme,
-                        ButtonKind::Secondary,
-                        interaction(status, false)
-                    )),
-            ),
-        ]
-        .spacing(8);
+                )
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Secondary,
+                    interaction(status, false)
+                )),
+        ),
+    ]
+    .spacing(8);
     let content =
         container(
             column![
                 text("Export manuscript").size(28),
-                text("Create one self-contained HTML export of the entire Manuscript.").size(16),
+                text("Export the entire Manuscript as an HTML file.").size(16),
+                column![text("Destination").size(12), output_file].spacing(8),
+                output_controls,
+                state,
                 row![
-                    container(output_controls)
-                        .padding([16, 0])
-                        .width(Length::FillPortion(1))
-                        .style(|_| iced::widget::container::Style::default()),
-                    column![
-                        text("OUTPUT FILE").size(12),
-                        output_file,
-                        container(summary)
-                            .padding([16, 0])
-                            .style(|_| iced::widget::container::Style::default()),
-                    ]
-                    .spacing(12)
-                    .width(Length::FillPortion(1))
-                ]
-                .spacing(32),
-                row![
+                    terminal_actions,
                     Space::new().width(Length::Fill),
-                    button(text("Cancel"))
-                        .padding([10, 18])
-                        .on_press_maybe(export.can_cancel().then_some(
-                            ProjectSurfaceMessage::Project(ProjectMessage::CancelExport)
-                        ))
-                        .style(move |_, status| components::button_style(
-                            theme,
-                            ButtonKind::Secondary,
-                            interaction(status, false)
-                        )),
                     harness_target::target(
                         HarnessTarget::ExportStart,
                         button(text("Export"))
@@ -2820,16 +2787,15 @@ fn export_center<'a>(
                                 interaction(status, false)
                             )),
                     ),
-                    terminal_actions,
                 ]
                 .spacing(12),
             ]
-            .spacing(20),
+            .spacing(24),
         )
-        .padding([40, 0])
-        .width(1100)
-        .height(Length::Fill);
-    container(content)
+        .padding([32, 24])
+        .width(Length::Fill)
+        .max_width(760);
+    container(scrollable(container(content).center_x(Length::Fill)).height(Length::Fill))
         .width(Length::Fill)
         .height(Length::Fill)
         .align_x(iced::alignment::Horizontal::Center)
@@ -2838,7 +2804,7 @@ fn export_center<'a>(
 
 fn export_setting_label(setting: parchmint_domain::ProjectExportSetting) -> &'static str {
     match setting {
-        parchmint_domain::ProjectExportSetting::Inherit => "Project default",
+        parchmint_domain::ProjectExportSetting::Inherit => "Default · include",
         parchmint_domain::ProjectExportSetting::Enabled => "Include",
         parchmint_domain::ProjectExportSetting::Disabled => "Exclude",
     }
@@ -2857,10 +2823,10 @@ fn settings_center<'a>(
                     ("System", "Follow the operating system")
                 }
                 parchmint_preferences::AppearanceMode::Light => {
-                    ("Light", "Keep this appearance when the system changes")
+                    ("Light", "Warm paper and dark text")
                 }
                 parchmint_preferences::AppearanceMode::Dark => {
-                    ("Dark", "Keep this appearance when the system changes")
+                    ("Dark", "A quieter canvas for low light")
                 }
             };
             column.push(
@@ -2913,7 +2879,7 @@ fn settings_center<'a>(
                     }),
             ]
             .align_y(iced::alignment::Vertical::Center),
-            text("Choose a field to edit its type, default, and card visibility.").size(11),
+            text("Choose a field to edit its type, default, and outline visibility.").size(11),
         ]
         .spacing(SPACING_8),
         |column, (index, field)| {
@@ -2931,7 +2897,7 @@ fn settings_center<'a>(
                     MetadataFieldTextKind::Multiline => "Multiline",
                 },
                 if field.visible_on_cards {
-                    " · Cards"
+                    " · Outline"
                 } else {
                     ""
                 },
@@ -3019,23 +2985,10 @@ fn settings_center<'a>(
             let id = style.id.to_owned();
             let delete_id = id.clone();
             let reserved = style.role.is_reserved();
+            let selected = matches!(settings.selected_detail(), Some(SettingsDetail::Style(id)) if id == style.id);
             let mut row_content = row![
                 button(
-                    row![
-                        column![
-                            text(style.display_name).size(13),
-                            text(if style.role.is_reserved() {
-                                "Reserved"
-                            } else {
-                                "Custom"
-                            })
-                            .size(11)
-                        ]
-                        .spacing(2),
-                        Space::new().width(Length::Fill),
-                        text(style.inherits.unwrap_or("No inheritance")).size(11),
-                    ]
-                    .spacing(14),
+                    text(style.display_name).size(13),
                 )
                 .width(Length::Fill)
                 .padding(SPACING_8)
@@ -3043,7 +2996,7 @@ fn settings_center<'a>(
                     id,
                 )))
                 .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, selected))
                 })
             ]
             .align_y(iced::alignment::Vertical::Center);
@@ -3066,6 +3019,21 @@ fn settings_center<'a>(
             .categories()
             .into_iter()
             .fold(column![].spacing(SPACING_4), |column, item| {
+                let column = if item.category == SettingsCategory::Appearance {
+                    column.push(
+                        text("Application")
+                            .size(12)
+                            .color(theme.palette().secondary_text),
+                    )
+                } else if item.category == SettingsCategory::Styles {
+                    column.push(Space::new().height(12)).push(
+                        text("This project")
+                            .size(12)
+                            .color(theme.palette().secondary_text),
+                    )
+                } else {
+                    column
+                };
                 column.push(
                     button(text(item.label).size(13).font(if item.selected {
                         Font {
@@ -3100,15 +3068,23 @@ fn settings_center<'a>(
             Space::new().height(8),
             container(choices).width(540),
             Space::new().height(12),
-            text("Operating system changes Light → Dark; every open ParchMint window updates immediately.").size(14),
-        ]
-        .spacing(SPACING_12)
-        .into(),
-        SettingsCategory::General => column![
-            text("General")
-                .size(u32::from(UI_PAGE_TITLE.size))
-                .line_height(UI_PAGE_TITLE.line_height),
-            text("No general settings are available.").size(13),
+            container(
+                column![
+                    text("Appearance preview").size(12),
+                    text("A place for your next chapter")
+                        .size(24)
+                        .font(Font::with_name("Source Serif 4")),
+                    text("Comfortable contrast, wherever you write.").size(14)
+                ]
+                .spacing(12)
+            )
+            .padding(24)
+            .width(540)
+            .style(move |_| components::surface(
+                theme,
+                Surface::Manuscript,
+                Interaction::Rest
+            )),
         ]
         .spacing(SPACING_12)
         .into(),
@@ -3142,7 +3118,11 @@ fn settings_center<'a>(
                     .padding(0)
                     .width(Length::FillPortion(3))
                     .height(Length::Fill)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+                    .style(move |_| components::surface(
+                        theme,
+                        Surface::Panel,
+                        Interaction::Rest
+                    )),
                 ]
                 .spacing(SPACING_24)
                 .height(Length::Fill),
@@ -3167,11 +3147,17 @@ fn settings_center<'a>(
                     container(scrollable(styles).height(Length::Fill))
                         .width(Length::FillPortion(2))
                         .height(Length::Fill),
-                    container(column![text("Style details").size(16), scrollable(detail)].spacing(10))
-                        .padding(0)
-                        .width(Length::FillPortion(3))
-                        .height(Length::Fill)
-                        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+                    container(
+                        column![text("Style details").size(16), scrollable(detail)].spacing(10)
+                    )
+                    .padding(0)
+                    .width(Length::FillPortion(3))
+                    .height(Length::Fill)
+                    .style(move |_| components::surface(
+                        theme,
+                        Surface::Panel,
+                        Interaction::Rest
+                    )),
                 ]
                 .spacing(SPACING_24)
                 .height(Length::Fill),
@@ -3205,46 +3191,88 @@ fn settings_center<'a>(
                                 }),
                         )
                     });
-            let words: Element<'a, ProjectSurfaceMessage> = match dictionaries.words() {
-                Some([]) => text("No project dictionary words.").size(12).into(),
-                Some(words) => {
-                    scrollable(words.iter().fold(column![].spacing(4), |column, word| {
-                        column.push(text(word).size(13))
-                    }))
-                    .height(Length::Fill)
-                    .into()
-                }
-                None => text("This dictionary is unavailable in the project workspace.")
-                    .size(12)
-                    .into(),
+            let query = dictionaries.query().to_lowercase();
+            let matches: Vec<_> = dictionaries
+                .words()
+                .unwrap_or_default()
+                .iter()
+                .filter(|word| word.to_lowercase().contains(&query))
+                .collect();
+            let words: Element<'a, ProjectSurfaceMessage> = if matches.is_empty() {
+                text(if query.is_empty() {
+                    if dictionaries.selected_scope() == crate::DictionaryScope::Project {
+                        "No words added to this project yet."
+                    } else if dictionaries.words().is_none() {
+                        "Loading global words…"
+                    } else {
+                        "No global words added yet."
+                    }
+                } else {
+                    "No words match your search."
+                })
+                .size(13)
+                .into()
+            } else {
+                scrollable(
+                    matches
+                        .into_iter()
+                        .fold(column![].spacing(6), |column, word| {
+                            column.push(
+                                row![
+                                    text(word).width(Length::Fill).size(14),
+                                    button(text("Remove").size(12)).on_press(
+                                        ProjectSurfaceMessage::Project(
+                                            ProjectMessage::RemoveDictionaryWord(word.clone())
+                                        )
+                                    )
+                                ]
+                                .spacing(8),
+                            )
+                        }),
+                )
+                .height(Length::Fill)
+                .into()
             };
             column![
-                text("Dictionaries")
-                    .size(u32::from(UI_PAGE_TITLE.size))
-                    .line_height(UI_PAGE_TITLE.line_height),
+                text("Dictionaries").size(u32::from(UI_PAGE_TITLE.size)),
                 text(format!("Language · {}", dictionaries.language())).size(12),
                 scopes,
+                text(if dictionaries.selected_scope() == crate::DictionaryScope::Project {
+                    "Project words travel with this project and are included in undo and History."
+                } else { "Global words apply to every project on this device. Changes are saved in application preferences." })
+                .size(13),
+                text("Add a word").size(12),
+                row![
+                    text_input("Enter a dictionary word", dictionaries.word_draft())
+                        .on_input(|word| ProjectSurfaceMessage::Project(
+                            ProjectMessage::EditDictionaryWord(word)
+                        ))
+                        .on_submit(ProjectSurfaceMessage::Project(
+                            ProjectMessage::AddDictionaryWord
+                        )),
+                    button(text("Add word")).on_press_maybe(
+                        (dictionaries.words().is_some() && !dictionaries.word_draft().trim().is_empty()).then_some(
+                            ProjectSurfaceMessage::Project(ProjectMessage::AddDictionaryWord)
+                        )
+                    )
+                ]
+                .spacing(8),
+                text_input("Search dictionary words", dictionaries.query()).on_input(|query| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetDictionaryQuery(query))
+                }),
                 words,
             ]
             .spacing(SPACING_12)
+            .height(Length::Fill)
             .into()
         }
     };
     row![
-        container(
-            column![
-                text("SETTINGS").size(12),
-                text("Project and application")
-                    .size(11)
-                    .color(theme.palette().secondary_text),
-                navigation,
-            ]
-            .spacing(SPACING_12),
-        )
-        .padding([SPACING_16, SPACING_12])
-        .width(280)
-        .height(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(column![text("Settings").size(12), navigation,].spacing(SPACING_12),)
+            .padding([SPACING_16, SPACING_12])
+            .width(280)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
         container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
             .width(SIDEBAR_SPLITTER_WIDTH)
             .height(Length::Fill)
@@ -3439,16 +3467,18 @@ fn metadata_field_detail<'a>(
         )
     });
     column![
-        text("Metadata field details").size(15),
+        text("Field name").size(12),
         label_input,
+        text("Description · optional").size(12),
         description_input,
+        text("Default value · optional").size(12),
         default_input,
         text("Applies to").size(12),
         applicability,
-        text("Text kind").size(12),
+        text("Text format").size(12),
         kind,
         checkbox(field.visible_on_cards)
-            .label("Visible on cards")
+            .label("Show on outline rows")
             .on_toggle({
                 let label = label.clone();
                 let description = description.clone();
@@ -3464,6 +3494,9 @@ fn metadata_field_detail<'a>(
                     ))
                 }
             }),
+        text("Shown beneath each document in Outline when a value is present.")
+            .size(12)
+            .color(theme.palette().secondary_text),
         button(text("Delete metadata field")).on_press(ProjectSurfaceMessage::Project(
             ProjectMessage::RequestDeleteMetadataField(id)
         )),
@@ -3472,74 +3505,59 @@ fn metadata_field_detail<'a>(
     .into()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StyleChoice {
+    id: Option<String>,
+    label: String,
+}
+
+impl std::fmt::Display for StyleChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
 fn style_detail<'a>(
     settings: &'a crate::SettingsState,
     style: crate::StyleSummary<'a>,
-    _theme: ParchMintTheme,
+    theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let style_id = style.id.to_owned();
-    let properties = [
-        StyleProperty::FontFamily,
-        StyleProperty::FontSizePoints,
-        StyleProperty::Weight,
-        StyleProperty::Italic,
-        StyleProperty::Alignment,
-        StyleProperty::FirstLineIndentPoints,
-        StyleProperty::LeftIndentPoints,
-        StyleProperty::RightIndentPoints,
-        StyleProperty::LineSpacing,
-        StyleProperty::SpaceBeforePoints,
-        StyleProperty::SpaceAfterPoints,
-        StyleProperty::KeepWithNext,
-        StyleProperty::PageBreakBefore,
-    ];
-    let property_controls =
-        properties
+    let choices: Vec<_> = std::iter::once(StyleChoice {
+        id: None,
+        label: "No inheritance".into(),
+    })
+    .chain(
+        settings
+            .styles()
             .into_iter()
-            .fold(column![].spacing(6), |column, property| {
-                let value = style_property_value(style.properties, property);
-                let id = style_id.clone();
-                column.push(
-                    row![
-                        text(property.label()).width(190),
-                        text(value).width(120),
-                        text_input("Enter new value", "").on_input(move |value| {
-                            ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
-                                style_id: id.clone(),
-                                property,
-                                value,
-                            })
-                        })
-                    ]
-                    .spacing(8),
-                )
-            });
-    let inheritance = settings
-        .styles()
-        .into_iter()
-        .filter(|candidate| candidate.id != style.id)
-        .fold(
-            row![
-                button(text("No inheritance")).on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::SetStyleInheritance {
-                        style_id: style_id.clone(),
-                        inherits: None
-                    }
-                ))
-            ]
-            .spacing(5),
-            |row, candidate| {
-                let id = style_id.clone();
-                row.push(button(text(candidate.display_name)).on_press(
-                    ProjectSurfaceMessage::Project(ProjectMessage::SetStyleInheritance {
-                        style_id: id,
-                        inherits: Some(candidate.id.to_owned()),
-                    }),
-                ))
-            },
-        );
+            .filter(|candidate| candidate.id != style.id)
+            .map(|candidate| StyleChoice {
+                id: Some(candidate.id.to_owned()),
+                label: candidate.display_name.to_owned(),
+            }),
+    )
+    .collect();
+    let selected = choices
+        .iter()
+        .find(|choice| choice.id.as_deref() == style.inherits)
+        .cloned();
+    let inheritance = harness_target::target(
+        HarnessTarget::StyleInheritance,
+        pick_list(choices, selected, {
+            let id = style_id.clone();
+            move |choice: StyleChoice| {
+                ProjectSurfaceMessage::Project(ProjectMessage::SetStyleInheritance {
+                    style_id: id.clone(),
+                    inherits: choice.id,
+                })
+            }
+        })
+        .width(Length::Fill)
+        .text_size(14),
+    );
     let mut content = column![
-        text("Style details").size(15),
+        text("Style name").size(12),
         text_input("Display name", style.display_name).on_input({
             let id = style_id.clone();
             move |display_name| {
@@ -3550,23 +3568,182 @@ fn style_detail<'a>(
             }
         }),
         text(if style.role.is_reserved() {
-            "Reserved style (cannot be deleted)"
+            "Built-in style"
         } else {
             "Custom style"
         })
-        .size(12),
+        .size(12)
+        .color(theme.palette().secondary_text),
         text("Inherits from").size(12),
         inheritance,
-        text("Properties").size(12),
-        property_controls,
+        text("Leave a field blank to inherit. Press Enter or Apply to save text values.")
+            .size(12)
+            .color(theme.palette().secondary_text),
     ]
     .spacing(8);
+    for (heading, properties) in [
+        (
+            "Typography",
+            &[
+                StyleProperty::FontFamily,
+                StyleProperty::FontSizePoints,
+                StyleProperty::Weight,
+                StyleProperty::Italic,
+                StyleProperty::Alignment,
+            ][..],
+        ),
+        (
+            "Spacing",
+            &[
+                StyleProperty::FirstLineIndentPoints,
+                StyleProperty::LeftIndentPoints,
+                StyleProperty::RightIndentPoints,
+                StyleProperty::LineSpacing,
+                StyleProperty::SpaceBeforePoints,
+                StyleProperty::SpaceAfterPoints,
+            ][..],
+        ),
+        (
+            "Pagination",
+            &[StyleProperty::KeepWithNext, StyleProperty::PageBreakBefore][..],
+        ),
+    ] {
+        content = content
+            .push(Space::new().height(8))
+            .push(text(heading).size(16));
+        for &property in properties {
+            let saved = style_property_value(style.properties, property);
+            let draft = settings.style_property_draft(&style_id, property);
+            let value = draft.unwrap_or(&saved);
+            let id = style_id.clone();
+            let control: Element<'a, ProjectSurfaceMessage> = if matches!(
+                property,
+                StyleProperty::Italic
+                    | StyleProperty::KeepWithNext
+                    | StyleProperty::PageBreakBefore
+            ) {
+                let selected = match value {
+                    "true" => "On",
+                    "false" => "Off",
+                    _ => "Inherit",
+                };
+                pick_list(["Inherit", "On", "Off"], Some(selected), move |choice| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
+                        style_id: id.clone(),
+                        property,
+                        value: match choice {
+                            "On" => "true",
+                            "Off" => "false",
+                            _ => "",
+                        }
+                        .into(),
+                    })
+                })
+                .text_size(14)
+                .width(Length::Fill)
+                .into()
+            } else if property == StyleProperty::Alignment {
+                let selected = match value {
+                    "Start" => "Left",
+                    "Center" => "Center",
+                    "End" => "Right",
+                    "Justify" => "Justified",
+                    _ => "Inherit",
+                };
+                pick_list(
+                    ["Inherit", "Left", "Center", "Right", "Justified"],
+                    Some(selected),
+                    move |choice| {
+                        ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
+                            style_id: id.clone(),
+                            property,
+                            value: match choice {
+                                "Left" => "Start",
+                                "Center" => "Center",
+                                "Right" => "End",
+                                "Justified" => "Justify",
+                                _ => "",
+                            }
+                            .into(),
+                        })
+                    },
+                )
+                .text_size(14)
+                .width(Length::Fill)
+                .into()
+            } else {
+                let commit = ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
+                    style_id: id.clone(),
+                    property,
+                    value: value.to_owned(),
+                });
+                let mut field = row![
+                    text_input(&format!("Enter {}", property.label().to_lowercase()), value)
+                        .on_input(move |value| ProjectSurfaceMessage::Project(
+                            ProjectMessage::EditStyleProperty {
+                                style_id: id.clone(),
+                                property,
+                                value
+                            }
+                        ))
+                        .on_submit(commit.clone()),
+                ]
+                .spacing(8);
+                if draft.is_some() {
+                    field = field.push(button(text("Apply").size(12)).on_press(commit));
+                }
+                field.into()
+            };
+            content = content.push(column![text(property.label()).size(12), control].spacing(4));
+        }
+    }
+    let family = match style.properties.font_family.as_deref() {
+        Some("Source Sans 3") => "Source Sans 3",
+        _ => "Source Serif 4",
+    };
+    content = content.push(
+        container(
+            column![
+                text(format!("Preview · {family}")).size(12),
+                text("The light reached the last page.")
+                    .font(Font {
+                        weight: if style.properties.weight.unwrap_or(400) >= 600 {
+                            font::Weight::Bold
+                        } else {
+                            font::Weight::Normal
+                        },
+                        style: if style.properties.italic.unwrap_or(false) {
+                            font::Style::Italic
+                        } else {
+                            font::Style::Normal
+                        },
+                        ..Font::with_name(family)
+                    })
+                    .size(
+                        style
+                            .properties
+                            .font_size_points
+                            .unwrap_or(18.0)
+                            .clamp(10.0, 36.0)
+                    ),
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(Length::Fill)
+        .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
+    );
     if !style.role.is_reserved() {
         content = content.push(button(text("Delete custom style")).on_press(
             ProjectSurfaceMessage::Project(ProjectMessage::RequestDeleteStyle(style_id)),
         ));
     }
-    content.into()
+    container(content)
+        .padding(iced::Padding {
+            right: 16.0,
+            ..iced::Padding::ZERO
+        })
+        .into()
 }
 
 fn style_property_value(
@@ -3633,7 +3810,7 @@ fn recovery_backdrop<'a>(
     container(
         column![
             Space::new().height(120),
-            text("ParchMint recovered newer edits before opening the workspace.").size(16),
+            text("Choose which version to open.").size(16),
         ]
         .spacing(0),
     )
@@ -3651,31 +3828,40 @@ fn recovery_modal<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let recovery = workspace.recovery();
-    let mut summary = column![
-        text(format!(
-            "{} recovered record{}",
-            recovery.accepted_records(),
-            if recovery.accepted_records() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ))
-        .size(16),
-    ]
-    .spacing(6);
+    let mut summary = column![text("Documents with unsaved changes").size(14)].spacing(8);
     for document in workspace.recovery_summary() {
-        summary = summary.push(
-            text(format!(
-                "{} · editor revision {}",
-                document.display_title.unwrap_or("Recovered document"),
-                document.revision
-            ))
-            .size(13),
-        );
+        summary =
+            summary.push(text(document.display_title.unwrap_or("Untitled document")).size(15));
     }
-    if let Some(isolation) = recovery.isolation() {
-        summary = summary.push(text(format!("Some records were isolated: {isolation}")).size(13));
+    summary = summary.push(
+        button(
+            text(if recovery.details_expanded() {
+                "Hide technical details"
+            } else {
+                "Show technical details"
+            })
+            .size(12),
+        )
+        .on_press(ProjectSurfaceMessage::Project(
+            ProjectMessage::ToggleRecoveryDetails,
+        )),
+    );
+    if recovery.details_expanded() {
+        summary = summary
+            .push(text(format!("{} recovery records", recovery.accepted_records())).size(12));
+        for document in workspace.recovery_summary() {
+            summary = summary.push(
+                text(format!(
+                    "{} · revision {}",
+                    document.display_title.unwrap_or("Untitled document"),
+                    document.revision
+                ))
+                .size(12),
+            );
+        }
+        if let Some(isolation) = recovery.isolation() {
+            summary = summary.push(text(format!("Isolated records: {isolation}")).size(12));
+        }
     }
     if let Some(error) = recovery.error() {
         summary = summary.push(text(format!("Recovery could not complete: {error}")).size(13));
@@ -3685,7 +3871,7 @@ fn recovery_modal<'a>(
     } else {
         "Recover changes"
     }));
-    let mut discard = button(text("Discard"));
+    let mut discard = button(text("Open last saved version"));
     if !recovery.is_resolving() && recovery.error().is_none() {
         recover = recover.on_press(ProjectSurfaceMessage::Project(
             ProjectMessage::AcceptRecovery,
@@ -3718,7 +3904,7 @@ fn recovery_modal<'a>(
         column![
             row![
                 icon_sized(Icon::History, 28),
-                text("Recovered changes are ready")
+                text("Unsaved changes found")
                     .size(28)
                     .font(Font {
                         weight: font::Weight::Bold,
@@ -3727,8 +3913,8 @@ fn recovery_modal<'a>(
             ]
                 .spacing(16)
                 .align_y(iced::alignment::Vertical::Center),
-            text("ParchMint found newer edits than the last completed save. Review the recovery summary before continuing.").size(16),
-            text("RECOVERY SUMMARY").size(12),
+            text("Recover your newer edits, or open the last saved version and discard the unsaved changes.").size(16),
+
             container(summary)
                 .padding(16)
                 .width(Length::Fill)
@@ -3823,7 +4009,7 @@ fn inspector<'a>(
         .height(Length::Fixed(80.0))
         .style(move |_, status| multiline_field_style(theme, status));
         let title: Element<'a, ProjectSurfaceMessage> = if compact {
-            text(format!("INSPECTOR · {title}")).size(12).into()
+            text(format!("Inspector · {title}")).size(12).into()
         } else if workspace.inspector_title_rename_node_id() == Some(selected) {
             let title_id = selected_id.clone();
             sensor(
@@ -3854,89 +4040,17 @@ fn inspector<'a>(
             harness_target::target(
                 HarnessTarget::InspectorTitle,
                 stationary_tooltip::tooltip(
-                    button(text(format!("INSPECTOR · {title}")).size(12))
-                        .width(Length::Fill)
-                        .padding(0)
-                        .on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::BeginInspectorTitleRename(node_id),
-                        ))
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                interaction(status, false),
-                            )
-                        }),
-                    container(text("Rename title").size(12)).padding([4, 6]),
-                    components::surface(theme, Surface::Elevated, Interaction::Rest),
-                ),
-            )
-        };
-        let editor = workspace.editor();
-        let mut comments = column![].spacing(SPACING_8);
-        let threads = editor.inspector_comments();
-        let has_threads = !threads.is_empty();
-        if !has_threads {
-            comments = comments.push(
-                column![
-                    text("No comments").size(13),
-                    text("Add a document comment below, or select text to anchor one.").size(12),
-                ]
-                .spacing(2),
-            );
-        }
-        for (thread_index, thread) in threads.into_iter().enumerate() {
-            let thread_id = thread.id().to_owned();
-            let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
-            let state = if thread.resolved() {
-                "Resolved"
-            } else {
-                "Unresolved"
-            };
-            let state_color = if thread.resolved() {
-                theme.palette().comment_resolved
-            } else {
-                theme.palette().comment_active
-            };
-            let root = thread.messages().first();
-            let root_body = root.map(|message| message.body()).unwrap_or("Comment");
-            let anchor_summary = comment_anchor_summary(thread.anchor());
-            let mut thread_summary = row![
-                column![
-                    text(root_body).size(u32::from(UI_BODY.size)),
-                    text(anchor_summary)
-                        .size(u32::from(UI_COMPACT.size))
-                        .color(theme.palette().secondary_text),
-                ]
-                .spacing(SPACING_4),
-                Space::new().width(Length::Fill),
-            ]
-            .spacing(SPACING_8);
-            if selected_thread {
-                thread_summary = thread_summary.push(
-                    text("Selected").size(u32::from(UI_LABEL.size)).font(Font {
-                        weight: font::Weight::Semibold,
-                        ..Font::DEFAULT
-                    }),
-                );
-            }
-            thread_summary = thread_summary.push(
-                text(state)
-                    .size(u32::from(UI_LABEL.size))
-                    .font(Font {
-                        weight: font::Weight::Semibold,
-                        ..Font::DEFAULT
-                    })
-                    .color(state_color),
-            );
-            let mut card = column![
-                button(thread_summary)
+                    button(
+                        row![
+                            text(title).size(14).width(Length::Fill),
+                            text("Edit title").size(11)
+                        ]
+                        .spacing(8),
+                    )
                     .width(Length::Fill)
-                    .padding([4, 0])
-                    .on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::SelectComment(
-                            thread_id.clone()
-                        ))
+                    .padding(0)
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::BeginInspectorTitleRename(node_id),
                     ))
                     .style(move |_, status| {
                         components::button_style(
@@ -3944,398 +4058,17 @@ fn inspector<'a>(
                             ButtonKind::Quiet,
                             interaction(status, false),
                         )
-                    })
-            ]
-            .spacing(SPACING_8);
-            if let Some(root) = root {
-                let root_id = root.id().to_owned();
-                if editor.editing_comment_message() == Some((thread_id.as_str(), root_id.as_str()))
-                {
-                    let edit_thread = thread_id.clone();
-                    card = card
-                        .push(
-                            text_editor(
-                                editor
-                                    .comment_reply_draft(&thread_id)
-                                    .expect("every rendered comment thread has a reply draft"),
-                            )
-                            .placeholder("Edit comment message")
-                            .on_action(move |action| {
-                                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                                    EditorMessage::EditCommentReplyDraft {
-                                        thread_id: edit_thread.clone(),
-                                        action,
-                                    },
-                                ))
-                            })
-                            .height(Length::Fixed(72.0))
-                            .style(move |_, status| multiline_field_style(theme, status)),
-                        )
-                        .push(
-                            row![
-                                button(text("Save edit")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::SaveEditedCommentMessage {
-                                                thread_id: thread_id.clone(),
-                                                message_id: root_id.clone(),
-                                            },
-                                        ),
-                                    ),
-                                ),
-                                button(text("Cancel edit")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::CancelEditCommentMessage,
-                                        ),
-                                    ),
-                                ),
-                            ]
-                            .spacing(6),
-                        );
-                } else {
-                    card = card.push(
-                        row![
-                            button(text("Edit message")).on_press(
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::BeginEditCommentMessage {
-                                            thread_id: thread_id.clone(),
-                                            message_id: root_id.clone(),
-                                            body: root.body().to_owned(),
-                                        },
-                                    ),
-                                ),
-                            ),
-                            button(text("Delete message")).on_press(
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::DeleteCommentMessage {
-                                            thread_id: thread_id.clone(),
-                                            message_id: root_id,
-                                        },
-                                    ),
-                                ),
-                            ),
-                        ]
-                        .spacing(6),
-                    );
-                }
-            }
-            let replies_collapsed = editor.comment_replies_collapsed(&thread_id);
-            let reply_count = thread.messages().len().saturating_sub(1);
-            if reply_count > 0 {
-                card = card.push(
-                    button(text(if replies_collapsed {
-                        format!("Expand {reply_count} replies")
-                    } else {
-                        format!("Collapse {reply_count} replies")
-                    }))
-                    .on_press(ProjectSurfaceMessage::EditorCenter(
-                        EditorCenterMessage::Workspace(EditorMessage::ToggleCommentReplies {
-                            thread_id: thread_id.clone(),
-                            collapsed: !replies_collapsed,
-                        }),
-                    )),
-                );
-            }
-            for reply in thread
-                .messages()
-                .iter()
-                .skip(1)
-                .filter(|_| !replies_collapsed)
-            {
-                let reply_id = reply.id().to_owned();
-                if editor.editing_comment_message() == Some((thread_id.as_str(), reply_id.as_str()))
-                {
-                    let edit_thread = thread_id.clone();
-                    card = card
-                        .push(
-                            text_editor(
-                                editor
-                                    .comment_reply_draft(&thread_id)
-                                    .expect("every rendered comment thread has a reply draft"),
-                            )
-                            .placeholder("Edit comment message")
-                            .on_action(move |action| {
-                                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                                    EditorMessage::EditCommentReplyDraft {
-                                        thread_id: edit_thread.clone(),
-                                        action,
-                                    },
-                                ))
-                            })
-                            .height(Length::Fixed(72.0))
-                            .style(move |_, status| multiline_field_style(theme, status)),
-                        )
-                        .push(
-                            row![
-                                button(text("Save edit")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::SaveEditedCommentMessage {
-                                                thread_id: thread_id.clone(),
-                                                message_id: reply_id.clone(),
-                                            },
-                                        ),
-                                    ),
-                                ),
-                                button(text("Cancel edit")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::CancelEditCommentMessage,
-                                        ),
-                                    ),
-                                ),
-                            ]
-                            .spacing(6),
-                        );
-                } else {
-                    card = card.push(
-                        row![
-                            text(format!("Reply: {}", reply.body())).size(12),
-                            button(text("Edit message")).on_press(
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::BeginEditCommentMessage {
-                                            thread_id: thread_id.clone(),
-                                            message_id: reply_id.clone(),
-                                            body: reply.body().to_owned(),
-                                        },
-                                    ),
-                                ),
-                            ),
-                            button(text("Delete message")).on_press(
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::DeleteCommentMessage {
-                                            thread_id: thread_id.clone(),
-                                            message_id: reply_id,
-                                        },
-                                    ),
-                                ),
-                            ),
-                        ]
-                        .spacing(6),
-                    );
-                }
-            }
-            if let CommentAnchor::Orphaned {
-                quote,
-                context_before,
-                context_after,
-                ..
-            } = thread.anchor()
-            {
-                card = card.push(
-                    container(
-                        column![
-                            text("Anchor needs attention")
-                                .size(12)
-                                .font(Font {
-                                    weight: font::Weight::Bold,
-                                    ..Font::DEFAULT
-                                })
-                                .color(theme.palette().comment_orphaned),
-                            text(format!("{context_before}[{quote}]{context_after}"))
-                                .size(12)
-                                .color(theme.palette().secondary_text),
-                            row![
-                                button(text("Reattach to selection")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::ReattachComment(thread_id.clone())
-                                        )
-                                    )
-                                ),
-                                button(text("Make document comment")).on_press(
-                                    ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::ConvertCommentToDocument(
-                                                thread_id.clone()
-                                            )
-                                        )
-                                    )
-                                ),
-                            ]
-                            .spacing(6),
-                        ]
-                        .spacing(6),
-                    )
-                    .padding(8)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
-                );
-            }
-            if editor
-                .editing_comment_message()
-                .is_none_or(|(editing_thread, _)| editing_thread != thread_id)
-            {
-                let reply_id = thread_id.clone();
-                let reply_editor = text_editor(
-                    editor
-                        .comment_reply_draft(&thread_id)
-                        .expect("every rendered comment thread has a reply draft"),
-                )
-                .placeholder("Reply to thread")
-                .on_action(move |action| {
-                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                        EditorMessage::EditCommentReplyDraft {
-                            thread_id: reply_id.clone(),
-                            action,
-                        },
-                    ))
-                })
-                .height(Length::Fixed(68.0));
-                let reply_editor = if thread_index == 0 {
-                    reply_editor.id(HarnessTarget::CommentReply.id())
-                } else {
-                    reply_editor
-                };
-                card = card.push(
-                    reply_editor.style(move |_, status| multiline_field_style(theme, status)),
-                );
-            }
-            card = card.push(
-                row![
-                    comment_action(
-                        "Reply",
-                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                            EditorMessage::SubmitCommentReply {
-                                thread_id: thread_id.clone(),
-                            },
-                        )),
-                        theme,
-                    ),
-                    comment_action(
-                        if thread.resolved() {
-                            "Reopen"
-                        } else {
-                            "Resolve"
-                        },
-                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                            EditorMessage::ToggleCommentResolved {
-                                thread_id: thread_id.clone(),
-                                resolved: !thread.resolved(),
-                            },
-                        )),
-                        theme,
-                    ),
-                    comment_action(
-                        "Delete thread",
-                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                            EditorMessage::RequestDeleteCommentThread(thread_id.clone()),
-                        )),
-                        theme,
-                    ),
-                ]
-                .spacing(SPACING_8),
-            );
-            if editor.pending_delete_comment() == Some(thread_id.as_str()) {
-                card = card.push(
-                    container(
-                        row![
-                            text("Delete this thread?").size(12),
-                            comment_action(
-                                "Confirm delete",
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::ConfirmDeleteCommentThread,
-                                    ),
-                                ),
-                                theme,
-                            ),
-                            comment_action(
-                                "Cancel",
-                                ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::CancelDeleteCommentThread,
-                                    ),
-                                ),
-                                theme,
-                            ),
-                        ]
-                        .spacing(6)
-                        .align_y(iced::alignment::Vertical::Center),
-                    )
-                    .padding(8)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Error)),
-                );
-            }
-            comments = comments
-                .push(
-                    container(card)
-                        .width(Length::Fill)
-                        .padding(8)
-                        .style(move |_| {
-                            if selected_thread {
-                                components::surface(theme, Surface::Panel, Interaction::Selected)
-                            } else {
-                                iced::widget::container::Style::default()
-                            }
-                        }),
-                )
-                .push(
-                    container(Space::new().height(1))
-                        .width(Length::Fill)
-                        .style(move |_| iced::widget::container::Style {
-                            background: Some(Background::Color(theme.palette().divider)),
-                            ..Default::default()
-                        }),
-                );
-        }
-        // A document-level comment is always available: authors often need to
-        // leave a note about a chapter before selecting specific prose.
-        comments = comments.push(
-            text("New comment")
-                .size(u32::from(UI_LABEL.size))
-                .font(Font {
-                    weight: font::Weight::Semibold,
-                    ..Font::DEFAULT
-                }),
-        );
-        comments = comments.push(
-            text_editor(editor.comment_draft())
-                .id(HarnessTarget::CommentDraft.id())
-                .placeholder("Write a comment")
-                .on_action(|action| {
-                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                        EditorMessage::EditCommentDraft(action),
-                    ))
-                })
-                .height(Length::Fixed(84.0))
-                .style(move |_, status| multiline_field_style(theme, status)),
-        );
-        comments = comments.push(
-            row![
-                comment_action(
-                    "Add at selection",
-                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                        EditorMessage::CreateComment {
-                            document_level: false,
-                        },
-                    )),
-                    theme,
+                    }),
+                    container(text("Rename title").size(12)).padding([4, 6]),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
                 ),
-                comment_action(
-                    "Add to document",
-                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                        EditorMessage::CreateComment {
-                            document_level: true,
-                        },
-                    )),
-                    theme,
-                ),
-            ]
-            .spacing(6),
-        );
-        if let Some(feedback) = editor.comment_feedback() {
-            comments = comments.push(text(feedback).size(12));
-        }
+            )
+        };
+        let editor = workspace.editor();
         // Comment mutation belongs beside the text it affects. Keep this
         // Inspector section as a compact document index: clicking an entry
         // navigates to its anchor, while the anchored editor popover owns all
         // drafting and thread actions.
-        let _legacy_comment_controls = comments;
         let mut comments = column![].spacing(SPACING_8);
         let threads = editor.inspector_comments();
         if threads.is_empty() {
@@ -4373,8 +4106,8 @@ fn inspector<'a>(
                         .size(u32::from(UI_COMPACT.size))
                         .color(theme.palette().secondary_text),
                 ]
-                .spacing(SPACING_4),
-                Space::new().width(Length::Fill),
+                .spacing(SPACING_4)
+                .width(Length::Fill),
                 text(state)
                     .size(u32::from(UI_LABEL.size))
                     .font(Font {
@@ -4416,7 +4149,7 @@ fn inspector<'a>(
             button(
                 row![
                     text(if synopsis_expanded { "⌄" } else { "›" }).size(12),
-                    text("SYNOPSIS").size(12),
+                    text("Synopsis").size(12),
                 ]
                 .spacing(6),
             )
@@ -4436,7 +4169,7 @@ fn inspector<'a>(
             button(
                 row![
                     text(if metadata_expanded { "⌄" } else { "›" }).size(12),
-                    text("METADATA").size(12),
+                    text("Metadata").size(12),
                 ]
                 .spacing(6),
             )
@@ -4457,14 +4190,16 @@ fn inspector<'a>(
                     "· {} unresolved",
                     editor.inspector_unresolved_comment_count()
                 )
-            } else {
+            } else if editor.inspector_comment_count() > 0 {
                 format!("· {} comments", editor.inspector_comment_count())
+            } else {
+                String::new()
             };
             sections = sections.push(
                 button(
                     row![
                         text(if comments_expanded { "⌄" } else { "›" }).size(12),
-                        text("COMMENTS").size(12),
+                        text("Comments").size(12),
                         text(comment_summary)
                             .size(u32::from(UI_COMPACT.size))
                             .color(theme.palette().secondary_text),
@@ -4490,7 +4225,7 @@ fn inspector<'a>(
         column![
             text("Inspector").size(12),
             text("No selection").size(13),
-            text("Select a group or document in Explorer or Cards to inspect its synopsis and metadata.")
+            text("Select a group or document in Explorer or Outline to inspect its synopsis and metadata.")
                 .size(12),
         ]
         .spacing(10)
@@ -4682,6 +4417,7 @@ fn recovery_status_bar<'a>(
 
 fn modal_view<'a>(
     modal: ProjectModal,
+    workspace: &ProjectWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     if let ProjectModal::Error { title, detail } = &modal {
@@ -4724,11 +4460,11 @@ fn modal_view<'a>(
         ),
         ProjectModal::DeleteMetadataField { field_id } => (
             "Delete metadata field",
-            format!("Remove {field_id} and its values from every applicable hierarchy item."),
+            format!("Remove “{}” and its values from every applicable hierarchy item.", workspace.settings().metadata_field(field_id).map(|field| field.label).unwrap_or("this field")),
         ),
         ProjectModal::DeleteStyle { style_id } => (
             "Delete custom style",
-            format!("Remove {style_id}. Text using it will fall back to an available style."),
+            format!("Remove “{}”. Text using it will fall back to an available style.", workspace.settings().style(style_id).map(|style| style.display_name).unwrap_or("this style")),
         ),
         ProjectModal::ReinitializeHistory => (
             "Reinitialize History",
@@ -4754,22 +4490,28 @@ fn modal_view<'a>(
                 ),
                 focus::region(
                     focus::modal_confirm_id(),
-                    button(text("Confirm"))
-                        .on_press(ProjectSurfaceMessage::Project(match modal {
-                            ProjectModal::HistoryRestore { .. } =>
-                                ProjectMessage::ConfirmHistoryRestore,
-                            ProjectModal::DeleteMetadataField { .. } =>
-                                ProjectMessage::ConfirmDeleteMetadataField,
-                            ProjectModal::DeleteStyle { .. } => ProjectMessage::ConfirmDeleteStyle,
-                            ProjectModal::ReinitializeHistory =>
-                                ProjectMessage::ConfirmHistoryReinitialize,
-                            ProjectModal::Error { .. } => ProjectMessage::DismissModal,
-                        }))
-                        .style(move |_, status| components::button_style(
-                            theme,
-                            ButtonKind::Destructive,
-                            interaction(status, false)
-                        )),
+                    button(text(match &modal {
+                        ProjectModal::HistoryRestore { .. } => "Restore project",
+                        ProjectModal::DeleteMetadataField { .. } => "Delete field",
+                        ProjectModal::DeleteStyle { .. } => "Delete style",
+                        ProjectModal::ReinitializeHistory => "Reinitialize History",
+                        ProjectModal::Error { .. } => "Dismiss",
+                    }))
+                    .on_press(ProjectSurfaceMessage::Project(match modal {
+                        ProjectModal::HistoryRestore { .. } =>
+                            ProjectMessage::ConfirmHistoryRestore,
+                        ProjectModal::DeleteMetadataField { .. } =>
+                            ProjectMessage::ConfirmDeleteMetadataField,
+                        ProjectModal::DeleteStyle { .. } => ProjectMessage::ConfirmDeleteStyle,
+                        ProjectModal::ReinitializeHistory =>
+                            ProjectMessage::ConfirmHistoryReinitialize,
+                        ProjectModal::Error { .. } => ProjectMessage::DismissModal,
+                    }))
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Destructive,
+                        interaction(status, false)
+                    )),
                 )
             ]
             .spacing(10)
@@ -4918,36 +4660,6 @@ mod tests {
     }
 
     #[test]
-    fn semantic_project_shell_renders_cards_and_recovery_in_both_appearances() {
-        for (fixture, destination) in [
-            (ProjectFixture::Cards, RibbonDestination::Cards),
-            (ProjectFixture::ErrorRecovery, RibbonDestination::Editor),
-        ] {
-            for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-                let workspace = ProjectWorkspace::from_fixture(fixture);
-                let theme = ParchMintTheme::new(appearance);
-                let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
-                    Settings::default(),
-                    Size::new(1_440.0, 900.0),
-                    project_surface(
-                        &workspace,
-                        destination,
-                        theme,
-                        text("Mounted editor child").into(),
-                    ),
-                );
-                let snapshot = simulator
-                    .snapshot(&theme.iced_theme())
-                    .expect("headless semantic project shell snapshot");
-                assert!(
-                    format!("{snapshot:?}").contains("renderer: \"tiny-skia\""),
-                    "headless project surface requires tiny-skia"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn cards_keep_hierarchy_mutation_in_the_explorer() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
@@ -5036,8 +4748,8 @@ mod tests {
                 text("Mounted editor child").into(),
             ),
         );
-        assert!(cards_surface.find("Manuscript outline").is_ok());
-        assert!(cards_surface.find("EXPLORER").is_ok());
+        assert!(cards_surface.find("Outline").is_ok());
+        assert!(cards_surface.find("Explorer").is_ok());
         assert!(
             cards_surface
                 .find(HarnessTarget::InspectorTitle.id())
@@ -5088,9 +4800,9 @@ mod tests {
 
         for content in [
             "Chapter One",
-            "SYNOPSIS",
+            "Synopsis",
             "A first-person opening beside the river.",
-            "METADATA",
+            "Metadata",
             "Point of view",
             "first person",
             "Location",
@@ -5100,10 +4812,6 @@ mod tests {
                 "Cards Inspector shows {content}"
             );
         }
-        let snapshot = simulator
-            .snapshot(&theme.iced_theme())
-            .expect("Cards Inspector headless render");
-        assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
     }
 
     #[test]
@@ -5143,15 +4851,11 @@ mod tests {
                 text("Mounted editor child").into(),
             ),
         );
-        assert!(simulator.find("Recovered changes are ready").is_ok());
+        assert!(simulator.find("Unsaved changes found").is_ok());
         assert!(simulator.find("Recover changes").is_ok());
-        assert!(simulator.find("Discard").is_ok());
-        assert!(
-            simulator
-                .find("ParchMint recovered newer edits before opening the workspace.")
-                .is_ok()
-        );
-        assert!(simulator.find("EXPLORER").is_err());
+        assert!(simulator.find("Open last saved version").is_ok());
+        assert!(simulator.find("Choose which version to open.").is_ok());
+        assert!(simulator.find("Explorer").is_err());
         assert!(simulator.find("Inspector").is_err());
         assert!(simulator.find("Document History").is_err());
         assert!(
@@ -5215,7 +4919,7 @@ mod tests {
                 CanonicalComment::new(
                     selected,
                     EditorSelection::new(5.into(), 8.into()),
-                    "Selected thread",
+                    "A long selected comment that must leave room for its unresolved status",
                     BlockId::from_bytes([0x33; 16]),
                 ),
             ],
@@ -5244,13 +4948,15 @@ mod tests {
                 text("Editor").into(),
             ),
         );
-        assert!(simulator.find("Selected thread").is_ok());
+        let comment = simulator
+            .find("A long selected comment that must leave room for its unresolved status")
+            .unwrap()
+            .bounds();
+        let status = simulator.find("Unresolved").unwrap().bounds();
+        assert!(comment.x + comment.width <= status.x);
+        assert!(status.x + status.width <= 1_440.0);
         assert!(simulator.find("Edit message").is_err());
         assert!(simulator.find("Reply to thread").is_err());
-        let snapshot = simulator
-            .snapshot(&theme.iced_theme())
-            .expect("selected comment Inspector render");
-        assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
     }
 
     #[test]
@@ -5318,7 +5024,7 @@ mod tests {
                 );
                 match destination {
                     RibbonDestination::Cards => {
-                        assert!(simulator.find("Manuscript outline").is_ok());
+                        assert!(simulator.find("Outline").is_ok());
                         assert!(simulator.find("Part One").is_ok());
                         assert!(simulator.find("Opening Scene").is_ok());
                         assert!(simulator.find("The opening synopsis.").is_ok());
@@ -5326,16 +5032,12 @@ mod tests {
                     }
                     RibbonDestination::RecentlyDeleted => {
                         assert!(simulator.find("Discarded Part").is_ok());
-                        assert!(simulator.find("Deleted document contents").is_ok());
+                        assert!(simulator.find("Deleted document contents").is_err());
                         assert!(simulator.find("Restore item").is_ok());
                         assert!(simulator.find("Manuscript").is_err());
                     }
                     RibbonDestination::Settings => {
-                        assert!(
-                            simulator
-                                .find("Operating system changes Light → Dark; every open ParchMint window updates immediately.")
-                                .is_ok()
-                        );
+                        assert!(simulator.find("Follow the operating system").is_ok());
                         assert!(simulator.find("Manuscript").is_err());
                     }
                     _ => unreachable!("the test enumerates destination-specific projections"),
@@ -5362,6 +5064,8 @@ mod tests {
                 text("Mounted editor child").into(),
             ),
         );
+        assert!(simulator.find("Restore to Manuscript").is_ok());
+        assert!(simulator.find("Deleted item preview").is_err());
         simulator
             .click("Restore item")
             .expect("visible restore action");
@@ -5372,39 +5076,6 @@ mod tests {
                 ProjectMessage::RestoreDeleted(ids.deleted_node,)
             )]
         );
-    }
-
-    #[test]
-    fn history_and_export_keep_their_reference_column_labels() {
-        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
-        for (fixture, destination, left_label, right_label) in [
-            (
-                ProjectFixture::History,
-                RibbonDestination::History,
-                "Milestones and recoverable project versions",
-                "Checkpoint details",
-            ),
-            (
-                ProjectFixture::Export,
-                RibbonDestination::Export,
-                "MANUSCRIPT OUTPUT",
-                "OUTPUT FILE",
-            ),
-        ] {
-            let workspace = ProjectWorkspace::from_fixture(fixture);
-            let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
-                Settings::default(),
-                Size::new(1_440.0, 900.0),
-                project_surface(
-                    &workspace,
-                    destination,
-                    theme,
-                    text("Mounted editor child").into(),
-                ),
-            );
-            assert!(simulator.find(left_label).is_ok());
-            assert!(simulator.find(right_label).is_ok());
-        }
     }
 
     #[test]
@@ -5478,7 +5149,7 @@ mod tests {
                 text("Mounted editor child").into(),
             ),
         );
-        assert!(simulator.find("Checkpoint").is_ok());
+        assert!(simulator.find("Saved version").is_ok());
         assert!(simulator.find("Current").is_ok());
         assert!(simulator.find("− 1").is_ok());
         assert!(simulator.find("+ 1").is_ok());
@@ -6244,11 +5915,42 @@ mod tests {
     }
 
     #[test]
+    fn style_detail_keeps_inheritance_and_property_controls_inside_a_narrow_panel() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
+        let style_id = id_string(parchmint_domain::StyleCatalog::body_id().as_bytes());
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        for edited in [false, true] {
+            if edited {
+                workspace.update(ProjectMessage::EditStyleProperty {
+                    style_id: style_id.clone(),
+                    property: StyleProperty::FontFamily,
+                    value: "Source Sans 3".into(),
+                });
+            }
+            let settings = workspace.settings();
+            let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+                Settings::default(),
+                Size::new(520.0, 1_200.0),
+                style_detail(settings, settings.style(&style_id).unwrap(), theme),
+            );
+            assert_eq!(simulator.find("Apply").is_ok(), edited);
+            for label in [
+                "Inherits from",
+                if edited { "Apply" } else { "Enter font family" },
+            ] {
+                let bounds = simulator.find(label).unwrap().bounds();
+                assert!(bounds.width > 0.0, "{label} must remain visible");
+                assert!(bounds.x + bounds.width <= 520.0, "{label} is clipped");
+            }
+        }
+    }
+
+    #[test]
     fn rendered_settings_keep_details_in_their_own_categories() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
 
         let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-            assert!(settings.find("SETTINGS").is_ok());
+            assert!(settings.find("Settings").is_ok());
             settings
                 .click("Metadata fields")
                 .expect("metadata navigation");
@@ -6265,18 +5967,25 @@ mod tests {
         assert!(apply_project_messages(&mut workspace, messages).is_empty());
         let _metadata = interact(&workspace, RibbonDestination::Settings, |settings| {
             assert!(settings.find("Metadata field details").is_ok());
-            assert!(settings.find("SETTINGS").is_ok());
+            assert!(settings.find("Settings").is_ok());
         });
 
-        for category in [SettingsCategory::Dictionaries, SettingsCategory::General] {
+        for category in [SettingsCategory::Dictionaries, SettingsCategory::Appearance] {
             let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
                 settings
                     .click(category.label())
                     .expect("rendered settings category");
             });
-            assert!(apply_project_messages(&mut workspace, messages).is_empty());
+            assert_eq!(
+                apply_project_messages(&mut workspace, messages),
+                if category == SettingsCategory::Dictionaries {
+                    vec![crate::ProjectEffect::LoadGlobalDictionary]
+                } else {
+                    Vec::new()
+                }
+            );
             let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-                assert!(settings.find("SETTINGS").is_ok());
+                assert!(settings.find("Settings").is_ok());
                 assert!(settings.find("Metadata field details").is_err());
             });
             assert!(messages.is_empty());
@@ -6317,7 +6026,7 @@ mod tests {
                     text("Editor").into(),
                 ),
             );
-            let heading = simulator.find("SYNOPSIS").expect("rendered synopsis");
+            let heading = simulator.find("Synopsis").expect("rendered synopsis");
             let bounds = heading.visible_bounds().expect("synopsis heading bounds");
             simulator.point_at(iced::Point::new(
                 bounds.x + bounds.width - 20.0,
@@ -6430,7 +6139,7 @@ mod tests {
         let messages = interact(&workspace, RibbonDestination::Cards, |cards| {
             for projection in [
                 "Chapter One",
-                "SYNOPSIS",
+                "Synopsis",
                 "A first-person opening beside the river.",
             ] {
                 assert!(
@@ -6553,6 +6262,8 @@ mod tests {
         );
 
         let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
+            assert!(preview.find("selected: Chapter One").is_ok());
+            assert!(preview.find("selected: chapter-one").is_err());
             preview
                 .click("Select none")
                 .expect("visible preview selection control");
@@ -6569,11 +6280,11 @@ mod tests {
         let messages = interact(&workspace, RibbonDestination::Editor, |preview| {
             assert!(
                 preview
-                    .find("Selection changed. Revalidate before applying.")
+                    .find("The project or selection changed. Refresh the preview before applying.")
                     .is_ok()
             );
             preview
-                .click("Revalidate selection")
+                .click("Refresh preview")
                 .expect("visible stale-preview revalidation action");
         });
         assert!(matches!(
@@ -6627,7 +6338,7 @@ mod tests {
 
         let messages = interact(&workspace, RibbonDestination::History, |history| {
             history
-                .click("Restore “Draft Two”")
+                .click("Restore project to this version…")
                 .expect("visible restore action");
         });
         assert!(apply_project_messages(&mut workspace, messages).is_empty());
@@ -6643,7 +6354,7 @@ mod tests {
                     .is_ok()
             );
             confirmation
-                .click("Confirm")
+                .click("Restore project")
                 .expect("visible restore confirmation");
         });
         assert_eq!(
@@ -6694,8 +6405,8 @@ mod tests {
         );
         assert_eq!(workspace.content_state(), &ContentState::Ready);
         let messages = interact(&workspace, RibbonDestination::Editor, |editor| {
-            assert!(editor.find("EXPLORER").is_ok());
-            assert!(editor.find("Recovered changes are ready").is_err());
+            assert!(editor.find("Explorer").is_ok());
+            assert!(editor.find("Unsaved changes found").is_err());
         });
         assert!(messages.is_empty());
     }

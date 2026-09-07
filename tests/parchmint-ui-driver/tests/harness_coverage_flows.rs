@@ -420,7 +420,7 @@ fn history_flow_preserves_meaningful_checkpoints_and_records_restoration() {
         initial.iter().any(|checkpoint| checkpoint
             .timeline_heading
             .as_deref()
-            .is_some_and(|heading| { heading.contains("UTC · Writing session") })),
+            .is_some_and(|heading| { heading.ends_with(" · Writing session") })),
         "the timeline should group checkpoints into dated writing sessions: {initial:?}"
     );
     let first = initial
@@ -502,10 +502,10 @@ fn history_flow_preserves_meaningful_checkpoints_and_records_restoration() {
         .click_history_checkpoint_by_id(HarnessWindow::Project, first.id.clone())
         .expect("select the exact first checkpoint");
     harness
-        .click_text(HarnessWindow::Project, "Restore “Automatic save”")
+        .click_text(HarnessWindow::Project, "Restore project to this version…")
         .expect("request restoration");
     harness
-        .click_text(HarnessWindow::Project, "Confirm")
+        .click_text(HarnessWindow::Project, "Restore project")
         .expect("confirm restoration");
     let after_restore = harness
         .history_checkpoints()
@@ -703,7 +703,7 @@ fn abandoned_session_replays_recovery_journal_without_a_final_close() {
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
         .expect("relaunch abandoned project directly");
     assert!(
-        contains(&reopened, "Recovered changes are ready"),
+        contains(&reopened, "Unsaved changes found"),
         "recovery surface should explain the available journal replay"
     );
     reopened

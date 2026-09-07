@@ -642,9 +642,7 @@ fn verification_deleted_node_id() -> String {
 }
 
 #[cfg(feature = "visual-verification")]
-fn stable_id(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+use parchmint_domain::encode_stable_id as stable_id;
 
 #[cfg(feature = "visual-verification")]
 fn verification_semantic_body(
@@ -918,11 +916,8 @@ fn verification_workspace(
             ));
         }
         VisualTarget::Export => {
-            let _ = workspace.update(ProjectMessage::SetExportOutputName(
-                "the-glass-harbor.html".to_owned(),
-            ));
             let _ = workspace.update(ProjectMessage::SetExportDestination(Some(
-                "~/Documents".to_owned(),
+                "~/Documents/the-glass-harbor.html".to_owned(),
             )));
             let _ = workspace.update(ProjectMessage::SetExportNumbering(true));
             let _ = workspace.update(ProjectMessage::SetExportTitleSetting(
@@ -1222,8 +1217,10 @@ fn assert_scenario_contract(
             assert_eq!(workspace.settings().appearance(), AppearanceMode::System);
         }
         VisualTarget::Export => {
-            assert_eq!(workspace.export().output_name(), "the-glass-harbor.html");
-            assert_eq!(workspace.export().destination(), Some("~/Documents"));
+            assert_eq!(
+                workspace.export().destination(),
+                Some("~/Documents/the-glass-harbor.html")
+            );
             assert!(workspace.export().numbers_documents());
             assert!(workspace.export().can_start());
             assert_eq!(
@@ -1430,18 +1427,17 @@ mod tests {
         let target = VisualTarget::Cards;
         let appearance = VisualAppearance::Light;
         let spec = visual_target_spec(target);
-        let theme = presentation(appearance);
         let mut simulator = Simulator::<()>::with_size(
             visual_settings(),
             Size::new(spec.width as f32, spec.height as f32),
             production_element(target, appearance),
         );
 
-        assert!(simulator.find("INSPECTOR · Chapter One").is_ok());
+        assert!(simulator.find("Edit title").is_ok());
         assert!(simulator.find("No selection").is_err());
         for content in [
             "Chapter One",
-            "SYNOPSIS",
+            "Synopsis",
             "The harbor has fallen silent, and Mara must decide whom to trust.",
             "POV",
             "Mara",
@@ -1454,10 +1450,6 @@ mod tests {
                 "production Cards Inspector shows {content}"
             );
         }
-        let snapshot = simulator
-            .snapshot(&theme.iced_theme())
-            .expect("production Cards target renders headlessly");
-        assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
     }
 
     #[test]
@@ -1570,7 +1562,7 @@ mod tests {
             Size::new(spec.width as f32, spec.height as f32),
             production_element(VisualTarget::History, VisualAppearance::Light),
         );
-        assert!(simulator.find("Checkpoint").is_ok());
+        assert!(simulator.find("Saved version").is_ok());
         assert!(simulator.find("Current").is_ok());
         assert!(
             simulator

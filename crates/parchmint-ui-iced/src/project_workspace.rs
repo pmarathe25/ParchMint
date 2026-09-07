@@ -4,6 +4,8 @@
 //! export, preferences, and persistence. This module validates UI intent,
 //! retains temporary view state, and emits effects for the integration layer.
 
+use parchmint_domain::decode_stable_id as stable_id_bytes;
+use parchmint_domain::encode_stable_id as stable_id_string;
 use std::collections::{BTreeMap, BTreeSet};
 
 use iced::widget::text_editor;
@@ -997,7 +999,7 @@ pub enum MetadataFieldTextKind {
 
 /// One editable Settings style property. The UI intentionally names every
 /// persisted property so no formatting control silently disappears.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StyleProperty {
     FontFamily,
     FontSizePoints,
@@ -1175,7 +1177,6 @@ pub enum SettingsDetail {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsCategory {
-    General,
     Appearance,
     Styles,
     Metadata,
@@ -1185,7 +1186,6 @@ pub enum SettingsCategory {
 impl SettingsCategory {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::General => "General",
             Self::Appearance => "Appearance",
             Self::Styles => "Styles",
             Self::Metadata => "Metadata fields",
@@ -1204,7 +1204,7 @@ pub struct SettingsCategoryItem {
 }
 
 /// Dictionary storage scopes. Project words are authored project data; global
-/// words remain application preferences and are intentionally not mirrored in
+/// words are loaded separately from application preferences and never stored in
 /// a project snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictionaryScope {
@@ -1235,6 +1235,9 @@ pub struct DictionaryScopeItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictionarySettingsState {
     project_words: Vec<String>,
+    global_words: Option<Vec<String>>,
+    word_draft: String,
+    query: String,
     selected_scope: DictionaryScope,
 }
 
@@ -1242,6 +1245,9 @@ impl DictionarySettingsState {
     fn fixture() -> Self {
         Self {
             project_words: Vec::new(),
+            global_words: Some(Vec::new()),
+            word_draft: String::new(),
+            query: String::new(),
             selected_scope: DictionaryScope::Project,
         }
     }
@@ -1249,8 +1255,19 @@ impl DictionarySettingsState {
     fn from_project(project: &Project) -> Self {
         Self {
             project_words: project.dictionary.iter().map(str::to_owned).collect(),
+            global_words: None,
+            word_draft: String::new(),
+            query: String::new(),
             selected_scope: DictionaryScope::Project,
         }
+    }
+
+    pub fn word_draft(&self) -> &str {
+        &self.word_draft
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
     }
 
     pub const fn language(&self) -> &'static str {
@@ -1261,8 +1278,8 @@ impl DictionarySettingsState {
         self.selected_scope
     }
 
-    pub const fn scope_available(&self, scope: DictionaryScope) -> bool {
-        matches!(scope, DictionaryScope::Project)
+    pub const fn scope_available(&self, _scope: DictionaryScope) -> bool {
+        true
     }
 
     pub fn scopes(&self) -> [DictionaryScopeItem; 2] {
@@ -1275,8 +1292,19 @@ impl DictionarySettingsState {
     }
 
     pub fn words(&self) -> Option<&[String]> {
-        self.scope_available(self.selected_scope)
-            .then_some(self.project_words.as_slice())
+        match self.selected_scope {
+            DictionaryScope::Project => Some(&self.project_words),
+            DictionaryScope::Global => self.global_words.as_deref(),
+        }
+    }
+
+    fn clear_saved_draft(&mut self) {
+        if self
+            .words()
+            .is_some_and(|words| words.iter().any(|word| word == self.word_draft.trim()))
+        {
+            self.word_draft.clear();
+        }
     }
 
     fn select_scope(&mut self, scope: DictionaryScope) {
@@ -1306,6 +1334,7 @@ pub struct SettingsState {
     new_metadata_field: Option<MetadataDefinition>,
     style_definitions: BTreeMap<String, StyleDefinition>,
     style_order: Vec<String>,
+    style_property_drafts: BTreeMap<(String, StyleProperty), String>,
     selected_detail: Option<SettingsDetail>,
     selected_category: SettingsCategory,
     metadata_drag_source: Option<String>,
@@ -1356,6 +1385,7 @@ impl SettingsState {
                 .iter()
                 .map(|definition| stable_id_string(definition.id.as_bytes()))
                 .collect(),
+            style_property_drafts: BTreeMap::new(),
             selected_detail: None,
             selected_category: SettingsCategory::Appearance,
             metadata_drag_source: None,
@@ -1415,6 +1445,7 @@ impl SettingsState {
             new_metadata_field: None,
             style_definitions,
             style_order,
+            style_property_drafts: BTreeMap::new(),
             selected_detail: None,
             selected_category: SettingsCategory::Appearance,
             metadata_drag_source: None,
@@ -1438,9 +1469,8 @@ impl SettingsState {
         true
     }
 
-    pub fn categories(&self) -> [SettingsCategoryItem; 5] {
+    pub fn categories(&self) -> [SettingsCategoryItem; 4] {
         [
-            SettingsCategory::General,
             SettingsCategory::Appearance,
             SettingsCategory::Styles,
             SettingsCategory::Metadata,
@@ -1499,6 +1529,12 @@ impl SettingsState {
                 })
             })
             .collect()
+    }
+
+    pub fn style_property_draft(&self, style_id: &str, property: StyleProperty) -> Option<&str> {
+        self.style_property_drafts
+            .get(&(style_id.to_owned(), property))
+            .map(String::as_str)
     }
 
     pub fn selected_detail(&self) -> Option<&SettingsDetail> {
@@ -2322,7 +2358,7 @@ impl HistoryState {
                 return starts_writing_session(previous, checkpoint).then(|| {
                     checkpoint
                         .recorded_at_unix_millis
-                        .map_or_else(|| "Earlier checkpoints".to_owned(), writing_session_label)
+                        .map_or_else(|| "Earlier versions".to_owned(), writing_session_label)
                 });
             }
             previous = Some(checkpoint);
@@ -2458,34 +2494,19 @@ fn same_writing_session(newer: u64, older: u64) -> bool {
 }
 
 fn writing_session_label(timestamp: u64) -> String {
-    let days = i64::try_from(timestamp / 86_400_000).unwrap_or(i64::MAX);
-    let (year, month, day) = civil_date_from_unix_days(days);
-    format!("{year:04}-{month:02}-{day:02} UTC · Writing session")
+    format!("{} · Writing session", local_version_time(timestamp))
 }
 
-// Howard Hinnant's public-domain civil-date conversion, kept here to avoid a
-// locale/time-zone dependency in the deterministic project UI crate.
-fn civil_date_from_unix_days(days_since_epoch: i64) -> (i32, u32, u32) {
-    let days = days_since_epoch + 719_468;
-    let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
-    let day_of_era = days - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
-    let year = year + i64::from(month <= 2);
-    (
-        i32::try_from(year).unwrap_or(if year.is_negative() {
-            i32::MIN
-        } else {
-            i32::MAX
-        }),
-        u32::try_from(month).expect("civil month is positive"),
-        u32::try_from(day).expect("civil day is positive"),
-    )
+pub(crate) fn local_version_time(timestamp: u64) -> String {
+    i64::try_from(timestamp)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%b %-d, %Y · %-I:%M %p")
+                .to_string()
+        })
+        .unwrap_or_else(|| "Date unavailable".to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2855,7 +2876,6 @@ struct DeletedItem {
     former: RestoreLocation,
     former_index: usize,
     location: RestoreLocation,
-    fallback: RestoreLocation,
     deleted_at_unix_millis: u64,
     restoring_checkpoint_id: Option<String>,
     preview_document_id: Option<String>,
@@ -2880,7 +2900,6 @@ pub struct RecentlyDeletedItem<'a> {
     pub former_location: &'a RestoreLocation,
     pub former_index: usize,
     pub restore_location: &'a RestoreLocation,
-    pub fallback_location: &'a RestoreLocation,
     pub deleted_at_unix_millis: u64,
     pub restoring_checkpoint_id: Option<&'a str>,
     pub preview_document_id: Option<&'a str>,
@@ -2915,7 +2934,6 @@ impl RecentlyDeletedState {
                     former: RestoreLocation::FormerParent("part-one".to_owned()),
                     former_index: 0,
                     location: RestoreLocation::FormerParent("part-one".to_owned()),
-                    fallback: RestoreLocation::SectionRoot("manuscript".to_owned()),
                     deleted_at_unix_millis: 0,
                     restoring_checkpoint_id: None,
                     preview_document_id: Some("deleted-part".to_owned()),
@@ -2944,7 +2962,6 @@ impl RecentlyDeletedState {
             let id = stable_id_string(node_id.as_bytes());
             let former_parent = stable_id_string(tombstone.former_parent.as_bytes());
             let section_id = stable_id_string(tombstone.section.root_id().as_bytes());
-            let fallback = RestoreLocation::SectionRoot(section_id.clone());
             let former = RestoreLocation::FormerParent(former_parent.clone());
             let former_is_live_container = project
                 .nodes
@@ -2953,7 +2970,7 @@ impl RecentlyDeletedState {
             let location = if former_is_live_container {
                 former.clone()
             } else {
-                fallback.clone()
+                RestoreLocation::SectionRoot(section_id.clone())
             };
             let preview_candidate = tombstone.subtree.iter().find_map(|deleted| {
                 let NodeKind::Document(document_id) = deleted.node.kind else {
@@ -2994,7 +3011,6 @@ impl RecentlyDeletedState {
                     former,
                     former_index: tombstone.former_index,
                     location,
-                    fallback,
                     deleted_at_unix_millis: tombstone.deleted_at_unix_millis,
                     restoring_checkpoint_id: tombstone
                         .restoring_checkpoint
@@ -3015,13 +3031,6 @@ impl RecentlyDeletedState {
 
     fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         let mut authoritative = Self::from_snapshot(snapshot);
-        for (id, item) in &mut authoritative.items {
-            if let Some(previous) = self.items.get(id)
-                && previous.location == previous.fallback
-            {
-                item.location = item.fallback.clone();
-            }
-        }
         if self
             .selected_item_id
             .as_ref()
@@ -3055,7 +3064,6 @@ impl RecentlyDeletedState {
                 former_location: &item.former,
                 former_index: item.former_index,
                 restore_location: &item.location,
-                fallback_location: &item.fallback,
                 deleted_at_unix_millis: item.deleted_at_unix_millis,
                 restoring_checkpoint_id: item.restoring_checkpoint_id.as_deref(),
                 preview_document_id: item.preview_document_id.as_deref(),
@@ -3093,12 +3101,6 @@ impl RecentlyDeletedState {
 
     pub const fn has_purge_action(&self) -> bool {
         false
-    }
-
-    fn use_fallback(&mut self, node_id: &str) {
-        if let Some(item) = self.items.get_mut(node_id) {
-            item.location = item.fallback.clone();
-        }
     }
 
     fn select(&mut self, node_id: String) {
@@ -3160,7 +3162,6 @@ pub enum ExportState {
 #[derive(Debug, Clone)]
 pub struct ExportViewState {
     state: ExportState,
-    output_name: String,
     numbering_documents: bool,
     project_settings: ProjectExportSettings,
     node_settings: BTreeMap<String, ProjectExportSettings>,
@@ -3171,7 +3172,6 @@ impl Default for ExportViewState {
     fn default() -> Self {
         Self {
             state: ExportState::Ready,
-            output_name: "manuscript.html".to_owned(),
             numbering_documents: false,
             project_settings: ProjectExportSettings::default(),
             node_settings: BTreeMap::new(),
@@ -3191,10 +3191,6 @@ impl ExportViewState {
 
     pub fn state(&self) -> ExportState {
         self.state.clone()
-    }
-
-    pub fn output_name(&self) -> &str {
-        &self.output_name
     }
 
     pub fn destination(&self) -> Option<&str> {
@@ -3217,14 +3213,17 @@ impl ExportViewState {
     }
 
     pub const fn can_start(&self) -> bool {
-        self.destination.is_some()
-            && matches!(
-                self.state,
-                ExportState::Ready
-                    | ExportState::Succeeded { .. }
-                    | ExportState::Cancelled
-                    | ExportState::Failed(_)
-            )
+        self.destination.is_some() && self.can_configure()
+    }
+
+    pub const fn can_configure(&self) -> bool {
+        matches!(
+            self.state,
+            ExportState::Ready
+                | ExportState::Succeeded { .. }
+                | ExportState::Cancelled
+                | ExportState::Failed(_)
+        )
     }
 
     pub const fn can_reveal_result(&self) -> bool {
@@ -3322,6 +3321,7 @@ pub struct RecoveryState {
     isolation: Option<String>,
     error: Option<String>,
     resolving: bool,
+    details_expanded: bool,
 }
 
 /// One document affected by recovery. Recovery reconciliation reports a
@@ -3343,6 +3343,10 @@ pub enum RecoveryHistoryPreservation {
 }
 
 impl RecoveryState {
+    pub fn details_expanded(&self) -> bool {
+        self.details_expanded
+    }
+
     pub const fn is_disposable_after_durable_save(&self) -> bool {
         self.accepted && self.durable_save_completed
     }
@@ -3654,6 +3658,11 @@ pub enum ProjectMessage {
         style_id: String,
         properties: StyleProperties,
     },
+    EditStyleProperty {
+        style_id: String,
+        property: StyleProperty,
+        value: String,
+    },
     SetStyleProperty {
         style_id: String,
         property: StyleProperty,
@@ -3722,11 +3731,13 @@ pub enum ProjectMessage {
     DismissModal,
     SelectRecentlyDeleted(String),
     RestoreDeleted(String),
-    UseRestoreFallback(String),
     SetAppearance(AppearanceMode),
     SelectSettingsCategory(SettingsCategory),
     SelectDictionaryScope(DictionaryScope),
-    SetExportOutputName(String),
+    EditDictionaryWord(String),
+    SetDictionaryQuery(String),
+    AddDictionaryWord,
+    RemoveDictionaryWord(String),
     BrowseExportDestination,
     SetExportDestination(Option<String>),
     SetExportNumbering(bool),
@@ -3755,6 +3766,7 @@ pub enum ProjectMessage {
     RetryCloseSave,
     CancelClose,
     SetContentState(ContentState),
+    ToggleRecoveryDetails,
     AcceptRecovery,
     DiscardRecovery,
     RetryRecovery,
@@ -3805,6 +3817,15 @@ pub enum ProjectEffect {
     },
     DeleteMetadataField(String),
     UpsertStyle(StyleDefinition),
+    LoadGlobalDictionary,
+    UpdateGlobalDictionaryWord {
+        word: String,
+        add: bool,
+    },
+    UpdateDictionaryWord {
+        word: String,
+        add: bool,
+    },
     DeleteStyle(String),
     SearchProject {
         query: String,
@@ -3845,13 +3866,10 @@ pub enum ProjectEffect {
     ApplyAppearanceToAllWindows(AppearanceMode),
     SetProjectExportSettings(ProjectExportSettings),
     ExportEntireManuscript {
-        output_name: String,
         number_documents: bool,
         source_revision: u64,
     },
-    ChooseExportDestination {
-        output_name: String,
-    },
+    ChooseExportDestination,
     CancelExport,
     OpenExportResult(ExportArtifactToken),
     RevealExportResult(ExportArtifactToken),
@@ -3994,6 +4012,7 @@ impl ProjectWorkspace {
                 isolation: None,
                 error: None,
                 resolving: false,
+                details_expanded: false,
             },
             modal: None,
             editor: EditorWorkspace::from_fixture(EditorFixture::DualPane),
@@ -4067,6 +4086,7 @@ impl ProjectWorkspace {
                 isolation: None,
                 error: None,
                 resolving: false,
+                details_expanded: false,
             },
             modal: None,
             editor: EditorWorkspace::from_snapshot(snapshot),
@@ -4076,6 +4096,11 @@ impl ProjectWorkspace {
     }
 
     /// Reconciles authoritative project/document data while retaining live UI state.
+    pub(crate) fn set_global_dictionary_words(&mut self, words: Vec<String>) {
+        self.settings.dictionaries.global_words = Some(words);
+        self.settings.dictionaries.clear_saved_draft();
+    }
+
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
@@ -4087,9 +4112,23 @@ impl ProjectWorkspace {
         let selected_category = self.settings.selected_category;
         let selected_detail = self.settings.selected_detail.clone();
         let new_metadata_field = self.settings.new_metadata_field.clone();
+        let dictionary_scope = self.settings.dictionaries.selected_scope;
+        let global_words = self.settings.dictionaries.global_words.take();
+        let dictionary_draft = std::mem::take(&mut self.settings.dictionaries.word_draft);
+        let dictionary_query = std::mem::take(&mut self.settings.dictionaries.query);
+        let style_property_drafts = std::mem::take(&mut self.settings.style_property_drafts);
         self.settings = SettingsState::from_project(&snapshot.project, self.settings.appearance);
+        self.settings.dictionaries.selected_scope = dictionary_scope;
+        self.settings.dictionaries.global_words = global_words;
+        self.settings.dictionaries.word_draft = dictionary_draft;
+        self.settings.dictionaries.query = dictionary_query;
+        self.settings.dictionaries.clear_saved_draft();
         self.settings.selected_category = selected_category;
         self.settings.new_metadata_field = new_metadata_field;
+        self.settings.style_property_drafts = style_property_drafts
+            .into_iter()
+            .filter(|((id, _), _)| self.settings.style_definitions.contains_key(id))
+            .collect();
         self.settings.selected_detail = selected_detail.filter(|detail| match detail {
             SettingsDetail::MetadataField(id) => {
                 self.settings.metadata_definitions.contains_key(id)
@@ -5328,6 +5367,18 @@ impl ProjectWorkspace {
                 definition.properties = properties;
                 vec![ProjectEffect::UpsertStyle(definition.clone())]
             }
+            ProjectMessage::EditStyleProperty {
+                style_id,
+                property,
+                value,
+            } => {
+                if self.settings.style_definitions.contains_key(&style_id) {
+                    self.settings
+                        .style_property_drafts
+                        .insert((style_id, property), value);
+                }
+                Vec::new()
+            }
             ProjectMessage::SetStyleProperty {
                 style_id,
                 property,
@@ -5339,6 +5390,16 @@ impl ProjectWorkspace {
                 let previous = definition.properties.clone();
                 if !set_style_property(&mut definition.properties, property, &value) {
                     definition.properties = previous;
+                    self.modal = Some(ProjectModal::Error {
+                        title: "Check the style value".into(),
+                        detail: format!("Enter a valid value for {}.", property.label()),
+                    });
+                    return Vec::new();
+                }
+                self.settings
+                    .style_property_drafts
+                    .remove(&(style_id, property));
+                if definition.properties == previous {
                     return Vec::new();
                 }
                 vec![ProjectEffect::UpsertStyle(definition.clone())]
@@ -5775,33 +5836,81 @@ impl ProjectWorkspace {
                 let location = self.recently_deleted.restore_location(&node_id);
                 vec![ProjectEffect::RestoreDeletedSubtree { node_id, location }]
             }
-            ProjectMessage::UseRestoreFallback(node_id) => {
-                self.recently_deleted.use_fallback(&node_id);
-                Vec::new()
-            }
             ProjectMessage::SetAppearance(appearance) => {
                 self.settings.appearance = appearance;
                 vec![ProjectEffect::ApplyAppearanceToAllWindows(appearance)]
             }
             ProjectMessage::SelectSettingsCategory(category) => {
                 self.settings.selected_category = category;
+                if category == SettingsCategory::Dictionaries {
+                    vec![ProjectEffect::LoadGlobalDictionary]
+                } else {
+                    Vec::new()
+                }
+            }
+            ProjectMessage::EditDictionaryWord(value) => {
+                self.settings.dictionaries.word_draft = value;
                 Vec::new()
+            }
+            ProjectMessage::SetDictionaryQuery(value) => {
+                self.settings.dictionaries.query = value;
+                Vec::new()
+            }
+            ProjectMessage::AddDictionaryWord => {
+                if self.settings.dictionaries.words().is_none() {
+                    return Vec::new();
+                }
+                let word = self.settings.dictionaries.word_draft.trim().to_owned();
+                if word.is_empty() || word.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    self.modal = Some(ProjectModal::Error {
+                        title: "Enter one word".into(),
+                        detail: "Dictionary entries cannot contain spaces or line breaks.".into(),
+                    });
+                    return Vec::new();
+                }
+                if self
+                    .settings
+                    .dictionaries
+                    .words()
+                    .is_some_and(|words| words.contains(&word))
+                {
+                    self.settings.dictionaries.word_draft.clear();
+                    Vec::new()
+                } else {
+                    if self.settings.dictionaries.selected_scope == DictionaryScope::Global {
+                        vec![ProjectEffect::UpdateGlobalDictionaryWord { word, add: true }]
+                    } else {
+                        vec![ProjectEffect::UpdateDictionaryWord { word, add: true }]
+                    }
+                }
+            }
+            ProjectMessage::RemoveDictionaryWord(word) => {
+                if self
+                    .settings
+                    .dictionaries
+                    .words()
+                    .is_some_and(|words| words.contains(&word))
+                {
+                    if self.settings.dictionaries.selected_scope == DictionaryScope::Global {
+                        vec![ProjectEffect::UpdateGlobalDictionaryWord { word, add: false }]
+                    } else {
+                        vec![ProjectEffect::UpdateDictionaryWord { word, add: false }]
+                    }
+                } else {
+                    Vec::new()
+                }
             }
             ProjectMessage::SelectDictionaryScope(scope) => {
                 self.settings.dictionaries.select_scope(scope);
-                Vec::new()
-            }
-            ProjectMessage::SetExportOutputName(output_name) => {
-                if !output_name.trim().is_empty() {
-                    self.export.output_name = output_name;
+                if scope == DictionaryScope::Global {
+                    vec![ProjectEffect::LoadGlobalDictionary]
+                } else {
+                    Vec::new()
                 }
-                Vec::new()
             }
             ProjectMessage::BrowseExportDestination => {
                 self.export.state = ExportState::ChoosingDestination;
-                vec![ProjectEffect::ChooseExportDestination {
-                    output_name: self.export.output_name.clone(),
-                }]
+                vec![ProjectEffect::ChooseExportDestination]
             }
             ProjectMessage::SetExportDestination(destination) => {
                 self.export.destination = destination;
@@ -5825,12 +5934,11 @@ impl ProjectWorkspace {
                 )]
             }
             ProjectMessage::StartExport => {
-                if self.export.destination.is_none() {
+                if !self.export.can_start() {
                     return Vec::new();
                 }
                 self.export.state = ExportState::Planning;
                 vec![ProjectEffect::ExportEntireManuscript {
-                    output_name: self.export.output_name.clone(),
                     number_documents: self.export.numbering_documents,
                     source_revision: self.project_revision,
                 }]
@@ -5933,6 +6041,10 @@ impl ProjectWorkspace {
                     self.report_error("project", error.clone());
                 }
                 self.content_state = state;
+                Vec::new()
+            }
+            ProjectMessage::ToggleRecoveryDetails => {
+                self.recovery.details_expanded = !self.recovery.details_expanded;
                 Vec::new()
             }
             ProjectMessage::AcceptRecovery => {
@@ -6283,6 +6395,7 @@ impl ProjectWorkspace {
                     isolation: None,
                     error: None,
                     resolving: false,
+                    details_expanded: false,
                 };
                 self.content_state = self.ready_content_state();
                 true
@@ -6581,27 +6694,6 @@ fn same_task_family(left: &ProjectTask, right: &ProjectTask) -> bool {
     )
 }
 
-fn stable_id_string(bytes: &[u8; 16]) -> String {
-    use std::fmt::Write as _;
-
-    let mut serialized = String::with_capacity(32);
-    for byte in bytes {
-        write!(&mut serialized, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    serialized
-}
-
-fn stable_id_bytes(value: &str) -> Option<[u8; 16]> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut bytes = [0_u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(bytes)
-}
-
 fn metadata_id_from_stable(value: &str) -> Option<MetadataFieldId> {
     stable_id_bytes(value).map(MetadataFieldId::from_bytes)
 }
@@ -6730,6 +6822,102 @@ fn is_research_section(section_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn style_property_drafts_survive_snapshots_and_only_commit_complete_values() {
+        let snapshot = ProjectSnapshot {
+            project: Project::new(parchmint_domain::ProjectId::from_bytes([7; 16])),
+            documents: Vec::new(),
+            document_summaries: Vec::new(),
+            styles_css: String::new(),
+        };
+        let mut workspace = ProjectWorkspace::from_snapshot(&snapshot);
+        let id = stable_id_string(StyleCatalog::body_id().as_bytes());
+        let property = StyleProperty::FontSizePoints;
+        for value in ["1", "12", "12.", "12.5"] {
+            assert!(
+                workspace
+                    .update(ProjectMessage::EditStyleProperty {
+                        style_id: id.clone(),
+                        property,
+                        value: value.into(),
+                    })
+                    .is_empty()
+            );
+            workspace.reconcile_snapshot(&snapshot);
+            assert_eq!(
+                workspace.settings().style_property_draft(&id, property),
+                Some(value)
+            );
+            assert_eq!(
+                workspace
+                    .settings()
+                    .style(&id)
+                    .unwrap()
+                    .properties
+                    .font_size_points,
+                None
+            );
+        }
+        let effects = workspace.update(ProjectMessage::SetStyleProperty {
+            style_id: id.clone(),
+            property,
+            value: "12.5".into(),
+        });
+        assert!(
+            matches!(effects.as_slice(), [ProjectEffect::UpsertStyle(style)]
+            if style.properties.font_size_points == Some(12.5))
+        );
+        assert_eq!(
+            workspace.settings().style_property_draft(&id, property),
+            None
+        );
+        assert!(
+            workspace
+                .update(ProjectMessage::SetStyleProperty {
+                    style_id: id,
+                    property,
+                    value: "12.5".into(),
+                })
+                .is_empty(),
+            "unchanged values must not save again"
+        );
+    }
+
+    #[test]
+    fn invalid_style_property_keeps_the_draft_and_previous_value() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
+        let id = stable_id_string(StyleCatalog::body_id().as_bytes());
+        let property = StyleProperty::FontSizePoints;
+        workspace.update(ProjectMessage::EditStyleProperty {
+            style_id: id.clone(),
+            property,
+            value: "12..5".into(),
+        });
+        assert!(
+            workspace
+                .update(ProjectMessage::SetStyleProperty {
+                    style_id: id.clone(),
+                    property,
+                    value: "12..5".into(),
+                })
+                .is_empty()
+        );
+        assert_eq!(
+            workspace.settings().style_property_draft(&id, property),
+            Some("12..5")
+        );
+        assert_eq!(
+            workspace
+                .settings()
+                .style(&id)
+                .unwrap()
+                .properties
+                .font_size_points,
+            None
+        );
+        assert!(workspace.modal().is_some());
+    }
 
     #[test]
     fn document_breadcrumb_follows_the_hierarchy_not_current_selection() {
@@ -6970,16 +7158,20 @@ mod tests {
 
         assert_eq!(
             workspace.history().timeline_heading("latest"),
-            Some("2024-01-02 UTC · Writing session".to_owned())
+            Some(writing_session_label(1_704_157_200_000))
         );
         assert_eq!(workspace.history().timeline_heading("same-session"), None);
         assert_eq!(
             workspace.history().timeline_heading("earlier-session"),
-            Some("2024-01-01 UTC · Writing session".to_owned())
+            Some(writing_session_label(
+                workspace.history.checkpoints[2]
+                    .recorded_at_unix_millis
+                    .unwrap()
+            ))
         );
         assert_eq!(
             workspace.history().timeline_heading("legacy"),
-            Some("Earlier checkpoints".to_owned())
+            Some("Earlier versions".to_owned())
         );
         assert_eq!(workspace.history().timeline_heading("older-legacy"), None);
     }
@@ -7189,20 +7381,14 @@ mod tests {
     }
 
     #[test]
-    fn settings_navigation_keeps_all_design_categories_and_refuses_unavailable_global_words() {
+    fn settings_navigation_exposes_both_dictionary_scopes() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
         assert_eq!(
             workspace
                 .settings()
                 .categories()
                 .map(|category| category.label),
-            [
-                "General",
-                "Appearance",
-                "Styles",
-                "Metadata fields",
-                "Dictionaries",
-            ]
+            ["Appearance", "Styles", "Metadata fields", "Dictionaries",]
         );
 
         workspace.update(ProjectMessage::SelectSettingsCategory(
@@ -7222,7 +7408,7 @@ mod tests {
                 .map(|scope| (scope.scope, scope.available, scope.selected)),
             [
                 (DictionaryScope::Project, true, true),
-                (DictionaryScope::Global, false, false),
+                (DictionaryScope::Global, true, false),
             ]
         );
 
@@ -7231,12 +7417,12 @@ mod tests {
         ));
         assert_eq!(
             workspace.settings().dictionaries().selected_scope(),
-            DictionaryScope::Project
+            DictionaryScope::Global
         );
     }
 
     #[test]
-    fn dictionary_settings_reads_project_words_without_copying_global_preferences() {
+    fn dictionary_settings_keeps_project_words_separate_from_global_words() {
         let project_id = parchmint_domain::ProjectId::from_bytes([0x47; 16]);
         let mut project = Project::new(project_id);
         project.dictionary.insert("harbor").unwrap();
@@ -7251,12 +7437,81 @@ mod tests {
             workspace.settings().dictionaries().words(),
             Some(["harbor".to_owned()].as_slice())
         );
+        assert!(workspace.settings().dictionaries().global_words.is_none());
+    }
+
+    #[test]
+    fn dictionary_edits_keep_scopes_and_unsaved_drafts_separate() {
+        let project = Project::new(parchmint_domain::ProjectId::from_bytes([0x74; 16]));
+        let snapshot = ProjectSnapshot {
+            project,
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        };
+        let mut workspace = ProjectWorkspace::from_snapshot(&snapshot);
+        workspace.update(ProjectMessage::EditDictionaryWord("two words".into()));
         assert!(
-            !workspace
-                .settings()
-                .dictionaries()
-                .scope_available(DictionaryScope::Global)
+            workspace
+                .update(ProjectMessage::AddDictionaryWord)
+                .is_empty()
         );
+        assert!(workspace.modal().is_some());
+        assert_eq!(workspace.settings.dictionaries.word_draft(), "two words");
+        workspace.update(ProjectMessage::DismissModal);
+        workspace.update(ProjectMessage::EditDictionaryWord("harbor".into()));
+        assert_eq!(
+            workspace.update(ProjectMessage::AddDictionaryWord),
+            vec![ProjectEffect::UpdateDictionaryWord {
+                word: "harbor".into(),
+                add: true
+            }]
+        );
+        workspace.reconcile_snapshot(&snapshot);
+        assert_eq!(
+            workspace.settings.dictionaries.word_draft(),
+            "harbor",
+            "a failed save must retain the draft"
+        );
+        workspace.update(ProjectMessage::SelectDictionaryScope(
+            DictionaryScope::Global,
+        ));
+        assert!(
+            workspace
+                .update(ProjectMessage::AddDictionaryWord)
+                .is_empty(),
+            "wait for the global dictionary to load"
+        );
+        workspace.set_global_dictionary_words(vec!["lantern".into()]);
+        assert_eq!(
+            workspace.update(ProjectMessage::AddDictionaryWord),
+            vec![ProjectEffect::UpdateGlobalDictionaryWord {
+                word: "harbor".into(),
+                add: true
+            }]
+        );
+        workspace.set_global_dictionary_words(vec!["harbor".into(), "lantern".into()]);
+        assert!(workspace.settings.dictionaries.word_draft().is_empty());
+        workspace.reconcile_snapshot(&snapshot);
+        assert_eq!(
+            workspace.settings.dictionaries.selected_scope(),
+            DictionaryScope::Global
+        );
+        assert_eq!(
+            workspace.settings.dictionaries.words().unwrap(),
+            ["harbor", "lantern"]
+        );
+        assert_eq!(
+            workspace.update(ProjectMessage::RemoveDictionaryWord("harbor".into())),
+            vec![ProjectEffect::UpdateGlobalDictionaryWord {
+                word: "harbor".into(),
+                add: false
+            }]
+        );
+        workspace.update(ProjectMessage::SelectDictionaryScope(
+            DictionaryScope::Project,
+        ));
+        assert!(workspace.settings.dictionaries.words().unwrap().is_empty());
     }
 
     #[test]
@@ -7660,11 +7915,10 @@ mod tests {
     fn export_requires_an_explicit_destination_before_starting() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Export);
         assert!(!workspace.export().can_start());
+        assert!(workspace.export().can_configure());
         assert_eq!(
             workspace.update(ProjectMessage::BrowseExportDestination),
-            vec![ProjectEffect::ChooseExportDestination {
-                output_name: "manuscript.html".to_owned(),
-            }]
+            vec![ProjectEffect::ChooseExportDestination]
         );
         workspace.update(ProjectMessage::SetExportDestination(Some(
             "/tmp/manuscript.html".to_owned(),
@@ -7674,6 +7928,11 @@ mod tests {
             workspace.update(ProjectMessage::StartExport).as_slice(),
             [ProjectEffect::ExportEntireManuscript { .. }]
         ));
+        assert!(!workspace.export().can_configure());
+        assert!(
+            workspace.update(ProjectMessage::StartExport).is_empty(),
+            "a running export must not start a second job"
+        );
     }
 
     #[test]

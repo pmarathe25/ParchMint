@@ -279,7 +279,7 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
         )
         .expect("set local search query");
     assert!(
-        visible(&harness, "2 matches"),
+        visible(&harness, "1 of 2 matches · Left pane"),
         "local search should find both occurrences"
     );
     harness
@@ -315,7 +315,7 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
         )
         .expect("open replacement preview");
     harness
-        .click_text(HarnessWindow::Project, "Revalidate selection")
+        .click_text(HarnessWindow::Project, "Refresh preview")
         .expect("revalidate current selection");
     harness
         .click_text(HarnessWindow::Project, "Apply replacement")

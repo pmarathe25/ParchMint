@@ -34,6 +34,10 @@ list.
 changed resource IDs. `synchronize_content_title` and `count_words` provide
 shared title and word-count rules.
 
+`encode_stable_id` and `decode_stable_id` own the shared 32-digit hexadecimal
+ID representation. Decoding accepts either ASCII case and rejects malformed
+identifier text without panicking; callers supply their own error types.
+
 See [the source](src/lib.rs) for method signatures.
 
 Each `DeletionTombstone` records the deleted node, its former parent and order,

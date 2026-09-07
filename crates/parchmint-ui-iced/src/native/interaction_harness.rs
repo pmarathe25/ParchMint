@@ -388,6 +388,30 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
+    /// Clicks relative to a control's current bounds, including adjacent popup
+    /// content that Iced does not expose to semantic test selectors.
+    pub fn click_target_offset(
+        &mut self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        offset: (f32, f32),
+    ) -> Result<(), HarnessError> {
+        if !offset.0.is_finite() || !offset.1.is_finite() {
+            return Err(HarnessError::new("click offsets must be finite"));
+        }
+        let bounds = self.find_target_bounds(window, target)?;
+        let point = iced::Point::new(
+            bounds.x + bounds.width * offset.0,
+            bounds.y + bounds.height * offset.1,
+        );
+        self.dispatch_events(window, Self::click_events(point, mouse::Button::Left))?;
+        self.record(
+            window,
+            format!("click target {target:?} at offset {offset:?}"),
+        );
+        Ok(())
+    }
+
     /// Closes one specific tab by its stable document identity.
     pub fn close_editor_tab(
         &mut self,
@@ -2123,6 +2147,17 @@ impl NativeDesktopHarness {
             surface.size,
             std::mem::take(&mut surface.cache),
             &mut surface.renderer,
+        );
+        // Widget status lives in the rebuilt widget, not its cached tree. A
+        // redraw event initializes enabled/focused/hovered styles before paint.
+        let _ = interface.update(
+            &[Event::Window(
+                window::Event::RedrawRequested(Instant::now()),
+            )],
+            surface.cursor,
+            &mut surface.renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Vec::new(),
         );
         interface.draw(
             &mut surface.renderer,

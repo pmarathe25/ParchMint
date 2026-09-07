@@ -39,6 +39,9 @@ returns selection and clipboard values, and projects exact document revisions.
 preserving unknown fields. Persistence, project loading, and History share this
 conversion.
 
+`style_id_from_canonical` resolves semantic paragraph style names and stable
+IDs for both session commands and widget layout.
+
 See [the source](src/lib.rs) for method signatures.
 
 `ViewHostCapability` identifies one mounted editor view. Code outside the editor

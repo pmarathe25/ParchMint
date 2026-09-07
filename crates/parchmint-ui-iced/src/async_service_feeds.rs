@@ -5,19 +5,13 @@
 //! must run those jobs on a blocking worker and deliver the owned results back
 //! to its reducer. Every job reacquires [`ProjectUiPorts::access`] when it runs.
 
-#![allow(
-    dead_code,
-    reason = "the controller is wired into the native Iced runtime in a separate integration pass"
-)]
-
 #[path = "history_project.rs"]
 mod history_project;
 
+use parchmint_domain::encode_stable_id as encode_hex;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    future::Future,
-    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -25,22 +19,12 @@ use std::{
     },
 };
 
-use parchmint_application::DocumentSnapshot;
-use parchmint_domain::{
-    DocumentId, MetadataFieldId, NodeId, NodeKind, Project, ProjectExportSetting, ProjectSection,
-};
+use parchmint_domain::{DocumentId, MetadataFieldId};
 use parchmint_editor_api::CanonicalDocumentLoad;
 use parchmint_editor_core::EditorCoreSession;
-use parchmint_export_api::{
-    CancelOutcome, ExportCompletion, ExportDefaults, ExportError, ExportHandle, ExportNode,
-    ExportNumbering, ExportPlan, ExportProgress as OperationProgress, ExportProgressSink,
-    ExportRequest, ExportRunOptions, ExportSettings, ExportSink, ExportSource, ExportStatus,
-    ExportStyleCatalog, ExportValidationReport, InheritedSetting,
-    ProjectSnapshot as ExportProjectSnapshot, SourceRevision,
-};
 use parchmint_history_api::{
     CheckpointCategory, CheckpointId, CheckpointResource, CheckpointSummary, HistoryCursor,
-    HistoryPage, HistoryPageQuery, RestorePlan, SnapshotResourcePaths,
+    HistoryPage, HistoryPageQuery, SnapshotResourcePaths,
 };
 use parchmint_project_format::CanonicalRelativePath;
 use parchmint_search_api::{SearchBatch, SearchBatchSink, SearchField, SearchHit, SearchQuery};
@@ -62,7 +46,7 @@ use crate::{
 #[must_use = "run the service job on a blocking worker"]
 pub struct BlockingServiceJob<T> {
     operation: &'static str,
-    run: Option<Box<dyn FnOnce() -> Result<T, ServiceFeedError> + Send + 'static>>,
+    run: Box<dyn FnOnce() -> Result<T, ServiceFeedError> + Send + 'static>,
 }
 
 impl<T> fmt::Debug for BlockingServiceJob<T> {
@@ -70,7 +54,6 @@ impl<T> fmt::Debug for BlockingServiceJob<T> {
         formatter
             .debug_struct("BlockingServiceJob")
             .field("operation", &self.operation)
-            .field("pending", &self.run.is_some())
             .finish()
     }
 }
@@ -82,7 +65,7 @@ impl<T> BlockingServiceJob<T> {
     ) -> Self {
         Self {
             operation,
-            run: Some(Box::new(run)),
+            run: Box::new(run),
         }
     }
 
@@ -90,63 +73,17 @@ impl<T> BlockingServiceJob<T> {
         self.operation
     }
 
-    pub fn run(mut self) -> Result<T, ServiceFeedError> {
-        let run = self.run.take().ok_or(ServiceFeedError::InvalidState {
-            operation: self.operation,
-            reason: "service job was already consumed",
-        })?;
-        run()
+    pub fn run(self) -> Result<T, ServiceFeedError> {
+        (self.run)()
     }
 }
-
-pub type ServiceFuture<T> =
-    Pin<Box<dyn Future<Output = Result<T, ServiceFeedError>> + Send + 'static>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKind {
     Search,
     History,
     Recovery,
-    Export,
     ProjectQuery,
-    PlatformOutput,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnsupportedBoundary {
-    /// `ProjectEffect::RestoreDeletedSubtree` is already executed by the
-    /// authoritative project command executor and must not be run twice.
-    RecentlyDeletedOwnedByCommandExecutor,
-    /// `Exporter::export` creates its handle internally and returns it only
-    /// after the synchronous call, so the UI cannot cancel an in-flight render.
-    ExportHandleUnavailableWhileRendering,
-    /// The exporter API has no progress callback. Only queued and terminal
-    /// progress can be reported without inventing intermediate work.
-    ExportProgressFeedUnavailable,
-    /// The platform API supports validated HTTPS intents, not file open/reveal.
-    ExportArtifactPathResolverUnavailable,
-    /// History returns a write/delete plan; applying it requires the canonical
-    /// save/restore coordinator rather than a HistoryStore call.
-    HistoryRestorePlanExecutorUnavailable,
-    /// The recovery API accepted data but exposes no editor focus action.
-    RecoveryFocusOwnedByWidgetRuntime,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConversionGap {
-    /// Export requires deterministic project CSS, which is not present in the
-    /// UI snapshot and must come from the canonical project-format projection.
-    ExportStyleCssUnavailable,
-    /// A UI document body has no block identities/ranges, so it cannot be
-    /// fabricated into a `SearchDocumentProjection` for result revalidation.
-    SearchBlockProjectionUnavailable,
-    /// History exposes manifests and hashes, not reconstructed rich previews.
-    HistoryRichPreviewUnavailable,
-    /// Deleted tombstones expose structural metadata but no rich content feed.
-    RecentlyDeletedRichPreviewUnavailable,
-    MalformedProjectHierarchy {
-        node_id: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,9 +95,6 @@ pub enum ServiceFeedError {
     StaleSearchGeneration {
         expected: Option<u64>,
         received: u64,
-    },
-    CanceledSearchGeneration {
-        generation: u64,
     },
     InvalidIdentifier {
         kind: &'static str,
@@ -174,10 +108,7 @@ pub enum ServiceFeedError {
         service: ServiceKind,
         message: String,
     },
-    Unsupported(UnsupportedBoundary),
-    Conversion(ConversionGap),
     NoRecoveryToAccept,
-    OutputUnavailable,
     InvalidState {
         operation: &'static str,
         reason: &'static str,
@@ -198,9 +129,6 @@ impl fmt::Display for ServiceFeedError {
                 formatter,
                 "search generation {received} is stale; current generation is {expected:?}"
             ),
-            Self::CanceledSearchGeneration { generation } => {
-                write!(formatter, "search generation {generation} was canceled")
-            }
             Self::InvalidIdentifier { kind, value } => {
                 write!(formatter, "invalid {kind} identifier {value:?}")
             }
@@ -210,12 +138,9 @@ impl fmt::Display for ServiceFeedError {
             Self::Service { service, message } => {
                 write!(formatter, "{service:?} service failed: {message}")
             }
-            Self::Unsupported(boundary) => write!(formatter, "unsupported boundary: {boundary:?}"),
-            Self::Conversion(gap) => write!(formatter, "data conversion gap: {gap:?}"),
             Self::NoRecoveryToAccept => {
                 formatter.write_str("there is no reconciled recovery to accept")
             }
-            Self::OutputUnavailable => formatter.write_str("export output is unavailable"),
             Self::InvalidState { operation, reason } => {
                 write!(formatter, "invalid {operation} state: {reason}")
             }
@@ -231,7 +156,6 @@ pub struct AsyncServiceFeeds {
     ports: Arc<dyn ServiceFeedPorts>,
     search: SearchFeedController,
     next_recovery: Arc<AtomicU64>,
-    active_export: Arc<Mutex<Option<ExportHandle>>>,
 }
 
 impl fmt::Debug for AsyncServiceFeeds {
@@ -253,7 +177,6 @@ impl AsyncServiceFeeds {
             search: SearchFeedController::new(ports.clone()),
             ports,
             next_recovery: Arc::new(AtomicU64::new(0)),
-            active_export: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -370,25 +293,6 @@ impl AsyncServiceFeeds {
         })
     }
 
-    /// Returns the whole-project restore plan. It does not apply the plan.
-    pub fn history_restore_plan(
-        &self,
-        checkpoint_id: impl Into<String>,
-    ) -> BlockingServiceJob<HistoryRestorePlanResult> {
-        let ports = self.ports.clone();
-        let checkpoint_id = checkpoint_id.into();
-        BlockingServiceJob::new("plan History restore", move || {
-            let checkpoint = parse_stable_id(&checkpoint_id, "History checkpoint")?;
-            ports
-                .history_restore(CheckpointId::from_bytes(checkpoint))
-                .map(|plan| HistoryRestorePlanResult { plan })
-        })
-    }
-
-    pub const fn recently_deleted_restore_disposition(&self) -> RecentlyDeletedRestoreDisposition {
-        RecentlyDeletedRestoreDisposition::CommandExecutorOwned
-    }
-
     pub fn reconcile_recovery(&self) -> BlockingServiceJob<RecoveryReconcileResult> {
         let ports = self.ports.clone();
         let sequence = self.next_recovery.fetch_add(1, Ordering::Relaxed) + 1;
@@ -416,113 +320,6 @@ impl AsyncServiceFeeds {
             ports.discard_recovery(acceptance.sequence)
         })
     }
-
-    pub fn plan_export(
-        &self,
-        request: ExportRequest,
-        project: ExportProjectSnapshot,
-    ) -> BlockingServiceJob<ExportPlan> {
-        let ports = self.ports.clone();
-        BlockingServiceJob::new("plan export", move || ports.export_plan(request, &project))
-    }
-
-    pub fn validate_export(&self, plan: ExportPlan) -> BlockingServiceJob<ExportValidationReport> {
-        let ports = self.ports.clone();
-        BlockingServiceJob::new("validate export", move || ports.export_validate(&plan))
-    }
-
-    /// Starts a synchronous exporter on a blocking worker.
-    ///
-    /// Progress is forwarded from the exporter, while its returned
-    /// [`ExportCompletion`] remains the authoritative success result.
-    pub fn start_export(
-        &self,
-        plan: ExportPlan,
-        sink: Box<dyn ExportSink>,
-        source_revision: u64,
-    ) -> ExportStart {
-        let ports = self.ports.clone();
-        let active_export = self.active_export.clone();
-        let output_name = plan.target().name().as_str().to_owned();
-        let (progress_sender, progress) = mpsc::channel();
-        let handle = ExportHandle::new();
-        if let Ok(mut active) = active_export.lock()
-            && let Some(replaced) = active.replace(handle.clone())
-        {
-            let _ = replaced.cancel();
-        }
-        let progress_sink = Arc::new(ChannelExportProgress {
-            sender: progress_sender,
-        });
-        let job = BlockingServiceJob::new("start export", move || {
-            let result = ports.export_start(plan, sink, handle.clone(), progress_sink);
-            if let Ok(mut active) = active_export.lock()
-                && active
-                    .as_ref()
-                    .is_some_and(|current| current.same_operation(&handle))
-            {
-                *active = None;
-            }
-            result?;
-            match handle.status() {
-                // `ExportCompletion` is returned only after the temporary
-                // output has been safely finished. Treat it as authoritative
-                // when an adapter leaves its status handle unsettled.
-                ExportStatus::Completed | ExportStatus::Pending | ExportStatus::Running => {
-                    Ok(SuccessfulExportOutput {
-                        output_name,
-                        source_revision,
-                    })
-                }
-                ExportStatus::Cancelled => Err(ServiceFeedError::Service {
-                    service: ServiceKind::Export,
-                    message: ExportError::Cancelled.to_string(),
-                }),
-                ExportStatus::Failed => Err(ServiceFeedError::Service {
-                    service: ServiceKind::Export,
-                    message: "export handle reported failure".to_owned(),
-                }),
-            }
-        });
-        ExportStart { progress, job }
-    }
-
-    /// Reports the current cancellation boundary honestly. `Exporter::export`
-    /// returns its handle only after synchronous rendering, so no controller
-    /// can cancel the in-flight operation through the existing trait.
-    pub fn cancel_export(&self) -> Result<BlockingServiceJob<CancelOutcome>, ServiceFeedError> {
-        let handle = self
-            .active_export
-            .lock()
-            .map_err(|_| ServiceFeedError::InvalidState {
-                operation: "cancel export",
-                reason: "export operation state is unavailable",
-            })?
-            .clone()
-            .ok_or(ServiceFeedError::OutputUnavailable)?;
-        Ok(BlockingServiceJob::new("cancel export", move || {
-            Ok(handle.cancel())
-        }))
-    }
-
-    /// Invokes an output adapter only for a success-gated intent and after
-    /// reauthorizing the exact project-session generation.
-    pub fn invoke_output_intent(
-        &self,
-        platform: Arc<dyn ExportOutputPlatform>,
-        intent: ExportOutputIntent,
-    ) -> ServiceFuture<()> {
-        let ports = self.ports.clone();
-        Box::pin(async move {
-            ports.authorize()?;
-            platform.invoke(intent).await
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecentlyDeletedRestoreDisposition {
-    CommandExecutorOwned,
 }
 
 impl HistoryCheckpointRow {
@@ -712,28 +509,9 @@ fn load_checkpoint_document(
     }))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistoryRestorePlanResult {
-    pub plan: RestorePlan,
-}
-
-impl HistoryRestorePlanResult {
-    pub const fn apply_in_ui_layer(&self) -> Result<(), ServiceFeedError> {
-        Err(ServiceFeedError::Unsupported(
-            UnsupportedBoundary::HistoryRestorePlanExecutorUnavailable,
-        ))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecoveryAcceptanceTicket {
     sequence: u64,
-}
-
-impl RecoveryAcceptanceTicket {
-    pub const fn sequence(self) -> u64 {
-        self.sequence
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -759,14 +537,6 @@ pub struct RecoveryAcceptedResult {
     pub snapshot: ProjectSnapshot,
 }
 
-impl RecoveryAcceptedResult {
-    pub const fn reducer_payload(&self) -> ProjectTaskPayload {
-        ProjectTaskPayload::RecoveryAccepted {
-            revision: self.project_revision,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecoveryDiscardedResult {
     pub isolation: Option<String>,
@@ -785,7 +555,6 @@ pub struct SearchRequest {
 
 #[derive(Debug)]
 pub struct SearchStart {
-    pub generation: u64,
     pub batches: Receiver<Result<SearchBatchResult, ServiceFeedError>>,
     pub job: BlockingServiceJob<SearchRunResult>,
 }
@@ -814,7 +583,6 @@ impl SearchBatchResult {
 #[derive(Debug, Default)]
 struct SearchGenerationState {
     current: Option<u64>,
-    canceled: BTreeSet<u64>,
 }
 
 #[derive(Clone)]
@@ -843,7 +611,6 @@ impl SearchFeedController {
     pub fn start(&self, request: SearchRequest) -> SearchStart {
         let superseded = self.state.lock().ok().and_then(|mut state| {
             let superseded = state.current.replace(request.generation);
-            state.canceled.remove(&request.generation);
             superseded.filter(|generation| *generation != request.generation)
         });
         let generation = request.generation;
@@ -885,25 +652,7 @@ impl SearchFeedController {
             }
             Ok(SearchRunResult { generation })
         });
-        SearchStart {
-            generation,
-            batches,
-            job,
-        }
-    }
-
-    /// Invalidates delivery immediately and returns the blocking service call.
-    pub fn cancel(&self, generation: u64) -> BlockingServiceJob<()> {
-        if let Ok(mut state) = self.state.lock() {
-            state.canceled.insert(generation);
-            if state.current == Some(generation) {
-                state.current = None;
-            }
-        }
-        let ports = self.ports.clone();
-        BlockingServiceJob::new("cancel global search", move || {
-            ports.search_cancel(generation)
-        })
+        SearchStart { batches, job }
     }
 
     pub fn accept_batch(&self, batch: &SearchBatchResult) -> Result<(), ServiceFeedError> {
@@ -914,11 +663,6 @@ impl SearchFeedController {
                 operation: "accept search batch",
                 reason: "search generation state is unavailable",
             })?;
-        if state.canceled.contains(&batch.generation) {
-            return Err(ServiceFeedError::CanceledSearchGeneration {
-                generation: batch.generation,
-            });
-        }
         if state.current != Some(batch.generation) {
             return Err(ServiceFeedError::StaleSearchGeneration {
                 expected: state.current,
@@ -944,7 +688,6 @@ impl SearchBatchSink for GatedSearchSink {
         }
         let accepted = self.state.lock().is_ok_and(|state| {
             state.current == Some(self.expected_generation)
-                && !state.canceled.contains(&self.expected_generation)
                 && batch.generation == self.expected_generation
         });
         if !accepted {
@@ -993,216 +736,6 @@ fn search_result_from_hit(hit: SearchHit) -> Result<GlobalSearchResult, ServiceF
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportProgress {
-    Planning,
-    Rendering { completed: u64, total: u64 },
-    Committing,
-}
-
-struct ChannelExportProgress {
-    sender: Sender<ExportProgress>,
-}
-
-impl ExportProgressSink for ChannelExportProgress {
-    fn report(&self, progress: OperationProgress) {
-        let progress = match progress {
-            OperationProgress::Planning => ExportProgress::Planning,
-            OperationProgress::Rendering { completed, total } => {
-                ExportProgress::Rendering { completed, total }
-            }
-            OperationProgress::Committing => ExportProgress::Committing,
-        };
-        let _ = self.sender.send(progress);
-    }
-}
-
-#[derive(Debug)]
-pub struct ExportStart {
-    pub progress: Receiver<ExportProgress>,
-    pub job: BlockingServiceJob<SuccessfulExportOutput>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SuccessfulExportOutput {
-    output_name: String,
-    source_revision: u64,
-}
-
-impl SuccessfulExportOutput {
-    pub fn output_name(&self) -> &str {
-        &self.output_name
-    }
-
-    pub const fn source_revision(&self) -> u64 {
-        self.source_revision
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportOutputAction {
-    Open,
-    Reveal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExportOutputIntent {
-    output: SuccessfulExportOutput,
-    action: ExportOutputAction,
-}
-
-impl ExportOutputIntent {
-    pub fn output(&self) -> &SuccessfulExportOutput {
-        &self.output
-    }
-
-    pub const fn action(&self) -> ExportOutputAction {
-        self.action
-    }
-}
-
-/// Creates an open/reveal intent only from a successful terminal result.
-pub fn successful_output_intent(
-    result: &Result<SuccessfulExportOutput, ServiceFeedError>,
-    action: ExportOutputAction,
-) -> Result<ExportOutputIntent, ServiceFeedError> {
-    result
-        .as_ref()
-        .map(|output| ExportOutputIntent {
-            output: output.clone(),
-            action,
-        })
-        .map_err(|_| ServiceFeedError::OutputUnavailable)
-}
-
-pub trait ExportOutputPlatform: Send + Sync {
-    fn invoke(&self, intent: ExportOutputIntent) -> ServiceFuture<()>;
-}
-
-/// Converts an authoritative UI snapshot into an exporter snapshot only when
-/// canonical serialized CSS is supplied by the project-format boundary.
-pub fn export_snapshot_from_ui(
-    snapshot: &ProjectSnapshot,
-    canonical_styles_css: Option<String>,
-) -> Result<ExportProjectSnapshot, ServiceFeedError> {
-    let css = canonical_styles_css.ok_or(ServiceFeedError::Conversion(
-        ConversionGap::ExportStyleCssUnavailable,
-    ))?;
-    export_snapshot_with_css(&snapshot.project, &snapshot.documents, css)
-}
-
-fn export_snapshot_with_css(
-    project: &Project,
-    documents: &[DocumentSnapshot],
-    css: String,
-) -> Result<ExportProjectSnapshot, ServiceFeedError> {
-    let mut visited = BTreeSet::new();
-    let manuscript = export_children(project, ProjectSection::Manuscript.root_id(), &mut visited)?;
-    let included_documents = collect_export_document_ids(&manuscript);
-    let sources = documents
-        .iter()
-        .filter(|document| included_documents.contains(&document.document_id))
-        .map(|document| {
-            (
-                document.document_id,
-                ExportSource {
-                    revision: SourceRevision::from(document.revision.value()),
-                    body: document.body.clone(),
-                },
-            )
-        })
-        .collect();
-    Ok(ExportProjectSnapshot::new(
-        ExportStyleCatalog::new(css),
-        ExportDefaults {
-            emit_titles: project.export_settings.emit_titles != ProjectExportSetting::Disabled,
-            start_new_page: project.export_settings.starts_new_page,
-        },
-        manuscript,
-        sources,
-    ))
-}
-
-fn export_children(
-    project: &Project,
-    parent: NodeId,
-    visited: &mut BTreeSet<NodeId>,
-) -> Result<Vec<ExportNode>, ServiceFeedError> {
-    let mut nodes = Vec::new();
-    for id in project.nodes.children(parent) {
-        if !visited.insert(*id) {
-            return Err(ServiceFeedError::Conversion(
-                ConversionGap::MalformedProjectHierarchy {
-                    node_id: encode_hex(id.as_bytes()),
-                },
-            ));
-        }
-        let node = project.nodes.get(*id).ok_or_else(|| {
-            ServiceFeedError::Conversion(ConversionGap::MalformedProjectHierarchy {
-                node_id: encode_hex(id.as_bytes()),
-            })
-        })?;
-        let settings = ExportSettings {
-            emit_titles: match node.export_settings.emit_titles {
-                ProjectExportSetting::Inherit => InheritedSetting::Inherit,
-                ProjectExportSetting::Enabled => InheritedSetting::Enabled,
-                ProjectExportSetting::Disabled => InheritedSetting::Disabled,
-            },
-            start_new_page: if node.export_settings.starts_new_page {
-                InheritedSetting::Enabled
-            } else {
-                InheritedSetting::Inherit
-            },
-        };
-        match node.kind {
-            NodeKind::Root(_) => {
-                return Err(ServiceFeedError::Conversion(
-                    ConversionGap::MalformedProjectHierarchy {
-                        node_id: encode_hex(id.as_bytes()),
-                    },
-                ));
-            }
-            NodeKind::Group => nodes.push(ExportNode::group(
-                node.title.clone(),
-                settings,
-                export_children(project, *id, visited)?,
-            )),
-            NodeKind::Document(document) => {
-                nodes.push(ExportNode::document(document, node.title.clone(), settings));
-            }
-        }
-    }
-    Ok(nodes)
-}
-
-fn collect_export_document_ids(nodes: &[ExportNode]) -> BTreeSet<DocumentId> {
-    let mut documents = BTreeSet::new();
-    for node in nodes {
-        match node {
-            ExportNode::Group { children, .. } => {
-                documents.extend(collect_export_document_ids(children));
-            }
-            ExportNode::Document { id, .. } => {
-                documents.insert(*id);
-            }
-        }
-    }
-    documents
-}
-
-pub fn export_request(output_name: impl Into<String>, number_documents: bool) -> ExportRequest {
-    ExportRequest::new(
-        output_name,
-        ExportRunOptions {
-            numbering: if number_documents {
-                ExportNumbering::Documents
-            } else {
-                ExportNumbering::None
-            },
-        },
-    )
-}
-
 trait ServiceFeedPorts: Send + Sync {
     fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ServiceFeedError>;
     fn authorize(&self) -> Result<(), ServiceFeedError>;
@@ -1222,29 +755,13 @@ trait ServiceFeedPorts: Send + Sync {
         checkpoint: CheckpointId,
         path: &CanonicalRelativePath,
     ) -> Result<CheckpointResource, ServiceFeedError>;
-    fn history_restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan, ServiceFeedError>;
+
     fn reconcile_recovery(
         &self,
         sequence: u64,
     ) -> Result<RecoveryReconcileResult, ServiceFeedError>;
     fn accept_recovery(&self, sequence: u64) -> Result<RecoveryAcceptedResult, ServiceFeedError>;
     fn discard_recovery(&self, sequence: u64) -> Result<RecoveryDiscardedResult, ServiceFeedError>;
-    fn export_plan(
-        &self,
-        request: ExportRequest,
-        project: &ExportProjectSnapshot,
-    ) -> Result<ExportPlan, ServiceFeedError>;
-    fn export_validate(
-        &self,
-        plan: &ExportPlan,
-    ) -> Result<ExportValidationReport, ServiceFeedError>;
-    fn export_start(
-        &self,
-        plan: ExportPlan,
-        sink: Box<dyn ExportSink>,
-        handle: ExportHandle,
-        progress: Arc<dyn ExportProgressSink>,
-    ) -> Result<ExportCompletion, ServiceFeedError>;
 }
 
 struct ProjectUiPortAdapter {
@@ -1323,13 +840,6 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
     ) -> Result<CheckpointResource, ServiceFeedError> {
         self.access()?
             .history(|history| history.read_resource(checkpoint, path))
-            .map_err(stale_session)?
-            .map_err(|error| service_error(ServiceKind::History, error))
-    }
-
-    fn history_restore(&self, checkpoint: CheckpointId) -> Result<RestorePlan, ServiceFeedError> {
-        self.access()?
-            .history(|history| history.restore(checkpoint))
             .map_err(stale_session)?
             .map_err(|error| service_error(ServiceKind::History, error))
     }
@@ -1417,39 +927,6 @@ impl ServiceFeedPorts for ProjectUiPortAdapter {
             snapshot,
         })
     }
-
-    fn export_plan(
-        &self,
-        request: ExportRequest,
-        project: &ExportProjectSnapshot,
-    ) -> Result<ExportPlan, ServiceFeedError> {
-        self.access()?
-            .exporter(|exporter| exporter.plan(request, project))
-            .map_err(stale_session)?
-            .map_err(|error| service_error(ServiceKind::Export, error))
-    }
-
-    fn export_validate(
-        &self,
-        plan: &ExportPlan,
-    ) -> Result<ExportValidationReport, ServiceFeedError> {
-        self.access()?
-            .exporter(|exporter| exporter.validate(plan))
-            .map_err(stale_session)
-    }
-
-    fn export_start(
-        &self,
-        plan: ExportPlan,
-        sink: Box<dyn ExportSink>,
-        handle: ExportHandle,
-        progress: Arc<dyn ExportProgressSink>,
-    ) -> Result<ExportCompletion, ServiceFeedError> {
-        self.access()?
-            .exporter(|exporter| exporter.export(plan, sink, handle, progress))
-            .map_err(stale_session)?
-            .map_err(|error| service_error(ServiceKind::Export, error))
-    }
 }
 
 fn recovery_reconcile_result(
@@ -1506,41 +983,18 @@ fn service_error(service: ServiceKind, error: impl fmt::Display) -> ServiceFeedE
     }
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    use fmt::Write as _;
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
-}
-
 fn parse_stable_id(value: &str, kind: &'static str) -> Result<[u8; 16], ServiceFeedError> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(ServiceFeedError::InvalidIdentifier {
-            kind,
-            value: value.to_owned(),
-        });
-    }
-    let mut bytes = [0_u8; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
-            ServiceFeedError::InvalidIdentifier {
-                kind,
-                value: value.to_owned(),
-            }
-        })?;
-    }
-    Ok(bytes)
+    parchmint_domain::decode_stable_id(value).ok_or_else(|| ServiceFeedError::InvalidIdentifier {
+        kind,
+        value: value.to_owned(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::atomic::AtomicBool;
 
-    use parchmint_application::{DocumentVisibility, EditorRevision};
-    use parchmint_domain::{ProjectId, ProjectSection};
-    use parchmint_export_api::{ExportCompletion, ExportTargetCapability};
+    use parchmint_domain::{NodeId, Project, ProjectId};
     use parchmint_history_api::{CheckpointSummary, HistoryPage, SnapshotName};
     use parchmint_search_api::{BlockId, RevisionId, SearchSnippet, TextRange};
 
@@ -1556,15 +1010,6 @@ mod tests {
         history_resource: Mutex<Option<CheckpointResource>>,
         history_resources: Mutex<BTreeMap<CanonicalRelativePath, CheckpointResource>>,
         recovery_revision: AtomicU64,
-        export_mode: Mutex<FakeExportMode>,
-    }
-
-    #[derive(Debug, Clone, Copy, Default)]
-    enum FakeExportMode {
-        #[default]
-        Success,
-        Failure,
-        PendingAfterCompletion,
     }
 
     impl FakePorts {
@@ -1655,12 +1100,6 @@ mod tests {
                 })
         }
 
-        fn history_restore(&self, _: CheckpointId) -> Result<RestorePlan, ServiceFeedError> {
-            Err(ServiceFeedError::Unsupported(
-                UnsupportedBoundary::HistoryRestorePlanExecutorUnavailable,
-            ))
-        }
-
         fn reconcile_recovery(
             &self,
             sequence: u64,
@@ -1696,60 +1135,6 @@ mod tests {
                 snapshot: recovery_snapshot(),
             })
         }
-
-        fn export_plan(
-            &self,
-            request: ExportRequest,
-            project: &ExportProjectSnapshot,
-        ) -> Result<ExportPlan, ServiceFeedError> {
-            self.check()?;
-            ExportPlan::build(request, project)
-                .map_err(|error| service_error(ServiceKind::Export, ExportError::Validation(error)))
-        }
-
-        fn export_validate(
-            &self,
-            _: &ExportPlan,
-        ) -> Result<ExportValidationReport, ServiceFeedError> {
-            self.check()?;
-            Ok(ExportValidationReport::default())
-        }
-
-        fn export_start(
-            &self,
-            plan: ExportPlan,
-            mut sink: Box<dyn ExportSink>,
-            handle: ExportHandle,
-            progress: Arc<dyn ExportProgressSink>,
-        ) -> Result<ExportCompletion, ServiceFeedError> {
-            self.check()?;
-            match *self.export_mode.lock().expect("export mode") {
-                FakeExportMode::Failure => {
-                    return Err(ServiceFeedError::Service {
-                        service: ServiceKind::Export,
-                        message: "fake write failed".to_owned(),
-                    });
-                }
-                FakeExportMode::PendingAfterCompletion => {
-                    return Ok(ExportCompletion {
-                        target: plan.target().clone(),
-                    });
-                }
-                FakeExportMode::Success => {}
-            }
-            progress.report(OperationProgress::Rendering {
-                completed: 0,
-                total: 0,
-            });
-            let output = handle
-                .begin_temporary(sink.as_mut(), plan.target())
-                .map_err(|error| service_error(ServiceKind::Export, error))?;
-            let completion = output
-                .finish()
-                .map_err(|error| service_error(ServiceKind::Export, error))?;
-            progress.report(OperationProgress::Committing);
-            Ok(completion)
-        }
     }
 
     fn recovery_snapshot() -> ProjectSnapshot {
@@ -1759,25 +1144,6 @@ mod tests {
             documents: Vec::new(),
             styles_css: String::new(),
         }
-    }
-
-    #[derive(Default)]
-    struct FakeSink;
-
-    impl ExportSink for FakeSink {
-        fn start(&mut self, _: &ExportTargetCapability) -> Result<(), ExportError> {
-            Ok(())
-        }
-
-        fn write_chunk(&mut self, _: &[u8]) -> Result<(), ExportError> {
-            Ok(())
-        }
-
-        fn finish(&mut self) -> Result<(), ExportError> {
-            Ok(())
-        }
-
-        fn abort(&mut self) {}
     }
 
     fn feeds(fake: Arc<FakePorts>) -> AsyncServiceFeeds {
@@ -1813,72 +1179,6 @@ mod tests {
         }
     }
 
-    fn export_project() -> ExportProjectSnapshot {
-        let document = DocumentId::from_bytes([4; 16]);
-        ExportProjectSnapshot::new(
-            ExportStyleCatalog::new("p {}"),
-            ExportDefaults::default(),
-            vec![ExportNode::document(
-                document,
-                "Chapter",
-                ExportSettings::default(),
-            )],
-            BTreeMap::from([(
-                document,
-                ExportSource {
-                    revision: SourceRevision::from(7),
-                    body: "<p>Body</p>".to_owned(),
-                },
-            )]),
-        )
-    }
-
-    #[test]
-    fn export_snapshot_preserves_excluded_nodes_for_planning() {
-        let document = DocumentId::from_bytes([4; 16]);
-        let node = NodeId::from_bytes([5; 16]);
-        let mut project = Project::new(ProjectId::from_bytes([7; 16]));
-        project
-            .nodes
-            .try_insert_document(
-                node,
-                document,
-                ProjectSection::Manuscript.root_id(),
-                0,
-                "Excluded chapter",
-            )
-            .expect("insert document");
-        project
-            .nodes
-            .get_mut(node)
-            .expect("document node")
-            .export_settings
-            .excluded = true;
-        let documents = [DocumentSnapshot {
-            document_id: document,
-            revision: EditorRevision::from(3),
-            body: "preserved body".to_owned(),
-            comments: Vec::new(),
-            visibility: DocumentVisibility::Closed,
-        }];
-
-        let snapshot = export_snapshot_with_css(&project, &documents, String::new())
-            .expect("capture full project snapshot");
-
-        assert!(matches!(
-            snapshot.manuscript.as_slice(),
-            [ExportNode::Document { id, title, .. }]
-                if *id == document && title == "Excluded chapter"
-        ));
-        assert_eq!(
-            snapshot
-                .sources
-                .get(&document)
-                .map(|source| source.body.as_str()),
-            Some("preserved body")
-        );
-    }
-
     #[test]
     fn jobs_reject_a_stale_session_at_execution_time() {
         let fake = Arc::new(FakePorts::default());
@@ -1902,13 +1202,13 @@ mod tests {
     }
 
     #[test]
-    fn canceled_and_old_search_generations_are_not_accepted() {
+    fn superseded_search_jobs_cannot_deliver_results() {
         let fake = Arc::new(FakePorts::default());
         fake.search_batches
             .lock()
             .expect("search batches")
             .extend([hit(1), hit(2)]);
-        let controller = feeds(fake).search().clone();
+        let controller = feeds(fake.clone()).search().clone();
         let old = controller.start(SearchRequest {
             text: "river".to_owned(),
             case_sensitive: false,
@@ -1944,12 +1244,10 @@ mod tests {
         assert_eq!(batch.generation, 2);
         assert_eq!(batch.results[0].matching_text, "river");
         assert!(current.batches.try_recv().is_err());
-        controller.cancel(2).run().expect("cancel current");
-        assert!(matches!(
-            controller.accept_batch(&batch),
-            Err(ServiceFeedError::CanceledSearchGeneration { generation: 2 })
-        ));
-        drop(old);
+        assert_eq!(*fake.canceled.lock().unwrap(), vec![1]);
+        old.job.run().expect("late old search");
+        assert!(old.batches.try_recv().is_err());
+        assert!(controller.accept_batch(&batch).is_ok());
     }
 
     #[test]
@@ -2154,10 +1452,6 @@ mod tests {
             accepted.recovered_document,
             Some(DocumentId::from_bytes([6; 16]))
         );
-        assert_eq!(
-            accepted.reducer_payload(),
-            ProjectTaskPayload::RecoveryAccepted { revision: 18 }
-        );
     }
 
     #[test]
@@ -2177,92 +1471,5 @@ mod tests {
             discarded.snapshot.project.id,
             ProjectId::from_bytes([7; 16])
         );
-    }
-
-    #[derive(Default)]
-    struct FakeOutputPlatform {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl ExportOutputPlatform for FakeOutputPlatform {
-        fn invoke(&self, _: ExportOutputIntent) -> ServiceFuture<()> {
-            let calls = self.calls.clone();
-            Box::pin(async move {
-                calls.fetch_add(1, Ordering::Relaxed);
-                Ok(())
-            })
-        }
-    }
-
-    #[test]
-    fn export_reports_terminal_progress_and_gates_output_intents() {
-        let fake = Arc::new(FakePorts::default());
-        let feeds = feeds(fake.clone());
-        let plan = feeds
-            .plan_export(export_request("manuscript.html", false), export_project())
-            .run()
-            .expect("plan");
-        let validation = feeds.validate_export(plan.clone()).run().expect("validate");
-        assert!(validation.is_valid());
-        let start = feeds.start_export(plan, Box::new(FakeSink), 7);
-        let success = start.job.run();
-        assert_eq!(
-            start.progress.into_iter().collect::<Vec<_>>(),
-            vec![
-                ExportProgress::Rendering {
-                    completed: 0,
-                    total: 0,
-                },
-                ExportProgress::Committing,
-            ]
-        );
-        assert_eq!(
-            success.as_ref().expect("success").output_name(),
-            "manuscript.html"
-        );
-        let open = successful_output_intent(&success, ExportOutputAction::Open)
-            .expect("successful open intent");
-
-        *fake.export_mode.lock().expect("export mode") = FakeExportMode::Failure;
-        let failed_plan = feeds
-            .plan_export(export_request("failed.html", false), export_project())
-            .run()
-            .expect("failed plan");
-        let failed = feeds
-            .start_export(failed_plan, Box::new(FakeSink), 7)
-            .job
-            .run();
-        assert!(matches!(failed, Err(ServiceFeedError::Service { .. })));
-        assert_eq!(
-            successful_output_intent(&failed, ExportOutputAction::Reveal),
-            Err(ServiceFeedError::OutputUnavailable)
-        );
-        let platform = Arc::new(FakeOutputPlatform::default());
-        iced::futures::executor::block_on(feeds.invoke_output_intent(platform.clone(), open))
-            .expect("invoke successful open");
-        assert_eq!(platform.calls.load(Ordering::Relaxed), 1);
-        assert!(matches!(
-            feeds.cancel_export(),
-            Err(ServiceFeedError::OutputUnavailable)
-        ));
-    }
-
-    #[test]
-    fn export_completion_is_successful_when_an_adapter_leaves_its_handle_pending() {
-        let fake = Arc::new(FakePorts::default());
-        *fake.export_mode.lock().expect("export mode") = FakeExportMode::PendingAfterCompletion;
-        let feeds = feeds(fake);
-        let plan = feeds
-            .plan_export(export_request("unsettled.html", false), export_project())
-            .run()
-            .expect("plan");
-
-        let completed = feeds
-            .start_export(plan, Box::new(FakeSink), 7)
-            .job
-            .run()
-            .expect("completion is authoritative");
-
-        assert_eq!(completed.output_name(), "unsettled.html");
     }
 }

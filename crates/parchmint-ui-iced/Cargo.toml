@@ -35,6 +35,7 @@ parchmint-project-format = { path = "../parchmint-project-format" }
 parchmint-search-api = { path = "../parchmint-search-api" }
 parchmint-ui-api = { path = "../parchmint-ui-api" }
 parchmint-workspace-state = { path = "../parchmint-workspace-state" }
+chrono = { version = "=0.4.42", default-features = false, features = ["clock"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "=0.13.13", default-features = false, features = ["settings", "tokio"] }

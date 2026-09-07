@@ -6,9 +6,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::components::semantic_pick_list as pick_list;
+
 use iced::widget::{
-    Space, button, column, container, mouse_area, opaque, pick_list, responsive, row, scrollable,
-    sensor, stack, text, text_editor, text_input,
+    Space, column, container, mouse_area, opaque, responsive, row, sensor, stack, text, text_editor,
 };
 use iced::{
     Background, Element, Font, Length,
@@ -19,6 +20,8 @@ use parchmint_editor_api::{EditorError, ViewId};
 use parchmint_editor_iced::{
     EditorViewport, MountedEditorHost, MountedEditorMessage, MountedEditorUpdate,
 };
+
+use crate::components::{semantic_button as button, semantic_text_input as text_input};
 
 use crate::{
     EditorMessage, EditorPane, EditorPaneState, EditorWorkspace, F6Region, FindDirection,
@@ -141,6 +144,7 @@ impl EditorHostSlots {
 pub(crate) enum EditorCenterMessage {
     BeginComment,
     BeginSplitResize,
+    ToggleFocusMode(EditorPane),
     HierarchyDropTarget(EditorPane),
     ClearHierarchyDropTarget(EditorPane),
     Workspace(EditorMessage),
@@ -168,6 +172,7 @@ impl EditorCenterMessage {
     /// local search state; mounted messages also establish that focus.
     pub(crate) fn workspace_messages(&self) -> Vec<EditorMessage> {
         match self {
+            Self::ToggleFocusMode(pane) => vec![EditorMessage::FocusPane(*pane)],
             Self::BeginComment
             | Self::BeginSplitResize
             | Self::HierarchyDropTarget(_)
@@ -405,57 +410,58 @@ fn formatting_toolbar(
     )
     .placeholder("Paragraph style")
     .width(118);
-    let controls =
-        text_commands
-            .into_iter()
-            .fold(row![style_selector].spacing(4), |row, (label, command)| {
-                let mark = match label {
-                    "B" => parchmint_editor_api::SemanticInlineMark::Bold,
-                    "I" => parchmint_editor_api::SemanticInlineMark::Italic,
-                    "U" => parchmint_editor_api::SemanticInlineMark::Underline,
-                    _ => parchmint_editor_api::SemanticInlineMark::Strikethrough,
-                };
-                let active = workspace.active_inline_marks().contains(&mark);
-                let control_font = match label {
-                    "B" => Font {
-                        weight: font::Weight::Bold,
-                        ..Font::with_name("Source Sans 3")
-                    },
-                    "I" => Font {
-                        style: font::Style::Italic,
-                        ..Font::with_name("Source Sans 3")
-                    },
-                    _ => Font {
-                        weight: font::Weight::Medium,
-                        ..Font::with_name("Source Sans 3")
-                    },
-                };
-                let control = button(text(label).size(14).font(control_font))
-                    .padding([4, 7])
-                    .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
-                    .on_press_maybe(
-                        workspace
-                            .pane(workspace.focused_pane())
-                            .is_populated()
-                            .then_some(EditorCenterMessage::Workspace(EditorMessage::Format(
-                                command,
-                            ))),
+    let controls = text_commands.into_iter().fold(
+        row![style_selector, Space::new().width(8)].spacing(4),
+        |row, (label, command)| {
+            let mark = match label {
+                "B" => parchmint_editor_api::SemanticInlineMark::Bold,
+                "I" => parchmint_editor_api::SemanticInlineMark::Italic,
+                "U" => parchmint_editor_api::SemanticInlineMark::Underline,
+                _ => parchmint_editor_api::SemanticInlineMark::Strikethrough,
+            };
+            let active = workspace.active_inline_marks().contains(&mark);
+            let control_font = match label {
+                "B" => Font {
+                    weight: font::Weight::Bold,
+                    ..Font::with_name("Source Sans 3")
+                },
+                "I" => Font {
+                    style: font::Style::Italic,
+                    ..Font::with_name("Source Sans 3")
+                },
+                _ => Font {
+                    weight: font::Weight::Medium,
+                    ..Font::with_name("Source Sans 3")
+                },
+            };
+            let control = button(text(label).size(14).font(control_font))
+                .padding([4, 7])
+                .height(u32::from(EDITOR_TOOLBAR_CONTROL_HEIGHT))
+                .on_press_maybe(
+                    workspace
+                        .pane(workspace.focused_pane())
+                        .is_populated()
+                        .then_some(EditorCenterMessage::Workspace(EditorMessage::Format(
+                            command,
+                        ))),
+                )
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        button_interaction(status, active),
                     )
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            button_interaction(status, active),
-                        )
-                    });
-                let control: Element<'static, EditorCenterMessage> = if label == "B" {
-                    harness_target::target(HarnessTarget::Bold, control)
-                } else {
-                    control.into()
-                };
-                row.push(control)
-            });
+                });
+            let control: Element<'static, EditorCenterMessage> = if label == "B" {
+                harness_target::target(HarnessTarget::Bold, control)
+            } else {
+                control.into()
+            };
+            row.push(control)
+        },
+    );
     let controls = controls
+        .push(Space::new().width(8))
         .push(formatting_icon_button(
             Icon::BulletedList,
             "Bulleted list",
@@ -479,18 +485,14 @@ fn formatting_toolbar(
             FormattingCommand::Link,
             theme,
         ))
+        .push(Space::new().width(8))
         .push(harness_target::target(
             HarnessTarget::SceneBreak,
             formatting_text_button("⁂ Scene Break", FormattingCommand::SceneBreak, theme),
         ))
         .push(harness_target::target(
             HarnessTarget::PageBreak,
-            formatting_icon_button(
-                Icon::PageBreak,
-                "Page Break",
-                FormattingCommand::PageBreak,
-                theme,
-            ),
+            formatting_text_button("Page Break", FormattingCommand::PageBreak, theme),
         ))
         .push(
             button(text("Comment").size(13))
@@ -510,18 +512,14 @@ fn formatting_toolbar(
                     )
                 }),
         );
-    container(
-        scrollable(controls).direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new(),
-        )),
-    )
-    .padding([6, 8])
-    .width(Length::Fill)
-    // The formatting toolbar is a flat panel. An elevated surface adds a
-    // large scrim shadow that is repeatedly repainted while its controls
-    // hover, causing the visible dark flicker across the whole bar.
-    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
-    .into()
+    container(controls.wrap())
+        .padding([6, 8])
+        .width(Length::Fill)
+        // The formatting toolbar is a flat panel. An elevated surface adds a
+        // large scrim shadow that is repeatedly repainted while its controls
+        // hover, causing the visible dark flicker across the whole bar.
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+        .into()
 }
 
 fn formatting_text_button(
@@ -574,6 +572,7 @@ fn link_editor_popover(
     let target = link_editor.target().to_owned();
     let url_input = text_input("https://example.com", &target)
         .on_input(|target| EditorCenterMessage::Workspace(EditorMessage::SetLinkTarget(target)))
+        .on_submit(EditorCenterMessage::Workspace(EditorMessage::ApplyLink))
         .padding([6, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
     let mut content = column![
@@ -656,18 +655,25 @@ fn editor_pane_surface<'a>(
         EditorPane::Primary => HarnessTarget::EditorPrimary,
         EditorPane::Companion => HarnessTarget::EditorCompanion,
     };
-    let body: Element<'a, EditorCenterMessage> = sensor(harness_target::target(
-        target,
-        pane_body(state, pane, theme, slots),
-    ))
-    .key((
-        pane,
-        view,
-        mount_generation,
-        slots.slot(pane).and_then(EditorPaneSlot::host).is_some(),
-    ))
-    .on_show(viewport_message)
-    .on_resize(viewport_message)
+    let body: Element<'a, EditorCenterMessage> = container(
+        container(
+            sensor(harness_target::target(
+                target,
+                pane_body(state, pane, theme, slots),
+            ))
+            .key((
+                pane,
+                view,
+                mount_generation,
+                slots.slot(pane).and_then(EditorPaneSlot::host).is_some(),
+            ))
+            .on_show(viewport_message)
+            .on_resize(viewport_message),
+        )
+        .max_width(800),
+    )
+    .center_x(Length::Fill)
+    .height(Length::Fill)
     .into();
     let body = if let Some(menu) = spelling_menu.filter(|menu| menu.pane() == pane) {
         spelling_menu_overlay(body, menu, theme)
@@ -870,7 +876,7 @@ fn comment_thread_card<'a>(
     ]
     .spacing(5);
 
-    for message in thread.messages() {
+    for (message_index, message) in thread.messages().iter().enumerate() {
         let message_id = message.id().to_owned();
         if workspace.editing_comment_message() == Some((thread_id.as_str(), message_id.as_str())) {
             let edit_thread = thread_id.clone();
@@ -915,33 +921,44 @@ fn comment_thread_card<'a>(
                     .spacing(6),
                 );
         } else {
+            let edit_thread = thread_id.clone();
+            let body = message.body().to_owned();
             card = card.push(
-                column![
-                    text(message.body().to_owned()).size(13),
-                    row![
-                        comment_popover_action(
-                            "Edit",
-                            EditorCenterMessage::Workspace(
-                                EditorMessage::BeginEditCommentMessage {
-                                    thread_id: thread_id.clone(),
-                                    message_id: message_id.clone(),
-                                    body: message.body().to_owned(),
-                                },
-                            ),
-                            theme,
-                        ),
-                        comment_popover_action(
-                            "Delete message",
-                            EditorCenterMessage::Workspace(EditorMessage::DeleteCommentMessage {
-                                thread_id: thread_id.clone(),
-                                message_id,
-                            }),
-                            theme,
-                        ),
-                    ]
-                    .spacing(6),
+                row![
+                    text(message.body().to_owned()).size(13).width(Length::Fill),
+                    harness_target::target(
+                        HarnessTarget::CommentMenu(message_index),
+                        pick_list(
+                            vec!["Edit", "Delete message", "Delete thread"],
+                            Option::<&str>::None,
+                            move |action| {
+                                EditorCenterMessage::Workspace(match action {
+                                    "Edit" => EditorMessage::BeginEditCommentMessage {
+                                        thread_id: edit_thread.clone(),
+                                        message_id: message_id.clone(),
+                                        body: body.clone(),
+                                    },
+                                    "Delete message" => EditorMessage::DeleteCommentMessage {
+                                        thread_id: edit_thread.clone(),
+                                        message_id: message_id.clone(),
+                                    },
+                                    _ => EditorMessage::RequestDeleteCommentThread(
+                                        edit_thread.clone(),
+                                    ),
+                                })
+                            }
+                        )
+                        .on_open(EditorCenterMessage::Workspace(
+                            EditorMessage::SetCommentActionsOpen(true)
+                        ))
+                        .on_close(EditorCenterMessage::Workspace(
+                            EditorMessage::SetCommentActionsOpen(false)
+                        ))
+                        .placeholder("More")
+                        .width(128)
+                    ),
                 ]
-                .spacing(4),
+                .spacing(6),
             );
         }
     }
@@ -989,13 +1006,6 @@ fn comment_thread_card<'a>(
                     thread_id: thread_id.clone(),
                     resolved: !thread.resolved(),
                 }),
-                theme,
-            ),
-            comment_popover_action(
-                "Delete thread",
-                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteCommentThread(
-                    thread_id.clone(),
-                )),
                 theme,
             ),
         ]
@@ -1107,8 +1117,12 @@ fn tab_strip_for_width(
     available_width: f32,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
+    let active_tab = tabs
+        .iter()
+        .find(|tab| Some(tab.id()) == active_document)
+        .cloned();
     let layout = EditorWorkspace::tab_strip_layout(
-        available_width,
+        (available_width - 122.0).max(0.0),
         tabs,
         active_document.unwrap_or_default(),
     );
@@ -1151,11 +1165,55 @@ fn tab_strip_for_width(
             .width(58),
         ))
     };
+    let tabs = if let Some(tab) = active_tab {
+        tabs.push(Space::new().width(Length::Fill))
+            .push(harness_target::target(
+                HarnessTarget::PaneMenu(pane),
+                pick_list(
+                    vec!["Open beside", "Focus pane"],
+                    Option::<&str>::None,
+                    move |action| {
+                        if action == "Open beside" {
+                            let other = if pane == EditorPane::Primary {
+                                EditorPane::Companion
+                            } else {
+                                EditorPane::Primary
+                            };
+                            EditorCenterMessage::PaneWorkspace {
+                                pane: other,
+                                message: EditorMessage::OpenTab {
+                                    pane: other,
+                                    tab: tab.clone(),
+                                },
+                            }
+                        } else {
+                            EditorCenterMessage::ToggleFocusMode(pane)
+                        }
+                    },
+                )
+                .placeholder("Pane")
+                .width(112),
+            ))
+    } else {
+        tabs
+    };
     let strip: Element<'static, EditorCenterMessage> = container(tabs)
         .padding([0, 2])
         .width(Length::Fill)
         .height(36)
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+        .style(move |_| {
+            let mut style = components::surface(theme, Surface::Panel, Interaction::Rest);
+            style.border = iced::Border {
+                color: if focused {
+                    theme.palette().accent
+                } else {
+                    theme.palette().border
+                },
+                width: 1.0,
+                radius: 0.0.into(),
+            };
+            style
+        })
         .into();
     if focused {
         focus::f6_region(F6Region::ActiveTab, strip)
@@ -1345,7 +1403,6 @@ fn local_search_bar(
         .padding([5, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
     let controls = row![
-        query,
         find_button(
             "Previous",
             pane,
@@ -1358,34 +1415,48 @@ fn local_search_bar(
             EditorMessage::NavigateFind(FindDirection::Next),
             theme
         ),
-        button(text(if case_sensitive { "Aa ✓" } else { "Aa" }).size(12))
-            .padding([5, 7])
-            .on_press(EditorCenterMessage::PaneWorkspace {
-                pane,
-                message: EditorMessage::SetFindOptions {
-                    case_sensitive: !case_sensitive,
-                    whole_word,
-                },
+        button(
+            text(if case_sensitive {
+                "Match case ✓"
+            } else {
+                "Match case"
             })
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                button_interaction(status, case_sensitive),
-            )),
-        button(text(if whole_word { "Whole ✓" } else { "Whole" }).size(12))
-            .padding([5, 7])
-            .on_press(EditorCenterMessage::PaneWorkspace {
-                pane,
-                message: EditorMessage::SetFindOptions {
-                    case_sensitive,
-                    whole_word: !whole_word,
-                },
+            .size(12)
+        )
+        .padding([5, 7])
+        .on_press(EditorCenterMessage::PaneWorkspace {
+            pane,
+            message: EditorMessage::SetFindOptions {
+                case_sensitive: !case_sensitive,
+                whole_word,
+            },
+        })
+        .style(move |_, status| components::button_style(
+            theme,
+            ButtonKind::Quiet,
+            button_interaction(status, case_sensitive),
+        )),
+        button(
+            text(if whole_word {
+                "Whole words ✓"
+            } else {
+                "Whole words"
             })
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                button_interaction(status, whole_word),
-            )),
+            .size(12)
+        )
+        .padding([5, 7])
+        .on_press(EditorCenterMessage::PaneWorkspace {
+            pane,
+            message: EditorMessage::SetFindOptions {
+                case_sensitive,
+                whole_word: !whole_word,
+            },
+        })
+        .style(move |_, status| components::button_style(
+            theme,
+            ButtonKind::Quiet,
+            button_interaction(status, whole_word),
+        )),
         button(
             text(if replace_visible {
                 "Hide replace"
@@ -1419,7 +1490,8 @@ fn local_search_bar(
     .spacing(4);
     let content = if replace_visible {
         column![
-            controls,
+            query,
+            controls.wrap(),
             row![
                 text_input("Replace with", &draft)
                     .id(HarnessTarget::LocalReplace(pane).id())
@@ -1446,13 +1518,29 @@ fn local_search_bar(
         ]
         .spacing(4)
     } else {
-        column![controls].spacing(4)
+        column![query, controls.wrap()].spacing(4)
     };
-    container(column![content, text(format!("{matches} matches")).size(12)].spacing(3))
-        .padding([4, 6])
-        .width(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-        .into()
+    container(
+        column![
+            content,
+            text(format!(
+                "{} of {matches} matches · {} pane",
+                search.active_match_position().unwrap_or(0),
+                if pane == EditorPane::Primary {
+                    "Left"
+                } else {
+                    "Right"
+                }
+            ))
+            .size(11)
+            .color(theme.palette().secondary_text)
+        ]
+        .spacing(3),
+    )
+    .padding([4, 6])
+    .width(Length::Fill)
+    .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+    .into()
 }
 
 fn find_button(
@@ -1654,6 +1742,7 @@ mod tests {
                 | EditorCenterMessage::ClearHierarchyDropTarget(_) => {}
                 unsupported @ (EditorCenterMessage::BeginComment
                 | EditorCenterMessage::BeginSplitResize
+                | EditorCenterMessage::ToggleFocusMode(_)
                 | EditorCenterMessage::ChooseSpellingAction(_)
                 | EditorCenterMessage::DismissSpellingMenu) => {
                     panic!(

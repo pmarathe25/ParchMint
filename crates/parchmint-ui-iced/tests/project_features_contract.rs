@@ -564,35 +564,52 @@ fn history_restore_requires_a_whole_project_confirmation_before_emitting_work() 
 }
 
 #[test]
-fn recently_deleted_restores_complete_subtrees_at_the_old_location_or_section_root() {
-    // DEL-003 through DEL-007.
-    let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::RecentlyDeleted);
-
-    assert!(workspace.recently_deleted().has_formatted_preview());
+fn recently_deleted_restore_destination_tracks_parent_deletion_and_restoration() {
+    let mut fixture = production_snapshot();
+    let child = fixture.manuscript_node;
+    let parent = fixture.group;
+    let child_id = id_string(child.as_bytes());
+    fixture.snapshot.project = apply_project_command(
+        &fixture.snapshot.project,
+        fixture.snapshot.project.revision,
+        ProjectCommand::delete_node_at(child, 124),
+    )
+    .unwrap()
+    .project;
+    let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
+    let original = RestoreLocation::FormerParent(id_string(parent.as_bytes()));
     assert_eq!(
-        workspace
-            .recently_deleted()
-            .restore_location("deleted-part"),
-        RestoreLocation::FormerParent("part-one".into())
+        workspace.recently_deleted().restore_location(&child_id),
+        original
     );
 
-    let effects = workspace.update(ProjectMessage::RestoreDeleted("deleted-part".into()));
-    assert_eq!(
-        effects,
-        [ProjectEffect::RestoreDeletedSubtree {
-            node_id: "deleted-part".into(),
-            location: RestoreLocation::FormerParent("part-one".into()),
-        }]
-    );
-
-    workspace.update(ProjectMessage::UseRestoreFallback("deleted-part".into()));
-    assert_eq!(
-        workspace
-            .recently_deleted()
-            .restore_location("deleted-part"),
-        RestoreLocation::SectionRoot("manuscript".into())
-    );
-    assert!(!workspace.recently_deleted().has_purge_action());
+    for (command, expected) in [
+        (
+            ProjectCommand::delete_node_at(parent, 125),
+            RestoreLocation::SectionRoot(id_string(NodeId::manuscript_root().as_bytes())),
+        ),
+        (ProjectCommand::restore_deleted(parent), original),
+    ] {
+        fixture.snapshot.project = apply_project_command(
+            &fixture.snapshot.project,
+            fixture.snapshot.project.revision,
+            command,
+        )
+        .unwrap()
+        .project;
+        workspace.reconcile_snapshot(&fixture.snapshot);
+        assert_eq!(
+            workspace.recently_deleted().restore_location(&child_id),
+            expected
+        );
+        assert_eq!(
+            workspace.update(ProjectMessage::RestoreDeleted(child_id.clone())),
+            [ProjectEffect::RestoreDeletedSubtree {
+                node_id: child_id.clone(),
+                location: expected,
+            }],
+        );
+    }
 }
 
 #[test]
@@ -721,9 +738,7 @@ fn export_controls_progress_cancel_retry_and_artifact_actions_are_typed() {
 
     assert_eq!(
         workspace.update(ProjectMessage::BrowseExportDestination),
-        [ProjectEffect::ChooseExportDestination {
-            output_name: "manuscript.html".into(),
-        }]
+        [ProjectEffect::ChooseExportDestination]
     );
     assert_eq!(workspace.export().state(), ExportState::ChoosingDestination);
     workspace.update(ProjectMessage::SetExportDestination(Some(
@@ -733,7 +748,6 @@ fn export_controls_progress_cancel_retry_and_artifact_actions_are_typed() {
     assert_eq!(
         workspace.update(ProjectMessage::StartExport),
         [ProjectEffect::ExportEntireManuscript {
-            output_name: "manuscript.html".into(),
             number_documents: false,
             source_revision: 1,
         }]
@@ -969,10 +983,6 @@ fn production_snapshot_hydrates_ordered_hierarchy_metadata_deleted_items_and_edi
     assert_eq!(
         deleted.restore_location,
         &RestoreLocation::FormerParent(manuscript_root.clone())
-    );
-    assert_eq!(
-        deleted.fallback_location,
-        &RestoreLocation::SectionRoot(manuscript_root)
     );
     assert!(deleted.formatted_preview_available);
 

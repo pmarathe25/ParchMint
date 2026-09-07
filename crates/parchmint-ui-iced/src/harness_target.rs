@@ -45,6 +45,10 @@ pub enum HarnessTarget {
     TabOverflow(EditorPane),
     ExportBrowse,
     ExportStart,
+    ExportTitles,
+    StyleInheritance,
+    PaneMenu(EditorPane),
+    CommentMenu(usize),
 }
 
 impl HarnessTarget {
@@ -87,6 +91,11 @@ impl HarnessTarget {
             Self::TabOverflow(EditorPane::Companion) => "harness.tab-overflow.companion",
             Self::ExportBrowse => "harness.export.browse",
             Self::ExportStart => "harness.export.start",
+            Self::ExportTitles => "harness.export.titles",
+            Self::StyleInheritance => "harness.settings.style-inheritance",
+            Self::PaneMenu(EditorPane::Primary) => "harness.pane-menu.primary",
+            Self::PaneMenu(EditorPane::Companion) => "harness.pane-menu.companion",
+            Self::CommentMenu(index) => return format!("harness.comment.menu.{index}").into(),
         })
     }
 }

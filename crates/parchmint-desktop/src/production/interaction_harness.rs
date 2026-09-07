@@ -60,6 +60,7 @@ enum HarnessAction {
     HasWindow(HarnessWindow),
     ClickText(HarnessWindow, String),
     ClickTarget(HarnessWindow, HarnessTarget),
+    ClickTargetOffset(HarnessWindow, HarnessTarget, (f32, f32)),
     CloseEditorTab(HarnessWindow, EditorPane, String),
     RightClickText(HarnessWindow, String),
     RightClickTarget(HarnessWindow, HarnessTarget),
@@ -206,6 +207,9 @@ fn execute_action(
         }
         HarnessAction::ClickText(window, label) => harness.click_text(window, &label),
         HarnessAction::ClickTarget(window, target) => harness.click_target(window, target),
+        HarnessAction::ClickTargetOffset(window, target, offset) => {
+            harness.click_target_offset(window, target, offset)
+        }
         HarnessAction::CloseEditorTab(window, pane, document_id) => {
             harness.close_editor_tab(window, pane, &document_id)
         }
@@ -545,6 +549,17 @@ impl DesktopInteractionHarness {
         label: impl Into<String>,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickText(window, label.into()))?
+            .into_unit()
+    }
+
+    /// Clicks a point measured in control widths/heights from the target origin.
+    pub fn click_target_offset(
+        &self,
+        window: HarnessWindow,
+        target: HarnessTarget,
+        offset: (f32, f32),
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ClickTargetOffset(window, target, offset))?
             .into_unit()
     }
 

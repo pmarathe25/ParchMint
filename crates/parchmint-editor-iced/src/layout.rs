@@ -1,9 +1,10 @@
+use parchmint_editor_api::style_id_from_canonical as parse_style_id;
 use std::sync::Arc;
 
 use parchmint_editor_api::{
     AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, SelectionRectangle,
-    SemanticBlockKind, SemanticInlineMark, StyleCatalog, StyleCatalogProjection, StyleId,
-    StyleProperties, TextAlignment,
+    SemanticBlockKind, SemanticInlineMark, StyleCatalog, StyleCatalogProjection, StyleProperties,
+    TextAlignment,
 };
 
 const TAB_COLUMNS: f32 = 4.0;
@@ -1309,30 +1310,6 @@ fn merge_style(target: &mut ResolvedBlockStyle, source: &StyleProperties) {
     replace!(line_spacing);
     replace!(space_before_points);
     replace!(space_after_points);
-}
-
-fn parse_style_id(value: &str) -> Option<StyleId> {
-    let reserved = match value {
-        "body" => Some(StyleCatalog::body_id()),
-        "document-title" => Some(StyleCatalog::document_title_id()),
-        "heading-1" => Some(StyleCatalog::heading_1_id()),
-        "heading-2" => Some(StyleCatalog::heading_2_id()),
-        "heading-3" => Some(StyleCatalog::heading_3_id()),
-        "block-quote" => Some(StyleCatalog::block_quote_id()),
-        "verse" => Some(StyleCatalog::verse_id()),
-        _ => None,
-    };
-    if reserved.is_some() {
-        return reserved;
-    }
-    if value.len() != 32 {
-        return None;
-    }
-    let mut bytes = [0u8; 16];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(StyleId::from_bytes(bytes))
 }
 
 fn has_mark(

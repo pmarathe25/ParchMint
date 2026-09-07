@@ -4,6 +4,8 @@ ParchMint keeps a novel in a project directory on your computer. The workspace
 combines a rich-text editor, a structured outline, planning metadata, search,
 saved History, and manuscript export.
 
+See the [installation guide](install.md) to download and install a release.
+
 ## Create or open a project
 
 ParchMint opens on the launcher. Select **Create Project** to choose a project
@@ -21,12 +23,12 @@ The workspace has three main areas:
 
 - **Explorer:** organizes groups and documents under the Manuscript and
   Research roots.
-- **Editor or Cards:** shows the writing surface or a compact outline of the
+- **Editor or Outline:** shows the writing surface or a compact outline of the
   same project structure.
 - **Inspector:** edits the selected item's title, Synopsis, metadata, and, for
   documents, provides a comments index.
 
-Use the top ribbon to switch between **Editor** and **Cards**. The actions on
+Use the top ribbon to switch between **Editor** and **Outline**. The actions on
 the right open History, Recently Deleted, Export, and Settings. The bottom
 status bar shows the active document or selected-text word count, current save
 state, and controls for the sidebars.
@@ -44,8 +46,9 @@ children.
 
 A single click selects a document and opens it as a replaceable preview tab.
 Double-click it, press **Enter**, edit it, or deliberately open it to keep the
-tab. Manuscript documents normally open in the primary pane; Research notes
-normally open in the companion pane. Closing a tab does not delete its
+tab. The pane menu offers **Open beside** for the same document in another pane
+and **Focus pane** to hide or restore the sidebars. Manuscript documents normally
+open in the primary pane; Research notes normally open in the companion pane. Closing a tab does not delete its
 document.
 
 Drag rows to reorder them, move them into a group, or move them between
@@ -54,9 +57,9 @@ and Linux or **Command** on macOS to add individual rows to the selection.
 Copy and paste duplicates selected documents with new identities. Cut and
 paste moves them.
 
-Cards shows the same hierarchy as compact rows with titles, Synopsis text, and
-configured metadata. Select a card and edit its details in Inspector. Drag a
-card to reorganize the project, or double-click a document card to open it in
+Outline shows the same hierarchy as compact rows with titles, Synopsis text, and
+configured metadata. Select a row and edit its details in Inspector. Drag a
+row to reorganize the project, or double-click a document row to open it in
 Editor.
 
 ## Write and format
@@ -64,7 +67,9 @@ Editor.
 The formatting toolbar applies to the focused editor pane. It provides
 paragraph styles, bold, italic, underline, strikethrough, lists, block quotes,
 links, scene breaks, and page breaks. Project styles can be configured in
-**Settings > Styles**.
+**Settings > Styles**. Press **Enter** or **Apply** to save a property value;
+leave it blank to inherit the value. Inheritance, alignment, and on/off properties
+have dropdown controls. Typography, spacing, and pagination are grouped separately.
 
 The B/I/U/S buttons show the active formatting. With no text selected, toggle a
 button to format the text you type next. Document and manuscript word counts
@@ -116,10 +121,10 @@ writing sessions. Structural changes request a save immediately. The status
 bar distinguishes unsaved, saving, saved, and failed states. Use **Save** or
 the primary modifier plus **S** when you want to request an immediate save.
 
-Each completed change is recorded in **History**. Select a checkpoint to
+Each completed change is recorded in **History**. Select a saved version to
 compare it with the current project, create a named snapshot for an important
 milestone, or restore the complete project to an earlier state. Restoration
-creates a new checkpoint and preserves the existing timeline.
+creates a new version and preserves the existing timeline.
 
 History includes unsaved drafts, added and deleted documents, outline changes,
 comments, and project settings. Removed lines have a **−** marker and added lines
@@ -135,14 +140,16 @@ immediately, or open **Recently Deleted** to preview and restore it later.
 
 If ParchMint finds edits newer than the last completed save after an interrupted
 session, it presents a recovery summary before opening the workspace. Choose
-**Recover** to apply those edits or **Discard** to open the last completed save.
+**Recover changes** to apply those edits or **Open last saved version** to discard
+them. **Show technical details** reveals recovery records and revision information.
 
 ## Spellcheck and appearance
 
 Misspelled words have an in-place underline. Open the word's context menu to
 choose a suggestion or add it to a dictionary. Manage project and global words
 in **Settings > Dictionaries**. Spellcheck uses the bundled `en-US` dictionary
-and works offline.
+and works offline. Select a scope to add, remove, or search its words. Project
+words travel with the project; global words apply to all projects on this device.
 
 Use **Settings > Appearance** to choose System, Light, or Dark. System follows
 the operating-system appearance. The setting applies to every open ParchMint

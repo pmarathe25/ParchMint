@@ -7,6 +7,8 @@ mod worker_pool;
 #[cfg(feature = "interaction-harness")]
 pub use interaction_harness::*;
 
+use parchmint_domain::encode_stable_id as stable_id_string;
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
@@ -31,7 +33,7 @@ use iced::{
     event, font,
     futures::{SinkExt, StreamExt, channel::mpsc as futures_mpsc},
     keyboard, mouse,
-    widget::{Space, button, column, container, opaque, row, stack, svg, text, text_input},
+    widget::{Space, column, container, opaque, row, stack, svg, text},
     window,
 };
 use parchmint_application::{ProjectPersistenceError, ReplacementEdit, ReplacementSelection};
@@ -66,6 +68,8 @@ use parchmint_ui_api::{
 };
 use parchmint_workspace_state::{ProjectIdentity, WorkspaceSnapshot};
 
+use crate::components::{semantic_button as button, semantic_text_input as text_input};
+
 use crate::{
     DragDestination, EditorEffect, EditorPane, HistoryCurrentDocument, LauncherState,
     NewProjectDraft, Point, ProjectEffect, ProjectMessage, ProjectTask, ProjectTaskCompletion,
@@ -78,14 +82,13 @@ use crate::{
         RecoveryDiscardedResult, RecoveryReconcileResult, SearchBatchResult, SearchRequest,
         SearchStart, ServiceFeedError,
     },
-    components::{self, ButtonKind, Interaction},
+    components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{
-        LAUNCHER_ACTION_ROW_HEIGHT, LAUNCHER_INSET, LAUNCHER_LAST_OPENED_ICON_SIZE,
-        LAUNCHER_PROJECT_CARD_GAP, LAUNCHER_PROJECT_CARD_HEIGHT,
-        LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING, LAUNCHER_PROJECT_CARD_VERTICAL_PADDING,
-        LAUNCHER_PROJECT_CARD_WIDTH, LAUNCHER_PROJECT_HEADER_GAP, LAUNCHER_PROJECT_ICON_SIZE,
-        LAUNCHER_PROJECT_LAST_OPENED_SIZE, LAUNCHER_PROJECT_METADATA_GAP,
-        LAUNCHER_PROJECT_NAME_MAX_CHARS, LAUNCHER_PROJECT_NAME_SIZE,
+        LAUNCHER_ACTION_ROW_HEIGHT, LAUNCHER_LAST_OPENED_ICON_SIZE, LAUNCHER_PROJECT_CARD_GAP,
+        LAUNCHER_PROJECT_CARD_HEIGHT, LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING,
+        LAUNCHER_PROJECT_CARD_VERTICAL_PADDING, LAUNCHER_PROJECT_CARD_WIDTH,
+        LAUNCHER_PROJECT_HEADER_GAP, LAUNCHER_PROJECT_ICON_SIZE, LAUNCHER_PROJECT_LAST_OPENED_SIZE,
+        LAUNCHER_PROJECT_METADATA_GAP, LAUNCHER_PROJECT_NAME_MAX_CHARS, LAUNCHER_PROJECT_NAME_SIZE,
         LAUNCHER_PROJECT_PATH_MAX_CHARS, LAUNCHER_PROJECT_PATH_SIZE, LAUNCHER_PROJECT_TITLE_WIDTH,
         LAUNCHER_RHYTHM, LAUNCHER_SUBTITLE_SIZE, LAUNCHER_TITLE_SIZE, LAUNCHER_WORDMARK_SIZE,
         ParchMintTheme,
@@ -790,7 +793,6 @@ type NativeTaskResult<T> = Result<T, NativeTaskOutcome>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NativeTaskOutcome {
     StaleSession,
-    Canceled,
     Unavailable,
     Failed { message: String },
 }
@@ -808,14 +810,10 @@ impl NativeTaskOutcome {
         let category = match &error {
             ServiceFeedError::StaleSession { .. }
             | ServiceFeedError::StaleSearchGeneration { .. } => "stale-session",
-            ServiceFeedError::CanceledSearchGeneration { .. } => "canceled",
             ServiceFeedError::InvalidIdentifier { .. } => "invalid-identifier",
             ServiceFeedError::InvalidServiceData { .. } => "invalid-service-data",
             ServiceFeedError::Service { .. } => "service",
-            ServiceFeedError::Unsupported(_) => "unsupported",
-            ServiceFeedError::Conversion(_) => "conversion",
             ServiceFeedError::NoRecoveryToAccept => "no-recovery-to-accept",
-            ServiceFeedError::OutputUnavailable => "output-unavailable",
             ServiceFeedError::InvalidState { .. } => "invalid-state",
         };
         #[cfg(not(feature = "diagnostics"))]
@@ -824,10 +822,6 @@ impl NativeTaskOutcome {
         let outcome = match error {
             ServiceFeedError::StaleSession { .. }
             | ServiceFeedError::StaleSearchGeneration { .. } => Self::StaleSession,
-            ServiceFeedError::CanceledSearchGeneration { .. } => Self::Canceled,
-            ServiceFeedError::Unsupported(_) | ServiceFeedError::OutputUnavailable => {
-                Self::Unavailable
-            }
             _ => Self::Failed {
                 message: message.clone(),
             },
@@ -860,7 +854,7 @@ impl NativeTaskOutcome {
 
     fn failure_message(self) -> Option<String> {
         match self {
-            Self::StaleSession | Self::Canceled => None,
+            Self::StaleSession => None,
             Self::Unavailable => Some("The requested project service is unavailable.".to_owned()),
             Self::Failed { message } => Some(message),
         }
@@ -868,7 +862,7 @@ impl NativeTaskOutcome {
 
     fn save_failure_message(self) -> Option<String> {
         match self {
-            Self::StaleSession | Self::Canceled => None,
+            Self::StaleSession => None,
             Self::Unavailable => Some("Project saving is currently unavailable.".to_owned()),
             Self::Failed { message } => Some(message),
         }
@@ -876,7 +870,7 @@ impl NativeTaskOutcome {
 
     fn for_current_session_save(self) -> Self {
         match self {
-            Self::StaleSession | Self::Canceled => Self::Unavailable,
+            Self::StaleSession => Self::Unavailable,
             outcome => outcome,
         }
     }
@@ -1267,7 +1261,7 @@ fn dismiss_workspace_notification(
 
 fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
     match effect {
-        ProjectEffect::CreateHierarchy { .. } => Some("Created item"),
+        ProjectEffect::CreateHierarchy { .. } => None,
         ProjectEffect::DeleteHierarchy(_) => Some("Moved item to Recently Deleted"),
         ProjectEffect::MoveHierarchy { .. } => Some("Reorganized project"),
         ProjectEffect::PasteCopiedSubtrees { .. } => Some("Copied item"),
@@ -1278,6 +1272,8 @@ fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
         ProjectEffect::ReorderMetadataField { .. } => Some("Reordered metadata fields"),
         ProjectEffect::DeleteMetadataField(_) => Some("Deleted metadata field"),
         ProjectEffect::UpsertStyle(_) => Some("Saved style"),
+        ProjectEffect::UpdateDictionaryWord { .. } => Some("Updated project dictionary"),
+        ProjectEffect::UpdateGlobalDictionaryWord { .. } => Some("Updated global dictionary"),
         ProjectEffect::DeleteStyle(_) => Some("Deleted style"),
         ProjectEffect::ApplyGlobalReplacement { .. } => Some("Replaced matches"),
         ProjectEffect::CreateNamedSnapshot(_) => Some("Created milestone"),
@@ -1913,6 +1909,7 @@ fn project_effect_requires_durability(effect: &ProjectEffect) -> bool {
             | ProjectEffect::ReorderMetadataField { .. }
             | ProjectEffect::DeleteMetadataField(_)
             | ProjectEffect::UpsertStyle(_)
+            | ProjectEffect::UpdateDictionaryWord { .. }
             | ProjectEffect::DeleteStyle(_)
             | ProjectEffect::ApplyGlobalReplacement { .. }
             | ProjectEffect::CreateNamedSnapshot(_)
@@ -3100,10 +3097,7 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(outcome) => {
-                            if matches!(
-                                outcome,
-                                NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled
-                            ) {
+                            if matches!(outcome, NativeTaskOutcome::StaleSession) {
                                 canceled = true;
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
@@ -3195,10 +3189,7 @@ impl NativeDesktop {
                             activate = completion_accepted && fully_resolved;
                         }
                         Err(outcome) => {
-                            if matches!(
-                                outcome,
-                                NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled
-                            ) {
+                            if matches!(outcome, NativeTaskOutcome::StaleSession) {
                                 canceled = true;
                                 workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                                     ticket,
@@ -4025,11 +4016,18 @@ impl NativeDesktop {
                     let composer_open = [EditorPane::Primary, EditorPane::Companion]
                         .into_iter()
                         .any(|pane| workspace.editor().comment_composer(pane).is_some());
-                    if composer_open {
+                    if workspace.editor().link_editor().is_open() {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelLinkEditor);
+                    } else if composer_open {
                         workspace
                             .editor_mut()
                             .update(crate::EditorMessage::CancelCommentComposer);
                     } else {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelCommentComposer);
                         workspace.update(ProjectMessage::CancelCut);
                     }
                 }
@@ -4306,20 +4304,26 @@ impl NativeDesktop {
             })
             .align_x(iced::alignment::Horizontal::Right)
             .align_y(iced::alignment::Vertical::Bottom);
-        let notification_button = container(
-            button(text(format!("Notifications {}", notifications.len())).size(11))
-                .padding([3, 6])
-                .on_press(Message::ToggleNotificationDrawer { window: id })
-                .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Quiet,
-                        launcher_button_interaction(status),
-                    )
-                }),
-        )
-        .width(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Right);
+        let notification_button: Element<'a, Message> = if notifications.is_empty() {
+            Space::new().into()
+        } else {
+            container(
+                button(text(format!("Notifications {}", notifications.len())).size(11))
+                    .padding([3, 6])
+                    .on_press(Message::ToggleNotificationDrawer { window: id })
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            launcher_button_interaction(status),
+                        )
+                    }),
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .into()
+        };
+
         // Reserve space for transient messages: they must never cover controls.
         let content: Element<'a, Message> = stack![
             column![toast, surface, notification_button].height(Length::Fill),
@@ -4399,6 +4403,18 @@ impl NativeDesktop {
         id: window::Id,
         message: ProjectSurfaceMessage,
     ) -> Task<Message> {
+        if let ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::ToggleFocusMode(pane)) =
+            message
+        {
+            let focus = self.update_project_surface(
+                id,
+                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                    crate::EditorMessage::FocusPane(pane),
+                )),
+            );
+            let layout = self.update_project_surface(id, ProjectSurfaceMessage::ToggleFocusedPane);
+            return Task::batch([focus, layout]);
+        }
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
@@ -4415,6 +4431,7 @@ impl NativeDesktop {
                 ProjectMessage::AcceptRecovery
                     | ProjectMessage::DiscardRecovery
                     | ProjectMessage::RetryRecovery
+                    | ProjectMessage::ToggleRecoveryDetails
             )
         ) {
             return Task::none();
@@ -4773,7 +4790,7 @@ impl NativeDesktop {
                                 .deferred_inspector_commits
                                 .schedule(effect, Instant::now());
                         }
-                        ProjectEffect::ChooseExportDestination { output_name } => {
+                        ProjectEffect::ChooseExportDestination => {
                             let Some(ports) = state.project.ports().cloned() else {
                                 workspace.update(ProjectMessage::ExportFailed(
                                     "Export destination chooser is unavailable.".to_owned(),
@@ -4793,7 +4810,7 @@ impl NativeDesktop {
                                             capability,
                                             PathDialog {
                                                 kind: PathDialogKind::SaveFile,
-                                                title: Some(format!("Export {output_name}")),
+                                                title: Some("Export manuscript".to_owned()),
                                             },
                                         )
                                         .await
@@ -5305,7 +5322,6 @@ impl NativeDesktop {
                                 .enqueue(mutation, prior_projects, launch);
                         }
                         ProjectEffect::ExportEntireManuscript {
-                            output_name: _,
                             number_documents,
                             source_revision,
                         } => {
@@ -7297,6 +7313,24 @@ impl NativeDesktop {
                     self.status = Some(DesktopStatus::Error(error.to_string()));
                 }
                 Task::batch(spellcheck_tasks)
+            }
+            Ok(ProjectEffectCompletion::GlobalDictionaryWords(words)) => {
+                if let Some(workspace) = state.workspace.as_mut() {
+                    workspace.set_global_dictionary_words(words);
+                }
+                let views = state.workspace.as_ref().map(|workspace| {
+                    [
+                        workspace.editor().pane(EditorPane::Primary).view(),
+                        workspace.editor().pane(EditorPane::Companion).view(),
+                    ]
+                });
+                Task::batch(
+                    views
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|view| Self::spellcheck_task(window, state, view).ok())
+                        .collect::<Vec<_>>(),
+                )
             }
             Ok(ProjectEffectCompletion::ApplyAppearance(snapshot)) => {
                 self.appearance = snapshot.appearance;
@@ -9698,7 +9732,7 @@ impl NativeDesktop {
                 )));
                 Task::none()
             }
-            Err(NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled) => Task::none(),
+            Err(NativeTaskOutcome::StaleSession) => Task::none(),
             Err(NativeTaskOutcome::Unavailable) => {
                 self.status = Some(DesktopStatus::Error(
                     "Project opening is currently unavailable.".to_owned(),
@@ -10184,15 +10218,9 @@ fn unique_comment_id(
 }
 
 fn parse_comment_id(value: &str) -> Result<CommentId, String> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("comment ID is invalid".into());
-    }
-    let mut bytes = [0; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|_| "comment ID is invalid".to_owned())?;
-    }
-    Ok(CommentId::from_bytes(bytes))
+    parchmint_domain::decode_stable_id(value)
+        .map(CommentId::from_bytes)
+        .ok_or_else(|| "comment ID is invalid".to_owned())
 }
 
 fn editor_intent_view(intent: &EditorRuntimeIntent) -> Option<ViewId> {
@@ -10411,11 +10439,11 @@ fn launcher_surface(
         let choose_destination = if opening_project {
             launcher_button("Choosing Location…", ButtonKind::Secondary)
                 .height(36)
-                .width(184)
+                .width(104)
         } else {
-            launcher_button("Choose Destination…", ButtonKind::Secondary)
+            launcher_button("Browse…", ButtonKind::Secondary)
                 .height(36)
-                .width(184)
+                .width(104)
                 .on_press(Message::ChooseNewProjectDestination)
         };
         let create = if opening_project {
@@ -10440,15 +10468,27 @@ fn launcher_surface(
                 LauncherTextKind::Secondary,
             ),
             column![
+                launcher_text("Title", 12, LauncherTextKind::Primary),
                 text_input("Project title", new_project.title())
                     .on_input(Message::NewProjectTitleChanged)
                     .padding(10)
                     .width(520),
-                text_input("Project destination", new_project.destination())
-                    .on_input(Message::NewProjectDestinationChanged)
-                    .padding(10)
-                    .width(520),
-                choose_destination,
+                launcher_text("Project folder", 12, LauncherTextKind::Primary),
+                row![
+                    text_input("Project destination", new_project.destination())
+                        .on_input(Message::NewProjectDestinationChanged)
+                        .padding(10)
+                        .width(Length::Fill),
+                    choose_destination
+                ]
+                .spacing(8)
+                .width(520),
+                launcher_text(
+                    format!("Saved in {}", new_project.destination()),
+                    12,
+                    LauncherTextKind::Secondary
+                ),
+                launcher_text("Author · optional", 12, LauncherTextKind::Primary),
                 text_input(
                     "Author (optional)",
                     new_project.author().unwrap_or_default()
@@ -10507,19 +10547,29 @@ fn launcher_surface(
         } else {
             let cards = recent_projects.iter().fold(
                 column!().spacing(f32::from(LAUNCHER_PROJECT_CARD_GAP)),
-                |cards, project| cards.push(launcher_project_card(project)),
+                |cards, project| {
+                    cards.push(
+                        iced::widget::tooltip(
+                            launcher_project_card(project),
+                            container(text(project.path().to_owned()).size(12)).padding([5, 8]),
+                            iced::widget::tooltip::Position::Bottom,
+                        )
+                        .style(|theme| {
+                            components::surface(
+                                launcher_theme(theme),
+                                Surface::Elevated,
+                                Interaction::Rest,
+                            )
+                        }),
+                    )
+                },
             );
             content = content.push(cards);
         }
     }
-    container(content)
-        .padding(iced::Padding {
-            top: f32::from(LAUNCHER_INSET),
-            right: f32::from(LAUNCHER_INSET),
-            bottom: f32::from(LAUNCHER_INSET),
-            left: f32::from(LAUNCHER_INSET),
-        })
-        .width(Length::Fill)
+    container(iced::widget::scrollable(container(content).max_width(640)))
+        .padding(48)
+        .center_x(Length::Fill)
         .height(Length::Fill)
         .into()
 }
@@ -10572,18 +10622,7 @@ fn launcher_button(
     label: &'static str,
     kind: ButtonKind,
 ) -> iced::widget::Button<'static, Message> {
-    button(
-        launcher_text(label, 12, LauncherTextKind::Primary).style(move |theme| {
-            let palette = launcher_theme(theme).palette();
-            iced::widget::text::Style {
-                color: Some(match kind {
-                    ButtonKind::Primary => palette.on_accent_text,
-                    _ => palette.primary_text,
-                }),
-            }
-        }),
-    )
-    .style(move |theme, status| {
+    button(components::button_label(label)).style(move |theme, status| {
         components::button_style(
             launcher_theme(theme),
             kind,
@@ -10780,10 +10819,6 @@ fn suggested_directory_name(title: &str) -> String {
     }
 }
 
-fn stable_id_string(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn mount_matches_active_document(
     active_document: Option<&str>,
     document: parchmint_domain::DocumentId,
@@ -10807,15 +10842,8 @@ fn mount_session_for_document(
 }
 
 fn stable_id_bytes(value: &str) -> Result<[u8; 16], String> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("stable identifier must contain 32 hexadecimal characters".to_owned());
-    }
-    let mut bytes = [0_u8; 16];
-    for (index, slot) in bytes.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|error| format!("invalid stable identifier: {error}"))?;
-    }
-    Ok(bytes)
+    parchmint_domain::decode_stable_id(value)
+        .ok_or_else(|| "stable identifier must contain 32 hexadecimal characters".to_owned())
 }
 
 fn launcher_recent_projects(projects: Vec<PreferenceRecentProject>) -> Vec<RecentProject> {
@@ -11311,38 +11339,6 @@ mod tests {
     }
 
     #[test]
-    fn launcher_foundation_preserves_geometry_and_semantic_variants() {
-        assert_eq!(LAUNCHER_INSET, 72);
-        assert_eq!(LAUNCHER_RHYTHM, 28);
-        assert_eq!(LAUNCHER_ACTION_ROW_HEIGHT, 52);
-        assert_eq!(LAUNCHER_PROJECT_CARD_WIDTH, 520);
-        assert_eq!(LAUNCHER_PROJECT_CARD_HEIGHT, 96);
-        assert_eq!(LAUNCHER_PROJECT_CARD_GAP, 22);
-        assert_eq!(LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING, 16);
-        assert_eq!(LAUNCHER_PROJECT_CARD_VERTICAL_PADDING, 10);
-        assert_eq!(LAUNCHER_PROJECT_TITLE_WIDTH, 124);
-        assert_eq!(LAUNCHER_PROJECT_HEADER_GAP, 14);
-        assert_eq!(LAUNCHER_PROJECT_METADATA_GAP, 12);
-
-        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
-            let theme = ParchMintTheme::new(appearance);
-            assert_eq!(
-                components::button_style(theme, ButtonKind::Primary, Interaction::Rest).background,
-                Some(iced::Background::Color(theme.palette().accent))
-            );
-            assert_eq!(
-                components::button_style(theme, ButtonKind::Secondary, Interaction::Rest)
-                    .background,
-                Some(iced::Background::Color(theme.palette().panel))
-            );
-            assert_eq!(
-                ParchMintTheme::from_iced_theme(&theme.iced_theme()),
-                Some(theme)
-            );
-        }
-    }
-
-    #[test]
     fn launcher_card_labels_truncate_on_character_boundaries_without_wrapping() {
         assert_eq!(truncate_launcher_label("Northbound", 24), "Northbound");
         assert_eq!(truncate_launcher_label("aé日b", 3), "aé日…");
@@ -11367,7 +11363,7 @@ mod tests {
             launcher_surface(&[], &draft, true, false, None),
         );
 
-        assert!(simulator.find("Choose Destination…").is_ok());
+        assert!(simulator.find("Browse…").is_ok());
         assert!(simulator.find("Cancel").is_ok());
         assert!(simulator.find("Create and Open").is_ok());
     }
@@ -11402,6 +11398,49 @@ mod tests {
                 .expect("strict mismatch")
                 .contains("1920x1013")
         );
+    }
+
+    #[cfg(feature = "interaction-harness")]
+    #[test]
+    fn harness_snapshot_initializes_enabled_control_styles_before_drawing() {
+        let mut harness = NativeDesktopHarness::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::Light,
+            recent_projects: Vec::new(),
+            projects: Vec::new(),
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        })
+        .unwrap();
+        harness
+            .resize(HarnessWindow::Launcher, 640.0, 480.0)
+            .unwrap();
+        let stem =
+            std::env::temp_dir().join(format!("parchmint-enabled-controls-{}", std::process::id()));
+        let path = stem.with_file_name(format!(
+            "{}-tiny-skia.png",
+            stem.file_name().unwrap().to_str().unwrap()
+        ));
+        let _ = std::fs::remove_file(&path);
+        harness.snapshot(HarnessWindow::Launcher, &stem).unwrap();
+        let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        let mut reader = png::Decoder::new(file).read_info().unwrap();
+        let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut rgba).unwrap();
+        let accent = ParchMintTheme::new(ResolvedAppearance::Light)
+            .palette()
+            .accent
+            .into_rgba8();
+        assert!(
+            rgba[..info.buffer_size()]
+                .chunks_exact(4)
+                .filter(|pixel| **pixel == accent)
+                .count()
+                > 100,
+            "the enabled Create Project button must use its primary color, not disabled styling"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -11816,7 +11855,7 @@ mod tests {
     }
 
     #[test]
-    fn canceled_recovery_accept_releases_its_mutation_and_can_retry() {
+    fn stale_recovery_accept_releases_its_mutation_and_can_retry() {
         let project = legacy_project(PathBuf::from("/tmp/canceled-accept.parchmint"), 155);
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
@@ -11872,7 +11911,7 @@ mod tests {
     }
 
     #[test]
-    fn canceled_recovery_discard_releases_its_mutation_and_can_retry() {
+    fn stale_recovery_discard_releases_its_mutation_and_can_retry() {
         let project = legacy_project(PathBuf::from("/tmp/canceled-discard.parchmint"), 156);
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
@@ -11909,7 +11948,7 @@ mod tests {
             session: project.session,
             ticket,
             mutation: Some(mutation),
-            result: Err(NativeTaskOutcome::Canceled),
+            result: Err(NativeTaskOutcome::StaleSession),
         });
 
         let NativeWindow::Project(state) = desktop.windows.get_mut(&window).expect("project")

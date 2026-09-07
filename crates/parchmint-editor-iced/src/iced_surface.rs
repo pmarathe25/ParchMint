@@ -529,6 +529,22 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         frame.fill(&background, content.theme.manuscript().iced());
 
         frame.with_clip(canvas_clip_bounds(bounds), |frame| {
+            let range = content.geometry.document_range();
+            if range.start().value() == 0
+                && range.end().value() == 0
+                && let Some(caret) = content.geometry.caret(range.start())
+            {
+                let mut color = content.theme.text().iced();
+                color.a = 0.55;
+                frame.fill_text(Text {
+                    content: "Start writing…".to_owned(),
+                    position: Point::new(caret.x + 3.0, caret.y),
+                    color,
+                    size: iced::Pixels::from(16.0),
+                    font: iced::Font::with_name("Source Serif 4"),
+                    ..Text::default()
+                });
+            }
             for selection in content.geometry.selection_rectangles(content.selection) {
                 fill_rectangle(frame, selection, content.theme.selection().iced());
             }

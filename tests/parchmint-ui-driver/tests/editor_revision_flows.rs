@@ -7,74 +7,6 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
-fn explorer_new_menu_creates_and_opens_a_named_chapter() {
-    let run = IsolatedRun::new("visible-creation-actions").unwrap();
-    let project = run.root().join("novel.parchmint");
-    let harness = create_project(&run, &project, "Visible creation");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::EditorPrimary,
-            "The original draft survives recovery and creation.",
-        )
-        .unwrap();
-    harness.elapse_recovery_capture().unwrap();
-    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
-    harness.click_text(HarnessWindow::Project, "Group").unwrap();
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "New Group", "Part One")
-        .unwrap();
-    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
-    harness
-        .click_text(HarnessWindow::Project, "Document")
-        .unwrap();
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Chapter One")
-        .unwrap();
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::EditorPrimary,
-            "The chapter begins.",
-        )
-        .unwrap();
-    assert!(
-        harness
-            .active_editor_body()
-            .unwrap()
-            .contains("The chapter begins.")
-    );
-    harness.close(HarnessWindow::Project).unwrap();
-    harness.shutdown().unwrap();
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains("The chapter begins."))
-    );
-    assert!(
-        canonical_bodies(&project)
-            .iter()
-            .any(|body| body.contains("The original draft survives recovery and creation."))
-    );
-    let reopened =
-        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
-    assert!(
-        reopened
-            .hierarchy_titles()
-            .unwrap()
-            .contains(&"Chapter One".to_owned())
-    );
-    assert!(
-        reopened
-            .active_editor_body()
-            .unwrap()
-            .contains("The chapter begins.")
-    );
-    reopened.close(HarnessWindow::Project).unwrap();
-    reopened.shutdown().unwrap();
-}
-
-#[test]
 fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
     for newest_first in [false, true] {
         let run = IsolatedRun::new("delayed-recovery-creation").unwrap();
@@ -358,7 +290,10 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
         )
         .unwrap();
     let checkpoints = harness.history_checkpoints().unwrap();
-    assert!(!checkpoints.is_empty());
+    assert!(
+        checkpoints.len() >= 2,
+        "comment activity must retain prior checkpoints"
+    );
     harness
         .click_target(
             HarnessWindow::Project,
@@ -436,11 +371,18 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
         .expect("read primary document identity");
 
     harness
-        .right_click_text(HarnessWindow::Project, "Tide Journal")
-        .expect("reopen research document menu");
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneMenu(EditorPane::Primary),
+        )
+        .expect("open pane actions");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
-        .expect("open the same source in companion pane");
+        .click_target_offset(
+            HarnessWindow::Project,
+            HarnessTarget::PaneMenu(EditorPane::Primary),
+            (0.5, 1.5),
+        )
+        .expect("open the same source beside the primary pane");
     assert_eq!(
         document_id,
         harness

@@ -182,20 +182,27 @@ fn missing_or_invalid_workspace_file_uses_defaults_and_reports_invalid_data() {
 
     block_on(store.save(project(1), &snapshot())).expect("workspace save should succeed");
     let file = store.path_for(project(1));
-    fs::write(&file, b"not valid workspace data").expect("invalid workspace fixture should write");
-    let before = fs::read(&file).expect("invalid workspace fixture should remain readable");
-
-    let invalid = block_on(store.load_or_default(project(1), &BTreeSet::new()))
-        .expect("invalid workspace should use defaults");
-    assert_eq!(invalid.snapshot, default);
-    assert!(matches!(
-        invalid.warning,
-        Some(WorkspaceWarning::InvalidFile { path, .. }) if path == file
-    ));
-    assert_eq!(
-        fs::read(file).expect("invalid workspace should be preserved"),
-        before
-    );
+    let mut malformed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    // A 32-byte identifier with a multibyte scalar crossing a hex-pair boundary.
+    malformed["active_view"] = serde_json::Value::String(format!("a€{}", "0".repeat(28)));
+    for bytes in [
+        b"not valid workspace data".to_vec(),
+        serde_json::to_vec(&malformed).unwrap(),
+    ] {
+        fs::write(&file, &bytes).expect("invalid workspace fixture should write");
+        let invalid = block_on(store.load_or_default(project(1), &BTreeSet::new()))
+            .expect("invalid workspace should use defaults");
+        assert_eq!(invalid.snapshot, default);
+        assert!(matches!(
+            invalid.warning,
+            Some(WorkspaceWarning::InvalidFile { path, .. }) if path == file
+        ));
+        assert_eq!(
+            fs::read(&file).expect("invalid workspace should be preserved"),
+            bytes
+        );
+    }
 }
 
 #[test]

@@ -21,7 +21,7 @@ fn route(harness: &DesktopInteractionHarness, destination: RibbonDestination) {
 }
 
 #[test]
-fn creation_has_one_primary_entry_and_banners_leave_controls_usable() {
+fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
     let run = IsolatedRun::new("creation-usability").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Creation usability");
@@ -52,7 +52,7 @@ fn creation_has_one_primary_entry_and_banners_leave_controls_usable() {
         .replace_text_and_submit(HarnessWindow::Project, "New Group", "Drafts")
         .unwrap();
     assert!(
-        harness
+        !harness
             .text_is_visible(HarnessWindow::Project, "Created item")
             .unwrap()
     );
@@ -68,9 +68,6 @@ fn creation_has_one_primary_entry_and_banners_leave_controls_usable() {
         .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Opening")
-        .unwrap();
-    harness
-        .click_text(HarnessWindow::Project, "Dismiss")
         .unwrap();
     harness.elapse_notifications().unwrap();
     assert!(
@@ -105,7 +102,7 @@ fn creation_has_one_primary_entry_and_banners_leave_controls_usable() {
     );
     create_group(&harness, "Manuscript", "Later");
     assert!(
-        harness
+        !harness
             .text_is_visible(HarnessWindow::Project, "Created item")
             .unwrap()
     );
@@ -168,7 +165,7 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "No changes since this checkpoint.")
+            .text_is_visible(HarnessWindow::Project, "No changes since this version.")
             .unwrap()
     );
     capture(&harness, "history-unchanged");
@@ -233,7 +230,7 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     );
     capture(&harness, "history-project-changes");
     for text in [
-        "Changes since checkpoint",
+        "Changes since this version",
         "Project outline and settings",
         "Added document · New ending",
         "Deleted document · Old ending",
@@ -249,7 +246,7 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     }
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Changes since checkpoint")
+            .text_is_visible(HarnessWindow::Project, "Changes since this version")
             .unwrap()
     );
     route(&harness, RibbonDestination::Editor);

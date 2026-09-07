@@ -720,3 +720,27 @@ fn canonical_anchors(anchors: &[CanonicalAnchor]) -> Vec<CanonicalAnchor> {
     anchors.sort_by_key(|anchor| (anchor.block, anchor.position));
     anchors
 }
+
+#[test]
+fn canonical_style_ids_share_reserved_names_and_reject_malformed_unicode() {
+    for (name, id) in [
+        ("body", StyleCatalog::body_id()),
+        ("document-title", StyleCatalog::document_title_id()),
+        ("heading-1", StyleCatalog::heading_1_id()),
+        ("heading-2", StyleCatalog::heading_2_id()),
+        ("heading-3", StyleCatalog::heading_3_id()),
+        ("block-quote", StyleCatalog::block_quote_id()),
+        ("verse", StyleCatalog::verse_id()),
+    ] {
+        assert_eq!(style_id_from_canonical(name), Some(id));
+    }
+    assert_eq!(
+        style_id_from_canonical(&"ab".repeat(16)),
+        Some(StyleId::from_bytes([0xab; 16]))
+    );
+    assert_eq!(
+        style_id_from_canonical(&format!("a€{}", "0".repeat(28))),
+        None
+    );
+    assert_eq!(style_id_from_canonical("unknown"), None);
+}

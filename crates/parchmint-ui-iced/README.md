@@ -31,14 +31,25 @@ PNG captures. The default desktop enables neither feature.
   Recovery recording can advance document state without changing the outline.
 - `iced_project_surface` and `iced_editor_surface` render workspace state.
   `design_tokens` maps the shared token catalog to an Iced theme.
-- [async_service_feeds.rs](src/async_service_feeds.rs) handles search, History,
-  export, and recovery results. Search accepts only the active query generation.
+- [async_service_feeds.rs](src/async_service_feeds.rs) handles search, History
+  previews, and recovery results. Search accepts only the active query generation.
+  Export and project restore use the session workflow ports supplied by desktop;
+  the UI does not maintain a second exporter or restore executor.
 - [native/worker_pool.rs](src/native/worker_pool.rs) runs blocking UI work on
   four workers with at most 128 queued jobs. Submission reports overload without
   blocking input. Services with their own workers keep their own limits.
 
+Style property fields retain local drafts across project snapshots. Enter or
+Apply submits one property change; malformed values retain the draft and show
+an error. Unchanged values do not request another save.
+
 Comment navigation reads the live session’s current anchors, including unsaved
-comments and positions shifted by editing.
+comments and positions shifted by editing. The Inspector indexes threads; the
+anchored popover owns their drafts and actions.
+
+Dictionary settings send project words through project commands and global words
+through preference ports. The UI retains input until the resulting word list
+confirms the change. Shared field, button, and menu styles live in `components`.
 
 A document session is shared across panes; each view keeps independent selection
 and viewport state. Tab switches advance mount generations, and delayed view

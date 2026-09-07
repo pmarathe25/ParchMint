@@ -1,0 +1,25 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="ParchMint" Manufacturer="ParchMint contributors"
+           Version="$(Version)" Language="1033" Scope="perMachine"
+           UpgradeCode="7C3C9E58-CC4B-4BC6-A859-EE2E09C83B21">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of ParchMint is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="ParchMint">
+        <Component Id="Application" Guid="*">
+          <File Id="Executable" Source="!(bindpath.payload)\parchmint.exe" KeyPath="yes">
+            <Shortcut Id="StartMenuShortcut" Name="ParchMint" Directory="ProgramMenuFolder"
+                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+          </File>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <Feature Id="Main" Title="ParchMint" Level="1">
+      <ComponentRef Id="Application" />
+      <Files Directory="INSTALLFOLDER" Include="!(bindpath.payload)\**">
+        <Exclude Files="!(bindpath.payload)\parchmint.exe" />
+      </Files>
+    </Feature>
+  </Package>
+</Wix>

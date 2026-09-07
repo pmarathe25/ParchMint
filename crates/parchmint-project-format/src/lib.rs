@@ -4,6 +4,7 @@
 //! represented safely and portably is rejected before it reaches a canonical
 //! project resource.
 
+use parchmint_domain::encode_stable_id as stable_id_text;
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -256,9 +257,24 @@ impl CanonicalDictionary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalDocument {
     html: String,
+    word_count: usize,
 }
 
 impl CanonicalDocument {
+    fn from_nodes(nodes: Vec<HtmlNode>) -> Self {
+        let mut text = String::new();
+        collect_document_text(&nodes, &mut text);
+        Self {
+            html: render_html(&nodes),
+            word_count: text.split_whitespace().count(),
+        }
+    }
+
+    /// Counts rendered words, excluding markup and respecting block boundaries.
+    pub const fn word_count(&self) -> usize {
+        self.word_count
+    }
+
     pub fn as_html(&self) -> &str {
         &self.html
     }
@@ -276,9 +292,7 @@ impl CanonicalDocument {
             Err(_) => return self.clone(),
         };
         if append_suffix_to_first_matching_document_title(&mut nodes, display_title, suffix) {
-            Self {
-                html: render_html(&nodes),
-            }
+            Self::from_nodes(nodes)
         } else {
             self.clone()
         }
@@ -350,13 +364,6 @@ pub struct CanonicalInputSet {
 pub struct ProjectModel {
     pub format_version: FormatVersion,
     pub resources: BTreeMap<CanonicalRelativePath, CanonicalResource>,
-}
-
-/// A complete resource set produced by a migration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalResourceSet {
-    pub format_version: FormatVersion,
-    pub resources: BTreeMap<CanonicalRelativePath, CanonicalBytes>,
 }
 
 /// Stable document locations retained alongside a decoded project session.
@@ -437,51 +444,13 @@ pub struct CanonicalProjectPatch {
     pub deletions: Vec<CanonicalRelativePath>,
 }
 
-/// An in-memory snapshot used as migration input.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SourceFormatSnapshot {
-    pub format_control: Vec<u8>,
-    pub resources: BTreeMap<CanonicalRelativePath, Vec<u8>>,
-}
-
-/// An error that leaves the source snapshot unchanged.
-#[derive(Debug)]
-pub enum MigrationError {
-    Format(FormatError),
-    UnsupportedTarget(FormatVersion),
-}
-
-impl fmt::Display for MigrationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Format(error) => write!(formatter, "migration input is invalid: {error}"),
-            Self::UnsupportedTarget(version) => {
-                write!(formatter, "unsupported migration target {version:?}")
-            }
-        }
-    }
-}
-
-impl Error for MigrationError {}
-
-impl From<FormatError> for MigrationError {
-    fn from(error: FormatError) -> Self {
-        Self::Format(error)
-    }
-}
-
-/// The format boundary used by repository and migration code.
+/// The format boundary used by project repositories.
 pub trait CanonicalCodec: Send + Sync {
     fn detect(&self, control: &[u8]) -> Result<FormatVersion, FormatError>;
     fn decode_project(&self, input: CanonicalInputSet) -> Result<ProjectModel, FormatError>;
     fn decode_document(&self, bytes: &[u8]) -> Result<CanonicalDocument, FormatError>;
     fn decode_annotations(&self, bytes: &[u8]) -> Result<CanonicalAnnotations, FormatError>;
     fn encode(&self, value: &CanonicalResource) -> Result<CanonicalBytes, FormatError>;
-    fn migrate(
-        &self,
-        source: SourceFormatSnapshot,
-        target: FormatVersion,
-    ) -> Result<CanonicalResourceSet, MigrationError>;
 }
 
 /// The v1 project codec.
@@ -580,7 +549,7 @@ impl ProjectFormatCodec {
             .iter()
             .map(|(document, body)| {
                 let content_hash = ContentHash::of_bytes(body.as_bytes());
-                (
+                Ok((
                     *document,
                     CanonicalDocumentSummary {
                         revision: frontier
@@ -589,11 +558,11 @@ impl ProjectFormatCodec {
                             .copied()
                             .unwrap_or_default(),
                         content_hash,
-                        word_count: body.split_whitespace().count(),
+                        word_count: self.decode_document(body.as_bytes())?.word_count(),
                     },
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<_, FormatError>>()?;
         finalize_save_identity(project, &mut frontier);
         let (manifest, paths) = domain_manifest(project, &frontier)?;
         let mut resources = BTreeMap::new();
@@ -737,7 +706,7 @@ impl ProjectFormatCodec {
                 CanonicalDocumentSummary {
                     revision,
                     content_hash: ContentHash::of_bytes(update.body.as_bytes()),
-                    word_count: update.body.split_whitespace().count(),
+                    word_count: self.decode_document(update.body.as_bytes())?.word_count(),
                 }
             } else {
                 let summary = frontiers
@@ -1945,22 +1914,10 @@ fn decode_export_setting(value: Option<&str>) -> Result<ProjectExportSetting, Fo
     }
 }
 
-fn stable_id_text(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 fn parse_stable_id(value: &str) -> Result<[u8; 16], FormatError> {
-    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(FormatError::InvalidManifest(
-            "stable ID is not 32 hexadecimal digits".into(),
-        ));
-    }
-    let mut bytes = [0; 16];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
-            .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
-    }
-    Ok(bytes)
+    parchmint_domain::decode_stable_id(value).ok_or_else(|| {
+        FormatError::InvalidManifest("stable ID is not 32 hexadecimal digits".into())
+    })
 }
 
 fn resource_for_path(path: &CanonicalRelativePath) -> ResourceId {
@@ -2038,9 +1995,7 @@ impl CanonicalCodec for ProjectFormatCodec {
 
     fn decode_document(&self, bytes: &[u8]) -> Result<CanonicalDocument, FormatError> {
         let html = utf8(bytes, "document")?;
-        parse_html(html).map(|nodes| CanonicalDocument {
-            html: render_html(&nodes),
-        })
+        parse_html(html).map(CanonicalDocument::from_nodes)
     }
 
     fn decode_annotations(&self, bytes: &[u8]) -> Result<CanonicalAnnotations, FormatError> {
@@ -2116,33 +2071,6 @@ impl CanonicalCodec for ProjectFormatCodec {
             path,
             bytes,
             hash,
-        })
-    }
-
-    fn migrate(
-        &self,
-        source: SourceFormatSnapshot,
-        target: FormatVersion,
-    ) -> Result<CanonicalResourceSet, MigrationError> {
-        if target != FormatVersion::V1 {
-            return Err(MigrationError::UnsupportedTarget(target));
-        }
-        let project = self.decode_project(CanonicalInputSet {
-            format_control: Some(source.format_control),
-            resources: source.resources,
-        })?;
-        let mut resources = BTreeMap::new();
-        let control = self.encode(&CanonicalResource::FormatControl(target))?;
-        resources.insert(control.path.clone(), control);
-        for (path, resource) in project.resources {
-            let mut encoded = self.encode(&resource)?;
-            encoded.path = path.clone();
-            resources.insert(path, encoded);
-        }
-        validate_paths(resources.keys())?;
-        Ok(CanonicalResourceSet {
-            format_version: target,
-            resources,
         })
     }
 }
@@ -2933,6 +2861,27 @@ fn append_suffix_to_first_matching_document_title(
     false
 }
 
+fn collect_document_text(nodes: &[HtmlNode], output: &mut String) {
+    for node in nodes {
+        match node {
+            HtmlNode::Text(text) => output.push_str(text),
+            HtmlNode::Element { tag, children, .. } => {
+                let boundary = matches!(
+                    tag.as_str(),
+                    "p" | "h1" | "h2" | "h3" | "blockquote" | "li" | "br" | "hr"
+                );
+                if boundary {
+                    output.push(' ');
+                }
+                collect_document_text(children, output);
+                if boundary {
+                    output.push(' ');
+                }
+            }
+        }
+    }
+}
+
 fn collect_html_text(nodes: &[HtmlNode], output: &mut String) {
     for node in nodes {
         match node {
@@ -3333,6 +3282,29 @@ mod tests {
     }
 
     #[test]
+    fn document_word_counts_exclude_markup_and_join_inline_text() {
+        for (html, expected) in [
+            ("<p></p>", 0),
+            ("<p>one</p><p>two</p>", 2),
+            ("<p>lan<em>tern</em> light</p>", 2),
+            (
+                "<p><a href=\"https://example.com\">one</a><br>two</p><hr data-kind=\"scene-break\">",
+                2,
+            ),
+            ("<p>one\u{a0}two</p>", 2),
+        ] {
+            assert_eq!(
+                codec()
+                    .decode_document(html.as_bytes())
+                    .unwrap()
+                    .word_count(),
+                expected,
+                "{html}"
+            );
+        }
+    }
+
+    #[test]
     fn content_hash_of_empty_bytes_is_stable() {
         assert_eq!(
             ContentHash::of_bytes(b""),
@@ -3691,68 +3663,6 @@ mod tests {
                 resources: BTreeMap::new(),
             }),
             Err(FormatError::MissingManifest)
-        );
-    }
-
-    #[test]
-    fn migration_rejects_missing_manifest() {
-        assert!(matches!(
-            codec().migrate(
-                SourceFormatSnapshot {
-                    format_control: FORMAT_CONTROL_V1.to_vec(),
-                    resources: BTreeMap::new(),
-                },
-                FormatVersion::V1,
-            ),
-            Err(MigrationError::Format(FormatError::MissingManifest))
-        ));
-    }
-
-    #[test]
-    fn migration_reencodes_a_complete_v1_snapshot_without_changing_resource_paths() {
-        let document_path = CanonicalRelativePath::parse("manuscript/chapter.html").unwrap();
-        let annotation_path = CanonicalRelativePath::parse("annotations/document-1.json").unwrap();
-        let mut resources = BTreeMap::new();
-        resources.insert(
-            CanonicalRelativePath::parse("project.toml").unwrap(),
-            b"[project]\n".to_vec(),
-        );
-        resources.insert(
-            document_path.clone(),
-            b"<p data-style-id=\"body\" data-block-id=\"block-1\">Text</p>".to_vec(),
-        );
-        resources.insert(
-            annotation_path.clone(),
-            br#"{"threads":[{"id":"01010101010101010101010101010101","resolved":false,"messages":[{"id":"02020202020202020202020202020202","body":"line one\nline two"}],"anchor":{"kind":"document"}}],"document_id":"document-1","schema":"parchmint.annotation-sidecar/v1"}"#.to_vec(),
-        );
-
-        let migrated = codec()
-            .migrate(
-                SourceFormatSnapshot {
-                    format_control: FORMAT_CONTROL_V1.to_vec(),
-                    resources,
-                },
-                FormatVersion::V1,
-            )
-            .unwrap();
-        assert_eq!(migrated.format_version, FormatVersion::V1);
-        assert!(migrated.resources.contains_key(&document_path));
-        assert!(migrated.resources.contains_key(&annotation_path));
-        assert!(
-            migrated
-                .resources
-                .contains_key(&CanonicalRelativePath::parse(".parchmint/format-version").unwrap())
-        );
-        assert!(
-            codec()
-                .migrate(
-                    SourceFormatSnapshot {
-                        format_control: b"2\n".to_vec(),
-                        resources: BTreeMap::new(),
-                    },
-                    FormatVersion::V1,
-                )
-                .is_err()
         );
     }
 

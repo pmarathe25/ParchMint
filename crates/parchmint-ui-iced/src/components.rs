@@ -45,6 +45,95 @@ pub enum StatusKind {
     Error,
 }
 
+/// Ordinary actions share the secondary style; primary and destructive actions
+/// opt into their semantic role at the call site.
+pub fn semantic_button<'a, Message: Clone + 'a>(
+    content: impl Into<iced::Element<'a, Message>>,
+) -> iced::widget::Button<'a, Message> {
+    button(content).padding([6, 10]).style(|theme, status| {
+        let presentation = presentation(theme);
+        let state = match status {
+            button::Status::Active => Interaction::Rest,
+            button::Status::Hovered => Interaction::Hovered,
+            button::Status::Pressed => Interaction::Pressed,
+            button::Status::Disabled => Interaction::Disabled,
+        };
+        button_style(presentation, ButtonKind::Secondary, state)
+    })
+}
+
+pub fn semantic_text_input<'a, Message: Clone + 'a>(
+    placeholder: &str,
+    value: &str,
+) -> iced::widget::TextInput<'a, Message> {
+    text_input(placeholder, value)
+        .padding([7, 9])
+        .style(|theme, status| {
+            let state = match status {
+                text_input::Status::Active => Interaction::Rest,
+                text_input::Status::Hovered => Interaction::Hovered,
+                text_input::Status::Focused { .. } => Interaction::Focused,
+                text_input::Status::Disabled => Interaction::Disabled,
+            };
+            field_style(presentation(theme), state)
+        })
+}
+
+/// A select control with the same field, text, and focus tokens as text inputs.
+pub fn semantic_pick_list<'a, T, L, V, Message>(
+    options: L,
+    selected: Option<V>,
+    on_selected: impl Fn(T) -> Message + 'a,
+) -> iced::widget::PickList<'a, T, L, V, Message>
+where
+    T: ToString + PartialEq + Clone + 'a,
+    L: std::borrow::Borrow<[T]> + 'a,
+    V: std::borrow::Borrow<T> + 'a,
+    Message: Clone + 'a,
+{
+    iced::widget::pick_list(options, selected, on_selected)
+        .padding([6, 8])
+        .text_size(14)
+        .style(|theme, status| {
+            let theme = presentation(theme);
+            let interaction = match status {
+                iced::widget::pick_list::Status::Opened { .. } => Interaction::Focused,
+                iced::widget::pick_list::Status::Hovered => Interaction::Hovered,
+                iced::widget::pick_list::Status::Active => Interaction::Rest,
+            };
+            let field = field_style(theme, interaction);
+            iced::widget::pick_list::Style {
+                text_color: field.value,
+                placeholder_color: field.value,
+                handle_color: field.icon,
+                background: field.background,
+                border: field.border,
+            }
+        })
+        .menu_style(|theme| {
+            let theme = presentation(theme);
+            let panel = surface(theme, Surface::Elevated, Interaction::Rest);
+            iced::widget::overlay::menu::Style {
+                background: theme.palette().panel.into(),
+                border: panel.border,
+                text_color: theme.palette().primary_text,
+                selected_text_color: theme.palette().primary_text,
+                selected_background: theme.palette().accent_subtle.into(),
+                shadow: panel.shadow,
+            }
+        })
+}
+
+fn presentation(theme: &iced::Theme) -> ParchMintTheme {
+    ParchMintTheme::from_iced_theme(theme).unwrap_or_else(|| {
+        ParchMintTheme::new(if theme.extended_palette().is_dark {
+            parchmint_preferences::ResolvedAppearance::Dark
+        } else {
+            parchmint_preferences::ResolvedAppearance::Light
+        })
+    })
+}
+
 /// Text content for controls uses the shared label token instead of the
 /// ambient body font. Buttons are compact actions, not authored prose.
 pub fn button_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
