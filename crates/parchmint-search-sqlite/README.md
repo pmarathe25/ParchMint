@@ -1,7 +1,5 @@
 # `parchmint-search-sqlite`
 
-## What it does
-
 This crate implements `SearchIndex` with bundled SQLite FTS5. One background
 worker uses one database connection for each open project. SQL, connections,
 rows, statements, and SQLite errors stay inside this crate.
@@ -29,40 +27,10 @@ SearchQuery -> check field names and quote text -> possible FTS5 matches
 
 ## Interface
 
-```rust
-pub struct SqliteSearchIndex {
-    sender: mpsc::Sender<Command>,
-    worker: Mutex<Option<thread::JoinHandle<()>>>,
-    operation: Mutex<()>,
-    cancellation: Arc<Cancellation>,
-    rebuild_status: Arc<Mutex<SearchRebuildStatus>>,
-    background_rebuild: Mutex<Option<BackgroundRebuild>>,
-    next_rebuild_generation: AtomicU64,
-}
+`SqliteSearchIndex::new` accepts a project directory and implements
+[`SearchIndex`](../parchmint-search-api/README.md).
 
-impl SqliteSearchIndex {
-    /// Creates a lazy index rooted at `<project>/.parchmint/cache/search.sqlite`.
-    pub fn new(project_root: impl AsRef<Path>) -> Self;
-}
-
-impl SearchIndex for SqliteSearchIndex {
-    fn open_or_rebuild(&self, project: ProjectId, source: &dyn SearchProjectionSource)
-        -> Result<SearchIndexState, SearchError>;
-    fn open_or_rebuild_background(&self, project: ProjectId, source: Arc<dyn SearchProjectionSource>)
-        -> Result<SearchIndexState, SearchError>;
-    fn rebuild_status(&self) -> SearchRebuildStatus;
-    fn replace_document(&self, projection: SearchDocumentProjection)
-        -> Result<ProjectionReceipt, SearchError>;
-    fn delete_document(&self, id: DocumentId, revision: RevisionId)
-        -> Result<ProjectionReceipt, SearchError>;
-    fn query(&self, query: SearchQuery, sink: Box<dyn SearchBatchSink>)
-        -> Result<(), SearchError>;
-    fn cancel(&self, generation: u64);
-    fn verify(&self) -> Result<SearchIntegrityReport, SearchError>;
-    fn rebuild(&self, source: &dyn SearchProjectionSource)
-        -> Result<RebuildReport, SearchError>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 

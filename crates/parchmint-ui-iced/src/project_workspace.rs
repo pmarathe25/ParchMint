@@ -3846,7 +3846,6 @@ pub enum ProjectEffect {
 /// Project-facing presentation model integrated with the mounted editor model.
 #[derive(Debug, Clone)]
 pub struct ProjectWorkspace {
-    source: ProjectWorkspaceSource,
     session: u64,
     project_revision: u64,
     project_title: String,
@@ -3884,12 +3883,6 @@ pub struct ProjectWorkspace {
     editor: EditorWorkspace,
     pending: BTreeMap<ProjectTask, ProjectTaskTicket>,
     next_request: u64,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ProjectWorkspaceSource {
-    Fixture(ProjectFixture),
-    Production,
 }
 
 impl ProjectWorkspace {
@@ -3941,7 +3934,6 @@ impl ProjectWorkspace {
         let explorer = ExplorerState::fixture();
         let synopsis_editors = synopsis_editors(&explorer);
         Self {
-            source: ProjectWorkspaceSource::Fixture(fixture),
             session: 37,
             project_revision: 1,
             project_title: "The Glass Harbor".to_owned(),
@@ -4006,7 +3998,6 @@ impl ProjectWorkspace {
             .values()
             .any(|node| node.kind == HierarchyNodeKind::Document);
         Self {
-            source: ProjectWorkspaceSource::Production,
             session: 0,
             project_revision: snapshot.project.revision.value(),
             project_title: snapshot.project.display_title.clone(),
@@ -4461,7 +4452,7 @@ impl ProjectWorkspace {
         #[cfg(feature = "diagnostics")]
         let revision = self.project_revision.to_string();
         #[cfg(feature = "diagnostics")]
-        diagnostics::event(
+        diagnostics::event!(
             DiagnosticLevel::Error,
             "ui.user-error",
             "presented",
@@ -4773,15 +4764,14 @@ impl ProjectWorkspace {
         self.tree_clipboard = None;
         self.explorer.cancel_cut();
         #[cfg(feature = "diagnostics")]
-        let session = session.to_string();
-        #[cfg(feature = "diagnostics")]
-        let revision = project_revision.to_string();
-        #[cfg(feature = "diagnostics")]
-        diagnostics::event(
+        diagnostics::event!(
             DiagnosticLevel::Info,
             "ui.project-session",
             "started",
-            &[("session", &session), ("project_revision", &revision)],
+            &[
+                ("session", &session.to_string()),
+                ("project_revision", &project_revision.to_string())
+            ],
         );
     }
 
@@ -4812,17 +4802,26 @@ impl ProjectWorkspace {
     /// Accepts only the exact live session/task/request and a matching payload.
     pub fn accept_completion(&mut self, completion: ProjectTaskCompletion) -> bool {
         let ticket = completion.ticket();
-        if ticket.session != self.session
+        let stale = ticket.session != self.session
             || self.pending.get(&ticket.task) != Some(ticket)
+            || !self.ticket_revision_is_live(ticket);
+        if stale
             || !project_payload_matches(&ticket.task, completion.payload())
             || !project_payload_claim_is_exact(&ticket.task, completion.payload())
-            || !self.ticket_revision_is_live(ticket)
         {
             #[cfg(feature = "diagnostics")]
-            diagnostics::event(
-                DiagnosticLevel::Warn,
+            diagnostics::event!(
+                if stale {
+                    DiagnosticLevel::Trace
+                } else {
+                    DiagnosticLevel::Warn
+                },
                 "ui.project-task",
-                "ignored stale or invalid completion",
+                if stale {
+                    "ignored stale completion"
+                } else {
+                    "ignored invalid completion"
+                },
                 &[("task", project_task_name(&ticket.task))],
             );
             return false;
@@ -6018,15 +6017,6 @@ impl ProjectWorkspace {
             });
         }
         false
-    }
-
-    pub(crate) const fn fixture(&self) -> ProjectFixture {
-        match self.source {
-            ProjectWorkspaceSource::Fixture(fixture) => fixture,
-            ProjectWorkspaceSource::Production => {
-                panic!("production workspace has no visual fixture")
-            }
-        }
     }
 
     fn activate_card(&mut self, node_id: String) -> Vec<ProjectEffect> {

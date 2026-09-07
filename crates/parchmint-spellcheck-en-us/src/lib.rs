@@ -18,7 +18,7 @@ use harper_core::{
     WordMetadata,
     spell::{Dictionary, FstDictionary, MutableDictionary, suggest_correct_spelling_str},
 };
-use parchmint_editor_api::{AsyncResult, DocumentPosition, EventStream};
+use parchmint_editor_api::{DocumentPosition, EventStream};
 use parchmint_spellcheck_api::{
     DictionaryRevision, DocumentId, LanguageId, ProjectId, SpellcheckGeneration, SpellcheckHandle,
     SpellcheckPriority, SpellcheckRequest, SpellcheckResult, SpellcheckResultStream,
@@ -35,9 +35,7 @@ const SUGGESTION_LIMIT: usize = 1;
 const ENGINE_CANDIDATE_LIMIT: usize = 64;
 const SUGGESTION_DISTANCE: u8 = 2;
 
-/// A future returned by the concrete, fallible implementation.
-pub type SpellcheckOperation<T> =
-    Pin<Box<dyn Future<Output = Result<T, SpellcheckError>> + Send + 'static>>;
+use parchmint_spellcheck_api::{SpellcheckError, SpellcheckOperation};
 
 /// The bundled dictionary selected by this implementation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -159,42 +157,6 @@ impl fmt::Display for SpellcheckStartupError {
 }
 
 impl Error for SpellcheckStartupError {}
-
-/// A recoverable failure from the concrete spellcheck implementation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpellcheckError {
-    InvalidRequest(String),
-    QueueFull,
-    DictionaryReload {
-        scope: &'static str,
-        revision: DictionaryRevision,
-        message: String,
-    },
-    WorkerStopped,
-}
-
-impl fmt::Display for SpellcheckError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidRequest(message) => {
-                write!(formatter, "invalid spellcheck request: {message}")
-            }
-            Self::QueueFull => formatter.write_str("spellcheck worker queue is full"),
-            Self::DictionaryReload {
-                scope,
-                revision,
-                message,
-            } => write!(
-                formatter,
-                "failed to reload {scope} dictionary revision {}: {message}",
-                revision.value()
-            ),
-            Self::WorkerStopped => formatter.write_str("spellcheck worker stopped"),
-        }
-    }
-}
-
-impl Error for SpellcheckError {}
 
 /// The platform-neutral `en-US` spellcheck service.
 #[derive(Clone)]
@@ -345,46 +307,27 @@ impl Default for EnUsSpellcheckService {
 }
 
 impl SpellcheckService for EnUsSpellcheckService {
-    fn available_languages(&self) -> AsyncResult<Vec<LanguageId>> {
-        let operation = EnUsSpellcheckService::available_languages(self);
-        Box::pin(async move { operation.await.unwrap_or_default() })
+    fn available_languages(&self) -> SpellcheckOperation<Vec<LanguageId>> {
+        EnUsSpellcheckService::available_languages(self)
     }
-
-    fn check(&self, request: SpellcheckRequest) -> AsyncResult<SpellcheckResultStream> {
-        let operation = EnUsSpellcheckService::check(self, request);
-        Box::pin(async move {
-            operation.await.unwrap_or_else(|_| {
-                let (_sender, receiver) = mpsc::channel();
-                EventStream::from_receiver(receiver)
-            })
-        })
+    fn check(&self, request: SpellcheckRequest) -> SpellcheckOperation<SpellcheckResultStream> {
+        EnUsSpellcheckService::check(self, request)
     }
-
-    fn suggest(&self, request: SuggestionRequest) -> AsyncResult<Vec<SpellingSuggestion>> {
-        let operation = EnUsSpellcheckService::suggest(self, request);
-        Box::pin(async move { operation.await.unwrap_or_default() })
+    fn suggest(&self, request: SuggestionRequest) -> SpellcheckOperation<Vec<SpellingSuggestion>> {
+        EnUsSpellcheckService::suggest(self, request)
     }
-
     fn cancel(&self, handle: SpellcheckHandle) {
         EnUsSpellcheckService::cancel(self, handle);
     }
-
     fn reload_project_dictionary(
         &self,
         project: ProjectId,
         revision: DictionaryRevision,
-    ) -> AsyncResult<()> {
-        let operation = EnUsSpellcheckService::reload_project_dictionary(self, project, revision);
-        Box::pin(async move {
-            let _ = operation.await;
-        })
+    ) -> SpellcheckOperation<()> {
+        EnUsSpellcheckService::reload_project_dictionary(self, project, revision)
     }
-
-    fn reload_global_dictionary(&self, revision: DictionaryRevision) -> AsyncResult<()> {
-        let operation = EnUsSpellcheckService::reload_global_dictionary(self, revision);
-        Box::pin(async move {
-            let _ = operation.await;
-        })
+    fn reload_global_dictionary(&self, revision: DictionaryRevision) -> SpellcheckOperation<()> {
+        EnUsSpellcheckService::reload_global_dictionary(self, revision)
     }
 }
 

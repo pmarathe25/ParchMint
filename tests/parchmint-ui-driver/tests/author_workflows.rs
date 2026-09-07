@@ -1,10 +1,10 @@
-use std::{fs, path::Path};
+use std::fs;
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessDropPosition, HarnessHierarchySurface,
     HarnessKey, HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
 };
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
 fn novelist_can_plan_and_draft_a_chaptered_manuscript() {
@@ -1296,52 +1296,6 @@ fn collection_editor_can_restore_a_deleted_story() {
         .close(HarnessWindow::Project)
         .expect("close collection");
     harness.shutdown().expect("stop collection application");
-}
-
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open project creation form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("enter project title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter project destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
-}
-
-fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create group")
-        .expect("create group");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
-        .expect("name group");
-}
-
-fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create document")
-        .expect("create document");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
-        .expect("name document");
 }
 
 fn visible(harness: &DesktopInteractionHarness, text: &str) -> bool {

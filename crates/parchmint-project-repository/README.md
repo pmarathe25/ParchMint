@@ -1,7 +1,5 @@
 # `parchmint-project-repository`
 
-## What it does
-
 This crate is the application's entry point for creating, opening, and reading
 projects. It presents resources by stable ID and hides filesystem layout. Large
 projects load document bodies on demand.
@@ -26,42 +24,11 @@ interrupted projects are rejected before a snapshot is returned.
 
 ## Interface
 
-```rust
-pub trait ProjectRepository: Send + Sync {
-    fn create(&self, request: CreateProject) -> Result<OpenProject, RepositoryError>;
-    fn open(&self, path: ProjectPath) -> Result<OpenProject, RepositoryError>;
-    fn load_document(&self, document: DocumentId) -> Result<Vec<u8>, RepositoryError>;
-}
+`ProjectRepository` creates, opens, and lazily loads documents. `OpenProject`
+holds an immutable snapshot and a write lease. `AtomicWriter` stages, validates,
+commits, reconciles, or abandons a multi-file write.
 
-pub struct ProjectSnapshot {
-    pub path: ProjectPath,
-    pub manifest: String,
-    pub document_ids: Vec<DocumentId>,
-}
-
-pub struct OpenProject {
-    pub snapshot: ProjectSnapshot,
-    // opaque writable lease; dropping the opened project releases it
-}
-
-pub trait AtomicWriter: Send + Sync {
-    fn stage(&self, plan: AtomicWritePlan) -> Result<StagedWrite, WriteError>;
-    fn validate_staged(&self, staged: &StagedWrite) -> ValidationReport;
-    fn commit(&self, staged: StagedWrite) -> Result<CommitReceipt, WriteError>;
-    fn reconcile(&self, record: SaveTransactionRecord) -> Result<Reconciliation, WriteError>;
-    fn abandon(&self, staged: StagedWrite) -> Result<Abandonment, WriteError>;
-}
-
-pub struct AtomicWritePlan {
-    pub writes: Vec<StagedResource>,
-    pub deletions: Vec<String>,
-}
-
-pub struct StagedResource {
-    pub path: String,
-    pub bytes: Vec<u8>,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 These are ParchMint-owned value types; the filesystem implementation converts
 operating-system handles, paths, codec values, and filesystem errors into them

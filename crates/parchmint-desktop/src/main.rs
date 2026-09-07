@@ -1,12 +1,16 @@
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::{env, path::PathBuf};
 
 use parchmint_desktop::{DesktopBootstrap, ExitCode, LaunchRequest};
 use parchmint_preferences::ResolvedAppearance;
 use parchmint_ui_iced::{NativeCaptureRequest, NativeCaptureTarget, RibbonDestination};
 
-const CAPTURE_USAGE: &str = "Usage:\n  parchmint [PROJECT]\n  parchmint capture --target <launcher|editor|cards|history|recently-deleted|export|settings|global-search> --appearance <light|dark> --output <ABSOLUTE-PNG> [--project <PROJECT>] [--scale <1|2>] [--logical-width <PIXELS> --logical-height <PIXELS>] [--require-size <WIDTHxHEIGHT>] [--keep-open]";
+const CAPTURE_USAGE: &str = "Usage:\n  parchmint [PROJECT]\n  parchmint --help\n  parchmint --version\n  parchmint capture --target <launcher|editor|cards|history|recently-deleted|export|settings|global-search> --appearance <light|dark> --output <ABSOLUTE-PNG> [--project <PROJECT>] [--scale <1|2>] [--logical-width <PIXELS> --logical-height <PIXELS>] [--require-size <WIDTHxHEIGHT>] [--keep-open]";
 
 enum ProcessRequest {
+    Help,
+    Version,
     Run(LaunchRequest),
     Capture {
         launch: LaunchRequest,
@@ -17,6 +21,14 @@ enum ProcessRequest {
 fn main() -> std::process::ExitCode {
     let exit = parse_process_request(env::args_os())
         .and_then(|request| match request {
+            ProcessRequest::Help => {
+                println!("{CAPTURE_USAGE}");
+                Ok(ExitCode::SUCCESS)
+            }
+            ProcessRequest::Version => {
+                println!("ParchMint {}", env!("CARGO_PKG_VERSION"));
+                Ok(ExitCode::SUCCESS)
+            }
             ProcessRequest::Run(launch) => DesktopBootstrap::production()?.run(launch),
             ProcessRequest::Capture { launch, capture } => {
                 DesktopBootstrap::production()?.run_native_capture(launch, capture)
@@ -31,14 +43,26 @@ fn parse_process_request(
 ) -> Result<ProcessRequest, parchmint_desktop::StartupError> {
     let mut arguments = arguments.into_iter().map(Into::into);
     let _executable = arguments.next();
-    match arguments
-        .next()
-        .as_deref()
-        .and_then(std::ffi::OsStr::to_str)
-    {
-        Some("capture") => parse_capture(arguments),
-        Some(argument) => Ok(ProcessRequest::Run(LaunchRequest::open(argument))),
-        None => Ok(ProcessRequest::Run(LaunchRequest::launcher())),
+    let Some(argument) = arguments.next() else {
+        return Ok(ProcessRequest::Run(LaunchRequest::launcher()));
+    };
+    if argument == "capture" {
+        return parse_capture(arguments);
+    }
+    if arguments.next().is_some() {
+        return Err(invalid_capture_request(
+            "expected one project path".to_owned(),
+        ));
+    }
+    match argument.to_str() {
+        Some("--help" | "-h") => Ok(ProcessRequest::Help),
+        Some("--version" | "-V") => Ok(ProcessRequest::Version),
+        Some(value) if value.starts_with('-') => {
+            Err(invalid_capture_request(format!("unknown option {value}")))
+        }
+        _ => Ok(ProcessRequest::Run(LaunchRequest::open(PathBuf::from(
+            argument,
+        )))),
     }
 }
 
@@ -245,7 +269,7 @@ fn required<T>(value: Option<T>, flag: &str) -> Result<T, parchmint_desktop::Sta
 
 fn invalid_capture_request(reason: String) -> parchmint_desktop::StartupError {
     parchmint_desktop::StartupError::Production {
-        component: "native capture arguments",
+        component: "command-line arguments",
         reason: format!("{reason}\n{CAPTURE_USAGE}"),
     }
 }
@@ -260,6 +284,31 @@ fn process_exit_code(exit: ExitCode) -> std::process::ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn informational_options_and_invalid_arguments_do_not_open_projects() {
+        assert!(matches!(
+            parse_process_request(["parchmint", "--version"]),
+            Ok(ProcessRequest::Version)
+        ));
+        assert!(matches!(
+            parse_process_request(["parchmint", "--help"]),
+            Ok(ProcessRequest::Help)
+        ));
+        assert!(parse_process_request(["parchmint", "--unknown"]).is_err());
+        assert!(parse_process_request(["parchmint", "one", "two"]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_preserves_non_utf8_project_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = std::ffi::OsString::from_vec(b"/tmp/novel-\xff.parchmint".to_vec());
+        let request = parse_process_request(["parchmint".into(), path.clone()]).unwrap();
+        assert!(
+            matches!(request, ProcessRequest::Run(launch) if launch == LaunchRequest::open(PathBuf::from(path)))
+        );
+    }
 
     #[test]
     fn capture_parser_requires_a_project_for_a_project_destination() {

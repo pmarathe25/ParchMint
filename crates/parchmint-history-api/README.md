@@ -1,7 +1,5 @@
 # `parchmint-history-api`
 
-## What it does
-
 This crate defines the interface for saving and reading project History. A
 History implementation stores complete project checkpoints. Callers use
 ParchMint types and do not depend on Git types.
@@ -26,38 +24,11 @@ and creates a new restoration checkpoint; History stays in its existing order.
 
 ## Interface
 
-```rust
-pub trait HistoryStore: Send + Sync {
-    fn initialize(&self, project: ProjectRootCapability)
-        -> Result<HistoryState, HistoryError>;
-    fn reinitialize_availability(&self)
-        -> Result<HistoryReinitializeAvailability, HistoryError>;
-    fn reinitialize(&self, project: ProjectRootCapability)
-        -> Result<HistoryReinitializeReport, HistoryError>;
-    fn checkpoint(&self, input: CheckpointInput)
-        -> Result<CheckpointId, HistoryError>;
-    fn list(&self, query: HistoryPageQuery)
-        -> Result<HistoryPage, HistoryError>;
-    fn preview(&self, checkpoint: CheckpointId)
-        -> Result<SnapshotPreview, HistoryError>;
-    fn read_resource(&self, checkpoint: CheckpointId, path: &CanonicalRelativePath)
-        -> Result<CheckpointResource, HistoryError>;
-    fn restore(&self, checkpoint: CheckpointId)
-        -> Result<RestorePlan, HistoryError>;
-    fn verify(&self) -> Result<HistoryIntegrityReport, HistoryError>;
-    fn maintain(&self, budget: MaintenanceBudget)
-        -> Result<MaintenanceReport, HistoryError>;
-}
+`HistoryStore` initializes storage, checkpoints files, pages through History,
+reads checkpoint resources, plans restores, verifies integrity, and maintains
+storage. `CheckpointInput` identifies the save intent and exact file hashes.
 
-pub struct CheckpointInput {
-    pub intent_hash: CheckpointIntentHash,
-    pub resources: BTreeMap<CanonicalRelativePath, ContentHash>,
-    pub category: CheckpointCategory,
-    pub affected_documents: Vec<DocumentId>,
-    pub name: Option<SnapshotName>,
-    pub recorded_at_unix_millis: Option<u64>,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 These methods run on an application worker. The UI receives an asynchronous
 result and the worker performs Git operations.

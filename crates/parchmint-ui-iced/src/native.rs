@@ -672,7 +672,7 @@ enum Message {
     SpellcheckFinished {
         window: window::Id,
         ticket: NativeSpellcheckTicket,
-        result: Result<SpellcheckResult, String>,
+        result: Result<Option<SpellcheckResult>, String>,
     },
     SearchFinished {
         window: window::Id,
@@ -835,7 +835,7 @@ impl NativeTaskOutcome {
         };
         if matches!(outcome, Self::Failed { .. }) {
             #[cfg(feature = "diagnostics")]
-            diagnostics::event(
+            diagnostics::event!(
                 diagnostics::Level::Error,
                 "ui.native-task",
                 "service task failed",
@@ -850,7 +850,7 @@ impl NativeTaskOutcome {
         #[cfg(not(feature = "diagnostics"))]
         let _ = (operation, category);
         #[cfg(feature = "diagnostics")]
-        diagnostics::event(
+        diagnostics::event!(
             diagnostics::Level::Error,
             "ui.native-task",
             "worker task failed",
@@ -1045,6 +1045,23 @@ struct NativeClipboardRequest {
     intent: MountedEditorClipboardIntent,
 }
 
+/// Distinguishes actionable failures from routine progress without parsing text.
+#[derive(Clone)]
+enum DesktopStatus {
+    Error(String),
+    Info(String),
+}
+
+impl std::ops::Deref for DesktopStatus {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            Self::Error(message) | Self::Info(message) => message,
+        }
+    }
+}
+
 pub(crate) struct NativeDesktop {
     appearance: ResolvedAppearance,
     appearance_mode: AppearanceMode,
@@ -1055,7 +1072,7 @@ pub(crate) struct NativeDesktop {
     close_failures: BTreeMap<WindowCapability, String>,
     opening_project: bool,
     creating_project: bool,
-    status: Option<String>,
+    status: Option<DesktopStatus>,
     callbacks: Arc<dyn NativeDesktopCallbacks>,
     preference_changes:
         Arc<Mutex<Option<futures_mpsc::UnboundedReceiver<Vec<PreferenceRecentProject>>>>>,
@@ -1977,11 +1994,14 @@ impl NativeDesktop {
             close_failures: BTreeMap::new(),
             opening_project: false,
             creating_project: false,
-            status: capture_error.clone().or_else(|| {
-                startup
-                    .locked_project
-                    .map(|path| format!("Project is already open: {}", path.display()))
-            }),
+            status: capture_error
+                .clone()
+                .or_else(|| {
+                    startup
+                        .locked_project
+                        .map(|path| format!("Project is already open: {}", path.display()))
+                })
+                .map(DesktopStatus::Error),
             callbacks,
             preference_changes: Arc::new(Mutex::new(Some(preference_changes))),
             last_appearance_generation: 0,
@@ -2026,7 +2046,7 @@ impl NativeDesktop {
                 if pane != workspace.editor().focused_pane()
                     && let Err(error) = binding.host().blur()
                 {
-                    self.status = Some(error.to_string());
+                    self.status = Some(DesktopStatus::Error(error.to_string()));
                 }
             }
             let marks = state
@@ -2135,17 +2155,18 @@ impl NativeDesktop {
                         match Self::restored_workspace_effects(state) {
                             Ok(effects) => effects,
                             Err(error) => {
-                                self.status = Some(format!(
+                                self.status = Some(DesktopStatus::Error(format!(
                                     "Restored editor views could not be remounted: {error}"
-                                ));
+                                )));
                                 Vec::new()
                             }
                         }
                     }
                     Ok(None) => Vec::new(),
                     Err(error) => {
-                        self.status =
-                            Some(format!("Workspace layout could not be restored: {error}"));
+                        self.status = Some(DesktopStatus::Error(format!(
+                            "Workspace layout could not be restored: {error}"
+                        )));
                         Vec::new()
                     }
                 };
@@ -2153,7 +2174,9 @@ impl NativeDesktop {
             }
             Message::WorkspacePersisted { result } => {
                 if let Err(error) = result {
-                    self.status = Some(format!("Workspace layout could not be saved: {error}"));
+                    self.status = Some(DesktopStatus::Error(format!(
+                        "Workspace layout could not be saved: {error}"
+                    )));
                 }
                 Task::none()
             }
@@ -2298,7 +2321,7 @@ impl NativeDesktop {
                             }
                             return Task::none();
                         };
-                        self.status = Some(error.clone());
+                        self.status = Some(DesktopStatus::Error(error.clone()));
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.update(ProjectMessage::SaveFailed(error.clone()));
                             Self::fail_pending_global_search(
@@ -2361,7 +2384,7 @@ impl NativeDesktop {
                             format!("Export could not record the latest draft: {error}"),
                         );
                     }
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     return Task::none();
                 }
                 let explicit_save = state.autosave.explicit_save_waiting;
@@ -2413,13 +2436,13 @@ impl NativeDesktop {
                         self.status = None;
                     }
                     Ok(None) => {}
-                    Err(error) => self.status = Some(error),
+                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
                 }
                 Task::none()
             }
             #[cfg(target_os = "linux")]
             Message::SystemAppearanceStreamFailed(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 Task::none()
             }
             Message::SaveFinished {
@@ -2468,7 +2491,7 @@ impl NativeDesktop {
                             if let Some(workspace) = state.workspace.as_mut() {
                                 workspace.update(ProjectMessage::SaveFailed(error.clone()));
                             }
-                            self.status = Some(error.clone());
+                            self.status = Some(DesktopStatus::Error(error.clone()));
                             terminal_error = Some(error);
                         }
                     }
@@ -2553,7 +2576,7 @@ impl NativeDesktop {
                             ticket,
                             ProjectTaskPayload::Failed(error.clone()),
                         ));
-                        self.status = Some(error);
+                        self.status = Some(DesktopStatus::Error(error));
                     }
                 }
                 Task::none()
@@ -2777,9 +2800,9 @@ impl NativeDesktop {
                             &replaced_documents,
                             self.appearance,
                         ) {
-                            self.status = Some(format!(
+                            self.status = Some(DesktopStatus::Error(format!(
                                 "Could not refresh replaced document in the editor: {error}"
-                            ));
+                            )));
                         }
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -2816,7 +2839,7 @@ impl NativeDesktop {
                             ))
                         });
                         if accepted {
-                            self.status = Some(error.clone());
+                            self.status = Some(DesktopStatus::Error(error.clone()));
                         }
                         self.after_persistent_mutation_terminal(
                             window,
@@ -2913,14 +2936,14 @@ impl NativeDesktop {
                 if state.active_export == Some(operation)
                     && let Err(error) = result
                 {
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                 }
                 Task::none()
             }
             Message::ExportArtifactActionFinished(result) => {
                 match result {
                     Ok(()) => self.status = None,
-                    Err(error) => self.status = Some(error),
+                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
                 }
                 Task::none()
             }
@@ -2994,7 +3017,7 @@ impl NativeDesktop {
                                 ProjectTaskPayload::Failed(error.clone()),
                             ));
                         }
-                        self.status = Some(error);
+                        self.status = Some(DesktopStatus::Error(error));
                         Task::none()
                     }
                 }
@@ -3069,7 +3092,7 @@ impl NativeDesktop {
                                         ProjectTaskPayload::Failed(error.clone()),
                                     ));
                                 if completion_accepted {
-                                    self.status = Some(error);
+                                    self.status = Some(DesktopStatus::Error(error));
                                 }
                             }
                         }
@@ -3164,7 +3187,7 @@ impl NativeDesktop {
                                         ProjectTaskPayload::Failed(error.clone()),
                                     ));
                                 if completion_accepted {
-                                    self.status = Some(error);
+                                    self.status = Some(DesktopStatus::Error(error));
                                 }
                             }
                         }
@@ -3216,7 +3239,7 @@ impl NativeDesktop {
                         self.apply_appearance(appearance);
                         self.status = None;
                     }
-                    Err(error) => self.status = Some(error),
+                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
                 }
                 Task::none()
             }
@@ -3289,7 +3312,7 @@ impl NativeDesktop {
                         state.project.project.display().to_string(),
                         state.shell.destination(),
                         self.close_failures.get(&state.project.window).cloned(),
-                        self.status.clone(),
+                        self.status.as_deref().map(str::to_owned),
                     )
                 },
                 |workspace| {
@@ -3393,7 +3416,56 @@ impl NativeDesktop {
         Subscription::batch(subscriptions)
     }
 
+    fn application_errors(&self) -> BTreeMap<String, String> {
+        let mut errors = BTreeMap::new();
+        if let Some(DesktopStatus::Error(message)) = &self.status {
+            errors.insert("status".to_owned(), message.clone());
+        }
+        for (window, error) in &self.close_failures {
+            errors.insert(
+                format!("close:{window:?}"),
+                format!("could not save before closing: {error}"),
+            );
+        }
+        for (id, window) in &self.windows {
+            let NativeWindow::Project(state) = window else {
+                continue;
+            };
+            if let Some(crate::ProjectModal::Error { title, detail }) = state
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.modal())
+            {
+                errors.insert(format!("modal:{id:?}"), format!("{title}: {detail}"));
+            }
+            for pane in [EditorPane::Primary, EditorPane::Companion] {
+                if let Some(crate::iced_editor_surface::EditorPaneSlot::State(
+                    crate::iced_editor_surface::EditorCenterPaneState::Error(error),
+                )) = state.editor_hosts.slot(pane)
+                {
+                    errors.insert(format!("editor:{id:?}:{pane:?}"), error.clone());
+                }
+            }
+            for notification in &state.notifications {
+                if notification.kind == NotificationKind::Error {
+                    errors.insert(
+                        format!("notification:{id:?}:{}", notification.id),
+                        notification.message.clone(),
+                    );
+                }
+            }
+        }
+        errors
+    }
+
     fn capture_after_settled_frame(&mut self, drawn_window: window::Id) -> Task<Message> {
+        if self.capture.is_some() {
+            let errors = self.application_errors();
+            if !errors.is_empty() {
+                return self
+                    .finish_capture(Err(errors.into_values().collect::<Vec<_>>().join("; ")));
+            }
+        }
         let Some(capture) = self.capture.as_mut() else {
             return Task::none();
         };
@@ -3487,7 +3559,9 @@ impl NativeDesktop {
                     .completion
                     .lock()
                     .expect("native capture completion mutex poisoned") = Some(Err(error.clone()));
-                self.status = Some(format!("Native capture failed: {error}"));
+                self.status = Some(DesktopStatus::Error(format!(
+                    "Native capture failed: {error}"
+                )));
                 iced::exit()
             }
         }
@@ -3583,7 +3657,7 @@ impl NativeDesktop {
                     return Task::none();
                 };
                 Self::clipboard_task(id, state, pane, view, intent).unwrap_or_else(|error| {
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     Task::none()
                 })
             }
@@ -3649,7 +3723,9 @@ impl NativeDesktop {
                 )
             }
             _ => {
-                self.status = Some(format!("Unknown keyboard shortcut command: {command}"));
+                self.status = Some(DesktopStatus::Error(format!(
+                    "Unknown keyboard shortcut command: {command}"
+                )));
                 Task::none()
             }
         }
@@ -4023,7 +4099,7 @@ impl NativeDesktop {
             self.launcher.new_project(),
             self.creating_project,
             self.opening_project,
-            self.status.clone(),
+            self.status.as_deref().map(str::to_owned),
         )
     }
 
@@ -4389,19 +4465,6 @@ impl NativeDesktop {
                 }
                 Self::workspace_persist_task(id, state)
             }
-            ProjectSurfaceMessage::Focus(target) => {
-                state.shell.focus(target.clone());
-                if matches!(target, crate::FocusTarget::EditorDocument(_))
-                    && let Some(binding) = state
-                        .editor_bindings
-                        .get(&workspace.editor().focused_pane())
-                {
-                    let _ = binding.restore_focus();
-                    return Task::none();
-                }
-                crate::focus::region_id(state.shell.focus_region())
-                    .map_or_else(Task::none, iced::widget::operation::focus)
-            }
             ProjectSurfaceMessage::ToggleExplorer => {
                 let visible = !state.shell.layout().explorer_is_visible();
                 state.shell.layout_mut().set_explorer_visible(visible);
@@ -4588,7 +4651,7 @@ impl NativeDesktop {
                     state.shell.dismiss_dialog();
                 }
                 if let Some(status) = clipboard_status {
-                    self.status = Some(status.to_owned());
+                    self.status = Some(DesktopStatus::Info(status.to_owned()));
                 }
                 if let Some(mode) = appearance {
                     let callbacks = Arc::clone(&self.callbacks);
@@ -4608,7 +4671,7 @@ impl NativeDesktop {
                         if let Err(error) =
                             binding.update(parchmint_editor_iced::MountedEditorMessage::Blur)
                         {
-                            self.status = Some(error.to_string());
+                            self.status = Some(DesktopStatus::Error(error.to_string()));
                         }
                     }
                     tasks.push(iced::widget::operation::focus(
@@ -4792,8 +4855,9 @@ impl NativeDesktop {
                                 || state.project_mutations.blocks_close()
                                 || state.opaque_mutations.blocks_close()
                             {
-                                self.status =
-                                    Some("Saving the latest draft before searching…".into());
+                                self.status = Some(DesktopStatus::Info(
+                                    "Saving the latest draft before searching…".into(),
+                                ));
                                 continue;
                             }
                             let Some(ports) = state.project.ports().cloned() else {
@@ -4849,7 +4913,9 @@ impl NativeDesktop {
                                 ticket,
                                 ProjectSaveKind::Autosave,
                             ));
-                            self.status = Some("Saving the latest draft before searching…".into());
+                            self.status = Some(DesktopStatus::Info(
+                                "Saving the latest draft before searching…".into(),
+                            ));
                         }
                         ProjectEffect::PreviewHistory(checkpoint_id) => {
                             let current = workspace
@@ -5056,7 +5122,9 @@ impl NativeDesktop {
                             ..
                         } => {
                             let Some(project_ui) = state.project.project_ui.as_ref() else {
-                                self.status = Some("project snapshot is unavailable".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "project snapshot is unavailable".into(),
+                                ));
                                 continue;
                             };
                             let ticket = workspace.begin_task(ProjectTask::ReplacementPreview);
@@ -5070,7 +5138,7 @@ impl NativeDesktop {
                                     ticket,
                                     ProjectTaskPayload::Failed(error.clone()),
                                 ));
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                                 continue;
                             }
                             let preview_results = workspace.replacement_preview().results();
@@ -5112,7 +5180,9 @@ impl NativeDesktop {
                             replacement,
                         } => {
                             let Some(project_ui) = state.project.project_ui.as_ref() else {
-                                self.status = Some("project snapshot is unavailable".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "project snapshot is unavailable".into(),
+                                ));
                                 continue;
                             };
                             let ticket = workspace.begin_task(ProjectTask::ApplyReplacement);
@@ -5125,7 +5195,7 @@ impl NativeDesktop {
                                     ticket,
                                     ProjectTaskPayload::Failed(error.clone()),
                                 ));
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                                 continue;
                             }
                             let mutation = state
@@ -5187,7 +5257,7 @@ impl NativeDesktop {
                                 let error =
                                     "Project export is unavailable for this session.".to_owned();
                                 workspace.update(ProjectMessage::ExportFailed(error.clone()));
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                                 continue;
                             };
                             let ticket =
@@ -5225,8 +5295,9 @@ impl NativeDesktop {
                                 || state.project_mutations.blocks_close()
                                 || state.opaque_mutations.blocks_close()
                             {
-                                self.status =
-                                    Some("Saving the latest draft before exporting…".into());
+                                self.status = Some(DesktopStatus::Info(
+                                    "Saving the latest draft before exporting…".into(),
+                                ));
                                 continue;
                             }
                             let Some(adapter) = state.project.editor_adapter().cloned() else {
@@ -5273,15 +5344,21 @@ impl NativeDesktop {
                                 ticket,
                                 ProjectSaveKind::Autosave,
                             ));
-                            self.status = Some("Saving the latest draft before exporting…".into());
+                            self.status = Some(DesktopStatus::Info(
+                                "Saving the latest draft before exporting…".into(),
+                            ));
                         }
                         ProjectEffect::CancelExport => {
                             let Some(operation) = state.active_export else {
-                                self.status = Some("export operation is no longer active".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "export operation is no longer active".into(),
+                                ));
                                 continue;
                             };
                             let Some(ports) = state.project.ports().cloned() else {
-                                self.status = Some("project export port is unavailable".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "project export port is unavailable".into(),
+                                ));
                                 continue;
                             };
                             tasks.push(Task::perform(
@@ -5303,7 +5380,9 @@ impl NativeDesktop {
                         ProjectEffect::OpenExportResult(artifact) => {
                             let action = ExportArtifactAction::Open;
                             let Some(ports) = state.project.ports().cloned() else {
-                                self.status = Some("project export port is unavailable".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "project export port is unavailable".into(),
+                                ));
                                 continue;
                             };
                             tasks.push(Task::perform(
@@ -5323,7 +5402,9 @@ impl NativeDesktop {
                         ProjectEffect::RevealExportResult(artifact) => {
                             let action = ExportArtifactAction::Reveal;
                             let Some(ports) = state.project.ports().cloned() else {
-                                self.status = Some("project export port is unavailable".into());
+                                self.status = Some(DesktopStatus::Error(
+                                    "project export port is unavailable".into(),
+                                ));
                                 continue;
                             };
                             tasks.push(Task::perform(
@@ -5375,7 +5456,7 @@ impl NativeDesktop {
                             iced::widget::operation::focus(crate::HarnessTarget::CommentDraft.id())
                         }
                         Err(error) => {
-                            self.status = Some(error);
+                            self.status = Some(DesktopStatus::Error(error));
                             Task::none()
                         }
                     };
@@ -5412,13 +5493,6 @@ impl NativeDesktop {
                         DragDestination::EditorPane(pane),
                     ));
                     return Task::none();
-                }
-                if matches!(message, EditorCenterMessage::CommitHierarchyDrop) {
-                    let effects = workspace.update(ProjectMessage::CommitHierarchyDrag);
-                    return Task::batch([
-                        Self::tracked_project_effect_tasks(id, state, effects),
-                        Self::workspace_persist_task(id, state),
-                    ]);
                 }
                 let refresh_local_search = message.workspace_messages().iter().any(|message| {
                     matches!(
@@ -5481,11 +5555,12 @@ impl NativeDesktop {
                                     .insert(previous_document, binding.session());
                             }
                             if let Err(error) = binding.detach() {
-                                self.status = Some(error.to_string());
+                                self.status = Some(DesktopStatus::Error(error.to_string()));
                             }
                         } else {
-                            self.status =
-                                Some("editor unmount view does not match the mounted pane".into());
+                            self.status = Some(DesktopStatus::Error(
+                                "editor unmount view does not match the mounted pane".into(),
+                            ));
                         }
                     }
                     state.mounted_documents.remove(&pane);
@@ -5521,7 +5596,9 @@ impl NativeDesktop {
                                         .update(crate::EditorMessage::SetFindMatches(matches)),
                                 );
                             }
-                            Err(error) => self.status = Some(error.to_string()),
+                            Err(error) => {
+                                self.status = Some(DesktopStatus::Error(error.to_string()))
+                            }
                         }
                     }
                 }
@@ -5536,7 +5613,7 @@ impl NativeDesktop {
                     return match Self::clipboard_task(id, state, *pane, *view, *intent) {
                         Ok(task) => task,
                         Err(error) => {
-                            self.status = Some(error);
+                            self.status = Some(DesktopStatus::Error(error));
                             Task::none()
                         }
                     };
@@ -5582,12 +5659,6 @@ impl NativeDesktop {
                     EditorCenterMessage::DismissSpellingMenu => {
                         state.pending_spelling_menu = None;
                         state.spelling_menu = None;
-                        return Task::none();
-                    }
-                    EditorCenterMessage::DismissCommentComposer => {
-                        workspace
-                            .editor_mut()
-                            .update(crate::EditorMessage::CancelCommentComposer);
                         return Task::none();
                     }
                     EditorCenterMessage::ChooseSpellingAction(action) => {
@@ -5640,7 +5711,9 @@ impl NativeDesktop {
                                         pane,
                                         snapshot.presentation.pixel_scroll_y,
                                     ),
-                                    Err(error) => self.status = Some(error.to_string()),
+                                    Err(error) => {
+                                        self.status = Some(DesktopStatus::Error(error.to_string()))
+                                    }
                                 }
                             }
                             if let Some(style_name) = state
@@ -5682,7 +5755,7 @@ impl NativeDesktop {
                                     &session,
                                 )
                             {
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                             }
                             let revision = update.revision();
                             let Some(session) = state
@@ -5690,9 +5763,9 @@ impl NativeDesktop {
                                 .get(&pane)
                                 .map(MountedEditorBinding::session)
                             else {
-                                self.status = Some(
+                                self.status = Some(DesktopStatus::Error(
                                     "edited document has no mounted editor session".to_owned(),
-                                );
+                                ));
                                 return Task::none();
                             };
                             workspace.update(ProjectMessage::MarkEditorDirty);
@@ -5723,7 +5796,7 @@ impl NativeDesktop {
                                 workspace.update(ProjectMessage::MarkEditorDirty);
                                 state.autosave.mark_dirty(session, revision, Instant::now());
                             }
-                            self.status = Some(error.to_string());
+                            self.status = Some(DesktopStatus::Error(error.to_string()));
                         }
                     }
                 } else if !effects.is_empty() {
@@ -5738,8 +5811,9 @@ impl NativeDesktop {
                         {
                             state.autosave.explicit_save_waiting = true;
                             let retry = Self::retry_pending_mutations(id, state);
-                            self.status =
-                                Some("Finishing project changes before saving…".to_owned());
+                            self.status = Some(DesktopStatus::Info(
+                                "Finishing project changes before saving…".to_owned(),
+                            ));
                             return Task::batch([editor_tasks, retry]);
                         }
                         if state.autosave.save_in_flight {
@@ -5754,12 +5828,15 @@ impl NativeDesktop {
                             ]);
                         }
                         let Some(ports) = state.project.ports().cloned() else {
-                            self.status =
-                                Some("This project session has no persistence port.".into());
+                            self.status = Some(DesktopStatus::Error(
+                                "This project session has no persistence port.".into(),
+                            ));
                             return editor_tasks;
                         };
                         let Some(adapter) = state.project.editor_adapter().cloned() else {
-                            self.status = Some("project editor adapter is unavailable".into());
+                            self.status = Some(DesktopStatus::Error(
+                                "project editor adapter is unavailable".into(),
+                            ));
                             return editor_tasks;
                         };
                         let sessions = deduplicated_editor_sessions(
@@ -5776,7 +5853,7 @@ impl NativeDesktop {
                         ) {
                             Ok(plans) => plans,
                             Err(error) => {
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                                 return editor_tasks;
                             }
                         };
@@ -5827,39 +5904,6 @@ impl NativeDesktop {
                 .into_iter()
                 .map(|effect| Self::project_effect_task(window, executor.clone(), None, effect)),
         )
-    }
-
-    fn tracked_project_effect_tasks(
-        window: window::Id,
-        state: &mut NativeProjectState,
-        effects: Vec<ProjectEffect>,
-    ) -> Task<Message> {
-        let mut tasks = Vec::new();
-        let mut untracked = Vec::new();
-        for effect in effects {
-            let history_action = match &effect {
-                ProjectEffect::CreateNamedSnapshot(_) => Some(HistoryWorkflowAction::NamedSnapshot),
-                ProjectEffect::RestoreHistory { .. } => Some(HistoryWorkflowAction::Restore),
-                _ => None,
-            };
-            if project_effect_requires_durability(&effect) {
-                let ticket = ProjectMutationTicket {
-                    effect: effect.clone(),
-                    history_action,
-                    synopsis_commit: None,
-                };
-                state.project_mutations.enqueue(ticket);
-            } else {
-                untracked.push(effect);
-            }
-        }
-        tasks.push(Self::project_effect_tasks(
-            window,
-            state.effect_executor.clone(),
-            untracked,
-        ));
-        tasks.push(Self::launch_next_persistent_mutation(window, state));
-        Task::batch(tasks)
     }
 
     fn launch_project_mutation(
@@ -5977,7 +6021,7 @@ impl NativeDesktop {
                 }
             }
             if let Some(error) = error {
-                self.status = Some(error.clone());
+                self.status = Some(DesktopStatus::Error(error.clone()));
                 append_workspace_notification(
                     &mut state.notifications,
                     WorkspaceNotification::error(error.clone()),
@@ -6550,38 +6594,49 @@ impl NativeDesktop {
         result: Result<(), String>,
     ) -> Task<Message> {
         if self.project_windows.get(&request.capability) != Some(&window) {
-            self.status = Some("clipboard completion targets a stale window".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard completion targets a stale window".to_owned(),
+            ));
             return Task::none();
         }
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
-            self.status = Some("clipboard completion targets a closed window".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard completion targets a closed window".to_owned(),
+            ));
             return Task::none();
         };
         let binding = match clipboard_target(state, &request) {
             Ok(binding) => binding,
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
         if request.intent == MountedEditorClipboardIntent::Copy {
             match result {
                 Ok(()) => {
-                    self.status = binding.restore_focus().err().map(|error| error.to_string());
+                    self.status = binding
+                        .restore_focus()
+                        .err()
+                        .map(|error| DesktopStatus::Error(error.to_string()));
                 }
                 Err(error) => {
                     let _ = binding.restore_focus();
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                 }
             }
             return Task::none();
         }
         if request.intent != MountedEditorClipboardIntent::Cut {
-            self.status = Some("clipboard write completion has the wrong intent".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard write completion has the wrong intent".to_owned(),
+            ));
             return Task::none();
         }
         let Some(adapter) = state.project.editor_adapter().cloned() else {
-            self.status = Some("project editor adapter is unavailable".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "project editor adapter is unavailable".to_owned(),
+            ));
             return Task::none();
         };
         let mutation = apply_completed_cut(adapter.as_ref(), binding, &request, result);
@@ -6595,17 +6650,21 @@ impl NativeDesktop {
         result: Result<UntrustedClipboardContent, String>,
     ) -> Task<Message> {
         if self.project_windows.get(&request.capability) != Some(&window) {
-            self.status = Some("clipboard completion targets a stale window".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard completion targets a stale window".to_owned(),
+            ));
             return Task::none();
         }
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
-            self.status = Some("clipboard completion targets a closed window".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard completion targets a closed window".to_owned(),
+            ));
             return Task::none();
         };
         let binding = match clipboard_target(state, &request) {
             Ok(binding) => binding,
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
@@ -6614,19 +6673,23 @@ impl NativeDesktop {
             MountedEditorClipboardIntent::Paste
                 | MountedEditorClipboardIntent::PasteWithoutFormatting
         ) {
-            self.status = Some("clipboard read completion has the wrong intent".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard read completion has the wrong intent".to_owned(),
+            ));
             return Task::none();
         }
         let source = match result {
             Ok(source) => source,
             Err(error) => {
                 let _ = binding.restore_focus();
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
         let Some(adapter) = state.project.editor_adapter().cloned() else {
-            self.status = Some("project editor adapter is unavailable".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "project editor adapter is unavailable".to_owned(),
+            ));
             return Task::none();
         };
         let mutation = apply_completed_paste(adapter.as_ref(), binding, &request, &source);
@@ -6645,16 +6708,20 @@ impl NativeDesktop {
                 return Task::none();
             }
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
-            self.status = Some("clipboard mutation completed for a closed window".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "clipboard mutation completed for a closed window".to_owned(),
+            ));
             return Task::none();
         };
         let Some(workspace) = state.workspace.as_mut() else {
-            self.status = Some("project workspace is unavailable".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "project workspace is unavailable".to_owned(),
+            ));
             return Task::none();
         };
         if let Some(style_name) = state
@@ -6672,7 +6739,10 @@ impl NativeDesktop {
         state
             .autosave
             .mark_dirty(mutation.editor_session, mutation.revision, Instant::now());
-        self.status = mutation.presentation_error.or(mutation.feedback);
+        self.status = mutation
+            .presentation_error
+            .map(DesktopStatus::Error)
+            .or_else(|| mutation.feedback.map(DesktopStatus::Info));
         Task::none()
     }
 
@@ -6915,7 +6985,9 @@ impl NativeDesktop {
                     .cloned()
                     .map(|ports| NativeProjectEffectExecutor::new(ports, snapshot));
                 if let Err(error) = Self::refresh_mounted_style_catalogs(state) {
-                    self.status = Some(format!("Could not refresh mounted styles: {error}"));
+                    self.status = Some(DesktopStatus::Error(format!(
+                        "Could not refresh mounted styles: {error}"
+                    )));
                 }
                 let mut reopen = Vec::new();
                 if !creating_hierarchy && let Some(workspace) = state.workspace.as_ref() {
@@ -7013,7 +7085,9 @@ impl NativeDesktop {
                     ));
                 }
                 if let Err(error) = Self::refresh_mounted_style_catalogs(state) {
-                    self.status = Some(format!("Could not refresh mounted styles: {error}"));
+                    self.status = Some(DesktopStatus::Error(format!(
+                        "Could not refresh mounted styles: {error}"
+                    )));
                 }
                 let Some(ports) = state.project.ports().cloned() else {
                     let error = "Project mutation completed without a persistence port.".to_owned();
@@ -7029,7 +7103,7 @@ impl NativeDesktop {
                             Some(error),
                         );
                     }
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     return Task::none();
                 };
                 let through_revision = snapshot.project.revision.value();
@@ -7077,12 +7151,15 @@ impl NativeDesktop {
                     .cloned()
                     .map(|ports| NativeProjectEffectExecutor::new(ports, snapshot));
                 if let Err(error) = Self::refresh_mounted_style_catalogs(state) {
-                    self.status = Some(format!("Could not refresh mounted styles: {error}"));
+                    self.status = Some(DesktopStatus::Error(format!(
+                        "Could not refresh mounted styles: {error}"
+                    )));
+                } else {
+                    self.status = Some(DesktopStatus::Info(match kind {
+                        crate::TreeClipboardKind::Copy => "Project item pasted".to_owned(),
+                        crate::TreeClipboardKind::Cut => "Project item moved".to_owned(),
+                    }));
                 }
-                self.status = Some(match kind {
-                    crate::TreeClipboardKind::Copy => "Project item pasted".to_owned(),
-                    crate::TreeClipboardKind::Cut => "Project item moved".to_owned(),
-                });
                 let terminal = mutation.map_or_else(Task::none, |ticket| {
                     self.after_persistent_mutation_terminal(
                         window,
@@ -7110,7 +7187,15 @@ impl NativeDesktop {
                     if let Err(error) =
                         Self::mount_resolved_document(state, document, self.appearance)
                     {
-                        self.status = Some(error);
+                        state.editor_hosts.insert(
+                            pane,
+                            crate::iced_editor_surface::EditorPaneSlot::state(
+                                crate::iced_editor_surface::EditorCenterPaneState::Error(
+                                    error.clone(),
+                                ),
+                            ),
+                        );
+                        self.status = Some(DesktopStatus::Error(error));
                         break;
                     }
                     if let Some(view) = state
@@ -7131,7 +7216,7 @@ impl NativeDesktop {
                         .get(&workspace.editor().focused_pane())
                     && let Err(error) = binding.restore_focus()
                 {
-                    self.status = Some(error.to_string());
+                    self.status = Some(DesktopStatus::Error(error.to_string()));
                 }
                 Task::batch(spellcheck_tasks)
             }
@@ -7157,7 +7242,7 @@ impl NativeDesktop {
                         parchmint_editor_iced::MountedEditorMessage::Focus(0_u64.into()),
                     )
                 {
-                    self.status = Some(error.to_string());
+                    self.status = Some(DesktopStatus::Error(error.to_string()));
                 }
                 Task::none()
             }
@@ -7177,21 +7262,25 @@ impl NativeDesktop {
                 Self::accept_hydrated_snapshot(state, *snapshot);
                 if let Err(error) = Self::mount_resolved_document(state, document, self.appearance)
                 {
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     return Task::none();
                 }
                 let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) else {
-                    self.status = Some("search navigation did not mount an editor".into());
+                    self.status = Some(DesktopStatus::Error(
+                        "search navigation did not mount an editor".into(),
+                    ));
                     return Task::none();
                 };
                 let Some(adapter) = state.project.editor_adapter() else {
-                    self.status = Some("project editor adapter is unavailable".into());
+                    self.status = Some(DesktopStatus::Error(
+                        "project editor adapter is unavailable".into(),
+                    ));
                     return Task::none();
                 };
                 let revision = match adapter.revision(binding.session()) {
                     Ok(revision) => revision,
                     Err(error) => {
-                        self.status = Some(error.to_string());
+                        self.status = Some(DesktopStatus::Error(error.to_string()));
                         return Task::none();
                     }
                 };
@@ -7209,9 +7298,9 @@ impl NativeDesktop {
                     ),
                 );
                 if let Err(error) = result {
-                    self.status = Some(error.to_string());
+                    self.status = Some(DesktopStatus::Error(error.to_string()));
                 } else if let Err(error) = binding.refresh() {
-                    self.status = Some(error.to_string());
+                    self.status = Some(DesktopStatus::Error(error.to_string()));
                 } else {
                     self.status = None;
                 }
@@ -7244,7 +7333,7 @@ impl NativeDesktop {
                 if let Some(terminal) = terminal {
                     self.after_persistent_mutation_terminal(window, terminal, Some(error))
                 } else {
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     Task::none()
                 }
             }
@@ -7441,14 +7530,14 @@ impl NativeDesktop {
                             .map(|view| Self::spellcheck_task(window, state, view))
                             .transpose()
                             .unwrap_or_else(|error| {
-                                self.status = Some(error);
+                                self.status = Some(DesktopStatus::Error(error));
                                 None
                             })
                             .unwrap_or_else(Task::none);
                         return spellcheck;
                     }
                     Ok(None) => {}
-                    Err(error) => self.status = Some(error),
+                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
                 }
                 Task::none()
             }
@@ -7481,7 +7570,7 @@ impl NativeDesktop {
                         Some(error),
                     );
                 }
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 Task::none()
             }
         }
@@ -7530,6 +7619,16 @@ impl NativeDesktop {
     fn restored_workspace_effects(
         state: &mut NativeProjectState,
     ) -> Result<Vec<ProjectEffect>, String> {
+        // Workspace preferences and recovery may finish in either order. Open
+        // the chosen tabs only after recovery has established their document state.
+        if state.workspace.as_ref().is_some_and(|workspace| {
+            matches!(
+                workspace.content_state(),
+                crate::ContentState::Loading | crate::ContentState::Recovery
+            )
+        }) {
+            return Ok(Vec::new());
+        }
         let targets = [EditorPane::Primary, EditorPane::Companion].map(|pane| {
             let document = state
                 .workspace
@@ -8475,12 +8574,13 @@ impl NativeDesktop {
             .editor_adapter()
             .ok_or_else(|| "project editor adapter is unavailable".to_owned())?;
         let session = binding.session();
-        let revision = adapter
-            .revision(session.clone())
-            .map_err(|error| error.to_string())?;
-        let block = adapter
-            .primary_visible_block(session.clone())
-            .map_err(|error| error.to_string())?;
+        let Some(context) = adapter
+            .text_context(session.clone(), view, 4096)
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(Task::none());
+        };
+        let revision = context.revision;
         let document_id = *state
             .mounted_documents
             .iter()
@@ -8513,14 +8613,9 @@ impl NativeDesktop {
             project_id,
             document_revision: revision,
             blocks: vec![RevisionedTextRange {
-                block_id: block.block(),
-                range: EditorSelection::new(
-                    block.document_start(),
-                    parchmint_editor_api::DocumentPosition::from(
-                        block.document_start().value() + block.text().chars().count() as u64,
-                    ),
-                ),
-                text: block.text().to_owned(),
+                block_id: context.block_id,
+                range: context.range,
+                text: context.text,
             }],
             project_dictionary,
             global_dictionary: DictionaryRevision::default(),
@@ -8548,20 +8643,22 @@ impl NativeDesktop {
                         spellcheck.reload_project_dictionary(project_id, request.project_dictionary)
                     })
                     .map_err(|error| error.to_string())?;
-                iced::futures::executor::block_on(project_reload);
+                iced::futures::executor::block_on(project_reload)
+                    .map_err(|error| error.to_string())?;
                 let global_reload = access
                     .spellcheck(|spellcheck| {
                         spellcheck.reload_global_dictionary(request.global_dictionary)
                     })
                     .map_err(|error| error.to_string())?;
-                iced::futures::executor::block_on(global_reload);
+                iced::futures::executor::block_on(global_reload)
+                    .map_err(|error| error.to_string())?;
                 let operation = access
                     .spellcheck(|spellcheck| spellcheck.check(request))
                     .map_err(|error| error.to_string())?;
-                let mut stream = iced::futures::executor::block_on(operation);
-                stream
-                    .next()
-                    .ok_or_else(|| "spellcheck stopped without a result".to_owned())
+                let mut stream = iced::futures::executor::block_on(operation)
+                    .map_err(|error| error.to_string())?;
+                // Cancellation and supersession intentionally end the stream.
+                Ok(stream.next())
             }),
             move |result| Message::SpellcheckFinished {
                 window,
@@ -8575,7 +8672,7 @@ impl NativeDesktop {
         &mut self,
         window: window::Id,
         ticket: NativeSpellcheckTicket,
-        result: Result<SpellcheckResult, String>,
+        result: Result<Option<SpellcheckResult>, String>,
     ) -> Task<Message> {
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
             return Task::none();
@@ -8610,10 +8707,10 @@ impl NativeDesktop {
             return Task::none();
         }
         let result = match result {
-            Ok(result) if ticket.request.accepts(&result) => result,
+            Ok(Some(result)) if ticket.request.accepts(&result) => result,
             Ok(_) => return Task::none(),
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
@@ -8986,7 +9083,7 @@ impl NativeDesktop {
                 let plans = match Self::projection_plans(state) {
                     Ok(plans) => plans,
                     Err(error) => {
-                        self.status = Some(error);
+                        self.status = Some(DesktopStatus::Error(error));
                         continue;
                     }
                 };
@@ -9030,7 +9127,7 @@ impl NativeDesktop {
             let plans = match Self::projection_plans(state) {
                 Ok(plans) => plans,
                 Err(error) => {
-                    self.status = Some(error);
+                    self.status = Some(DesktopStatus::Error(error));
                     continue;
                 }
             };
@@ -9065,17 +9162,21 @@ impl NativeDesktop {
             return Task::none();
         }
         let Some(ports) = state.project.ports().cloned() else {
-            self.status = Some("This project session has no persistence port.".into());
+            self.status = Some(DesktopStatus::Error(
+                "This project session has no persistence port.".into(),
+            ));
             return Task::none();
         };
         let Some(adapter) = state.project.editor_adapter().cloned() else {
-            self.status = Some("project editor adapter is unavailable".into());
+            self.status = Some(DesktopStatus::Error(
+                "project editor adapter is unavailable".into(),
+            ));
             return Task::none();
         };
         let plans = match Self::projection_plans(state) {
             Ok(plans) => plans,
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 return Task::none();
             }
         };
@@ -9116,82 +9217,6 @@ impl NativeDesktop {
                 .window = Some(id);
         }
         task.map(Message::WindowOpened)
-    }
-
-    fn mount_initial_editor(
-        &mut self,
-        project: &NativeProjectWindow,
-        workspace: &ProjectWorkspace,
-    ) -> (
-        EditorHostSlots,
-        BTreeMap<EditorPane, MountedEditorBinding>,
-        BTreeMap<EditorPane, parchmint_domain::DocumentId>,
-    ) {
-        let mut slots = EditorHostSlots::default();
-        let mut bindings = BTreeMap::new();
-        let mut mounted_documents = BTreeMap::new();
-        let Some(project_ui) = project.project_ui.as_ref() else {
-            return (slots, bindings, mounted_documents);
-        };
-        let Some(adapter) = project.editor_adapter() else {
-            return (slots, bindings, mounted_documents);
-        };
-        let pane = EditorPane::Primary;
-        let state = workspace.editor().pane(pane);
-        let Some(active_document) = state.active_document() else {
-            return (slots, bindings, mounted_documents);
-        };
-        let Some(document) =
-            project_ui.snapshot.documents.iter().find(|document| {
-                stable_id_string(document.document_id.as_bytes()) == active_document
-            })
-        else {
-            self.status = Some("The active document is missing from the project snapshot.".into());
-            return (slots, bindings, mounted_documents);
-        };
-        let viewport = EditorViewport::new(720.0, 520.0)
-            .expect("native editor viewport constants must be positive");
-        let surface_theme = match self.appearance {
-            ResolvedAppearance::Light => EditorSurfaceTheme::light(),
-            ResolvedAppearance::Dark => EditorSurfaceTheme::dark(),
-        };
-        let load = match canonical_load(&project_ui.snapshot, document.document_id) {
-            Ok(load) => load,
-            Err(error) => {
-                self.status = Some(error.to_string());
-                return (slots, bindings, mounted_documents);
-            }
-        };
-        let config = MountedEditorBindingConfig::new(
-            MountedEditorSession::Open(load),
-            project.window,
-            state.view(),
-            viewport,
-            surface_theme,
-        );
-        match MountedEditorBinding::mount(adapter.as_ref(), config) {
-            Ok(binding) => {
-                if let Err(error) = binding.restore_scroll(viewport, state.scroll_offset()) {
-                    self.status = Some(format!("Could not restore editor scroll: {error}"));
-                }
-                slots.insert(
-                    pane,
-                    crate::iced_editor_surface::EditorPaneSlot::mounted(binding.host().clone()),
-                );
-                mounted_documents.insert(pane, document.document_id);
-                bindings.insert(pane, binding);
-            }
-            Err(error) => {
-                self.status = Some(format!("Could not mount the editor: {error}"));
-                slots.insert(
-                    pane,
-                    crate::iced_editor_surface::EditorPaneSlot::state(
-                        crate::iced_editor_surface::EditorCenterPaneState::Error(error.to_string()),
-                    ),
-                );
-            }
-        }
-        (slots, bindings, mounted_documents)
     }
 
     fn activate_reconciled_project(
@@ -9261,55 +9286,16 @@ impl NativeDesktop {
                 });
         }
 
-        if let Some(workspace) = state.workspace.as_deref() {
-            let (hosts, bindings, documents) = self.mount_initial_editor(&state.project, workspace);
-            state.editor_hosts = hosts;
-            state.editor_bindings = bindings;
-            state.mounted_documents = documents;
-            if let Some(adapter) = state.project.editor_adapter() {
-                let mounted = state
-                    .editor_bindings
-                    .values()
-                    .filter_map(|binding| {
-                        let session = binding.session();
-                        adapter
-                            .revision(session.clone())
-                            .ok()
-                            .map(|revision| (session, revision))
-                    })
-                    .collect::<Vec<_>>();
-                state.autosave.record_projected(mounted);
+        let effects = match Self::restored_workspace_effects(&mut state) {
+            Ok(effects) => effects,
+            Err(error) => {
+                self.status = Some(DesktopStatus::Error(error));
+                Vec::new()
             }
-        }
-        if let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) {
-            let _ = binding.restore_focus();
-            if let Ok(active_style) = binding.active_style()
-                && let Some(style_name) = state
-                    .project
-                    .project_ui
-                    .as_ref()
-                    .and_then(|project| project.snapshot.project.styles.get(active_style))
-                    .map(|style| style.display_name.clone())
-                && let Some(workspace) = state.workspace.as_mut()
-            {
-                workspace
-                    .editor_mut()
-                    .update(crate::EditorMessage::SetActiveParagraphStyle(style_name));
-            }
-        }
-        self.windows.insert(window, NativeWindow::Project(state));
-        let spellcheck_tasks = match self.windows.get_mut(&window) {
-            Some(NativeWindow::Project(state)) => state
-                .editor_bindings
-                .values()
-                .map(MountedEditorBinding::view)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .filter_map(|view| Self::spellcheck_task(window, state, view).ok())
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
         };
-        Task::batch(spellcheck_tasks)
+        let task = Self::project_effect_tasks(window, state.effect_executor.clone(), effects);
+        self.windows.insert(window, NativeWindow::Project(state));
+        task
     }
 
     fn open_project_window(&mut self, project: NativeProjectWindow) -> Task<Message> {
@@ -9488,7 +9474,7 @@ impl NativeDesktop {
             Ok(Some(project)) => self.route_project_open(project),
             Ok(None) => Task::none(),
             Err(error) => {
-                self.status = Some(error);
+                self.status = Some(DesktopStatus::Error(error));
                 Task::none()
             }
         }
@@ -9496,10 +9482,10 @@ impl NativeDesktop {
 
     fn route_recent_project_open(&mut self, project: PathBuf) -> Task<Message> {
         if !project.exists() {
-            self.status = Some(format!(
+            self.status = Some(DesktopStatus::Error(format!(
                 "The project at {} is no longer available. It may have been moved or deleted.",
                 project.display()
-            ));
+            )));
             return Task::none();
         }
         self.route_project_open(project)
@@ -9540,7 +9526,9 @@ impl NativeDesktop {
                 .map(str::to_owned),
         };
         if request.title.is_empty() || request.destination.as_os_str().is_empty() {
-            self.status = Some("Enter a project title and choose a destination.".to_owned());
+            self.status = Some(DesktopStatus::Error(
+                "Enter a project title and choose a destination.".to_owned(),
+            ));
             return Task::none();
         }
         let project = request.destination.clone();
@@ -9602,16 +9590,21 @@ impl NativeDesktop {
                     .map_or_else(Task::none, window::gain_focus)
             }
             Ok(NativeProjectOpenResult::Locked) => {
-                self.status = Some(format!("Project is already open: {}", project.display()));
+                self.status = Some(DesktopStatus::Error(format!(
+                    "Project is already open: {}",
+                    project.display()
+                )));
                 Task::none()
             }
             Err(NativeTaskOutcome::StaleSession | NativeTaskOutcome::Canceled) => Task::none(),
             Err(NativeTaskOutcome::Unavailable) => {
-                self.status = Some("Project opening is currently unavailable.".to_owned());
+                self.status = Some(DesktopStatus::Error(
+                    "Project opening is currently unavailable.".to_owned(),
+                ));
                 Task::none()
             }
             Err(NativeTaskOutcome::Failed { message }) => {
-                self.status = Some(message);
+                self.status = Some(DesktopStatus::Error(message));
                 Task::none()
             }
         }
@@ -9640,7 +9633,9 @@ impl NativeDesktop {
                 Self::enqueue_deferred_inspector_commit(state, effect);
             }
             state.autosave.close_after_save = true;
-            self.status = Some("Finishing Inspector changes before closing…".to_owned());
+            self.status = Some(DesktopStatus::Info(
+                "Finishing Inspector changes before closing…".to_owned(),
+            ));
             return Self::launch_next_persistent_mutation(id, state);
         }
         let NativeWindow::Project(state) = self
@@ -9660,7 +9655,9 @@ impl NativeDesktop {
             };
             state.autosave.close_after_save = true;
             let retry = Self::retry_pending_mutations(id, state);
-            self.status = Some("Finishing project changes before closing…".to_owned());
+            self.status = Some(DesktopStatus::Info(
+                "Finishing project changes before closing…".to_owned(),
+            ));
             return retry;
         }
         if state.autosave.save_in_flight {
@@ -9672,7 +9669,9 @@ impl NativeDesktop {
                 unreachable!("project window kind was checked above")
             };
             state.autosave.close_after_save = true;
-            self.status = Some("Finishing the current save before closing…".to_owned());
+            self.status = Some(DesktopStatus::Info(
+                "Finishing the current save before closing…".to_owned(),
+            ));
             return Task::none();
         }
         self.continue_close_window(id)
@@ -9712,11 +9711,11 @@ impl NativeDesktop {
         let ports = state.project.ports().cloned();
         let adapter = state.project.editor_adapter().cloned();
         let has_plans = !plans.is_empty();
-        self.status = Some(if is_clean {
+        self.status = Some(DesktopStatus::Info(if is_clean {
             "Closing project…".to_owned()
         } else {
             "Saving project before closing…".to_owned()
-        });
+        }));
         let close = Task::perform(
             Self::run_blocking_operation("close project", move || {
                 Ok(run_projection_sequence(
@@ -11148,7 +11147,7 @@ mod tests {
     }
 
     #[test]
-    fn native_capture_counts_only_draws_of_its_open_target_window() {
+    fn native_capture_counts_target_draws_and_propagates_application_failures() {
         let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
             appearance: ResolvedAppearance::Light,
             appearance_mode: AppearanceMode::System,
@@ -11184,6 +11183,13 @@ mod tests {
         }
         let _ = desktop.capture_after_settled_frame(target);
         assert!(desktop.capture.as_ref().unwrap().screenshot_requested);
+        let completion = Arc::clone(&desktop.capture.as_ref().unwrap().request.completion);
+        desktop.status = Some(DesktopStatus::Error("editor failed to load".to_owned()));
+        let _ = desktop.capture_after_settled_frame(target);
+        assert!(desktop.capture.is_none());
+        assert!(
+            matches!(completion.lock().unwrap().as_ref(), Some(Err(error)) if error == "editor failed to load")
+        );
     }
 
     #[test]
@@ -11220,7 +11226,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_foundation_preserves_penpot_geometry_and_semantic_variants() {
+    fn launcher_foundation_preserves_geometry_and_semantic_variants() {
         assert_eq!(LAUNCHER_INSET, 72);
         assert_eq!(LAUNCHER_RHYTHM, 28);
         assert_eq!(LAUNCHER_ACTION_ROW_HEIGHT, 52);
@@ -11837,7 +11843,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_unavailable_still_activates_the_project_without_an_error() {
+    fn recovery_unavailable_activates_a_workspace_with_no_open_tabs() {
         let project = legacy_project(PathBuf::from("/tmp/no-recovery.parchmint"), 153);
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
@@ -11853,6 +11859,22 @@ mod tests {
         let state = install_fixture_workspace(&mut desktop, window);
         let generation = project.session.generation();
         let workspace = state.workspace.as_mut().expect("fixture workspace");
+        // This reducer fixture has no project ports; document mounting is
+        // covered by the production restart flows.
+        for pane in [EditorPane::Primary, EditorPane::Companion] {
+            let documents = workspace
+                .editor()
+                .pane(pane)
+                .tabs()
+                .iter()
+                .map(|tab| tab.id().to_owned())
+                .collect::<Vec<_>>();
+            for document_id in documents {
+                workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::CloseTab { pane, document_id });
+            }
+        }
         workspace.begin_session(generation, 1);
         let ticket = workspace.begin_recovery_reconciliation();
 

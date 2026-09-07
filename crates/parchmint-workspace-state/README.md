@@ -1,7 +1,5 @@
 # `parchmint-workspace-state`
 
-## What it does
-
 This crate saves the way each project workspace was arranged. It restores pane
 widths, the split layout, collapsed sections, open tabs, the active view, scroll
 positions, and the current workspace mode when the project opens again.
@@ -29,37 +27,10 @@ save their workspace state independently.
 
 ## Interface
 
-```rust
-pub type WorkspaceFuture<'a, T> =
-    Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+`WorkspaceStateStore` loads, saves, and removes `WorkspaceSnapshot` values by
+project identity. `FileWorkspaceStateStore` implements the interface on disk.
 
-pub trait WorkspaceStateStore: Send + Sync {
-    fn load(
-        &self,
-        project: ProjectIdentity,
-    ) -> WorkspaceFuture<'_, Result<Option<WorkspaceSnapshot>, WorkspaceError>>;
-
-    fn save(
-        &self,
-        project: ProjectIdentity,
-        snapshot: &WorkspaceSnapshot,
-    ) -> WorkspaceFuture<'_, Result<WorkspaceRevision, WorkspaceError>>;
-
-    fn remove(
-        &self,
-        project: ProjectIdentity,
-    ) -> WorkspaceFuture<'_, Result<(), WorkspaceError>>;
-}
-
-pub struct WorkspaceSnapshot {
-    pub layout: PaneLayout,
-    pub explorer: ExplorerWorkspaceState,
-    pub tabs: Vec<OpenTabState>,
-    pub active_view: Option<ViewId>,
-    pub views: BTreeMap<ViewId, SavedViewState>,
-    pub mode: WorkspaceMode,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 The store uses project and node IDs. It does not store document text or other
 authored content.
@@ -71,12 +42,6 @@ directory. It writes a temporary file, flushes it, and replaces the previous
 file. The UI holds splitter movements in memory and persists the settled layout
 once the pointer is released, so dragging a splitter does not write on every
 pointer event.
-
-```rust
-fn restore(saved: &mut WorkspaceSnapshot, nodes: &BTreeSet<NodeId>) {
-    saved.remove_missing_nodes(nodes);
-}
-```
 
 If the workspace file is missing or invalid, ParchMint opens the project with
 the default layout and reports the invalid file.

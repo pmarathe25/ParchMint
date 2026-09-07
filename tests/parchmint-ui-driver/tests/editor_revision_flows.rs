@@ -4,13 +4,21 @@ use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessTarget, HarnessWindow, LaunchRequest,
     RibbonDestination,
 };
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
 fn visible_explorer_buttons_create_and_open_a_named_chapter() {
     let run = IsolatedRun::new("visible-creation-actions").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Visible creation");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "The original draft survives recovery and creation.",
+        )
+        .unwrap();
+    harness.elapse_recovery_capture().unwrap();
     harness
         .click_text(HarnessWindow::Project, "New group")
         .unwrap();
@@ -43,6 +51,98 @@ fn visible_explorer_buttons_create_and_open_a_named_chapter() {
             .iter()
             .any(|body| body.contains("The chapter begins."))
     );
+    assert!(
+        canonical_bodies(&project)
+            .iter()
+            .any(|body| body.contains("The original draft survives recovery and creation."))
+    );
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert!(
+        reopened
+            .hierarchy_titles()
+            .unwrap()
+            .contains(&"Chapter One".to_owned())
+    );
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains("The chapter begins.")
+    );
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
+    for newest_first in [false, true] {
+        let run = IsolatedRun::new("delayed-recovery-creation").unwrap();
+        let project = run.root().join("novel.parchmint");
+        let harness = create_project(&run, &project, "Delayed recovery");
+        harness
+            .type_into_target(
+                HarnessWindow::Project,
+                HarnessTarget::EditorPrimary,
+                "Draft before recovery. ",
+            )
+            .unwrap();
+        harness.hold_completions().unwrap();
+        harness.elapse_recovery_capture().unwrap();
+        harness
+            .click_text(HarnessWindow::Project, "New document")
+            .unwrap();
+        harness
+            .type_into_target(
+                HarnessWindow::Project,
+                HarnessTarget::EditorPrimary,
+                "Typed while creation was pending.",
+            )
+            .unwrap();
+        harness.release_completions(newest_first).unwrap();
+        harness
+            .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Next chapter")
+            .unwrap();
+        harness
+            .type_into_target(
+                HarnessWindow::Project,
+                HarnessTarget::EditorPrimary,
+                "A newly created chapter.",
+            )
+            .unwrap();
+        harness.close(HarnessWindow::Project).unwrap();
+        harness.shutdown().unwrap();
+        let bodies = canonical_bodies(&project);
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body
+                    .contains("Draft before recovery. Typed while creation was pending.")),
+            "{bodies:?}"
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains("A newly created chapter.")),
+            "{bodies:?}"
+        );
+        let reopened =
+            DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+        assert!(
+            reopened
+                .hierarchy_titles()
+                .unwrap()
+                .contains(&"Next chapter".to_owned())
+        );
+        assert!(
+            reopened
+                .active_editor_body()
+                .unwrap()
+                .contains("A newly created chapter.")
+        );
+        reopened.close(HarnessWindow::Project).unwrap();
+        reopened.shutdown().unwrap();
+    }
 }
 
 #[test]
@@ -454,52 +554,6 @@ fn editor_selection_formatting_can_be_undone_and_redone_with_keyboard_focus() {
         .close(HarnessWindow::Project)
         .expect("close project");
     harness.shutdown().expect("stop application");
-}
-
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open project form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("enter title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
-}
-
-fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create group")
-        .expect("create group");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
-        .expect("name group");
-}
-
-fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create document")
-        .expect("create document");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
-        .expect("name document");
 }
 
 fn canonical_bodies(project: &Path) -> Vec<String> {

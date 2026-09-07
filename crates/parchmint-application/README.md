@@ -1,7 +1,5 @@
 # `parchmint-application`
 
-## What it does
-
 This crate runs ParchMint actions and sends each edit to the correct undo list.
 
 Project commands change hierarchy, display titles, Synopsis, metadata, styles,
@@ -40,58 +38,14 @@ undo while the user is typing, then commits its value through the appropriate
 project or document command. This prevents a text field from bypassing project
 or document undo.
 
-Global replacement changes several documents as one project command. Before it
-changes any document, it prepares the data needed to reverse every change. The
-operation uses one ID, creates one project undo entry, and creates one History
-checkpoint after the save completes. Open editor sessions receive a
-project-command boundary and do not add separate document-undo entries. If any
-part fails, the prepared inverse restores every affected open and closed
-document as one operation; recovery never accepts a partial replacement.
-
 ## Interface
 
-```rust
-pub type AppFuture<'a, T> =
-    Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+`NativeProjectCommandDispatcher` applies project commands and workflows.
+`NativeDocumentStateOwner` manages loaded and lazy document state.
+`ProjectPersistenceCoordinator` and `EditorPersistenceCoordinator` connect
+revisioned snapshots to save and recovery services.
 
-pub trait ProjectCommandDispatcher: Send + Sync {
-    fn execute(
-        &self,
-        command: ProjectCommand,
-    ) -> AppFuture<'_, Result<ProjectCommandResult, ApplicationError>>;
-
-    fn undo(&self) -> AppFuture<'_, Result<ProjectCommandResult, ApplicationError>>;
-    fn redo(&self) -> AppFuture<'_, Result<ProjectCommandResult, ApplicationError>>;
-    fn undo_state(&self) -> ProjectUndoState;
-    fn reset_undo(&self, reason: UndoResetReason);
-}
-
-pub struct ProjectCommandResult {
-    pub operation_id: ProjectOperationId,
-    pub revision: ProjectRevision,
-    pub dirty_resources: ResourceSet,
-    pub events: Vec<ProjectEvent>,
-    pub checkpoint_group: CheckpointGroupId,
-}
-
-pub struct ProjectUndoEntry {
-    pub operation_id: ProjectOperationId,
-    pub label: String,
-    pub forward: ProjectPatch,
-    pub inverse: ProjectPatch,
-    pub revisions: RevisionRange,
-    pub affected: ResourceSet,
-    pub byte_cost: usize,
-    pub checkpoint_group: CheckpointGroupId,
-}
-
-pub trait GlobalReplacement: Send + Sync {
-    fn preview(&self, selection: ReplacementSelection)
-        -> AppFuture<'_, Result<ReplacementPreview, ApplicationError>>;
-    fn apply(&self, selection: ReplacementSelection)
-        -> AppFuture<'_, Result<ProjectCommandResult, ApplicationError>>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 Long-running application methods return a future, stream, task handle, or event
 receiver. Application state stays synchronous behind mutexes, and the actual
@@ -111,41 +65,6 @@ Project undo retains up to 100 complete operations and 64 MiB of inverse data
 in memory. Eviction removes whole operations, and a new project command clears
 redo. A larger inverse is not retained after eviction; moving it to a temporary
 session file is not implemented.
-
-```rust
-fn execute_now(&self, command: ProjectCommand) -> Result<ProjectCommandResult, ApplicationError> {
-    let mut state = lock(&self.state)?;
-    let before = state.project.revision;
-    let forward = command.clone();
-    let applied = apply_project_command(&state.project, before, command)?;
-    if let ProjectCommand::CreateDocument { document_id, .. } = &forward {
-        self.documents
-            .insert_document(default_open_snapshot(*document_id))?;
-    }
-    let operation_id = state.operation_id();
-    let mutation = state.mark_dirty(&applied.changed_resources);
-    let checkpoint_group = state.stage_checkpoint(mutation);
-    state.push_undo(ProjectUndoEntry {
-        operation_id,
-        label: command_label(&forward).to_owned(),
-        forward: ProjectPatch::Domain(forward),
-        inverse: ProjectPatch::Domain(applied.inverse),
-        revisions: RevisionRange { before, after: applied.project.revision },
-        affected: applied.changed_resources.clone(),
-        byte_cost: patch_byte_cost(&command) + patch_byte_cost(&applied.inverse),
-        checkpoint_group,
-    });
-    state.project = applied.project;
-    state.redo.clear();
-    Ok(ProjectCommandResult {
-        operation_id,
-        revision: state.project.revision,
-        dirty_resources: applied.changed_resources,
-        events: vec![ProjectEvent::Executed],
-        checkpoint_group,
-    })
-}
-```
 
 Undo and redo create new project or document revisions and save like any other
 edit. Closing and reopening a project clears its interactive undo lists. A

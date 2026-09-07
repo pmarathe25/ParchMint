@@ -541,7 +541,14 @@ impl ProjectSaveCoordinator {
         history: Arc<dyn HistoryStore>,
         intents: Arc<dyn CheckpointIntentStore>,
     ) -> Result<Self, SaveError> {
-        Self::new_inner(project, writer, history, intents, None)
+        Self::new_inner(
+            project,
+            writer,
+            history,
+            intents,
+            #[cfg(test)]
+            None,
+        )
     }
 
     #[cfg(test)]
@@ -560,7 +567,7 @@ impl ProjectSaveCoordinator {
         writer: Arc<dyn AtomicWriter>,
         history: Arc<dyn HistoryStore>,
         intents: Arc<dyn CheckpointIntentStore>,
-        worker_pause: Option<Arc<WorkerPause>>,
+        #[cfg(test)] worker_pause: Option<Arc<WorkerPause>>,
     ) -> Result<Self, SaveError> {
         let (sender, receiver) = mpsc::channel();
         let status = Arc::new(Mutex::new(SaveStatusSnapshot::default()));
@@ -582,7 +589,12 @@ impl ProjectSaveCoordinator {
                     status: worker_status,
                     outstanding: worker_outstanding,
                 };
-                run_worker(dependencies, receiver, worker_pause.clone());
+                run_worker(
+                    dependencies,
+                    receiver,
+                    #[cfg(test)]
+                    worker_pause,
+                );
             })
             .map_err(|_| SaveError::WorkerStopped)?;
         Ok(Self {
@@ -707,12 +719,14 @@ impl Drop for WorkerExitGuard {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct WorkerPause {
     state: Mutex<WorkerPauseState>,
     changed: Condvar,
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct WorkerPauseState {
     blocked: bool,
@@ -721,7 +735,7 @@ struct WorkerPauseState {
     observed_generation: SaveGeneration,
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl WorkerPause {
     fn blocked() -> Self {
         Self {
@@ -804,7 +818,7 @@ impl WorkerPause {
 fn run_worker(
     dependencies: WorkerDependencies,
     receiver: mpsc::Receiver<Command>,
-    worker_pause: Option<Arc<WorkerPause>>,
+    #[cfg(test)] worker_pause: Option<Arc<WorkerPause>>,
 ) {
     let mut queue = VecDeque::new();
     loop {
@@ -828,6 +842,7 @@ fn run_worker(
         }
         coalesce_queue(&mut queue);
         update_queue_metrics(&dependencies.status, queue.len());
+        #[cfg(test)]
         if let Some(pause) = &worker_pause {
             pause.before_execute(&receiver, &mut queue, &dependencies);
         }
@@ -925,6 +940,7 @@ fn coalesce_queue(queue: &mut VecDeque<WorkItem>) {
     }
 }
 
+#[cfg(test)]
 fn highest_generation(queue: &VecDeque<WorkItem>) -> SaveGeneration {
     queue
         .iter()

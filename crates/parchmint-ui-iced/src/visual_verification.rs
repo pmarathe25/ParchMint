@@ -1,6 +1,6 @@
 //! Stable production-composition inputs for external visual verification.
 //!
-//! The catalog mirrors the checked-in Penpot baseline fixture IDs. It never
+//! The capture targets use stable fixture IDs. This module never
 //! renders legacy fixture-only Iced surfaces.
 
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 use std::borrow::Cow;
 
-/// One checked-in Penpot baseline fixture that can be rendered headlessly.
+/// One UI fixture that can be rendered headlessly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualTarget {
     Launcher,
@@ -37,7 +37,7 @@ impl VisualTarget {
         Self::RecentlyDeleted,
     ];
 
-    /// The fixture ID recorded by the Penpot reference manifest.
+    /// The stable fixture ID accepted by the capture command.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Launcher => "launcher-default",
@@ -53,7 +53,7 @@ impl VisualTarget {
         }
     }
 
-    /// The stable basename of the checked-in Penpot PNG for one appearance.
+    /// The output basename for one appearance.
     pub const fn reference_id(self, appearance: VisualAppearance) -> &'static str {
         match (self, appearance) {
             (Self::Launcher, VisualAppearance::Light) => "launcher-light",
@@ -261,7 +261,7 @@ fn production_element(
 ) -> iced::Element<'static, ()> {
     use crate::{
         ProjectWorkspace, RibbonDestination,
-        iced_editor_surface::{EditorCenterChrome, editor_center_surface_with_chrome},
+        iced_editor_surface::editor_center_surface_with_breadcrumbs,
         iced_project_surface::{ProjectSurfaceMessage, verification_project_surface},
     };
 
@@ -275,18 +275,12 @@ fn production_element(
     let workspace: &'static ProjectWorkspace = Box::leak(Box::new(workspace));
     let slots = editor_slots(&snapshot, workspace, target, appearance);
     let theme = presentation(appearance);
-    let chrome = if target == VisualTarget::GlobalSearch {
-        EditorCenterChrome::ManuscriptOnly
-    } else {
-        EditorCenterChrome::Full
-    };
     let breadcrumbs = workspace.active_editor_breadcrumbs();
-    let editor = editor_center_surface_with_chrome(
+    let editor = editor_center_surface_with_breadcrumbs(
         workspace.editor(),
         theme,
         &slots,
         None,
-        chrome,
         &breadcrumbs,
     )
     .map(ProjectSurfaceMessage::EditorCenter);
@@ -361,7 +355,7 @@ fn editor_slots(
     slots
 }
 
-/// Returns the initial mounted-host allocation for a 1440 x 900 Penpot target.
+/// Returns the initial mounted-host allocation for a 1440 x 900 capture target.
 ///
 /// A native window subsequently reflows the host through the viewport sensor,
 /// but a headless capture has no application update loop to consume that
@@ -1102,7 +1096,7 @@ fn assert_scenario_contract(
             assert_eq!(
                 results[0].prefix.as_str(),
                 "...the ",
-                "first Chapter One result matches the Penpot scenario text"
+                "first Chapter One result matches the fixture text"
             );
             assert_eq!(results[1].suffix, " road beneath the cliffs.");
             assert_eq!(
@@ -1116,7 +1110,7 @@ fn assert_scenario_contract(
                     ("...the ", " held the last of the evening light."),
                     ("...a ", " road beneath the cliffs."),
                 ],
-                "visible Search result groups follow the checked-in Penpot reference order"
+                "visible Search result groups follow the fixture order"
             );
             assert_eq!(
                 workspace
@@ -1352,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_every_penpot_fixture_at_the_2x_reference_size() {
+    fn catalog_has_every_fixture_at_the_2x_reference_size() {
         assert_eq!(VisualTarget::ALL.len(), 10);
         assert_eq!(VISUAL_TARGET_SPECS.len(), VisualTarget::ALL.len());
         for target in VisualTarget::ALL {

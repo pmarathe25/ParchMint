@@ -81,26 +81,30 @@ impl NativeProjectEffectExecutor {
         #[cfg(feature = "diagnostics")]
         let effect_name = project_effect_name(&effect);
         #[cfg(feature = "diagnostics")]
-        let started = Instant::now();
+        let started = diagnostics::enabled(DiagnosticLevel::Trace).then(Instant::now);
         #[cfg(feature = "diagnostics")]
-        let revision = self.snapshot.project.revision.value().to_string();
-        #[cfg(feature = "diagnostics")]
-        diagnostics::event(
+        diagnostics::event!(
             DiagnosticLevel::Trace,
             "ui.project-effect",
             "started",
-            &[("effect", effect_name), ("snapshot_revision", &revision)],
+            &[
+                ("effect", effect_name),
+                (
+                    "snapshot_revision",
+                    &self.snapshot.project.revision.value().to_string()
+                )
+            ],
         );
         let result = self.execute_project_effect_inner(effect).await;
         #[cfg(feature = "diagnostics")]
         match &result {
-            Ok(_) => diagnostics::event(
+            Ok(_) => diagnostics::event!(
                 DiagnosticLevel::Trace,
                 "ui.project-effect",
                 "completed",
                 &[("effect", effect_name)],
             ),
-            Err(error) => diagnostics::event(
+            Err(error) => diagnostics::event!(
                 DiagnosticLevel::Error,
                 "ui.project-effect",
                 "failed",
@@ -108,7 +112,9 @@ impl NativeProjectEffectExecutor {
             ),
         }
         #[cfg(feature = "diagnostics")]
-        diagnostics::timing(effect_name, "project-effect", started.elapsed());
+        if let Some(started) = started {
+            diagnostics::timing(effect_name, "project-effect", started.elapsed());
+        }
         result
     }
 
@@ -422,9 +428,9 @@ impl NativeProjectEffectExecutor {
         #[cfg(feature = "diagnostics")]
         let effect_name = editor_effect_name(&effect);
         #[cfg(feature = "diagnostics")]
-        let started = Instant::now();
+        let started = diagnostics::enabled(DiagnosticLevel::Trace).then(Instant::now);
         #[cfg(feature = "diagnostics")]
-        diagnostics::event(
+        diagnostics::event!(
             DiagnosticLevel::Trace,
             "ui.editor-effect",
             "started",
@@ -433,13 +439,13 @@ impl NativeProjectEffectExecutor {
         let result = self.execute_editor_effect_inner(effect).await;
         #[cfg(feature = "diagnostics")]
         match &result {
-            Ok(_) => diagnostics::event(
+            Ok(_) => diagnostics::event!(
                 DiagnosticLevel::Trace,
                 "ui.editor-effect",
                 "completed",
                 &[("effect", effect_name)],
             ),
-            Err(error) => diagnostics::event(
+            Err(error) => diagnostics::event!(
                 DiagnosticLevel::Error,
                 "ui.editor-effect",
                 "failed",
@@ -447,7 +453,9 @@ impl NativeProjectEffectExecutor {
             ),
         }
         #[cfg(feature = "diagnostics")]
-        diagnostics::timing(effect_name, "editor-effect", started.elapsed());
+        if let Some(started) = started {
+            diagnostics::timing(effect_name, "editor-effect", started.elapsed());
+        }
         result
     }
 
@@ -599,9 +607,10 @@ impl NativeProjectEffectExecutor {
 
     async fn current_snapshot(&self) -> Result<ProjectSnapshot, ProjectRuntimeError> {
         let current = self.ports.snapshot().await?;
-        if self.snapshot.project.revision != current.project.revision
-            || document_revision_frontier(&self.snapshot) != document_revision_frontier(&current)
-        {
+        // Project commands depend on the outline revision. Recovery and document
+        // hydration can advance document state independently, so resolve document
+        // operations from this fresh snapshot and validate their own inputs.
+        if self.snapshot.project.revision != current.project.revision {
             return Err(ProjectRuntimeError::StaleSnapshot {
                 expected: self.snapshot.project.revision,
                 actual: current.project.revision,
@@ -1069,38 +1078,31 @@ trait RuntimeProjectPorts: Send + Sync {
     }
 }
 
-struct ProjectUiPortAdapter {
-    ports: ProjectUiPorts,
-}
-
-impl ProjectUiPortAdapter {
-    fn stale(&self) -> PortError {
-        let session = self.ports.session();
-        PortError::Stale {
-            session_id: session.session_id(),
-            generation: session.generation(),
+impl From<parchmint_ui_api::StaleProjectSession> for PortError {
+    fn from(error: parchmint_ui_api::StaleProjectSession) -> Self {
+        Self::Stale {
+            session_id: error.session().session_id(),
+            generation: error.session().generation(),
         }
     }
 }
 
+struct ProjectUiPortAdapter {
+    ports: ProjectUiPorts,
+}
+
 impl RuntimeProjectPorts for ProjectUiPortAdapter {
     fn authorize(&self) -> Result<(), PortError> {
-        self.ports.access().map(|_| ()).map_err(|_| self.stale())
+        self.ports.access().map(|_| ()).map_err(PortError::from)
     }
 
     fn snapshot(&self) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .snapshot(|query| query.snapshot())
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map_err(|error| PortError::Failed {
                     service: "ProjectSnapshotQuery::snapshot",
                     message: error.to_string(),
@@ -1114,16 +1116,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<parchmint_application::DocumentSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .snapshot(|query| query.load_document(document))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map_err(|error| PortError::Failed {
                     service: "ProjectSnapshotQuery::load_document",
                     message: error.to_string(),
@@ -1134,16 +1130,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     fn execute(&self, command: ProjectCommand) -> RuntimeFuture<Result<(), PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .commands_service()
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .execute(command)
                 .await
                 .map(|_| ())
@@ -1154,16 +1144,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     fn undo(&self) -> RuntimeFuture<Result<(), PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .commands_service()
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .undo()
                 .await
                 .map(|_| ())
@@ -1174,16 +1158,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     fn redo(&self) -> RuntimeFuture<Result<(), PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .commands_service()
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .redo()
                 .await
                 .map(|_| ())
@@ -1195,32 +1173,20 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
         let ports = self.ports.clone();
         Box::pin(async move {
             let handle = {
-                let access = ports.access().map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?;
+                let access = ports.access().map_err(PortError::from)?;
                 let (handle, _) = access
                     .persistence(|persistence| persistence.request_save(kind))
-                    .map_err(|error| PortError::Stale {
-                        session_id: error.session().session_id(),
-                        generation: error.session().generation(),
-                    })?
+                    .map_err(PortError::from)?
                     .map_err(|error| PortError::Failed {
                         service: "ProjectPersistencePort::request_save",
                         message: error.to_string(),
                     })?;
                 handle
             };
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             let saved = access
                 .persistence(|persistence| persistence.await_save(handle))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map_err(|error| PortError::Failed {
                     service: "ProjectPersistencePort::await_save",
                     message: error.to_string(),
@@ -1236,16 +1202,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
         let ports = self.ports.clone();
         Box::pin(async move {
             let preferences = {
-                let access = ports.access().map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?;
+                let access = ports.access().map_err(PortError::from)?;
                 access
                     .preferences_service()
-                    .map_err(|error| PortError::Stale {
-                        session_id: error.session().session_id(),
-                        generation: error.session().generation(),
-                    })?
+                    .map_err(PortError::from)?
                     .load()
                     .await
                     .map_err(|error| PortError::Failed {
@@ -1253,16 +1213,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                         message: error.to_string(),
                     })?
             };
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .appearance_service()
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .set_mode(preferences.revision, mode)
                 .await
                 .map_err(|error| PortError::Failed {
@@ -1280,16 +1234,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
         let ports = self.ports.clone();
         Box::pin(async move {
             let preferences = {
-                let access = ports.access().map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?;
+                let access = ports.access().map_err(PortError::from)?;
                 access
                     .preferences_service()
-                    .map_err(|error| PortError::Stale {
-                        session_id: error.session().session_id(),
-                        generation: error.session().generation(),
-                    })?
+                    .map_err(PortError::from)?
                     .load()
                     .await
                     .map_err(|error| PortError::Failed {
@@ -1302,16 +1250,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
             } else {
                 PreferenceCommand::RemoveGlobalDictionaryWord(word)
             };
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .preferences_service()
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .update(preferences.revision, command)
                 .await
                 .map(|_| ())
@@ -1328,16 +1270,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.create_document(request))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::create_document",
@@ -1352,16 +1288,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.move_nodes(request))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::move_nodes",
@@ -1376,16 +1306,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.delete_subtrees(request))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::delete_subtrees",
@@ -1400,16 +1324,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.restore_deleted_subtree(node))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::restore_deleted_subtree",
@@ -1424,16 +1342,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<DuplicateWorkflowResult, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.duplicate_subtrees(request))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| DuplicateWorkflowResult {
                     snapshot: result.workflow.snapshot,
                     created_roots: result.created_roots,
@@ -1451,16 +1363,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.create_named_snapshot(name))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::create_named_snapshot",
@@ -1475,16 +1381,10 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
     ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
         let ports = self.ports.clone();
         Box::pin(async move {
-            let access = ports.access().map_err(|error| PortError::Stale {
-                session_id: error.session().session_id(),
-                generation: error.session().generation(),
-            })?;
+            let access = ports.access().map_err(PortError::from)?;
             access
                 .workflows(|workflows| workflows.restore_checkpoint(checkpoint))
-                .map_err(|error| PortError::Stale {
-                    session_id: error.session().session_id(),
-                    generation: error.session().generation(),
-                })?
+                .map_err(PortError::from)?
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::restore_checkpoint",
@@ -1853,22 +1753,6 @@ pub(crate) fn canonical_load(
     load.comments = source.comments.clone();
     load.styles = StyleCatalogProjection::new(snapshot.project.styles.clone());
     Ok(load)
-}
-
-fn document_revision_frontier(
-    snapshot: &ProjectSnapshot,
-) -> BTreeMap<DocumentId, parchmint_editor_api::EditorRevision> {
-    snapshot
-        .document_summaries
-        .iter()
-        .map(|summary| (summary.document_id, summary.revision))
-        .chain(
-            snapshot
-                .documents
-                .iter()
-                .map(|document| (document.document_id, document.revision)),
-        )
-        .collect()
 }
 
 fn selection(start: u64, end: u64) -> EditorSelection {
@@ -2572,6 +2456,36 @@ mod tests {
             result,
             Err(ProjectRuntimeError::StaleSnapshot { .. })
         ));
+    }
+
+    #[test]
+    fn project_actions_and_mounts_use_current_document_revisions_after_recovery() {
+        let (snapshot, node, document, _) = fixture();
+        let (executor, ports) = executor(snapshot.clone());
+        let mut recovered = snapshot;
+        recovered.documents[0].revision = EditorRevision::from(7);
+        recovered.documents[0].body = "Recovered draft".to_owned();
+        ports.replace_snapshot(recovered);
+
+        let mount = block_on(executor.clone().execute_project_effect(
+            ProjectEffect::OpenDocumentInPrimary(stable_id_string(document.as_bytes())),
+        ))
+        .unwrap();
+        assert!(
+            matches!(mount, ProjectEffectCompletion::OpenDocuments { documents, .. }
+            if documents[0].load.body == "Recovered draft")
+        );
+        block_on(
+            executor.execute_project_effect(ProjectEffect::CommitNodeTitle {
+                node_id: stable_id_string(node.as_bytes()),
+                title: "Chapter after recovery".to_owned(),
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            block_on(ports.snapshot()).unwrap().documents[0].body,
+            "Recovered draft"
+        );
     }
 
     #[test]

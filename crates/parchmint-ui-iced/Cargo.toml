@@ -12,8 +12,8 @@ workspace = true
 
 [features]
 default = []
-diagnostics = ["dep:parchmint-diagnostics", "parchmint-diagnostics/capture"]
-interaction-harness = ["diagnostics", "dep:iced_test"]
+diagnostics = ["dep:parchmint-diagnostics"]
+interaction-harness = ["diagnostics", "parchmint-diagnostics/capture", "dep:iced_test"]
 visual-verification = ["dep:iced_test"]
 
 [dependencies]

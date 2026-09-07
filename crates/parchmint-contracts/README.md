@@ -1,7 +1,5 @@
 # `parchmint-contracts`
 
-## What it does
-
 `parchmint-contracts` defines the durable JSON shapes that ParchMint reads and
 writes across versions. It covers document annotation sidecars and recovery
 records.
@@ -26,27 +24,11 @@ Tests check that the bindings and schemas stay in sync.
 
 ## Interface
 
-```rust
-pub struct ContractDescriptor {
-    pub schema_id: &'static str,
-    pub schema_version: u32,
-    pub source_checksum: &'static str,
-}
+`descriptor` and `validate_fixture` identify and check versioned JSON records.
+`generated` contains the annotation and recovery bindings; `AnnotationThread`,
+`AnnotationMessage`, `AnnotationAnchor`, and `AnnotationValue` preserve annotation content.
 
-pub fn descriptor(schema_id: &str) -> Option<&'static ContractDescriptor>;
-
-pub fn validate_fixture(
-    descriptor: &ContractDescriptor,
-    json: &[u8],
-) -> Result<(), ContractError>;
-```
-
-```rust
-pub enum ContractError {
-    Json(serde_json::Error),
-    SchemaMismatch { expected: &'static str, actual: String },
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 Generated Rust bindings (`generated::*`) provide the remaining API: one
 versioned type per schema (`AnnotationSidecarV1` and `RecoveryRecordV1`). A
@@ -60,24 +42,6 @@ rules live in `parchmint-project-format`'s `CanonicalCodec`, outside this
 crate.
 
 ## Implementation
-
-Native tests keep the bindings honest. Each fixture is loaded through the
-generated type and encoded again, malformed and non-UTF-8 JSON is rejected, and
-a freshly rebuilt schema manifest must equal the checked-in constant:
-
-```rust
-for contract in CONTRACTS {
-    assert_eq!(
-        descriptor(contract.descriptor.schema_id).unwrap().source_checksum,
-        sha256(contract.schema_file)
-    );
-    for fixture in fixtures_for(&contract) {
-        let value = generated_decode(&contract, fixture.bytes())?;
-        let _canonical = generated_encode(&contract, &value)?;
-    }
-}
-assert_eq!(regenerate_manifest_from_schemas(), generated::SCHEMA_MANIFEST);
-```
 
 Every schema change creates a new version: the new schema and its fixtures sit
 beside the old ones, and readers of the old version keep working. The generated

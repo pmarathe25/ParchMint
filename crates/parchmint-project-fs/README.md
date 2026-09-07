@@ -1,7 +1,5 @@
 # `parchmint-project-fs`
 
-## What it does
-
 This crate implements `ProjectRepository` and `AtomicWriter` for projects stored
 in a normal directory. It validates the directory, holds the lock that allows
 one writer, reads project files through `CanonicalCodec`, and replaces files
@@ -27,43 +25,11 @@ whole set is complete.
 
 ## Interface
 
-```rust
-pub trait ProjectFileSystem: Send + Sync {
-    fn create_root(&self, path: UntrustedProjectPath)
-        -> Result<(ProjectRootCapability, ProjectLockLease), FsError>;
-    fn acquire(&self, path: UntrustedProjectPath)
-        -> Result<(ProjectRootCapability, ProjectLockLease), FsError>;
-    fn read(&self, root: &ProjectRootCapability, path: &CanonicalRelativePath)
-        -> Result<Vec<u8>, FsError>;
-    fn transaction_records(&self, root: &ProjectRootCapability)
-        -> Result<Vec<SaveTransactionRecord>, FsError>;
-}
+`FsProjectRepository` implements `ProjectRepository` through `ProjectFileSystem`.
+`FsAtomicWriter` implements `AtomicWriter` through `AtomicFileOps`. These smaller
+interfaces let tests inject read, flush, replacement, and reconciliation failures.
 
-pub struct FsProjectRepository<F: ProjectFileSystem = NativeProjectFileSystem> {
-    files: F,
-    active: Mutex<Option<ActiveProject>>, // private session state
-}
-
-impl<F: ProjectFileSystem> ProjectRepository for FsProjectRepository<F> {
-    fn create(&self, request: CreateProject) -> Result<OpenProject, RepositoryError>;
-    fn open(&self, path: ProjectPath) -> Result<OpenProject, RepositoryError>;
-    fn load_document(&self, document: DocumentId) -> Result<Vec<u8>, RepositoryError>;
-}
-
-pub trait AtomicFileOps: Send + Sync {
-    fn write_temporary(&self, write: TemporaryWrite) -> Result<TemporaryFile, FsError>;
-    fn flush_file(&self, file: &TemporaryFile) -> Result<(), FsError>;
-    fn replace(&self, file: TemporaryFile, target: &CheckedTarget) -> Result<(), FsError>;
-    fn remove(&self, target: &CheckedTarget) -> Result<(), FsError>;
-    fn flush_parent(&self, target: &CheckedTarget) -> Result<(), FsError>;
-    fn root(&self) -> Option<&ProjectRootCapability>;
-}
-
-pub struct FsAtomicWriter<F: AtomicFileOps> {
-    files: F,
-    state: Mutex<WriterState>, // private
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 

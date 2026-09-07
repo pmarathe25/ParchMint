@@ -4,6 +4,7 @@ mod adapter;
 mod iced_surface;
 mod layout;
 mod mounted_binding;
+mod text_context;
 
 pub use adapter::{
     BlockRelayout, EditorFrameReport, EditorIcedAdapter, EditorIcedConfig, EditorResourceLimits,
@@ -18,3 +19,5 @@ pub use layout::{
     EditorScalarGeometry, EditorViewport, VisibleEditorBlock,
 };
 pub use mounted_binding::{MountedEditorBinding, MountedEditorBindingConfig, MountedEditorSession};
+
+pub use text_context::EditorTextContext;

@@ -213,7 +213,7 @@ impl ProductionApplicationGraph {
 }
 
 pub(crate) fn assemble() -> Result<DesktopBootstrap, StartupError> {
-    let controls = ProductionControls::default();
+    let controls = ProductionControls::disabled();
     assemble_with_controls(controls)
 }
 
@@ -243,7 +243,7 @@ fn assemble_with_platform(
         .map_err(|error| StartupError::production("application paths", error))?;
     #[cfg(feature = "diagnostics")]
     match diagnostics::configure_file(paths.data()) {
-        Ok(path) => diagnostics::event(
+        Ok(path) => diagnostics::event!(
             DiagnosticLevel::Info,
             "desktop.startup",
             "production application graph is assembling",
@@ -305,7 +305,7 @@ fn assemble_with_platform(
         "project-service-factory",
         "iced-ui",
     ] {
-        controls.observe(ProductionObservation::ComponentReady(component));
+        controls.observe(|| ProductionObservation::ComponentReady(component));
     }
 
     let graph = Arc::new(ProductionApplicationGraph {

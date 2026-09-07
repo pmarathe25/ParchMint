@@ -45,7 +45,7 @@ pub enum StatusKind {
     Error,
 }
 
-/// Text content for controls uses the Penpot label token instead of the
+/// Text content for controls uses the shared label token instead of the
 /// ambient body font. Buttons are compact actions, not authored prose.
 pub fn button_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(value)
@@ -81,7 +81,7 @@ pub fn surface(
         shadow: Shadow::default(),
         snap: true,
     };
-    // Penpot panels and menus use borders and contrast for separation. Keep
+    // Panels and menus use borders and contrast for separation. Keep
     // elevation reserved for modal dialogs so pointer hover cannot trigger a
     // broad shadow repaint behind ordinary controls or context menus.
     if matches!(surface, Surface::Dialog) {

@@ -89,39 +89,12 @@ fn legacy_summary_hydration_runs_in_background_without_opening_unselected_docume
 }
 
 #[test]
-fn production_constructor_retains_every_application_wide_service() {
+fn normal_startup_disables_production_observation_collection() {
     let bootstrap = DesktopBootstrap::production().expect("production graph should assemble");
     let graph = bootstrap
         .production_graph()
-        .expect("production bootstrap should retain the typed graph");
-
-    let ready = graph
-        .controls()
-        .observations()
-        .into_iter()
-        .filter_map(|observation| match observation {
-            ProductionObservation::ComponentReady(component) => Some(component),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        ready,
-        [
-            "platform",
-            "preferences",
-            "appearance",
-            "editor",
-            "spellcheck",
-            "export",
-            "workspace-state",
-            "project-service-factory",
-            "iced-ui",
-        ]
-    );
-    let _editor = graph.editor();
-    let _spellcheck = graph.spellcheck();
-    let _exporter = graph.exporter();
-    let _workspace = graph.workspace_state();
+        .expect("retained production graph");
+    assert!(graph.controls().observations().is_empty());
 }
 
 #[test]

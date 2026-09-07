@@ -197,14 +197,53 @@ pub struct DictionaryReload {
 /// A receiver of result batches for one spellcheck request.
 pub type SpellcheckResultStream = EventStream<SpellcheckResult>;
 
+/// A recoverable failure at the offline spellcheck boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpellcheckError {
+    InvalidRequest(String),
+    QueueFull,
+    DictionaryReload {
+        scope: &'static str,
+        revision: DictionaryRevision,
+        message: String,
+    },
+    WorkerStopped,
+}
+
+impl std::fmt::Display for SpellcheckError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message) => {
+                write!(formatter, "invalid spellcheck request: {message}")
+            }
+            Self::QueueFull => formatter.write_str("spellcheck worker queue is full"),
+            Self::DictionaryReload {
+                scope,
+                revision,
+                message,
+            } => write!(
+                formatter,
+                "failed to reload {scope} dictionary revision {}: {message}",
+                revision.value()
+            ),
+            Self::WorkerStopped => formatter.write_str("spellcheck worker stopped"),
+        }
+    }
+}
+
+impl std::error::Error for SpellcheckError {}
+
+/// A fallible asynchronous service operation.
+pub type SpellcheckOperation<T> = AsyncResult<Result<T, SpellcheckError>>;
+
 /// The engine-neutral boundary implemented by the private offline spellcheck
 /// runtime.
 pub trait SpellcheckService: Send + Sync {
-    fn available_languages(&self) -> AsyncResult<Vec<LanguageId>>;
+    fn available_languages(&self) -> SpellcheckOperation<Vec<LanguageId>>;
 
-    fn check(&self, request: SpellcheckRequest) -> AsyncResult<SpellcheckResultStream>;
+    fn check(&self, request: SpellcheckRequest) -> SpellcheckOperation<SpellcheckResultStream>;
 
-    fn suggest(&self, request: SuggestionRequest) -> AsyncResult<Vec<SpellingSuggestion>>;
+    fn suggest(&self, request: SuggestionRequest) -> SpellcheckOperation<Vec<SpellingSuggestion>>;
 
     fn cancel(&self, handle: SpellcheckHandle);
 
@@ -212,9 +251,9 @@ pub trait SpellcheckService: Send + Sync {
         &self,
         project: ProjectId,
         revision: DictionaryRevision,
-    ) -> AsyncResult<()>;
+    ) -> SpellcheckOperation<()>;
 
-    fn reload_global_dictionary(&self, revision: DictionaryRevision) -> AsyncResult<()>;
+    fn reload_global_dictionary(&self, revision: DictionaryRevision) -> SpellcheckOperation<()>;
 }
 
 #[cfg(test)]

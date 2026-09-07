@@ -60,13 +60,14 @@ impl DesktopUi for ProductionDesktopUi {
                     editor: Some(self.editor.clone()),
                 },
             );
-        self.controls.observe(ProductionObservation::WindowOpened {
-            window,
-            session_id: session.session_id(),
-            session_generation: session.generation(),
-            typed_ports: false,
-            native_editor: true,
-        });
+        self.controls
+            .observe(|| ProductionObservation::WindowOpened {
+                window,
+                session_id: session.session_id(),
+                session_generation: session.generation(),
+                typed_ports: false,
+                native_editor: true,
+            });
         Ok(())
     }
 
@@ -90,13 +91,14 @@ impl DesktopUi for ProductionDesktopUi {
                     self.editor.clone(),
                 ),
             );
-        self.controls.observe(ProductionObservation::WindowOpened {
-            window,
-            session_id: session.session_id(),
-            session_generation: session.generation(),
-            typed_ports: true,
-            native_editor: true,
-        });
+        self.controls
+            .observe(|| ProductionObservation::WindowOpened {
+                window,
+                session_id: session.session_id(),
+                session_generation: session.generation(),
+                typed_ports: true,
+                native_editor: true,
+            });
         Ok(())
     }
 
@@ -111,7 +113,7 @@ impl DesktopUi for ProductionDesktopUi {
             return Err(DesktopUiError::new("cannot focus a stale project window"));
         }
         self.controls
-            .observe(ProductionObservation::WindowFocused(window));
+            .observe(|| ProductionObservation::WindowFocused(window));
         Ok(())
     }
 
@@ -120,15 +122,16 @@ impl DesktopUi for ProductionDesktopUi {
             .lock()
             .map_err(|_| DesktopUiError::new("Iced desktop state is unavailable"))?
             .locked_project = Some(project.as_path().to_path_buf());
-        self.controls.observe(ProductionObservation::ProjectLocked {
-            path: project.as_path().to_path_buf(),
-        });
+        self.controls
+            .observe(|| ProductionObservation::ProjectLocked {
+                path: project.as_path().to_path_buf(),
+            });
         Ok(())
     }
 
     fn retain_window_for_final_save(&self, window: WindowCapability) -> Result<(), DesktopUiError> {
         self.controls
-            .observe(ProductionObservation::WindowRetained(window));
+            .observe(|| ProductionObservation::WindowRetained(window));
         Ok(())
     }
 
@@ -139,7 +142,7 @@ impl DesktopUi for ProductionDesktopUi {
             .projects
             .remove(&window);
         self.controls
-            .observe(ProductionObservation::WindowClosed(window));
+            .observe(|| ProductionObservation::WindowClosed(window));
         Ok(())
     }
 
@@ -149,7 +152,7 @@ impl DesktopUi for ProductionDesktopUi {
         error: &ProjectFilesystemError,
     ) -> Result<(), DesktopUiError> {
         self.controls
-            .observe(ProductionObservation::FinalSaveFailed {
+            .observe(|| ProductionObservation::FinalSaveFailed {
                 window,
                 reason: error.to_string(),
             });

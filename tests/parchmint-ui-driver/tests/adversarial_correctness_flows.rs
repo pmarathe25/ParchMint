@@ -1,10 +1,8 @@
-use std::path::Path;
-
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessDropPosition, HarnessHierarchySurface,
     HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
 };
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 /// Exercise several structural commands without allowing an intermediate
 /// selection or expansion state to hide a stale hierarchy projection.
@@ -330,52 +328,6 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
         "replacement must not leave stale query text in the focused document"
     );
     close(harness);
-}
-
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open project form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("enter project title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter project destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
-}
-
-fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create group")
-        .expect("create group");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
-        .expect("name group");
-}
-
-fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open parent menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create document")
-        .expect("create document");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
-        .expect("name document");
 }
 
 fn assert_order(titles: &[String], expected: &[&str]) {

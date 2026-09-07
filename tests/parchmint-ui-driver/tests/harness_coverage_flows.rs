@@ -5,7 +5,7 @@ use parchmint_desktop::{
     HarnessWindow, LaunchRequest, ProductionFaultKind, ProductionFaultPoint, ProductionObservation,
     RibbonDestination,
 };
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_project};
 
 #[test]
 fn explorer_opening_keeps_editor_shortcuts_and_reselecting_keeps_the_selection() {
@@ -566,9 +566,10 @@ fn continuous_autosave_and_retry_after_final_save_failure_keep_authoring_safe() 
         )
         .expect("continue editing after autosave");
     harness.fail_next(ProductionFaultPoint::FinalSave, ProductionFaultKind::Io);
-    harness
+    let error = harness
         .close(HarnessWindow::Project)
-        .expect("request a close whose final save fails");
+        .expect_err("the harness must surface a failed final save");
+    assert!(error.to_string().contains("could not save before closing"));
     assert!(
         harness
             .has_window(HarnessWindow::Project)
@@ -714,28 +715,6 @@ fn abandoned_session_replays_recovery_journal_without_a_final_close() {
         "body was {body:?}"
     );
     close(reopened);
-}
-
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open project creation");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("set project title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.display().to_string(),
-        )
-        .expect("set project destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
 }
 
 fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {

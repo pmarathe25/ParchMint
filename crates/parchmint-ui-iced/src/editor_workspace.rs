@@ -27,7 +27,7 @@ pub enum EditorPane {
     Companion,
 }
 
-/// A deterministic editor state with a maintained visual reference.
+/// A deterministic editor state for rendering and interaction tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorFixture {
     DualPane,

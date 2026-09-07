@@ -1,16 +1,8 @@
-//! Generated from `docs/ui-design/parchmint-ui.penpot`.
-//!
-//! Source entry: `files/2be68822-842f-8175-8008-65eef13b0227/tokens.json`
-//! Source SHA-256: `ad30015644a1d9c17c3bd8357d5e72c1e2e772a5adbd9288e8ff2b00a431ee70`.
-//! Regenerate this file from the checked-in export; do not parse the archive at runtime.
-
-/// Checksum of the exact Penpot `tokens.json` entry from which this file was generated.
-pub const PENPOT_TOKEN_SOURCE_SHA256: &str =
-    "ad30015644a1d9c17c3bd8357d5e72c1e2e772a5adbd9288e8ff2b00a431ee70";
+//! Shared Light and Dark UI tokens. Edit these values directly.
 
 /// Immutable value for the same semantic role in both appearances.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GeneratedToken {
+pub struct DesignToken {
     pub name: &'static str,
     pub token_type: &'static str,
     pub light: &'static str,
@@ -21,338 +13,338 @@ pub struct GeneratedToken {
 ///
 /// This is deliberately a semantic subset of the source export: it contains
 /// every appearance-dependent semantic role plus shared layout and type roles.
-pub const TOKENS: &[GeneratedToken] = &[
-    GeneratedToken {
+pub const TOKENS: &[DesignToken] = &[
+    DesignToken {
         name: "color.canvas.application",
         token_type: "color",
         light: "#F6F8F7",
         dark: "#151713",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.divider",
         token_type: "color",
         light: "#D7DED9",
         dark: "#374039",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.border.default",
         token_type: "color",
         light: "#D7DED9",
         dark: "#465048",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.border.strong",
         token_type: "color",
         light: "#818D85",
         dark: "#6E7A71",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.focus.ring",
         token_type: "color",
         light: "#3578B8",
         dark: "#73B7F0",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.sidebar",
         token_type: "color",
         light: "#FAFBFA",
         dark: "#1A1D19",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.panel",
         token_type: "color",
         light: "#FFFFFF",
         dark: "#20231F",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.manuscript",
         token_type: "color",
         light: "#FFFFFF",
         dark: "#252924",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.elevated",
         token_type: "color",
         light: "#FFFFFF",
         dark: "#2A2F29",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.sunken",
         token_type: "color",
         light: "#EDF1EE",
         dark: "#111310",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.surface.inverse",
         token_type: "color",
         light: "#1A1C1A",
         dark: "#101310",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.primary",
         token_type: "color",
         light: "#1A1C1A",
         dark: "#F1F4EF",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.secondary",
         token_type: "color",
         light: "#39423C",
         dark: "#C4CCC5",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.muted",
         token_type: "color",
         light: "#626D65",
         dark: "#94A097",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.disabled",
         token_type: "color",
         light: "#657068",
         dark: "#737D76",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.on-accent",
         token_type: "color",
         light: "#FFFFFF",
         dark: "#102019",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.placeholder",
         token_type: "color",
         light: "#626D65",
         dark: "#94A097",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.text.inverse",
         token_type: "color",
         light: "#FFFFFF",
         dark: "#F1F4EF",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.accent.default",
         token_type: "color",
         light: "#216E52",
         dark: "#77C3A0",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.accent.hover",
         token_type: "color",
         light: "#185A45",
         dark: "#8FD3B4",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.accent.pressed",
         token_type: "color",
         light: "#185A45",
         dark: "#5CAF89",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.accent.subtle",
         token_type: "color",
         light: "#D7F1E5",
         dark: "#183A2D",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.control.hover",
         token_type: "color",
         light: "#EDF1EE",
         dark: "#2A2F29",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.control.pressed",
         token_type: "color",
         light: "#D7DED9",
         dark: "#37443B",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.control.disabled.background",
         token_type: "color",
         light: "#EDF1EE",
         dark: "#1A1D19",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.control.disabled.border",
         token_type: "color",
         light: "#D7DED9",
         dark: "#374039",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.selection.background",
         token_type: "color",
         light: "#D7F1E5",
         dark: "#183A2D",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.selection.border",
         token_type: "color",
         light: "#216E52",
         dark: "#77C3A0",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.search.match",
         token_type: "color",
         light: "#FFF0CC",
         dark: "#5A4316",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.search.match.active",
         token_type: "color",
         light: "#F1C470",
         dark: "#6A4C16",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.comment.highlight",
         token_type: "color",
         light: "#C7B5FF",
         dark: "#A88DFF",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.comment.active",
         token_type: "color",
         light: "#6D4AA2",
         dark: "#C9A8FF",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.comment.resolved",
         token_type: "color",
         light: "#2D7646",
         dark: "#83D9A1",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.comment.orphaned",
         token_type: "color",
         light: "#9A5B00",
         dark: "#E7B46E",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.success",
         token_type: "color",
         light: "#2D7646",
         dark: "#83D9A1",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.saving",
         token_type: "color",
         light: "#3578B8",
         dark: "#73B7F0",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.warning",
         token_type: "color",
         light: "#9A5B00",
         dark: "#F1C470",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.error",
         token_type: "color",
         light: "#A63D32",
         dark: "#FF9D8E",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.success.subtle",
         token_type: "color",
         light: "#DFF2E5",
         dark: "#173B29",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.saving.subtle",
         token_type: "color",
         light: "#DDEBFA",
         dark: "#1C3447",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.warning.subtle",
         token_type: "color",
         light: "#FFF0CC",
         dark: "#4D3A1B",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.status.error.subtle",
         token_type: "color",
         light: "#FBE2DF",
         dark: "#4A211E",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.destructive.default",
         token_type: "color",
         light: "#A63D32",
         dark: "#FF9D8E",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.destructive.subtle",
         token_type: "color",
         light: "#FBE2DF",
         dark: "#4A211E",
     },
-    GeneratedToken {
+    DesignToken {
         name: "color.overlay.scrim",
         token_type: "color",
         light: "#1A1C1A66",
         dark: "#00000099",
     },
-    GeneratedToken {
+    DesignToken {
         name: "size.ribbon.height",
         token_type: "sizing",
         light: "52",
         dark: "52",
     },
-    GeneratedToken {
+    DesignToken {
         name: "size.status.height",
         token_type: "sizing",
         light: "32",
         dark: "32",
     },
-    GeneratedToken {
+    DesignToken {
         name: "size.control.compact",
         token_type: "sizing",
         light: "28",
         dark: "28",
     },
-    GeneratedToken {
+    DesignToken {
         name: "size.control.default",
         token_type: "sizing",
         light: "36",
         dark: "36",
     },
-    GeneratedToken {
+    DesignToken {
         name: "size.icon.core",
         token_type: "sizing",
         light: "20",
         dark: "20",
     },
-    GeneratedToken {
+    DesignToken {
         name: "radius.default",
         token_type: "borderRadius",
         light: "4",
         dark: "4",
     },
-    GeneratedToken {
+    DesignToken {
         name: "border.default",
         token_type: "borderWidth",
         light: "1",
         dark: "1",
     },
-    GeneratedToken {
+    DesignToken {
         name: "border.focus",
         token_type: "borderWidth",
         light: "2",
         dark: "2",
     },
-    GeneratedToken {
+    DesignToken {
         name: "font.family.ui",
         token_type: "fontFamily",
         light: "Source Sans 3",
         dark: "Source Sans 3",
     },
-    GeneratedToken {
+    DesignToken {
         name: "font.family.prose.sample",
         token_type: "fontFamily",
         light: "Source Serif 4",
         dark: "Source Serif 4",
     },
-    GeneratedToken {
+    DesignToken {
         name: "font.family.code",
         token_type: "fontFamily",
         light: "ui-monospace, Menlo, Consolas, Liberation Mono",

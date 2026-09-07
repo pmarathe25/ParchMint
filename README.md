@@ -10,17 +10,18 @@ account.
 Install the Rust toolchain listed in `rust-toolchain.toml`, then run:
 
 ```console
-cargo run --locked -p parchmint-desktop --bin parchmint
+cargo run --locked -j 1 -p parchmint-desktop --bin parchmint
 ```
 
 To build an optimized executable, run:
 
 ```console
-cargo build --release --locked -p parchmint-desktop --bin parchmint
+cargo build --release --locked -j 1 -p parchmint-desktop --bin parchmint
 ```
 
 The executable is written to `target/release/parchmint` on macOS and Linux or
-`target/release/parchmint.exe` on Windows.
+`target/release/parchmint.exe` on Windows. See [packaging](packaging/README.md)
+for portable release archives.
 
 ## Documentation
 
@@ -28,20 +29,18 @@ The executable is written to `target/release/parchmint` on macOS and Linux or
   recovery, settings, and export.
 - [Architecture](docs/architecture/architecture.md) explains crate boundaries,
   data ownership, and background work.
-- [UI design](docs/ui-design/README.md) records the visual language and screen
-  composition.
 - [Documentation index](docs/README.md) links the detailed contributor
   references.
 
-Tests define supported behavior. Crate-level `README.md` files document the
-interfaces and implementation details for each component.
+Tests are the single source of truth for application requirements. Crate-level
+`README.md` files document the interfaces and implementation details for each component.
 
 ## Development
 
 ```console
-cargo check --workspace --all-targets --locked
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo check --workspace --all-targets --locked -j 1
+cargo test --workspace --locked -j 1
+cargo clippy --workspace --all-targets --locked -j 1 -- -D warnings
 cargo fmt --all --check
 ```
 

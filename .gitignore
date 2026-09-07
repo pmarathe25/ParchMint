@@ -1,3 +1,5 @@
 /target/
 /release/
 *.tmp
+
+__pycache__/

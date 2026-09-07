@@ -3,20 +3,17 @@
 //! The logger is intentionally safe to call before the desktop graph has
 //! discovered its application-data directory: enabled builds send events to
 //! standard error until [`configure_file`] installs the persistent log file.
-//! Release builds disable diagnostics unless the `capture` feature is enabled.
+//! Release builds record warnings and errors. Debug builds and the explicit
+//! `capture` feature also record traces, timing aggregates, and in-memory events.
 //! Callers should record operation names and non-content identifiers, never
 //! document text.
 
-#![cfg_attr(
-    not(any(debug_assertions, feature = "capture")),
-    allow(dead_code, unused_imports)
-)]
-
 use std::time::Duration;
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
+use std::collections::{BTreeMap, VecDeque};
+
 use std::{
-    collections::{BTreeMap, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -27,19 +24,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 const LOG_FILE_NAME: &str = "parchmint-debug.log";
-#[cfg(any(debug_assertions, feature = "capture"))]
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 const MAX_CAPTURED_EVENTS: usize = 4096;
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 const MAX_TIMING_GROUPS: usize = 64;
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 const TIMING_SAMPLES_PER_REPORT: u64 = 64;
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 const MAX_BLOCKING_WORKER_GROUPS: usize = 64;
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 const BLOCKING_WORKER_SAMPLES_PER_REPORT: u64 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,12 +45,30 @@ pub enum Level {
     Error,
 }
 
+/// Filters release logging before callers allocate event fields.
+#[inline]
+pub const fn enabled(level: Level) -> bool {
+    cfg!(any(test, debug_assertions, feature = "capture"))
+        || matches!(level, Level::Warn | Level::Error)
+}
+
+/// Records an event without evaluating fields for disabled levels.
+#[macro_export]
+macro_rules! event {
+    ($level:expr, $target:expr, $message:expr, $fields:expr $(,)?) => {{
+        let level = $level;
+        if $crate::enabled(level) {
+            $crate::event(level, $target, $message, $fields);
+        }
+    }};
+}
+
 /// A structured diagnostic event retained by debug/test captures.
 ///
 /// The event contains operation metadata only; callers must not put document
 /// content in diagnostic messages or fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 pub struct DiagnosticEvent {
     pub sequence: u64,
     pub timestamp_millis: u128,
@@ -65,7 +78,6 @@ pub struct DiagnosticEvent {
     pub fields: BTreeMap<String, String>,
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 impl Level {
     const fn label(self) -> &'static str {
         match self {
@@ -77,7 +89,6 @@ impl Level {
     }
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 #[derive(Debug, Default)]
 struct DiagnosticSink {
     file: Option<File>,
@@ -85,7 +96,6 @@ struct DiagnosticSink {
     bytes_written: u64,
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 impl DiagnosticSink {
     fn write_line(&mut self, line: &str, flush: bool) {
         if line.len() > usize::try_from(MAX_LOG_BYTES).unwrap_or(usize::MAX) {
@@ -114,25 +124,23 @@ impl DiagnosticSink {
     }
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn sink() -> &'static Mutex<DiagnosticSink> {
     static SINK: OnceLock<Mutex<DiagnosticSink>> = OnceLock::new();
     SINK.get_or_init(|| Mutex::new(DiagnosticSink::default()))
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn next_sequence() -> u64 {
     static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     SEQUENCE.fetch_add(1, Ordering::Relaxed)
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 fn captured_events() -> &'static Mutex<VecDeque<DiagnosticEvent>> {
     static EVENTS: OnceLock<Mutex<VecDeque<DiagnosticEvent>>> = OnceLock::new();
     EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 fn retain_event(events: &mut VecDeque<DiagnosticEvent>, event: DiagnosticEvent) {
     if events.len() == MAX_CAPTURED_EVENTS {
         events.pop_front();
@@ -142,9 +150,8 @@ fn retain_event(events: &mut VecDeque<DiagnosticEvent>, event: DiagnosticEvent) 
 
 /// Removes and returns events collected by a debug/test diagnostics capture.
 ///
-/// Release builds without the `capture` feature return an empty vector and do
-/// not retain diagnostic events.
-#[cfg(any(debug_assertions, feature = "capture"))]
+/// Available only in debug/test builds or with the `capture` feature.
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 pub fn take_captured_events() -> Vec<DiagnosticEvent> {
     captured_events()
         .lock()
@@ -153,7 +160,6 @@ pub fn take_captured_events() -> Vec<DiagnosticEvent> {
         .collect()
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn lock_sink() -> MutexGuard<'static, DiagnosticSink> {
     sink()
         .lock()
@@ -168,7 +174,6 @@ fn lock_sink() -> MutexGuard<'static, DiagnosticSink> {
 /// Reconfiguring is supported for the production bootstrap's test seams. A
 /// failure leaves the preceding sink untouched so diagnostics never prevent
 /// ParchMint from starting.
-#[cfg(any(debug_assertions, feature = "capture"))]
 pub fn configure_file(data_directory: impl AsRef<Path>) -> io::Result<PathBuf> {
     let directory = data_directory.as_ref().join("logs");
     fs::create_dir_all(&directory)?;
@@ -193,7 +198,6 @@ pub fn configure_file(data_directory: impl AsRef<Path>) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn open_log_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     // Windows append access deliberately omits write-data permission, which
@@ -205,14 +209,14 @@ fn open_log_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
-#[cfg(all(any(debug_assertions, feature = "capture"), unix))]
+#[cfg(unix)]
 fn set_no_follow(options: &mut OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
 
     options.custom_flags(libc::O_NOFOLLOW);
 }
 
-#[cfg(all(any(debug_assertions, feature = "capture"), windows))]
+#[cfg(windows)]
 fn set_no_follow(options: &mut OpenOptions) {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
@@ -220,10 +224,10 @@ fn set_no_follow(options: &mut OpenOptions) {
     options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
 }
 
-#[cfg(all(any(debug_assertions, feature = "capture"), not(any(unix, windows))))]
+#[cfg(not(any(unix, windows)))]
 fn set_no_follow(_options: &mut OpenOptions) {}
 
-#[cfg(all(any(debug_assertions, feature = "capture"), windows))]
+#[cfg(windows)]
 fn opened_log_len(file: &File) -> io::Result<u64> {
     use std::os::windows::fs::MetadataExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
@@ -238,29 +242,25 @@ fn opened_log_len(file: &File) -> io::Result<u64> {
     Ok(metadata.len())
 }
 
-#[cfg(all(any(debug_assertions, feature = "capture"), not(windows)))]
+#[cfg(not(windows))]
 fn opened_log_len(file: &File) -> io::Result<u64> {
     file.metadata().map(|metadata| metadata.len())
 }
 
 /// The persistent debug-log path, if logging has been configured.
-#[cfg(any(debug_assertions, feature = "capture"))]
 pub fn log_path() -> Option<PathBuf> {
     lock_sink().path.clone()
 }
 
 /// Writes one structured, line-oriented event. Failures are deliberately
 /// ignored: diagnostics must not change application behavior.
-#[cfg(any(debug_assertions, feature = "capture"))]
 pub fn event(level: Level, target: &str, message: &str, fields: &[(&str, &str)]) {
-    write_event(level, target, message, fields, true);
+    if enabled(level) {
+        write_event(level, target, message, fields, true);
+    }
 }
 
-#[cfg(not(any(debug_assertions, feature = "capture")))]
-#[inline(always)]
-pub fn event(_level: Level, _target: &str, _message: &str, _fields: &[(&str, &str)]) {}
-
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 fn capture_event(
     sequence: u64,
     level: Level,
@@ -287,12 +287,10 @@ fn capture_event(
     retain_event(&mut events, event);
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn write_event(level: Level, target: &str, message: &str, fields: &[(&str, &str)], flush: bool) {
     write_event_at(next_sequence(), level, target, message, fields, flush);
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn write_event_at(
     sequence: u64,
     level: Level,
@@ -301,6 +299,7 @@ fn write_event_at(
     fields: &[(&str, &str)],
     flush: bool,
 ) {
+    #[cfg(any(test, debug_assertions, feature = "capture"))]
     capture_event(sequence, level, target, message, fields);
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -321,14 +320,14 @@ fn write_event_at(
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 struct TimingAggregate {
     samples: u64,
     total_duration_us: u128,
     max_duration_us: u128,
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 impl TimingAggregate {
     fn record(&mut self, duration: Duration) -> Option<Self> {
         let duration_us = duration.as_micros();
@@ -342,7 +341,7 @@ impl TimingAggregate {
     }
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 fn timing_aggregates() -> &'static Mutex<BTreeMap<(&'static str, &'static str), TimingAggregate>> {
     static TIMINGS: OnceLock<Mutex<BTreeMap<(&'static str, &'static str), TimingAggregate>>> =
         OnceLock::new();
@@ -354,7 +353,7 @@ fn timing_aggregates() -> &'static Mutex<BTreeMap<(&'static str, &'static str), 
 /// One summary is written per sample window, without a synchronous flush. The
 /// in-memory cardinality and persistent log are both bounded. Measurements are
 /// best-effort and are not evidence that a performance requirement is met.
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 pub fn timing(operation: &'static str, context: &'static str, duration: Duration) {
     let aggregate = {
         let mut timings = timing_aggregates()
@@ -389,7 +388,7 @@ pub fn timing(operation: &'static str, context: &'static str, duration: Duration
     );
 }
 
-#[cfg(not(any(debug_assertions, feature = "capture")))]
+#[cfg(not(any(test, debug_assertions, feature = "capture")))]
 #[inline(always)]
 pub fn timing(_operation: &'static str, _context: &'static str, _duration: Duration) {}
 
@@ -401,7 +400,7 @@ pub enum WorkerDelivery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 struct BlockingWorkerAggregate {
     samples: u64,
     accepted: u64,
@@ -412,7 +411,7 @@ struct BlockingWorkerAggregate {
     peak_concurrency: u64,
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 impl BlockingWorkerAggregate {
     fn record(
         &mut self,
@@ -438,13 +437,13 @@ impl BlockingWorkerAggregate {
 }
 
 #[derive(Default)]
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 struct BlockingWorkerState {
     active: BTreeMap<&'static str, u64>,
     aggregates: BTreeMap<&'static str, BlockingWorkerAggregate>,
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 fn blocking_workers() -> &'static Mutex<BlockingWorkerState> {
     static WORKERS: OnceLock<Mutex<BlockingWorkerState>> = OnceLock::new();
     WORKERS.get_or_init(|| Mutex::new(BlockingWorkerState::default()))
@@ -456,7 +455,7 @@ fn blocking_workers() -> &'static Mutex<BlockingWorkerState> {
 /// [`BlockingWorkerActivity::complete`] after attempting result delivery. If a
 /// worker unwinds before that point, dropping the guard records a dropped
 /// delivery. Reports are emitted only after a bounded sample window.
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 pub struct BlockingWorkerActivity {
     operation: &'static str,
     started: std::time::Instant,
@@ -464,11 +463,11 @@ pub struct BlockingWorkerActivity {
     completed: bool,
 }
 
-#[cfg(not(any(debug_assertions, feature = "capture")))]
+#[cfg(not(any(test, debug_assertions, feature = "capture")))]
 pub struct BlockingWorkerActivity;
 
 /// Starts passive diagnostics for a blocking worker.
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 pub fn blocking_worker(operation: &'static str) -> BlockingWorkerActivity {
     let tracked = {
         let mut workers = blocking_workers()
@@ -497,13 +496,13 @@ pub fn blocking_worker(operation: &'static str) -> BlockingWorkerActivity {
     }
 }
 
-#[cfg(not(any(debug_assertions, feature = "capture")))]
+#[cfg(not(any(test, debug_assertions, feature = "capture")))]
 #[inline(always)]
 pub fn blocking_worker(_operation: &'static str) -> BlockingWorkerActivity {
     BlockingWorkerActivity
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 impl BlockingWorkerActivity {
     /// Records the worker duration and whether the receiver accepted its result.
     pub fn complete(mut self, delivery: WorkerDelivery) {
@@ -563,20 +562,19 @@ impl BlockingWorkerActivity {
     }
 }
 
-#[cfg(not(any(debug_assertions, feature = "capture")))]
+#[cfg(not(any(test, debug_assertions, feature = "capture")))]
 impl BlockingWorkerActivity {
     #[inline(always)]
     pub fn complete(self, _delivery: WorkerDelivery) {}
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
+#[cfg(any(test, debug_assertions, feature = "capture"))]
 impl Drop for BlockingWorkerActivity {
     fn drop(&mut self) {
         self.finish(WorkerDelivery::Dropped);
     }
 }
 
-#[cfg(any(debug_assertions, feature = "capture"))]
 fn append_escaped(output: &mut String, value: &str) {
     for character in value.chars() {
         match character {

@@ -53,7 +53,10 @@ fn invalid_request_is_rejected_before_it_enters_the_worker() {
     .expect("bounded service");
 
     assert!(matches!(
-        block_on_test(service.check(request("three"))),
+        block_on_test(parchmint_spellcheck_api::SpellcheckService::check(
+            &service,
+            request("three")
+        )),
         Err(SpellcheckError::InvalidRequest(_))
     ));
 }

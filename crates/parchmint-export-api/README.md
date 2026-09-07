@@ -1,7 +1,5 @@
 # `parchmint-export-api`
 
-## What it does
-
 This crate defines a common `ExportPlan` for every export format. The plan
 contains the ordered manuscript blocks, formatting marks, project styles,
 titles, page breaks, export options, and a checked output target. It contains no
@@ -24,48 +22,11 @@ export already in progress.
 
 ## Interface
 
-```rust
-pub trait Exporter: Send + Sync {
-    fn plan(
-        &self,
-        request: ExportRequest,
-        project: &ProjectSnapshot,
-    ) -> Result<ExportPlan, ExportError>;
-    fn validate(&self, plan: &ExportPlan) -> ExportValidationReport;
-    fn export(
-        &self,
-        plan: ExportPlan,
-        sink: Box<dyn ExportSink>,
-        handle: ExportHandle,
-        progress: Arc<dyn ExportProgressSink>,
-    ) -> Result<ExportCompletion, ExportError>;
-    fn cancel(&self, handle: &ExportHandle);
-}
+`ExportPlan::build` validates a fixed project snapshot and an `ExportRequest`.
+`Exporter` renders the resulting plan through `ExportSink`. `ExportHandle`
+tracks progress and cancellation.
 
-pub struct ExportPlan {
-    scope: OrderedExportScope,
-    styles: ExportStyleCatalog,
-    items: Vec<SemanticExportItem>,
-    run_options: ExportRunOptions,
-    target: ExportTargetCapability,
-    source_revisions: BTreeMap<DocumentId, SourceRevision>,
-}
-
-impl ExportPlan {
-    pub fn build(
-        request: ExportRequest,
-        project: &ProjectSnapshot,
-    ) -> Result<Self, ExportValidationReport>;
-    // Fields are private; read them with scope(), styles(), items(),
-    // run_options(), target(), and source_revisions().
-}
-
-pub enum SemanticExportItem {
-    GroupHeading(ExportHeading),
-    Document(ExportDocument),
-    PageBreak,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 

@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     fmt,
-    fs::{self, File},
+    fs::File,
     io::{BufReader, BufWriter},
     path::{Path, PathBuf},
 };
@@ -11,7 +11,6 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 pub const REPORT_SCHEMA: &str = "parchmint.ui-verification/v1";
-pub const CATALOG_SCHEMA: &str = "parchmint.ui-verification-catalog/v1";
 
 /// A tightly packed RGBA8 image.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -421,90 +420,6 @@ pub fn write_report(
     Ok(())
 }
 
-/// Artifacts written for one catalog scenario. References are never modified.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct CatalogCaseReport {
-    pub id: String,
-    pub appearance: String,
-    pub reference_path: PathBuf,
-    pub actual_path: PathBuf,
-    pub diff_path: PathBuf,
-    pub report_path: PathBuf,
-    pub acceptance_passed: bool,
-    pub comparison: ComparisonReport,
-}
-
-/// Aggregate artifact index for a complete catalog run.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub struct CatalogIndex {
-    pub schema: &'static str,
-    pub total_cases: usize,
-    pub accepted_cases: usize,
-    pub failed_cases: usize,
-    pub cases: Vec<CatalogCaseReport>,
-}
-
-/// Writes a new actual PNG, diff, and detailed report for one scenario.
-pub fn write_catalog_case(
-    output_directory: impl AsRef<Path>,
-    id: &str,
-    appearance: &str,
-    reference_path: impl AsRef<Path>,
-    actual: &RgbaImage,
-) -> Result<CatalogCaseReport, VerificationError> {
-    let output_directory = output_directory.as_ref().join(appearance);
-    fs::create_dir_all(&output_directory)?;
-    let actual_path = output_directory.join(format!("{id}-actual.png"));
-    let diff_path = output_directory.join(format!("{id}-diff.png"));
-    let report_path = output_directory.join(format!("{id}-report.json"));
-    for path in [&actual_path, &diff_path, &report_path] {
-        if path.exists() {
-            return Err(VerificationError::OutputExists(path.clone()));
-        }
-    }
-    let reference_path = reference_path.as_ref().to_path_buf();
-    let reference = decode_png(&reference_path)?;
-    let comparison = compare(&reference, actual);
-    let diff = diff_image(&reference, actual)?;
-    encode_png(&actual_path, actual)?;
-    encode_png(&diff_path, &diff)?;
-    write_report(&report_path, &comparison)?;
-    Ok(CatalogCaseReport {
-        id: id.to_owned(),
-        appearance: appearance.to_owned(),
-        reference_path,
-        actual_path,
-        diff_path,
-        report_path,
-        acceptance_passed: passes_acceptance(&comparison),
-        comparison,
-    })
-}
-
-/// Writes a stable aggregate index for a completed catalog run.
-pub fn write_catalog_index(
-    output_directory: impl AsRef<Path>,
-    cases: &[CatalogCaseReport],
-) -> Result<PathBuf, VerificationError> {
-    let output_path = output_directory.as_ref().join("catalog-index.json");
-    if output_path.exists() {
-        return Err(VerificationError::OutputExists(output_path));
-    }
-    let file = File::create(&output_path)?;
-    let accepted_cases = cases.iter().filter(|case| case.acceptance_passed).count();
-    serde_json::to_writer_pretty(
-        BufWriter::new(file),
-        &CatalogIndex {
-            schema: CATALOG_SCHEMA,
-            total_cases: cases.len(),
-            accepted_cases,
-            failed_cases: cases.len() - accepted_cases,
-            cases: cases.to_vec(),
-        },
-    )?;
-    Ok(output_path)
-}
-
 fn normalize_rgba8(
     width: u32,
     height: u32,
@@ -655,37 +570,6 @@ mod tests {
             diff_image(&reference, &actual).unwrap().pixels(),
             &[0, 0, 0, 0, 255, 80, 0, 255]
         );
-    }
-
-    #[test]
-    fn catalog_case_writes_artifacts_and_keeps_dimension_mismatch_red() {
-        let root = std::env::temp_dir().join(format!(
-            "parchmint-verification-catalog-{}-{}",
-            std::process::id(),
-            UNIQUE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).unwrap();
-        let reference = root.join("reference.png");
-        encode_png(&reference, &image(1, 1, &[1, 2, 3, 255])).unwrap();
-        let report = write_catalog_case(
-            root.join("output"),
-            "launcher-light",
-            "light",
-            &reference,
-            &image(2, 1, &[1, 2, 3, 255, 4, 5, 6, 255]),
-        )
-        .unwrap();
-        assert!(!report.acceptance_passed);
-        assert!(report.actual_path.is_file());
-        assert!(report.diff_path.is_file());
-        assert!(report.report_path.is_file());
-        assert!(report.comparison.dimension_mismatch);
-        assert!(
-            write_catalog_index(root.join("output"), &[report])
-                .unwrap()
-                .is_file()
-        );
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

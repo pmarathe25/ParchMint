@@ -112,6 +112,8 @@ enum HarnessAction {
     Redraw(HarnessWindow),
     ElapseAutosaveIdle,
     ElapseRecoveryCapture,
+    HoldCompletions,
+    ReleaseCompletions(bool),
     AdvanceAutosaveClock(Duration, Duration),
     Close(HarnessWindow),
     ActiveEditorBody,
@@ -340,6 +342,13 @@ fn execute_action(
         HarnessAction::Redraw(window) => harness.redraw(window),
         HarnessAction::ElapseAutosaveIdle => harness.elapse_autosave_idle(),
         HarnessAction::ElapseRecoveryCapture => harness.elapse_recovery_capture(),
+        HarnessAction::HoldCompletions => {
+            harness.hold_completions();
+            Ok(())
+        }
+        HarnessAction::ReleaseCompletions(newest_first) => {
+            harness.release_completions(newest_first)
+        }
         HarnessAction::AdvanceAutosaveClock(first_dirty_age, last_edit_age) => {
             harness.advance_autosave_clock(first_dirty_age, last_edit_age)
         }
@@ -1040,6 +1049,17 @@ impl DesktopInteractionHarness {
     /// Advances the production recovery cadence without waiting on wall time.
     pub fn elapse_recovery_capture(&self) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ElapseRecoveryCapture)?
+            .into_unit()
+    }
+
+    /// Holds service completions while further user input reaches the UI.
+    pub fn hold_completions(&self) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::HoldCompletions)?.into_unit()
+    }
+
+    /// Delivers held completions, optionally reversing their completion order.
+    pub fn release_completions(&self, newest_first: bool) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ReleaseCompletions(newest_first))?
             .into_unit()
     }
 

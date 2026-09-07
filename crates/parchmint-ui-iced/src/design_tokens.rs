@@ -1,17 +1,10 @@
 //! ParchMint-owned Iced appearance boundary.
 //!
-//! Screens select semantic roles through this module. They never branch on
-//! Light/Dark or read the Penpot archive.
+//! Screens select semantic color roles through one appearance mapping.
 
 use iced::{Color, Theme, theme::Palette};
-use parchmint_design_system::{
-    generated_penpot_tokens::{PENPOT_TOKEN_SOURCE_SHA256, TOKENS},
-    production_token,
-};
+use parchmint_design_system::{TOKENS, production_token};
 use parchmint_preferences::ResolvedAppearance;
-
-/// Provenance for the generated production token set.
-pub const TOKEN_SOURCE_SHA256: &str = PENPOT_TOKEN_SOURCE_SHA256;
 
 /// Fixed desktop metrics from the native design source.
 pub const RIBBON_HEIGHT: u16 = 52;
@@ -33,7 +26,7 @@ pub const SPACING_16: f32 = 16.0;
 pub const SPACING_24: f32 = 24.0;
 pub const SPACING_32: f32 = 32.0;
 
-/// Exact launcher composition metrics from the Penpot launcher frame.
+/// Shared launcher composition metrics.
 ///
 /// These constants are intentionally reusable: the launcher is a full-window
 /// application surface, so future first-run and project-picker surfaces use
@@ -54,7 +47,7 @@ pub const LAUNCHER_PROJECT_METADATA_GAP: u16 = 12;
 pub const LAUNCHER_PROJECT_NAME_MAX_CHARS: usize = 24;
 pub const LAUNCHER_PROJECT_PATH_MAX_CHARS: usize = 38;
 
-/// Exact launcher type sizes from the Penpot source.
+/// Launcher text sizes.
 pub const LAUNCHER_WORDMARK_SIZE: u16 = 24;
 pub const LAUNCHER_TITLE_SIZE: u16 = 24;
 pub const LAUNCHER_SUBTITLE_SIZE: u16 = 14;

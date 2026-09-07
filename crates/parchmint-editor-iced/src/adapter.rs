@@ -19,6 +19,7 @@ use parchmint_editor_core::{AppliedEditorChange, EditorCoreSession, PreparedEdit
 use parchmint_platform_api::{UntrustedClipboardContent, WindowCapability};
 
 use crate::layout::{BlockLayoutGeometry, EditorLayoutMetrics, EditorViewport, VisibleEditorBlock};
+use crate::text_context::{EditorTextContext, bounded_text_context};
 
 /// Number of exact canonical revisions retained by the adapter for projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,6 +667,35 @@ impl EditorIcedAdapter {
         self.with_session(session, |state| {
             state.require_open()?;
             state.core.active_style(view)
+        })
+    }
+
+    /// Copies at most `max_chars` Unicode scalars around this view's caret.
+    /// Partial words at the range boundaries are omitted. No layout or whole-
+    /// document text buffer is built for background text services.
+    pub fn text_context(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+        max_chars: usize,
+    ) -> Result<Option<EditorTextContext>, EditorError> {
+        if max_chars == 0 {
+            return Err(invalid("text context requires a positive character budget"));
+        }
+        self.with_session(session, |state| {
+            state.require_open()?;
+            let revision = state.core.revision();
+            let caret = state.core.selection(view)?.end().value();
+            let projection = state
+                .projections
+                .get(&revision)
+                .ok_or_else(|| invalid("current editor projection is unavailable"))?;
+            Ok(bounded_text_context(
+                projection.semantic(),
+                revision,
+                caret,
+                max_chars,
+            ))
         })
     }
 

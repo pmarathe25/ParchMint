@@ -51,6 +51,11 @@ enum Command {
         text: String,
     },
     ElapseAutosaveIdle,
+    ElapseRecoveryCapture,
+    HoldCompletions,
+    ReleaseCompletions {
+        newest_first: bool,
+    },
     Close {
         window: WindowName,
     },
@@ -163,6 +168,11 @@ fn execute(
         Command::ContainsText { window, text } => {
             harness.contains_text(window.into(), text).map(Value::Bool)
         }
+        Command::ElapseRecoveryCapture => harness.elapse_recovery_capture().map(|()| Value::Null),
+        Command::HoldCompletions => harness.hold_completions().map(|()| Value::Null),
+        Command::ReleaseCompletions { newest_first } => harness
+            .release_completions(newest_first)
+            .map(|()| Value::Null),
         Command::ElapseAutosaveIdle => harness.elapse_autosave_idle().map(|()| Value::Null),
         Command::Close { window } => harness.close(window.into()).map(|()| Value::Null),
         Command::ActiveEditorBody => harness.active_editor_body().map(Value::String),

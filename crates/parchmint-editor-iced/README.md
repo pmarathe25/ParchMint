@@ -1,7 +1,5 @@
 # `parchmint-editor-iced`
 
-## What it does
-
 `parchmint-editor-iced` implements `EditorAdapter` as a custom virtualized
 `iced` widget. It draws a document as independent semantic blocks and sends
 editing commands to one shared ParchMint editor session.
@@ -37,37 +35,13 @@ geometry.
 
 ## Interface
 
-The adapter is constructed without exposing `iced` or editor-engine types:
+`EditorIcedAdapter` implements `EditorAdapter`. `MountedEditorBinding` connects
+a session and view to a `MountedEditorHost`; the host supplies the Iced widget.
+`EditorIcedConfig` controls projection, resource, and layout limits.
 
-```rust
-pub struct EditorIcedConfig {
-    pub projection_budget: ProjectionBudget,
-    pub resource_limits: EditorResourceLimits,
-    pub layout_metrics: EditorLayoutMetrics,
-}
+See [the source](src/lib.rs) for method signatures.
 
-#[derive(Clone)]
-pub struct EditorIcedAdapter {
-    config: EditorIcedConfig,
-    runtime: Arc<Mutex<AdapterRuntime>>,
-}
-
-impl EditorIcedAdapter {
-    pub fn new(config: EditorIcedConfig) -> Result<Self, EditorStartupError>;
-
-    pub fn create_view_host(
-        &self,
-        window: WindowCapability,
-        view: ViewId,
-    ) -> Result<ViewHostCapability, EditorError>;
-}
-
-impl EditorAdapter for EditorIcedAdapter {
-    // Implements the engine-neutral public contract.
-}
-```
-
-`AdapterRuntime` and the `MountedView` records it retains are private. Beyond
+The adapter keeps session and mounted-view records private. Beyond
 the `EditorAdapter` methods, the adapter exposes the host-facing entry points
 the mounted surface and binding use: `open_session`, `set_view_presentation`,
 `view_snapshot`, `cache_visible_blocks`, `next_frame`, `geometry`,
@@ -89,31 +63,6 @@ The native shell releases input focus on other document hosts when the active
 pane changes. Caret formatting survives the automatic selection advance after
 each typed character; explicit selection changes reset that pending format.
 
-```rust
-struct MountedView {
-    host: ViewHostCapability,
-    window: WindowCapability,
-    presentation: MountedViewPresentation, // pixel scroll, focus, viewport
-    rendered_revision: EditorRevision,
-    layouts: BTreeMap<BlockId, CachedLayout>,
-    search: Vec<SearchDecoration>,
-    spellcheck: Vec<SpellcheckDecoration>,
-    active_comment: Option<CommentId>,
-}
-
-fn record_change(state: &mut SessionRuntime, applied: &AppliedEditorChange) {
-    if !applied.document_changed() {
-        return;
-    }
-    state.pending_blocks.extend(applied.changed_blocks());
-    state.projections.insert(applied.revision(), projection);
-    while state.projections.len() > retained_budget {
-        state.projections.remove(oldest());
-    }
-    state.publish(EditorEvent::DocumentChanged { revision: applied.revision() });
-}
-```
-
 The editor-core session owns and maps each view's logical selection (and the
 session's comment anchors). The mounted record owns pixel scroll, focus,
 viewport, and the per-view layout cache plus search and spellcheck decorations;
@@ -132,3 +81,7 @@ V1 accepts normal keyboard input for en-US writing. It keeps text as valid
 UTF-8 and leaves the input and layout layers replaceable for later IME,
 multilingual, bidirectional, and assistive-technology work. It does not include
 placeholder implementations for those features.
+
+`EditorIcedAdapter::text_context` copies a bounded range around a view's caret
+for background text services. It preserves scalar positions and omits partial
+words without constructing a whole-document layout or text buffer.

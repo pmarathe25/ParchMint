@@ -9,7 +9,7 @@ use parchmint_domain::{
     DocumentId, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
 };
 use parchmint_project_format::{CanonicalProjectPathMap, ProjectFormatCodec};
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_project};
 
 #[test]
 fn explorer_keyboard_navigation_reaches_a_document_and_group_click_collapses_it() {
@@ -404,28 +404,6 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
     );
 
     close(harness);
-}
-
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open project creation form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("enter project title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter project destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
 }
 
 fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {

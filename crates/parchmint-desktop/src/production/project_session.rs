@@ -647,7 +647,7 @@ impl ProductionProjectSession {
             })?
         {
             self.controls
-                .observe(ProductionObservation::FinalSaveReconciled {
+                .observe(|| ProductionObservation::FinalSaveReconciled {
                     path: self.path.clone(),
                 });
             self.controls.service_operation(
@@ -683,7 +683,7 @@ impl ProductionProjectSession {
             return Err(ProjectFilesystemError::failed("save", error.to_string()));
         }
         self.controls
-            .observe(ProductionObservation::FinalSaveReconciled {
+            .observe(|| ProductionObservation::FinalSaveReconciled {
                 path: self.path.clone(),
             });
         self.controls.service_operation(
@@ -964,7 +964,7 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
 
         self.shared
             .controls
-            .observe(ProductionObservation::ProjectOpened {
+            .observe(|| ProductionObservation::ProjectOpened {
                 path: path.clone(),
                 project: project_id,
             });

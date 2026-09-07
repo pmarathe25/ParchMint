@@ -1,7 +1,5 @@
 # `parchmint-search-api`
 
-## What it does
-
 This crate defines whole-project search. The search index contains text copied
 from the project files and open editor sessions. ParchMint can rebuild the index
 from those sources. Each editor view handles its own local Find command.
@@ -23,34 +21,11 @@ canonical project files.
 
 ## Interface
 
-```rust
-pub trait SearchIndex: Send + Sync {
-    fn open_or_rebuild(&self, project: ProjectId, source: &dyn SearchProjectionSource)
-        -> Result<SearchIndexState, SearchError>;
-    fn open_or_rebuild_background(&self, project: ProjectId, source: Arc<dyn SearchProjectionSource>)
-        -> Result<SearchIndexState, SearchError>;
-    fn rebuild_status(&self) -> SearchRebuildStatus;
-    fn replace_document(&self, projection: SearchDocumentProjection)
-        -> Result<ProjectionReceipt, SearchError>;
-    fn delete_document(&self, id: DocumentId, revision: RevisionId)
-        -> Result<ProjectionReceipt, SearchError>;
-    fn query(&self, query: SearchQuery, sink: Box<dyn SearchBatchSink>)
-        -> Result<(), SearchError>;
-    fn cancel(&self, generation: u64);
-    fn verify(&self) -> Result<SearchIntegrityReport, SearchError>;
-    fn rebuild(&self, source: &dyn SearchProjectionSource)
-        -> Result<RebuildReport, SearchError>;
-}
+`SearchIndex` opens or rebuilds an index, replaces or deletes document
+projections, streams queries through `SearchBatchSink`, cancels generations,
+and verifies integrity. `SearchHit` carries source identity, revision, and range.
 
-pub struct SearchHit {
-    pub document_id: DocumentId,
-    pub block_id: BlockId,
-    pub indexed_revision: RevisionId,
-    pub field: SearchField,
-    pub candidate_range: TextRange,
-    pub snippet: SearchSnippet,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 

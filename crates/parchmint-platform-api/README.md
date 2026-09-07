@@ -1,7 +1,5 @@
 # `parchmint-platform-api`
 
-## What it does
-
 `parchmint-platform-api` defines the operating-system features ParchMint uses:
 menus and menu activations, dialogs, clipboard access, external links,
 application directories, and system appearance, including its change events.
@@ -28,45 +26,11 @@ generation so the UI can ignore a result after the window closes.
 
 ## Interface
 
-```rust
-pub trait DialogService: Send + Sync {
-    fn choose_path(
-        &self,
-        window: WindowCapability,
-        request: PathDialog,
-    ) -> AsyncResult<WindowResult<Option<UntrustedPathSelection>>>;
-}
+`DialogService`, `MenuService`, `ClipboardService`, `ExternalOpenService`,
+`ApplicationPathService`, and the appearance services define native operations. Window-scoped requests carry a
+`WindowCapability` and return ParchMint values.
 
-pub trait MenuService: Send + Sync {
-    fn install(
-        &self,
-        window: WindowCapability,
-        menu: SemanticMenu,
-    ) -> AsyncResult<MenuBinding>;
-}
-
-pub trait ClipboardService: Send + Sync {
-    fn read(
-        &self,
-        window: WindowCapability,
-        formats: ClipboardFormats,
-    ) -> AsyncResult<WindowResult<UntrustedClipboardContent>>;
-
-    fn write(
-        &self,
-        window: WindowCapability,
-        content: ClipboardContent,
-    ) -> AsyncResult<WindowResult<()>>;
-}
-
-pub trait ExternalOpenService: Send + Sync {
-    fn open(
-        &self,
-        window: WindowCapability,
-        intent: ValidatedExternalIntent,
-    ) -> AsyncResult<WindowResult<()>>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 Every window-scoped call returns a `WindowResult<T>` that pairs the value with
 the exact `WindowCapability` that started the work, so the receiving crate can

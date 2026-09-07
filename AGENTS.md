@@ -12,9 +12,6 @@ repository you are changing. Tests are the authority for supported behavior.
   application.
 - [`docs/architecture/architecture.md`](docs/architecture/architecture.md)
   describes application flow, data ownership, and crate boundaries.
-- [`docs/ui-design/README.md`](docs/ui-design/README.md) links the visual
-  language, screen catalog, interaction patterns, platform conventions, and
-  Penpot source.
 
 ## Find implementation details
 

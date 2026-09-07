@@ -1,7 +1,5 @@
 # `parchmint-recovery-api`
 
-## What it does
-
 This crate defines the recovery journal that protects edits made after the last
 completed save. The journal stores enough information to rebuild those edits
 after a crash. The save crate writes accepted recovery through the normal save
@@ -26,29 +24,10 @@ through the normal canonical save path.
 
 ## Interface
 
-```rust
-pub trait RecoveryJournal: Send + Sync {
-    fn append(&self, batch: RecoveryBatch)
-        -> Result<RecoveryReceipt, RecoveryError>;
-    fn flush_through(&self, target: RecoveryRevisionVector)
-        -> Result<RecoveryReceipt, RecoveryError>;
-    fn inspect(&self) -> Result<RecoveryInventory, RecoveryError>;
-    fn replay(&self, base: RecoveryBaseSnapshot)
-        -> Result<RecoveryReplay, RecoveryError>;
-    fn compact(&self, durable: DurableRevisionVector)
-        -> Result<CompactionReport, RecoveryError>;
-    fn discard_through(&self, durable: DurableRevisionVector)
-        -> Result<DiscardReport, RecoveryError>;
-}
+`RecoveryJournal` appends and flushes `RecoveryBatch` records, inspects and
+replays them, and compacts or discards records through explicit saved revisions.
 
-pub struct RecoveryBatch {
-    pub project_revision: ProjectRevision,
-    pub documents: BTreeMap<DocumentId, EditorRevisionRange>,
-    pub base_hashes: BTreeMap<ResourceId, ContentHash>,
-    pub result_hashes: BTreeMap<ResourceId, ContentHash>,
-    pub payload: VersionedRecoveryPayload,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 

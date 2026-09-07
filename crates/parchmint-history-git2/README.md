@@ -1,7 +1,5 @@
 # `parchmint-history-git2`
 
-## What it does
-
 This crate implements `HistoryStore` with embedded libgit2. Git repositories,
 commits, references, object IDs, locks, and errors stay inside this crate.
 
@@ -24,38 +22,10 @@ CheckpointInput
 
 ## Interface
 
-```rust
-pub struct Git2HistoryStore {
-    root: NativeProjectRoot,
-    gate: OnceLock<RepositoryGate>,
-}
+`Git2HistoryStore::new` accepts a validated `NativeProjectRoot` and implements
+[`HistoryStore`](../parchmint-history-api/README.md).
 
-impl Git2HistoryStore {
-    pub const fn new(root: NativeProjectRoot) -> Self;
-}
-
-impl HistoryStore for Git2HistoryStore {
-    fn initialize(&self, project: ProjectRootCapability)
-        -> Result<HistoryState, HistoryError>;
-    fn reinitialize_availability(&self)
-        -> Result<HistoryReinitializeAvailability, HistoryError>;
-    fn reinitialize(&self, project: ProjectRootCapability)
-        -> Result<HistoryReinitializeReport, HistoryError>;
-    fn checkpoint(&self, input: CheckpointInput)
-        -> Result<CheckpointId, HistoryError>;
-    fn list(&self, query: HistoryPageQuery)
-        -> Result<HistoryPage, HistoryError>;
-    fn preview(&self, checkpoint: CheckpointId)
-        -> Result<SnapshotPreview, HistoryError>;
-    fn read_resource(&self, checkpoint: CheckpointId, path: &CanonicalRelativePath)
-        -> Result<CheckpointResource, HistoryError>;
-    fn restore(&self, checkpoint: CheckpointId)
-        -> Result<RestorePlan, HistoryError>;
-    fn verify(&self) -> Result<HistoryIntegrityReport, HistoryError>;
-    fn maintain(&self, budget: MaintenanceBudget)
-        -> Result<MaintenanceReport, HistoryError>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 Repositories are opened for each operation because `git2::Repository` is not
 `Sync`; a process-wide per-root gate keeps independently constructed stores on

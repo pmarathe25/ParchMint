@@ -35,15 +35,6 @@ pub(crate) const EDITOR_BREADCRUMB_HEIGHT: u16 = 24;
 
 /// Surrounding controls to include around a mounted manuscript pane.
 ///
-/// The project shell selects this presentation for destinations whose center
-/// is a manuscript preview rather than the authoring workspace. The mounted
-/// host, viewport sensor, focus region, and message routing stay identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EditorCenterChrome {
-    Full,
-    ManuscriptOnly,
-}
-
 /// The non-document state a center pane can render while an editor host is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum EditorCenterPaneState {
@@ -152,7 +143,6 @@ pub(crate) enum EditorCenterMessage {
     BeginSplitResize,
     HierarchyDropTarget(EditorPane),
     ClearHierarchyDropTarget(EditorPane),
-    CommitHierarchyDrop,
     Workspace(EditorMessage),
     PaneWorkspace {
         pane: EditorPane,
@@ -170,7 +160,6 @@ pub(crate) enum EditorCenterMessage {
     },
     ChooseSpellingAction(SpellingMenuAction),
     DismissSpellingMenu,
-    DismissCommentComposer,
 }
 
 impl EditorCenterMessage {
@@ -182,8 +171,7 @@ impl EditorCenterMessage {
             Self::BeginComment
             | Self::BeginSplitResize
             | Self::HierarchyDropTarget(_)
-            | Self::ClearHierarchyDropTarget(_)
-            | Self::CommitHierarchyDrop => Vec::new(),
+            | Self::ClearHierarchyDropTarget(_) => Vec::new(),
             Self::Workspace(message) => vec![message.clone()],
             Self::PaneWorkspace { pane, message } => {
                 vec![EditorMessage::FocusPane(*pane), message.clone()]
@@ -216,13 +204,13 @@ impl EditorCenterMessage {
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
             Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
-            Self::DismissCommentComposer => vec![EditorMessage::CancelCommentComposer],
         }
     }
 }
 
 /// Composes only the editor-center region. Explorer, Inspector, ribbon, and
 /// status bar remain separate project-surface responsibilities.
+#[cfg(test)]
 pub(crate) fn editor_center_surface<'a>(
     workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
@@ -240,32 +228,12 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
     spelling_menu: Option<&SpellingMenu>,
     breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
 ) -> Element<'a, EditorCenterMessage> {
-    editor_center_surface_with_chrome(
-        workspace,
-        theme,
-        slots,
-        spelling_menu,
-        EditorCenterChrome::Full,
-        breadcrumbs,
-    )
-}
-
-/// Composes the editor center with an explicit surrounding-chrome policy.
-pub(crate) fn editor_center_surface_with_chrome<'a>(
-    workspace: &'a EditorWorkspace,
-    theme: ParchMintTheme,
-    slots: &EditorHostSlots,
-    spelling_menu: Option<&SpellingMenu>,
-    chrome: EditorCenterChrome,
-    breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
-) -> Element<'a, EditorCenterMessage> {
     let primary = editor_pane_surface(
         workspace,
         EditorPane::Primary,
         theme,
         slots,
         spelling_menu,
-        chrome,
         breadcrumbs
             .get(&EditorPane::Primary)
             .cloned()
@@ -299,7 +267,6 @@ pub(crate) fn editor_center_surface_with_chrome<'a>(
                 theme,
                 slots,
                 spelling_menu,
-                chrome,
                 breadcrumbs
                     .get(&EditorPane::Companion)
                     .cloned()
@@ -314,18 +281,14 @@ pub(crate) fn editor_center_surface_with_chrome<'a>(
         container(primary).width(Length::Fill).into()
     };
 
-    let center_content: Element<'a, EditorCenterMessage> = match chrome {
-        EditorCenterChrome::Full => column![
-            focus::f6_region(
-                F6Region::FormattingToolbar,
-                formatting_toolbar(workspace, theme),
-            ),
-            panes,
-        ]
-        .spacing(0)
-        .into(),
-        EditorCenterChrome::ManuscriptOnly => panes,
-    };
+    let center_content = column![
+        focus::f6_region(
+            F6Region::FormattingToolbar,
+            formatting_toolbar(workspace, theme)
+        ),
+        panes,
+    ]
+    .spacing(0);
     let center = container(center_content)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -554,7 +517,7 @@ fn formatting_toolbar(
     )
     .padding([6, 8])
     .width(Length::Fill)
-    // The Penpot toolbar is a flat panel. An elevated surface adds a
+    // The formatting toolbar is a flat panel. An elevated surface adds a
     // large scrim shadow that is repeatedly repainted while its controls
     // hover, causing the visible dark flicker across the whole bar.
     .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
@@ -666,7 +629,6 @@ fn editor_pane_surface<'a>(
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
     spelling_menu: Option<&SpellingMenu>,
-    chrome: EditorCenterChrome,
     breadcrumb: Vec<String>,
 ) -> Element<'a, EditorCenterMessage> {
     let state = workspace.pane(pane);
@@ -738,19 +700,19 @@ fn editor_pane_surface<'a>(
     } else {
         body
     };
-    let content: Element<'a, EditorCenterMessage> = match chrome {
-        EditorCenterChrome::Full if search.is_open() => column![
+    let content: Element<'a, EditorCenterMessage> = if search.is_open() {
+        column![
             tabs,
             breadcrumb_row(breadcrumb, theme),
             local_search_bar(search, pane, theme, slots),
             body
         ]
         .spacing(6)
-        .into(),
-        EditorCenterChrome::Full => column![tabs, breadcrumb_row(breadcrumb, theme), body]
+        .into()
+    } else {
+        column![tabs, breadcrumb_row(breadcrumb, theme), body]
             .spacing(0)
-            .into(),
-        EditorCenterChrome::ManuscriptOnly => body,
+            .into()
     };
     hierarchy_drag::target(
         container(content)
@@ -1689,13 +1651,11 @@ mod tests {
                 // and release during these editor flows legitimately publish
                 // these surface-level signals without changing editor state.
                 EditorCenterMessage::HierarchyDropTarget(_)
-                | EditorCenterMessage::ClearHierarchyDropTarget(_)
-                | EditorCenterMessage::CommitHierarchyDrop => {}
+                | EditorCenterMessage::ClearHierarchyDropTarget(_) => {}
                 unsupported @ (EditorCenterMessage::BeginComment
                 | EditorCenterMessage::BeginSplitResize
                 | EditorCenterMessage::ChooseSpellingAction(_)
-                | EditorCenterMessage::DismissSpellingMenu
-                | EditorCenterMessage::DismissCommentComposer) => {
+                | EditorCenterMessage::DismissSpellingMenu) => {
                     panic!(
                         "the editor flow fixture does not model this center message: {unsupported:?}"
                     );

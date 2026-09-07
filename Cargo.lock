@@ -2381,10 +2381,6 @@ dependencies = [
 [[package]]
 name = "parchmint-design-system"
 version = "0.1.0"
-dependencies = [
- "serde_json",
- "sha2 0.11.0",
-]
 
 [[package]]
 name = "parchmint-desktop"
@@ -2627,7 +2623,6 @@ dependencies = [
 name = "parchmint-test-support"
 version = "0.1.0"
 dependencies = [
- "parchmint-domain",
  "parchmint-project-format",
 ]
 
@@ -2693,8 +2688,6 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "serde_json",
- "sha2 0.11.0",
- "toml",
 ]
 
 [[package]]

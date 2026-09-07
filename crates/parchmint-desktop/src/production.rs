@@ -78,11 +78,11 @@ mod dependencies {
     };
     pub(super) use parchmint_search_sqlite::SqliteSearchIndex;
     pub(super) use parchmint_spellcheck_api::{
-        DictionaryRevision, ProjectId as SpellcheckProjectId, SpellcheckService,
+        DictionaryRevision, ProjectId as SpellcheckProjectId, SpellcheckError, SpellcheckOperation,
+        SpellcheckService,
     };
     pub(super) use parchmint_spellcheck_en_us::{
         DictionaryLoadError, EnUsSpellcheckConfig, EnUsSpellcheckService, SavedDictionarySource,
-        SpellcheckError, SpellcheckOperation,
     };
     pub(super) use parchmint_ui_api::{
         ApplicationServices as UiApplicationServices, CreateDocumentWorkflow, DocumentSummary,
@@ -192,16 +192,31 @@ struct ControlState {
 
 /// Shared observation and one-shot fault controls.
 ///
-/// Production uses an empty instance. Tests must explicitly enqueue faults;
+/// Normal startup disables these controls. Tests must explicitly enqueue faults;
 /// consuming a fault records the exact boundary and kind.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ProductionControls {
-    state: Arc<Mutex<ControlState>>,
+    state: Option<Arc<Mutex<ControlState>>>,
+}
+
+impl Default for ProductionControls {
+    fn default() -> Self {
+        Self {
+            state: Some(Arc::new(Mutex::new(ControlState::default()))),
+        }
+    }
 }
 
 impl ProductionControls {
+    fn disabled() -> Self {
+        Self { state: None }
+    }
+
     pub fn fail_next(&self, point: ProductionFaultPoint, kind: ProductionFaultKind) {
-        self.state
+        let Some(state) = &self.state else {
+            return;
+        };
+        state
             .lock()
             .expect("production controls mutex poisoned")
             .faults
@@ -211,24 +226,29 @@ impl ProductionControls {
     }
 
     pub fn observations(&self) -> Vec<ProductionObservation> {
-        self.state
-            .lock()
-            .expect("production controls mutex poisoned")
-            .observations
-            .clone()
+        self.state.as_ref().map_or_else(Vec::new, |state| {
+            state
+                .lock()
+                .expect("production controls mutex poisoned")
+                .observations
+                .clone()
+        })
     }
 
-    fn observe(&self, observation: ProductionObservation) {
-        self.state
-            .lock()
-            .expect("production controls mutex poisoned")
-            .observations
-            .push(observation);
+    fn observe(&self, observation: impl FnOnce() -> ProductionObservation) {
+        if let Some(state) = &self.state {
+            state
+                .lock()
+                .expect("production controls mutex poisoned")
+                .observations
+                .push(observation());
+        }
     }
 
     fn take_fault(&self, point: ProductionFaultPoint) -> Option<ProductionFaultKind> {
         let mut state = self
             .state
+            .as_ref()?
             .lock()
             .expect("production controls mutex poisoned");
         let kind = state.faults.get_mut(&point)?.pop_front()?;
@@ -244,7 +264,7 @@ impl ProductionControls {
         operation: &'static str,
         succeeded: bool,
     ) {
-        self.observe(ProductionObservation::ServiceOperation {
+        self.observe(|| ProductionObservation::ServiceOperation {
             point,
             operation,
             succeeded,
@@ -278,6 +298,22 @@ pub(crate) fn block_on<T>(future: impl Future<Output = T>) -> T {
 
 #[cfg(test)]
 mod dictionary_source_tests {
+    #[test]
+    fn normal_startup_controls_do_not_collect_or_allocate_observations() {
+        let controls = super::ProductionControls::disabled();
+        controls.observe(|| panic!("disabled controls must not construct observations"));
+        controls.fail_next(
+            super::ProductionFaultPoint::History,
+            super::ProductionFaultKind::Io,
+        );
+        assert!(
+            controls
+                .take_fault(super::ProductionFaultPoint::History)
+                .is_none()
+        );
+        assert!(controls.observations().is_empty());
+    }
+
     use super::composition::ProductionDictionarySource;
     use super::workflow_adapters::NativeExportSink;
     use super::*;

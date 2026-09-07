@@ -10,14 +10,33 @@ desktop update loop, and runs the production project and persistence services.
 The `interaction-harness` feature contains all harness-only code and pulls in
 the `iced_test` renderer. The production desktop does not enable this feature.
 
-## Run the acceptance scenario
+## Completion and failure checks
+
+Every action reports new failure status messages, editor errors, error dialogs,
+failed closes, and error notifications. A test that injects a failure must assert the returned error;
+clicking a control alone does not establish success. Successful flows check
+saved bytes and reopen the project to verify persistence.
+
+The harness drains task work between actions by default. It does not run native
+timer subscriptions or reproduce every OS scheduling interleaving. Use
+`elapse_recovery_capture` and `advance_autosave_clock` for timer boundaries.
+`hold_completions` runs service work while retaining result messages;
+`release_completions(newest_first)` delivers them in either order after more
+user input. These controls exercise stale snapshots and delayed UI updates
+without sleeps. The JSON Lines driver exposes the same commands.
+
+Shared `create_project`, `create_group`, and `create_document` helpers use rendered
+controls and the real service graph. Specialized keyboard and focus tests retain
+their own input paths.
+
+## Run the acceptance scenarios
 
 The first scenario creates a project, types in the custom editor, triggers the
 60-second autosave boundary without sleeping, closes the project, relaunches
 ParchMint, and opens the project from the recent-project list.
 
 ```console
-cargo test -p parchmint-ui-driver --locked
+cargo test -p parchmint-ui-driver --locked -j 1
 ```
 
 ## Drive the application from an agent
@@ -26,7 +45,7 @@ Start the JSON Lines driver with an isolated application-data directory. Each
 input line is one command and each output line is one result.
 
 ```console
-cargo run --locked -p parchmint-ui-driver -- \
+cargo run --locked -j 1 -p parchmint-ui-driver -- \
   --app-root /tmp/parchmint-agent-run \
   --artifacts /tmp/parchmint-agent-run/failure
 ```

@@ -1,7 +1,5 @@
 # `parchmint-editor-api`
 
-## What it does
-
 `parchmint-editor-api` defines the interface between ParchMint and its
 rich-text editor. The application uses it to open documents, attach views, run
 editor commands, observe changes, and create project-file snapshots.
@@ -34,85 +32,11 @@ editable while a projection is built.
 
 ## Interface
 
-```rust
-pub trait EditorAdapter: Send + Sync {
-    fn open(&self, load: CanonicalDocumentLoad) -> AsyncResult<SharedEditorSession>;
+`EditorAdapter` opens shared sessions, attaches views, executes commands,
+returns selection and clipboard values, and projects exact document revisions.
+`DurableProjectionBatch` pairs a document projection with its persistence revisions.
 
-    fn attach_view(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-        host: ViewHostCapability,
-    ) -> Result<(), EditorError>;
-
-    fn detach_view(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-    ) -> Result<EditorViewState, EditorError>;
-
-    fn execute(
-        &self,
-        session: SharedEditorSession,
-        origin: EditorCommandOrigin,
-        command: EditorCommand,
-    ) -> Result<(), EditorError>;
-
-    fn selection(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-    ) -> Result<EditorSelection, EditorError>;
-
-    fn selection_clipboard(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-    ) -> Result<Option<EditorClipboardContent>, EditorError>;
-
-    fn selection_geometry(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-    ) -> Result<Option<SelectionGeometry>, EditorError>;
-
-    fn set_style_catalog(
-        &self,
-        session: SharedEditorSession,
-        styles: StyleCatalogProjection,
-    ) -> Result<(), EditorError>;
-
-    fn set_search_decorations(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-        decorations: Vec<SearchDecoration>,
-    ) -> Result<(), EditorError>;
-
-    fn set_spellcheck_decorations(
-        &self,
-        session: SharedEditorSession,
-        view: ViewId,
-        decorations: Vec<SpellcheckDecoration>,
-    ) -> Result<(), EditorError>;
-
-    fn apply_composite_project_edit(
-        &self,
-        session: SharedEditorSession,
-        operation: ProjectDocumentOperation,
-    ) -> Result<(), EditorError>;
-
-    fn project(
-        &self,
-        session: SharedEditorSession,
-        through: EditorRevision,
-    ) -> AsyncResult<Result<CanonicalProjection, EditorError>>;
-
-    fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent>;
-    fn close(&self, session: SharedEditorSession) -> AsyncResult<()>;
-    fn capabilities(&self) -> EditorCapabilities;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 `ViewHostCapability` identifies one mounted editor view. Code outside the editor
 cannot inspect the GUI handle behind it. The API exposes no editor-engine

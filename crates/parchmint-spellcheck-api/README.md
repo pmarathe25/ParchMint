@@ -1,7 +1,5 @@
 # `parchmint-spellcheck-api`
 
-## What it does
-
 `parchmint-spellcheck-api` defines offline en-US spellcheck. The editor sends
 small text ranges for checking and receives misspellings and ranked suggestions
 asynchronously. The public API contains no spelling-engine or operating-system
@@ -28,67 +26,14 @@ document. Dictionary actions update either the project or global dictionary.
 
 ## Interface
 
-```rust
-#[non_exhaustive]
-pub enum LanguageId {
-    EnUs,
-}
+`SpellcheckService` checks revisioned text snapshots and returns issues and
+suggestions through ParchMint values. Dictionary interfaces separate the
+global preference dictionary from each project dictionary.
 
-pub trait SpellcheckService: Send + Sync {
-    fn available_languages(&self) -> AsyncResult<Vec<LanguageId>>;
+See [the source](src/lib.rs) for method signatures.
 
-    fn check(
-        &self,
-        request: SpellcheckRequest,
-    ) -> AsyncResult<SpellcheckResultStream>;
-
-    fn suggest(
-        &self,
-        request: SuggestionRequest,
-    ) -> AsyncResult<Vec<SpellingSuggestion>>;
-
-    fn cancel(&self, handle: SpellcheckHandle);
-
-    fn reload_project_dictionary(
-        &self,
-        project: ProjectId,
-        revision: DictionaryRevision,
-    ) -> AsyncResult<()>;
-
-    fn reload_global_dictionary(
-        &self,
-        revision: DictionaryRevision,
-    ) -> AsyncResult<()>;
-}
-
-pub struct SpellcheckRequest {
-    pub language: LanguageId,
-    pub document_id: DocumentId,
-    pub document_revision: EditorRevision,
-    pub blocks: Vec<RevisionedTextRange>,
-    pub project_dictionary: DictionaryRevision,
-    pub global_dictionary: DictionaryRevision,
-    pub generation: SpellcheckGeneration,
-    pub priority: SpellcheckPriority,
-}
-
-pub struct SpellingIssue {
-    pub block_id: BlockId,
-    pub range: EditorSelection,
-    pub word: String,
-    pub category: SpellingCategory,
-    pub suggestions: Vec<SpellingSuggestion>,
-}
-
-pub struct SpellcheckResult {
-    pub document_id: DocumentId,
-    pub document_revision: EditorRevision,
-    pub project_dictionary: DictionaryRevision,
-    pub global_dictionary: DictionaryRevision,
-    pub generation: SpellcheckGeneration,
-    pub issues: Vec<SpellingIssue>,
-}
-```
+`SpellcheckOperation` preserves typed request, worker, and dictionary errors.
+An empty result stream means cancelled, superseded, or evicted work.
 
 `SpellcheckRequest::accepts` reports whether a result belongs to that exact
 request, so callers can discard stale results.

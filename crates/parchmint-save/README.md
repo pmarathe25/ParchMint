@@ -1,7 +1,5 @@
 # `parchmint-save`
 
-## What it does
-
 This crate saves changes from memory to the project files and History. It keeps
 the save queue, records the exact revisions included in each save, tracks the
 matching History checkpoint, and tells the application when it can show
@@ -24,29 +22,11 @@ revision list. The new edits remain unsaved and enter the next save.
 
 ## Interface
 
-```rust
-pub struct SaveRevisionVector {
-    pub project_revision: ProjectRevision,
-    pub open_documents: BTreeMap<DocumentId, EditorRevision>,
-    pub closed_resources: BTreeMap<ResourceId, ResourceRevision>,
-    pub canonical_hashes: BTreeMap<ResourceId, ContentHash>,
-    pub generation: SaveGeneration,
-}
+`ProjectSaveCoordinator` implements `SaveCoordinator`: request a save, inspect
+status, reconcile an interrupted open, or cancel queued work. `SaveTicket`
+reports completion. `CheckpointIntentStore` persists pending History work.
 
-pub trait SaveCoordinator: Send + Sync {
-    fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError>;
-    fn status(&self) -> SaveStatusSnapshot;
-    fn reconcile_open(&self) -> Result<OpenReconciliation, SaveError>;
-    fn cancel_pending(&self, ticket: SaveTicket) -> CancelOutcome;
-}
-
-pub trait CheckpointIntentStore: Send + Sync {
-    fn persist(&self, intent: CheckpointIntent) -> Result<(), IntentStoreError>;
-    fn pending(&self) -> Result<Vec<CheckpointIntent>, IntentStoreError>;
-    fn complete(&self, receipt: CheckpointReceipt)
-        -> Result<(), IntentStoreError>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 `SaveTicket` reports the result asynchronously. A background worker converts
 values into project files and writes them to disk.

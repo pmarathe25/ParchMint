@@ -1,7 +1,5 @@
 # `parchmint-project-format`
 
-## What it does
-
 This crate reads and writes ParchMint project files. It gives each value one
 standard byte representation, called its canonical form. The crate also upgrades
 older project formats.
@@ -49,28 +47,11 @@ checkpoint is not yet implemented.
 
 ## Interface
 
-```rust
-pub trait CanonicalCodec: Send + Sync {
-    fn detect(&self, control: &[u8]) -> Result<FormatVersion, FormatError>;
-    fn decode_project(&self, input: CanonicalInputSet)
-        -> Result<ProjectModel, FormatError>;
-    fn decode_document(&self, bytes: &[u8])
-        -> Result<CanonicalDocument, FormatError>;
-    fn decode_annotations(&self, bytes: &[u8])
-        -> Result<CanonicalAnnotations, FormatError>;
-    fn encode(&self, value: &CanonicalResource)
-        -> Result<CanonicalBytes, FormatError>;
-    fn migrate(&self, source: SourceFormatSnapshot, target: FormatVersion)
-        -> Result<CanonicalResourceSet, MigrationError>;
-}
+`CanonicalCodec` detects formats, decodes resources, encodes canonical bytes,
+and plans migrations. `ProjectFormatCodec` implements it and converts manifests
+to domain projects and persistence revision lists.
 
-pub struct CanonicalBytes {
-    pub resource: ResourceId,
-    pub path: CanonicalRelativePath,
-    pub bytes: Vec<u8>,
-    pub hash: ContentHash,
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 [`parchmint-contracts`](../parchmint-contracts/README.md) defines the JSON annotation
 shape. This crate owns the HTML, TOML, CSS, and text codecs, checks the project

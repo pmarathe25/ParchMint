@@ -1,9 +1,8 @@
-use std::path::Path;
-
 use parchmint_desktop::{
-    DesktopInteractionHarness, HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
+    DesktopInteractionHarness, HarnessTarget, HarnessWindow, LaunchRequest, ProductionFaultKind,
+    ProductionFaultPoint, RibbonDestination,
 };
-use parchmint_ui_driver::IsolatedRun;
+use parchmint_ui_driver::{IsolatedRun, create_document, create_project};
 
 /// Export preferences are project context, so a writer can configure title
 /// emission once and retain it across sessions.
@@ -50,42 +49,31 @@ fn export_settings_survive_a_project_restart() {
     reopened.shutdown().expect("stop export application");
 }
 
-fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open create form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
-        .expect("enter project title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter project destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
-    harness
-}
-
-fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .right_click_text(HarnessWindow::Project, parent)
-        .expect("open group menu");
-    harness
-        .click_text(HarnessWindow::Project, "Create document")
-        .expect("create document");
-    harness
-        .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
-        .expect("name document");
-}
-
 fn contains(harness: &DesktopInteractionHarness, text: &str) -> bool {
     harness
         .contains_text(HarnessWindow::Project, text)
         .expect("query project surface")
+}
+
+#[test]
+fn launcher_open_errors_fail_the_action_and_allow_retry() {
+    let run = IsolatedRun::new("launcher-error-retry").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Retry Novel");
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
+    reopened.fail_next(ProductionFaultPoint::ProjectOpen, ProductionFaultKind::Io);
+    let error = reopened
+        .click_text(HarnessWindow::Launcher, "Retry Novel")
+        .expect_err("an error displayed by the launcher must fail the action");
+    assert!(error.to_string().contains("application reported an error"));
+    reopened
+        .click_text(HarnessWindow::Launcher, "Retry Novel")
+        .unwrap();
+    assert!(!reopened.hierarchy_titles().unwrap().is_empty());
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
 }

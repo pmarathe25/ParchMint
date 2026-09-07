@@ -7,15 +7,7 @@ mod editor_workspace;
 mod focus;
 mod harness_target;
 mod hierarchy_drag;
-#[allow(
-    dead_code,
-    reason = "the private Iced surface is exercised by headless fixture tests"
-)]
 mod iced_editor_surface;
-#[allow(
-    dead_code,
-    reason = "the private Iced surface is exercised by headless fixture tests"
-)]
 mod iced_project_surface;
 mod icons;
 mod native;

@@ -1,7 +1,5 @@
 # `parchmint-preferences`
 
-## What it does
-
 This crate stores application settings in an application preference file. These
 settings include the appearance choice, global spelling dictionary, recent
 projects, and settings shared by all windows. Project settings remain in the
@@ -29,77 +27,16 @@ operating-system appearance event while mode is System
   -> if the resolved appearance changed, publish one numbered theme snapshot
 ```
 
-The `System` choice follows operating-system appearance changes. It resolves to
-Light or Dark before the design system creates a theme snapshot.
+The `System` choice follows operating-system appearance changes. The appearance controller publishes
+the resolved Light or Dark choice; the UI maps it to design-system tokens.
 
 ## Interface
 
-```rust
-pub type PreferenceFuture<'a, T> =
-    Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+`PreferenceStore` loads and saves revisioned preferences.
+`PreferenceCoordinator` implements `PreferenceService`; `AppearanceController`
+implements `AppearanceService` and publishes numbered `ThemeSnapshot` values.
 
-pub trait PreferenceStore: Send + Sync {
-    fn load(&self)
-        -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>>;
-    fn compare_and_save(
-        &self,
-        expected: PreferenceRevision,
-        preferences: &ApplicationPreferences,
-    ) -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>>;
-}
-
-pub trait PreferenceService: Send + Sync {
-    fn load(&self)
-        -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>>;
-    fn update(
-        &self,
-        expected: PreferenceRevision,
-        command: PreferenceCommand,
-    ) -> PreferenceFuture<'_, Result<PreferenceSnapshot, PreferenceError>>;
-    fn changes(&self) -> EventStream<PreferenceChange>;
-}
-
-pub struct PreferenceSnapshot {
-    pub revision: PreferenceRevision,
-    pub values: ApplicationPreferences,
-}
-
-pub trait AppearanceService: Send + Sync {
-    fn initialize(
-        &self,
-        preferences: &PreferenceSnapshot,
-        system: ResolvedAppearance,
-    ) -> Result<ThemeSnapshot, PreferenceError>;
-    fn set_mode(
-        &self,
-        expected: PreferenceRevision,
-        mode: AppearanceMode,
-    ) -> PreferenceFuture<'_, Result<ThemeSnapshot, PreferenceError>>;
-    fn system_appearance_changed(
-        &self,
-        appearance: ResolvedAppearance,
-    ) -> Result<Option<ThemeSnapshot>, PreferenceError>;
-    fn current(&self) -> ThemeSnapshot;
-    fn changes(&self) -> EventStream<ThemeSnapshot>;
-}
-
-pub struct AppearanceController {
-    state: Mutex<AppearanceState>,
-    preferences: Arc<dyn PreferenceService>,
-    subscribers: Mutex<Vec<mpsc::Sender<ThemeSnapshot>>>,
-}
-
-struct AppearanceState {
-    initialized: bool,
-    mode: AppearanceMode,
-    system: ResolvedAppearance,
-    current: ThemeSnapshot,
-}
-
-impl AppearanceService for AppearanceController {
-    // Implements the framework-neutral contract above.
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 The UI receives one complete immutable `ThemeSnapshot` for each frame. It uses
 that snapshot as a whole.
@@ -127,16 +64,6 @@ save error leaves the active appearance unchanged. An operating-system
 appearance event publishes a new snapshot only while the stored mode is
 `System` and only when the resolved appearance actually changes; it does not
 rewrite the preference file.
-
-```rust
-fn publish(&self, snapshot: ThemeSnapshot) {
-    let mut subscribers = self
-        .subscribers
-        .lock()
-        .expect("theme subscribers mutex poisoned");
-    subscribers.retain(|subscriber| subscriber.send(snapshot).is_ok());
-}
-```
 
 The global dictionary lives in the preference file and every update flows
 through the same revision-checked coordinator; the spelling service reloads it

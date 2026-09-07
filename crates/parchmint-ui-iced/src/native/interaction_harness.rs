@@ -306,6 +306,9 @@ pub struct NativeDesktopHarness {
     trace: Vec<HarnessTraceEntry>,
     next_sequence: u64,
     exited: bool,
+    reported_errors: BTreeMap<String, String>,
+    hold_completions: bool,
+    held_completions: VecDeque<Message>,
 }
 
 impl NativeDesktopHarness {
@@ -317,6 +320,9 @@ impl NativeDesktopHarness {
             trace: Vec::new(),
             next_sequence: 1,
             exited: false,
+            reported_errors: BTreeMap::new(),
+            hold_completions: false,
+            held_completions: VecDeque::new(),
         };
         harness.run_task(task)?;
         Ok(harness)
@@ -324,6 +330,30 @@ impl NativeDesktopHarness {
 
     pub fn trace(&self) -> &[HarnessTraceEntry] {
         &self.trace
+    }
+
+    /// Runs service work but holds its messages so tests can deliver more input
+    /// before the UI learns the result.
+    pub fn hold_completions(&mut self) {
+        self.hold_completions = true;
+        self.record(HarnessWindow::Project, "hold task completions".to_owned());
+    }
+
+    /// Releases held results in their original order or newest first.
+    pub fn release_completions(&mut self, newest_first: bool) -> Result<(), HarnessError> {
+        self.hold_completions = false;
+        self.record(
+            HarnessWindow::Project,
+            format!("release task completions newest-first={newest_first}"),
+        );
+        while let Some(message) = if newest_first {
+            self.held_completions.pop_back()
+        } else {
+            self.held_completions.pop_front()
+        } {
+            self.route_messages([message])?;
+        }
+        Ok(())
     }
 
     pub fn has_window(&self, window: HarnessWindow) -> bool {
@@ -2340,6 +2370,7 @@ impl NativeDesktopHarness {
 
     fn run_task(&mut self, task: Task<Message>) -> Result<(), HarnessError> {
         let mut pending = VecDeque::from([task]);
+        let mut failure = self.take_new_application_error();
         while let Some(task) = pending.pop_front() {
             let Some(mut stream) = runtime::task::into_stream(task) else {
                 continue;
@@ -2347,7 +2378,13 @@ impl NativeDesktopHarness {
             while let Some(action) = iced::futures::executor::block_on(stream.next()) {
                 match action {
                     runtime::Action::Output(message) => {
+                        if self.hold_completions {
+                            self.held_completions.push_back(message);
+                            continue;
+                        }
                         pending.push_back(self.desktop.update(message));
+                        let error = self.take_new_application_error();
+                        failure = failure.or(error);
                     }
                     runtime::Action::LoadFont { bytes, channel } => {
                         iced_test::renderer::graphics::text::font_system()
@@ -2367,7 +2404,24 @@ impl NativeDesktopHarness {
                 }
             }
         }
-        Ok(())
+        match failure {
+            Some(message) => Err(HarnessError::new(format!(
+                "application reported an error: {message}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn take_new_application_error(&mut self) -> Option<String> {
+        let errors = self.desktop.application_errors();
+        let new = errors
+            .iter()
+            .filter(|(key, value)| self.reported_errors.get(*key) != Some(*value))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.reported_errors = errors;
+        (!new.is_empty()).then_some(new)
     }
 
     fn handle_window_action(&self, action: runtime::window::Action) {

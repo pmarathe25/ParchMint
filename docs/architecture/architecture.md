@@ -5,8 +5,8 @@ ParchMint is a native Rust desktop application for organizing and writing novels
 is split into small crates for writing, project files, History, search, export,
 spellcheck, and operating-system work.
 
-This page is the starting point for the architecture. Follow a crate link when
-you need its public API or implementation details.
+Tests define application requirements; this page explains the implementation.
+Follow a crate link for its public API or implementation details.
 
 ## How the application works
 
@@ -14,7 +14,7 @@ you need its public API or implementation details.
 flowchart TD
     Writer --> Desktop[parchmint-desktop]
     Desktop --> UiApi[parchmint-ui-api]
-    IcedUi[parchmint-ui-iced] -. implements .-> UiApi
+    IcedUi[parchmint-ui-iced] --> UiApi
     IcedUi --> App[parchmint-application]
     App --> EditorApi[parchmint-editor-api]
     IcedEditor[parchmint-editor-iced] -. implements .-> EditorApi
@@ -60,7 +60,7 @@ one another in the workspace.
 - [`parchmint-application`](../../crates/parchmint-application/README.md) runs user actions
   and coordinates the other crates.
 - [`parchmint-contracts`](../../crates/parchmint-contracts/README.md) defines durable JSON
-  schemas for annotation sidecars, recovery records, and CLI machine output.
+  schemas for annotation sidecars and recovery records.
 
 ### Project files
 
@@ -102,9 +102,9 @@ one another in the workspace.
 
 - [`parchmint-desktop`](../../crates/parchmint-desktop/README.md) starts the process and
   connects the crates.
-- [`parchmint-ui-api`](../../crates/parchmint-ui-api/README.md) defines the contract for a
-  desktop UI.
-  - [`parchmint-ui-iced`](../../crates/parchmint-ui-iced/README.md) implements the desktop
+- [`parchmint-ui-api`](../../crates/parchmint-ui-api/README.md) defines session-scoped service ports and
+  framework-neutral UI values.
+  - [`parchmint-ui-iced`](../../crates/parchmint-ui-iced/README.md) provides the desktop
     UI and owns the `iced` event loop and windows.
 - [`parchmint-editor-api`](../../crates/parchmint-editor-api/README.md) defines what a
   rich-text editor provides.
@@ -117,8 +117,8 @@ one another in the workspace.
   operating-system features ParchMint uses.
   - [`parchmint-platform-native`](../../crates/parchmint-platform-native/README.md)
     implements those features on Windows, macOS, and Linux.
-- [`parchmint-design-system`](../../crates/parchmint-design-system/README.md) turns the
-  Penpot design source into typed UI tokens and icons.
+- [`parchmint-design-system`](../../crates/parchmint-design-system/README.md) provides
+  framework-neutral UI tokens and SVG icons.
 - [`parchmint-preferences`](../../crates/parchmint-preferences/README.md) stores application
   preferences and sends appearance changes to every window.
 - [`parchmint-workspace-state`](../../crates/parchmint-workspace-state/README.md) restores
@@ -127,7 +127,9 @@ one another in the workspace.
 ### Tools for development
 
 - [`parchmint-test-support`](../../tests/parchmint-test-support/README.md) provides shared
-  fixtures, controlled tasks, and failure injection.
+  project-directory fixtures.
+- [`parchmint-ui-driver`](../../tests/parchmint-ui-driver/README.md) exercises real
+  desktop services and widgets with controlled input, clocks, and task delivery.
 - [`parchmint-ui-verification`](../../tests/parchmint-ui-verification/README.md) decodes,
   compares, and reports framework-neutral PNG visual artifacts.
 

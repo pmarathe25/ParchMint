@@ -1,7 +1,5 @@
 # `parchmint-domain`
 
-## What it does
-
 This crate defines the meaning of a ParchMint project in plain Rust.
 
 It defines stable IDs and the data structures for projects, groups, documents,
@@ -32,66 +30,11 @@ list.
 
 ## Interface
 
-Callers use this external surface:
+`apply_project_command` returns a validated project, its inverse command, and
+changed resource IDs. `synchronize_content_title` and `count_words` provide
+shared title and word-count rules.
 
-```rust
-pub struct ProjectId([u8; 16]);
-pub struct NodeId([u8; 16]);
-pub struct DocumentId([u8; 16]);
-pub struct ProjectRevision(u64);
-
-impl ProjectId {
-    pub const fn from_bytes(bytes: [u8; 16]) -> Self;
-    pub const fn as_bytes(&self) -> &[u8; 16];
-}
-
-pub enum NodeKind {
-    Root(ProjectSection),
-    Group,
-    Document(DocumentId),
-}
-
-impl ProjectRevision {
-    pub const fn value(self) -> u64;
-    pub const fn next(self) -> Self;
-}
-
-pub struct Project {
-    pub id: ProjectId,
-    pub revision: ProjectRevision,
-    pub display_title: String,
-    pub author: Option<String>,
-    pub spellcheck_language: SpellcheckLanguage,
-    pub nodes: OrderedTree<NodeId, ProjectNode>,
-    pub styles: StyleCatalog,
-    pub metadata: MetadataCatalog,
-    pub dictionary: ProjectDictionary,
-    pub export_settings: ProjectExportSettings,
-    pub deleted: BTreeMap<NodeId, DeletionTombstone>,
-}
-
-pub fn apply_project_command(
-    project: &Project,
-    expected: ProjectRevision,
-    command: ProjectCommand,
-) -> Result<AppliedProjectCommand, DomainError>;
-
-pub struct AppliedProjectCommand {
-    pub project: Project,
-    pub inverse: ProjectCommand,
-    pub changed_resources: ResourceSet,
-}
-
-pub fn synchronize_content_title(
-    display_title: &str,
-    previous_content_title: Option<&str>,
-    new_content_title: Option<&str>,
-) -> TitleChange;
-
-pub fn count_words<'a>(
-    blocks: impl Iterator<Item = SemanticBlockRef<'a>>,
-) -> WordCount;
-```
+See [the source](src/lib.rs) for method signatures.
 
 Each `DeletionTombstone` records the deleted node, its former parent and order,
 its type, and the information needed to restore it. Styles, metadata fields,
@@ -102,30 +45,7 @@ of ID where another is required.
 ## Implementation
 
 The tree stores ID lookup separately from each node's ordered child list. A
-mutation edits a draft and publishes it only after validation:
-
-```rust
-pub fn apply_project_command(
-    project: &Project,
-    expected: ProjectRevision,
-    command: ProjectCommand,
-) -> Result<AppliedProjectCommand, DomainError> {
-    if expected != project.revision {
-        return Err(DomainError::StaleRevision { .. });
-    }
-    project.validate()?;
-    let previous = project.clone();
-    let mut draft = project.clone();
-    apply_to_draft(&mut draft, command)?;
-    draft.validate()?;
-    draft.revision = project.revision.next();
-    Ok(AppliedProjectCommand {
-        project: draft,
-        inverse: ProjectCommand::RestoreState(Box::new(previous)),
-        changed_resources: changed_resources(project, &draft),
-    })
-}
-```
+mutation edits a draft and publishes it only after validation.
 
 The crate returns different error variants for invalid input, an outdated
 revision, a missing item, a duplicate ID, an invalid tree, or a move that

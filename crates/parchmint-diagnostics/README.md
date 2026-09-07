@@ -1,15 +1,24 @@
 # `parchmint-diagnostics`
 
-`parchmint-diagnostics` provides the desktop application's local,
-dependency-free runtime log. Production configures it below the platform data
-directory at `logs/parchmint-debug.log`; before that point it writes to standard
-error so startup failures are still observable.
+This crate records local diagnostics without changing application results.
+Normal release builds record warnings and errors. Debug builds and the explicit
+`capture` feature also retain traces, timing aggregates, and up to 4,096 events.
 
-The log is line-oriented. Each event has a timestamp, an in-process sequence
-number, level, component, operation, and safe fields. Callers must not log
-document text. The logger is best-effort, so an unavailable log file does not
-change application behavior.
+## Interface
 
-The file stays within 1 MiB. In-memory captures retain the most recent 4,096
-events, so an ordinary desktop session does not accumulate an unbounded event
-list while no test harness is draining it.
+`configure_file(data_directory)` opens `logs/parchmint-debug.log`.
+`event!` checks the level before evaluating fields, so disabled trace events
+avoid string formatting and allocation. `event` accepts already prepared fields.
+Callers record operations and identifiers; document text stays out of the log.
+
+## Implementation
+
+The file stays within 1 MiB and uses a mutex to serialize writes and rotation.
+The final path is opened without following symlinks or Windows reparse points.
+Failures are ignored; before configuration, enabled events go to standard error.
+Warnings and errors write synchronously. Normal release builds omit in-memory
+capture and timing collection, so ordinary editing performs no diagnostic I/O.
+`--no-default-features` on the desktop omits diagnostics entirely.
+
+See [lib.rs](src/lib.rs) for the logger and [release_logging.rs](tests/release_logging.rs)
+for the check that filtered fields are not evaluated.

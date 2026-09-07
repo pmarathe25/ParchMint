@@ -914,52 +914,6 @@ impl PlatformServices {
     }
 }
 
-/// Services available to a running desktop UI.
-#[derive(Clone)]
-pub struct UiPorts {
-    pub application: ApplicationServices,
-    pub editor: Arc<dyn EditorAdapter>,
-    pub spellcheck: Arc<dyn SpellcheckService>,
-    pub platform: PlatformServices,
-    pub preferences: Arc<dyn PreferenceService>,
-    pub appearance: Arc<dyn AppearanceService>,
-    pub workspace_state: Arc<dyn WorkspaceStateStore>,
-}
-
-impl UiPorts {
-    pub fn new(
-        application: ApplicationServices,
-        editor: Arc<dyn EditorAdapter>,
-        spellcheck: Arc<dyn SpellcheckService>,
-        platform: PlatformServices,
-        preferences: Arc<dyn PreferenceService>,
-        appearance: Arc<dyn AppearanceService>,
-        workspace_state: Arc<dyn WorkspaceStateStore>,
-    ) -> Self {
-        Self {
-            application,
-            editor,
-            spellcheck,
-            platform,
-            preferences,
-            appearance,
-            workspace_state,
-        }
-    }
-}
-
-/// Values resolved before the UI runtime starts.
-pub struct UiStartup {
-    pub appearance: ThemeSnapshot,
-    pub sessions: ProjectSessionRegistry,
-    pub initial_project: Option<RequestedProjectPath>,
-}
-
-/// A desktop UI implementation selected by the executable.
-pub trait DesktopUi: Send {
-    fn run(self: Box<Self>, startup: UiStartup, ports: UiPorts) -> Result<ExitCode, UiError>;
-}
-
 /// Applies every appearance event to live windows in ascending logical-ID order.
 ///
 /// Callers retain the complete capability, including its exact generation, in

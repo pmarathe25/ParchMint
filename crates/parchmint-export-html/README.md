@@ -1,7 +1,5 @@
 # `parchmint-export-html`
 
-## What it does
-
 This crate renders a validated `ExportPlan` as one self-contained HTML5 file.
 HTML parsing, escaping, CSS generation, and serialization stay inside this
 crate.
@@ -21,26 +19,10 @@ emit the same title again.
 
 ## Interface
 
-```rust
-pub struct HtmlExporter;
+`HtmlExporter` implements the `Exporter` interface from
+[`parchmint-export-api`](../parchmint-export-api/README.md).
 
-impl Exporter for HtmlExporter {
-    fn plan(
-        &self,
-        request: ExportRequest,
-        project: &ProjectSnapshot,
-    ) -> Result<ExportPlan, ExportError>;
-    fn validate(&self, plan: &ExportPlan) -> ExportValidationReport;
-    fn export(
-        &self,
-        plan: ExportPlan,
-        sink: Box<dyn ExportSink>,
-        handle: ExportHandle,
-        progress: Arc<dyn ExportProgressSink>,
-    ) -> Result<ExportCompletion, ExportError>;
-    fn cancel(&self, handle: &ExportHandle);
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 No HTML library is used: parsing, escaping, CSS sanitization, and serialization
 are implemented in this crate, and only `parchmint-export-api` values and
@@ -64,9 +46,3 @@ The renderer writes the file in small chunks and checks for cancellation between
 chunks. A render or output error leaves the project unchanged and reports the
 partial file as incomplete. The completed HTML file can display its authored
 content without a network connection.
-
-The private renderer writes one semantic item at a time:
-
-```rust
-fn render_item(item: &SemanticExportItem, out: &mut String);
-```

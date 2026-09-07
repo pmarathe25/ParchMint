@@ -11,5 +11,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-parchmint-domain = { path = "../../crates/parchmint-domain" }
 parchmint-project-format = { path = "../../crates/parchmint-project-format" }

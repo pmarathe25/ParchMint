@@ -36,3 +36,51 @@ impl Drop for IsolatedRun {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+
+use parchmint_desktop::{DesktopInteractionHarness, HarnessWindow, LaunchRequest};
+
+pub fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> DesktopInteractionHarness {
+    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
+        .expect("launch application");
+    harness
+        .click_text(HarnessWindow::Launcher, "Create Project")
+        .expect("open project form");
+    harness
+        .type_into(HarnessWindow::Launcher, "Project title", title)
+        .expect("enter title");
+    harness
+        .type_into(
+            HarnessWindow::Launcher,
+            "Project destination",
+            project.to_string_lossy(),
+        )
+        .expect("enter destination");
+    harness
+        .click_text(HarnessWindow::Launcher, "Create and Open")
+        .expect("create project");
+    harness
+}
+
+pub fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
+    harness
+        .right_click_text(HarnessWindow::Project, parent)
+        .expect("open parent menu");
+    harness
+        .click_text(HarnessWindow::Project, "Create group")
+        .expect("create group");
+    harness
+        .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
+        .expect("name group");
+}
+
+pub fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
+    harness
+        .right_click_text(HarnessWindow::Project, parent)
+        .expect("open parent menu");
+    harness
+        .click_text(HarnessWindow::Project, "Create document")
+        .expect("create document");
+    harness
+        .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)
+        .expect("name document");
+}

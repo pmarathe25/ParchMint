@@ -6,6 +6,7 @@ on:
       - ".github/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "packaging/**"
       - "crates/**"
       - "rust-toolchain.toml"
       - "tests/**"
@@ -19,6 +20,7 @@ on:
       - ".github/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "packaging/**"
       - "crates/**"
       - "rust-toolchain.toml"
       - "tests/**"
@@ -30,6 +32,7 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: "1.97.1"
+  CARGO_BUILD_JOBS: "1"
 
 jobs:
   workspace:
@@ -81,3 +84,48 @@ jobs:
 
       - name: Test locked workspace
         run: cargo +$RUST_TOOLCHAIN test --workspace --locked --offline
+
+  release:
+    name: ${{ matrix.platform }} / release archive
+    needs: workspace
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            suffix: ""
+          - os: macos-latest
+            platform: macos
+            suffix: ""
+          - os: windows-latest
+            platform: windows
+            suffix: ".exe"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+      - name: Build the desktop with release features only
+        run: cargo +$RUST_TOOLCHAIN build --release --locked -j 1 -p parchmint-desktop --bin parchmint
+      - name: Verify release diagnostics filtering
+        run: cargo +$RUST_TOOLCHAIN test --release --locked -j 1 -p parchmint-diagnostics --test release_logging
+      - name: Verify packaging
+        run: python -m unittest discover -s packaging -p 'test_*.py'
+      - name: Fetch locked sources for dependency notices
+        run: cargo +$RUST_TOOLCHAIN fetch --locked
+      - name: Create portable archive
+        run: python packaging/package.py --binary "target/release/parchmint${{ matrix.suffix }}" --platform "${{ matrix.platform }}" --output release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ParchMint-${{ matrix.platform }}
+          path: |
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error

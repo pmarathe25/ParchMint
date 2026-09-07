@@ -1,7 +1,5 @@
 # `parchmint-recovery-fs`
 
-## What it does
-
 This crate writes the recovery journal and pending History checkpoint records
 under `.parchmint/recovery/` in the project directory. It implements
 `RecoveryJournal` and `CheckpointIntentStore`. The save crate tells it which
@@ -23,39 +21,10 @@ detect an incomplete or corrupt record at the end of the journal.
 
 ## Interface
 
-```rust
-pub struct FsRecoveryJournal {
-    root: PathBuf,
-    root_identity: FileIdentity,
-    operations: Mutex<()>,
-}
+`FsRecoveryJournal::open` opens storage beneath an existing project directory.
+It implements both `RecoveryJournal` and `CheckpointIntentStore`.
 
-impl FsRecoveryJournal {
-    /// Opens or creates recovery storage beneath an existing project directory.
-    pub fn open(project_root: impl AsRef<Path>) -> Result<Self, RecoveryError>;
-}
-
-impl RecoveryJournal for FsRecoveryJournal {
-    fn append(&self, batch: RecoveryBatch)
-        -> Result<RecoveryReceipt, RecoveryError>;
-    fn flush_through(&self, target: RecoveryRevisionVector)
-        -> Result<RecoveryReceipt, RecoveryError>;
-    fn inspect(&self) -> Result<RecoveryInventory, RecoveryError>;
-    fn replay(&self, base: RecoveryBaseSnapshot)
-        -> Result<RecoveryReplay, RecoveryError>;
-    fn compact(&self, durable: DurableRevisionVector)
-        -> Result<CompactionReport, RecoveryError>;
-    fn discard_through(&self, durable: DurableRevisionVector)
-        -> Result<DiscardReport, RecoveryError>;
-}
-
-impl CheckpointIntentStore for FsRecoveryJournal {
-    fn persist(&self, intent: CheckpointIntent) -> Result<(), IntentStoreError>;
-    fn pending(&self) -> Result<Vec<CheckpointIntent>, IntentStoreError>;
-    fn complete(&self, receipt: CheckpointReceipt)
-        -> Result<(), IntentStoreError>;
-}
-```
+See [the source](src/lib.rs) for method signatures.
 
 ## Implementation
 
