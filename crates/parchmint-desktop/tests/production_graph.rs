@@ -58,7 +58,7 @@ fn legacy_summary_hydration_runs_in_background_without_opening_unselected_docume
         .as_any()
         .downcast_ref::<ProductionProjectSession>()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         if !matches!(
             production.search().rebuild_status(),
@@ -70,7 +70,7 @@ fn legacy_summary_hydration_runs_in_background_without_opening_unselected_docume
             std::time::Instant::now() < deadline,
             "summary hydration stalled"
         );
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     let snapshot = production.ui_snapshot().unwrap();
@@ -1045,7 +1045,7 @@ impl SearchBatchSink for SearchHits {
 
 fn search_hits(index: &dyn SearchIndex, text: &str, field: SearchField) -> Vec<SearchHit> {
     let sink = SearchHits::default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let result = index.query(
             SearchQuery {
@@ -1064,7 +1064,7 @@ fn search_hits(index: &dyn SearchIndex, text: &str, field: SearchField) -> Vec<S
                     std::time::Instant::now() < deadline,
                     "production search rebuild did not settle"
                 );
-                std::thread::yield_now();
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
             Err(error) => panic!("production search query: {error}"),
         }

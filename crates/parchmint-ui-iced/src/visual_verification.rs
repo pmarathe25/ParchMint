@@ -1389,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn production_cards_target_renders_the_selected_inspector_content() {
+    fn production_cards_target_renders_synopsis_and_metadata_inline() {
         let target = VisualTarget::Cards;
         let appearance = VisualAppearance::Light;
         let spec = visual_target_spec(target);
@@ -1404,7 +1404,6 @@ mod tests {
         assert!(simulator.find("Comments").is_err());
         for content in [
             "Chapter One",
-            "Synopsis",
             "The harbor has fallen silent, and Mara must decide whom to trust.",
             "POV",
             "Mara",
@@ -1413,7 +1412,7 @@ mod tests {
         ] {
             assert!(
                 simulator.find(content).is_ok(),
-                "production Cards Inspector shows {content}"
+                "production Cards show {content}"
             );
         }
     }

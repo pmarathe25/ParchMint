@@ -196,9 +196,6 @@ fn deleting_an_open_document_and_restoring_after_restart_recovers_identity() {
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("relaunch application");
     reopened
-        .click_text(HarnessWindow::Launcher, "Delete Restart")
-        .expect("reopen project");
-    reopened
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::RecentlyDeleted),

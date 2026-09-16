@@ -776,13 +776,6 @@ fn author_can_export_the_manuscript_to_a_controlled_html_artifact() {
     let export = run.root().join("manuscript.html");
     let harness = create_project(&run, &project, "Export Artifact Authoring");
 
-    create_document(&harness, "Manuscript", "Chapter One");
-    harness
-        .right_click_text(HarnessWindow::Project, "Chapter One")
-        .expect("open chapter menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open")
-        .expect("open manuscript chapter");
     harness
         .type_into_target(
             HarnessWindow::Project,
@@ -796,6 +789,9 @@ fn author_can_export_the_manuscript_to_a_controlled_html_artifact() {
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "What happens here?")
+        .expect("edit the manuscript synopsis in Overview");
     harness
         .replace_target(
             HarnessWindow::Project,
@@ -845,7 +841,7 @@ fn author_can_export_the_manuscript_to_a_controlled_html_artifact() {
     });
     assert!(html.starts_with("<!doctype html>"), "export was {html:?}");
     assert!(html.contains("Only this manuscript scene belongs in the export."));
-    assert!(html.contains("Chapter One"));
+    assert!(html.contains("Untitled Document"));
     assert!(!html.contains("Private research must not be exported."));
     assert!(!html.contains("Private outline material"));
     close(harness);

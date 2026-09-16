@@ -113,9 +113,6 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("relaunch application");
-    reopened
-        .click_text(HarnessWindow::Launcher, "Restore Writing Context")
-        .expect("reopen project");
     assert!(visible(&reopened, "Overview"));
     assert!(visible(&reopened, "Harbor Notes"));
     assert!(
@@ -819,74 +816,37 @@ fn author_can_reorder_chapters_from_explorer_and_cards() {
 }
 
 #[test]
-fn novelist_can_turn_inspector_synopses_into_a_cards_outline() {
-    let run = IsolatedRun::new("inspector-outline").expect("isolated run");
-    let project = run.root().join("inspector-outline.parchmint");
-    let harness = create_project(&run, &project, "Inspector Outline");
+fn novelist_can_write_chapter_synopses_in_overview() {
+    let run = IsolatedRun::new("cards-outline").expect("isolated run");
+    let project = run.root().join("cards-outline.parchmint");
+    let harness = create_project(&run, &project, "Cards Outline");
 
     create_group(&harness, "Manuscript", "Act One");
-    create_document(&harness, "Act One", "Opening Image");
-    let opening_image = harness
-        .hierarchy_node("Opening Image")
-        .expect("resolve the first chapter");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, opening_image)
-        .expect("select the first chapter for Inspector editing");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Cards),
-        )
-        .unwrap();
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
-        .expect("focus Inspector synopsis");
-    assert!(
-        harness
-            .target_is_focused(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
-            .expect("inspect synopsis focus")
+    create_outline_document(
+        &harness,
+        "Act One",
+        "Opening Image",
+        "A storm puts the harbor under glass.",
+    );
+    create_outline_document(
+        &harness,
+        "Act One",
+        "The First Choice",
+        "The protagonist chooses the impossible crossing.",
     );
     harness
-        .type_focused(
-            HarnessWindow::Project,
-            "A storm puts the harbor under glass.",
-        )
-        .expect("write a chapter synopsis in Overview");
-    harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Editor),
-        )
-        .unwrap();
-    create_document(&harness, "Act One", "The First Choice");
-    let first_choice = harness
-        .hierarchy_node("The First Choice")
-        .expect("resolve the second chapter");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, first_choice)
-        .expect("select the second chapter for Inspector editing");
-    outline_synopsis(&harness, "The protagonist chooses the impossible crossing.");
-    harness
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
-        .expect("review the outline in Cards");
-    harness
-        .click_cards_node(
-            HarnessWindow::Project,
-            harness.hierarchy_node("Act One").unwrap(),
-        )
-        .unwrap();
+        .expect("review the outline in Overview");
     assert!(visible(&harness, "A storm puts the harbor under glass."));
     assert!(visible(
         &harness,
         "The protagonist chooses the impossible crossing."
     ));
-    harness
-        .close(HarnessWindow::Project)
-        .expect("close inspector-outline project");
-    harness.shutdown().expect("stop inspector-outline project");
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
 }
 
 #[test]
@@ -1202,35 +1162,23 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
         .expect("write a second research note in the companion pane");
 
     create_group(&harness, "Manuscript", "Act One");
-    create_document(&harness, "Act One", "Opening Image");
-    let opening_image = harness
-        .hierarchy_node("Opening Image")
-        .expect("resolve the opening chapter");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, opening_image)
-        .expect("select the opening chapter for Inspector editing");
-    outline_synopsis(
+    create_outline_document(
         &harness,
+        "Act One",
+        "Opening Image",
         "A storm seals the harbor and strands the cartographer.",
     );
-    create_document(&harness, "Act One", "The Crossing");
-    let crossing = harness
-        .hierarchy_node("The Crossing")
-        .expect("resolve the crossing chapter");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, crossing)
-        .expect("select the crossing chapter for Inspector editing");
-    outline_synopsis(&harness, "The cartographer chooses the forbidden channel.");
-    create_group(&harness, "Manuscript", "Act Two");
-    create_document(&harness, "Act Two", "The Archive");
-    let archive = harness
-        .hierarchy_node("The Archive")
-        .expect("resolve the archive chapter");
-    harness
-        .click_hierarchy_node(HarnessWindow::Project, archive)
-        .expect("select the archive chapter for Inspector editing");
-    outline_synopsis(
+    create_outline_document(
         &harness,
+        "Act One",
+        "The Crossing",
+        "The cartographer chooses the forbidden channel.",
+    );
+    create_group(&harness, "Manuscript", "Act Two");
+    create_outline_document(
+        &harness,
+        "Act Two",
+        "The Archive",
         "An old pilot log reveals why the tide turns to glass.",
     );
 
@@ -1386,7 +1334,12 @@ fn canonical_bodies_in(directory: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-fn outline_synopsis(harness: &DesktopInteractionHarness, synopsis: &str) {
+fn create_outline_document(
+    harness: &DesktopInteractionHarness,
+    parent: &str,
+    title: &str,
+    synopsis: &str,
+) {
     harness
         .click_target(
             HarnessWindow::Project,
@@ -1394,11 +1347,28 @@ fn outline_synopsis(harness: &DesktopInteractionHarness, synopsis: &str) {
         )
         .unwrap();
     harness
-        .replace_target(
-            HarnessWindow::Project,
-            HarnessTarget::InspectorSynopsis,
-            synopsis,
-        )
+        .click_text(HarnessWindow::Project, "Manuscript")
+        .unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, parent)
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create document")
+        .unwrap();
+    harness.type_focused(HarnessWindow::Project, title).unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
+            .unwrap()
+    );
+    harness
+        .type_focused(HarnessWindow::Project, synopsis)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
         .unwrap();
     harness
         .click_target(
