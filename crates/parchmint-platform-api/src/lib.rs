@@ -402,8 +402,30 @@ impl ValidatedExternalIntent {
         })
     }
 
-    pub const fn scheme(&self) -> &'static str {
-        "https"
+    /// Validates a web link for the user's browser.
+    pub fn browser_url(url: impl AsRef<str>) -> Result<Self, ExternalIntentError> {
+        let url = url.as_ref();
+        let (scheme, rest) = url.split_once("://").ok_or(ExternalIntentError::Scheme)?;
+        if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+            return Err(ExternalIntentError::Scheme);
+        }
+        validate_https_url(&format!("https://{rest}"))?;
+        Ok(Self {
+            url: url.to_owned(),
+            action: ExternalOpenAction::OpenInBrowser,
+        })
+    }
+
+    pub fn scheme(&self) -> &'static str {
+        if self
+            .url
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        {
+            "http"
+        } else {
+            "https"
+        }
     }
 
     pub fn as_url(&self) -> &str {

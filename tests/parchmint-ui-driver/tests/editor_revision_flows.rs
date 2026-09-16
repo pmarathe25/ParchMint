@@ -1,10 +1,359 @@
 use std::path::Path;
 
 use parchmint_desktop::{
-    DesktopInteractionHarness, EditorPane, HarnessTarget, HarnessWindow, LaunchRequest,
+    DesktopInteractionHarness, EditorPane, HarnessKey, HarnessTarget, HarnessWindow, LaunchRequest,
     RibbonDestination,
 };
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
+
+#[test]
+fn empty_tabs_close_without_creating_project_documents() {
+    let run = IsolatedRun::new("empty-draft-tabs").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Empty tabs");
+    let before = std::fs::read(project.join("project.toml")).unwrap();
+    for _ in 0..3 {
+        harness
+            .click_target(
+                HarnessWindow::Project,
+                HarnessTarget::NewTab(EditorPane::Primary),
+            )
+            .unwrap();
+        let draft = harness
+            .active_editor_document_id(EditorPane::Primary)
+            .unwrap();
+        harness
+            .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, draft)
+            .unwrap();
+        assert!(
+            !harness
+                .contains_text(HarnessWindow::Project, "Save before closing?")
+                .unwrap()
+        );
+    }
+    assert_eq!(std::fs::read(project.join("project.toml")).unwrap(), before);
+    assert!(
+        !harness
+            .hierarchy_titles()
+            .unwrap()
+            .contains(&"Unfiled".to_owned())
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(canonical_bodies_in(&project.join("unfiled")).is_empty());
+}
+
+#[test]
+fn closing_a_changed_draft_can_cancel_save_or_discard() {
+    let run = IsolatedRun::new("close-draft-decision").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Draft decisions");
+    for save in [true, false] {
+        harness
+            .click_target(
+                HarnessWindow::Project,
+                HarnessTarget::NewTab(EditorPane::Primary),
+            )
+            .unwrap();
+        harness
+            .type_focused(HarnessWindow::Project, "Keep this idea.")
+            .unwrap();
+        let draft = harness
+            .active_editor_document_id(EditorPane::Primary)
+            .unwrap();
+        harness
+            .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, draft.clone())
+            .unwrap();
+        assert!(
+            harness
+                .contains_text(HarnessWindow::Project, "Save before closing?")
+                .unwrap()
+        );
+        harness
+            .click_target(HarnessWindow::Project, HarnessTarget::ModalCancel)
+            .unwrap();
+        assert!(
+            harness
+                .active_editor_body()
+                .unwrap()
+                .contains("Keep this idea.")
+        );
+        harness
+            .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, draft)
+            .unwrap();
+        if save {
+            harness
+                .click_target(HarnessWindow::Project, HarnessTarget::ModalConfirm)
+                .unwrap();
+            harness
+                .type_focused(HarnessWindow::Project, "Opening")
+                .unwrap();
+            harness
+                .click_target(HarnessWindow::Project, HarnessTarget::ModalConfirm)
+                .unwrap();
+            assert!(
+                harness
+                    .hierarchy_titles()
+                    .unwrap()
+                    .contains(&"Opening".to_owned())
+            );
+        } else {
+            harness
+                .click_text(HarnessWindow::Project, "Don’t Save")
+                .unwrap();
+        }
+        assert!(
+            !harness
+                .contains_text(HarnessWindow::Project, "Save before closing?")
+                .unwrap()
+        );
+    }
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(
+        canonical_bodies_in(&project.join("manuscript"))
+            .iter()
+            .any(|body| body.contains("Keep this idea."))
+    );
+    assert!(canonical_bodies_in(&project.join("unfiled")).is_empty());
+}
+
+#[test]
+fn a_new_tab_can_be_written_before_choosing_its_name_and_group() {
+    let run = IsolatedRun::new("unfiled-draft-save").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Write first");
+    create_group(&harness, "Manuscript", "Act One");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::NewTab(EditorPane::Primary),
+        )
+        .unwrap();
+    assert_eq!(harness.active_editor_tab_title().unwrap(), "Untitled");
+    harness
+        .type_focused(HarnessWindow::Project, "A story starts here.")
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A story starts here.")
+    );
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 0 words")
+            .unwrap()
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::DraftTitle)
+            .unwrap()
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ModalCancel)
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A story starts here.")
+    );
+    harness
+        .type_focused(HarnessWindow::Project, " More.")
+        .unwrap();
+    assert!(harness.active_editor_body().unwrap().contains("More."));
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "The beginning")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Manuscript › Act One")
+        .unwrap();
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(HarnessWindow::Project, Path::new(&root).join("save-draft"))
+            .unwrap();
+    }
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ModalConfirm)
+        .unwrap();
+    assert_eq!(harness.active_editor_tab_title().unwrap(), "The beginning");
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 5 words")
+            .unwrap()
+    );
+    assert!(
+        !harness
+            .hierarchy_titles()
+            .unwrap()
+            .contains(&"Unfiled".to_owned())
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Save document")
+            .unwrap()
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(
+        canonical_bodies_in(&project.join("manuscript"))
+            .iter()
+            .any(|body| body.contains("A story starts here."))
+    );
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert_eq!(reopened.active_editor_tab_title().unwrap(), "The beginning");
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains("A story starts here.")
+    );
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn changed_drafts_remain_recoverable_without_exposing_an_unfiled_section() {
+    let run = IsolatedRun::new("unfiled-draft-reopen").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Unfiled writing");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::NewTab(EditorPane::Primary),
+        )
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "An unplaced opening.")
+        .unwrap();
+    let primary = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::NewTab(EditorPane::Companion),
+        )
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "A different ending.")
+        .unwrap();
+    assert_ne!(
+        primary,
+        harness
+            .active_editor_document_id(EditorPane::Companion)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 0 words")
+            .unwrap()
+    );
+    harness
+        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, primary)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+        .unwrap();
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    let bodies = canonical_bodies_in(&project.join("unfiled"));
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("An unplaced opening."))
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body.contains("A different ending."))
+    );
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert!(
+        !reopened
+            .hierarchy_titles()
+            .unwrap()
+            .contains(&"Unfiled".to_owned())
+    );
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains("A different ending.")
+    );
+    reopened
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "Save document")
+            .unwrap()
+    );
+    reopened
+        .click_target(HarnessWindow::Project, HarnessTarget::ModalCancel)
+        .unwrap();
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
+
+#[test]
+fn unfiled_writing_can_be_recovered_before_its_first_explicit_save() {
+    let run = IsolatedRun::new("unfiled-draft-recovery").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Recover unfiled writing");
+    harness
+        .press_command_key(HarnessWindow::Project, 't')
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "An idea worth keeping.")
+        .unwrap();
+    harness.elapse_recovery_capture().unwrap();
+    harness.abandon().unwrap();
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "Unsaved changes found")
+            .unwrap()
+    );
+    reopened
+        .click_text(HarnessWindow::Project, "Recover changes")
+        .unwrap();
+
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains("An idea worth keeping.")
+    );
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "Manuscript · 0 words")
+            .unwrap()
+    );
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+    assert!(
+        canonical_bodies_in(&project.join("unfiled"))
+            .iter()
+            .any(|body| body.contains("An idea worth keeping."))
+    );
+}
 
 #[test]
 fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
@@ -21,9 +370,11 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
             .unwrap();
         harness.hold_completions().unwrap();
         harness.elapse_recovery_capture().unwrap();
-        harness.click_text(HarnessWindow::Project, "+ New").unwrap();
         harness
-            .click_text(HarnessWindow::Project, "Document")
+            .right_click_text(HarnessWindow::Project, "Manuscript")
+            .unwrap();
+        harness
+            .click_text(HarnessWindow::Project, "Create document")
             .unwrap();
         harness
             .type_into_target(
@@ -144,11 +495,15 @@ fn toolbar_typing_marks_and_history_compare_the_live_unsaved_draft() {
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
         .unwrap();
-    harness.click_text(HarnessWindow::Project, "B").unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::Bold)
+        .unwrap();
     harness
         .type_focused(HarnessWindow::Project, "Bold words")
         .unwrap();
-    harness.click_text(HarnessWindow::Project, "B").unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::Bold)
+        .unwrap();
     harness
         .type_focused(HarnessWindow::Project, " plain words")
         .unwrap();
@@ -238,9 +593,11 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
     harness
         .scroll_target_by(HarnessWindow::Project, HarnessTarget::EditorCompanion, 80.0)
         .unwrap();
-    harness.click_text(HarnessWindow::Project, "B").unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Comment")
+        .click_target(HarnessWindow::Project, HarnessTarget::Bold)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::AddComment)
         .unwrap();
     harness
         .type_into_target(
@@ -371,17 +728,7 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
         .expect("read primary document identity");
 
     harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::PaneMenu(EditorPane::Primary),
-        )
-        .expect("open pane actions");
-    harness
-        .click_target_offset(
-            HarnessWindow::Project,
-            HarnessTarget::PaneMenu(EditorPane::Primary),
-            (0.5, 1.5),
-        )
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
         .expect("open the same source beside the primary pane");
     assert_eq!(
         document_id,
@@ -423,7 +770,7 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
 }
 
 #[test]
-fn editor_toolbar_inserts_semantic_scene_and_page_breaks() {
+fn editor_toolbar_menus_format_lists_and_insert_breaks() {
     let run = IsolatedRun::new("semantic-breaks").expect("isolated run");
     let project = run.root().join("semantic-breaks.parchmint");
     let harness = create_project(&run, &project, "Semantic Breaks");
@@ -435,12 +782,53 @@ fn editor_toolbar_inserts_semantic_scene_and_page_breaks() {
             "Opening scene.",
         )
         .expect("draft opening prose");
+    for (target, expected) in [
+        (HarnessTarget::ListBulleted, "<ul>"),
+        (HarnessTarget::ListNumbered, "<ol>"),
+    ] {
+        if target == HarnessTarget::ListNumbered {
+            harness
+                .click_target(HarnessWindow::Project, HarnessTarget::ListMenu)
+                .unwrap();
+            if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+                harness
+                    .snapshot(HarnessWindow::Project, Path::new(&root).join("list-menu"))
+                    .unwrap();
+            }
+        }
+        harness
+            .click_target(HarnessWindow::Project, target)
+            .unwrap();
+        let body = harness.active_editor_body().unwrap();
+        assert!(body.contains(expected), "{body}");
+    }
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::SceneBreak)
-        .expect("insert a scene break");
+        .type_focused(HarnessWindow::Project, " Still writing.")
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("Opening scene. Still writing.")
+    );
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::PageBreak)
-        .expect("insert a page break");
+        .click_target(HarnessWindow::Project, HarnessTarget::BreakMenu)
+        .expect("open break menu");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowUp)
+        .expect("select scene break");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("insert scene break");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::BreakMenu)
+        .expect("reopen break menu");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+        .expect("select page break");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("insert page break");
     let body = harness
         .active_editor_body()
         .expect("read document with semantic breaks");
@@ -503,7 +891,7 @@ fn editor_selection_formatting_can_be_undone_and_redone_with_keyboard_focus() {
 }
 
 fn canonical_bodies(project: &Path) -> Vec<String> {
-    ["manuscript", "research"]
+    ["manuscript", "research", "unfiled"]
         .into_iter()
         .flat_map(|directory| canonical_bodies_in(&project.join(directory)))
         .collect()
@@ -525,4 +913,207 @@ fn canonical_bodies_in(directory: &Path) -> Vec<String> {
             }
         })
         .collect()
+}
+
+#[test]
+fn a_draft_keeps_typing_while_its_creation_completion_is_delayed() {
+    for newest_first in [false, true] {
+        let run = IsolatedRun::new("buffered-draft").unwrap();
+        let project = run.root().join("novel.parchmint");
+        let harness = create_project(&run, &project, "Buffered draft");
+        harness
+            .click_target(
+                HarnessWindow::Project,
+                HarnessTarget::NewTab(EditorPane::Primary),
+            )
+            .unwrap();
+        harness.hold_completions().unwrap();
+        harness
+            .type_focused(HarnessWindow::Project, "The first sentence. ")
+            .unwrap();
+        harness
+            .type_focused(HarnessWindow::Project, "And the next one.")
+            .unwrap();
+        harness.release_completions(newest_first).unwrap();
+        assert!(
+            harness
+                .active_editor_body()
+                .unwrap()
+                .contains("The first sentence. And the next one.")
+        );
+        harness.elapse_recovery_capture().unwrap();
+        harness.close(HarnessWindow::Project).unwrap();
+        harness.shutdown().unwrap();
+        assert!(
+            canonical_bodies_in(&project.join("unfiled"))
+                .iter()
+                .any(|body| body.contains("The first sentence. And the next one."))
+        );
+    }
+}
+
+#[test]
+fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
+    let run = IsolatedRun::new("pane-tab-transfers").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Pane transfers");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    let initial = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .unwrap();
+    harness
+        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, initial)
+        .unwrap();
+    create_document(&harness, "Manuscript", "Opening");
+    harness
+        .type_focused(HarnessWindow::Project, "A moving chapter.")
+        .unwrap();
+    let opening = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Manuscript")
+        .unwrap();
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Create group")
+            .unwrap()
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+        .unwrap();
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Create group")
+            .unwrap()
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
+        .unwrap();
+    harness
+        .drag_text_to_text(HarnessWindow::Project, "Opening", "Untitled Document")
+        .unwrap();
+    assert!(
+        !harness
+            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Primary, opening.clone())
+            .unwrap()
+    );
+    assert!(
+        harness
+            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Companion, opening)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A moving chapter.")
+    );
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(HarnessWindow::Project, Path::new(&root).join("pane-tabs"))
+            .unwrap();
+        harness
+            .resize(HarnessWindow::Project, 1280.0, 720.0)
+            .unwrap();
+        harness
+            .snapshot(
+                HarnessWindow::Project,
+                Path::new(&root).join("editor-compact"),
+            )
+            .unwrap();
+    }
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn closing_during_draft_creation_preserves_input_and_honors_the_close_request() {
+    for close_window in [false, true] {
+        let run = IsolatedRun::new("pending-draft-close").unwrap();
+        let project = run.root().join("novel.parchmint");
+        let harness = create_project(&run, &project, "Pending draft");
+        harness
+            .click_target(
+                HarnessWindow::Project,
+                HarnessTarget::NewTab(EditorPane::Primary),
+            )
+            .unwrap();
+        let draft = harness
+            .active_editor_document_id(EditorPane::Primary)
+            .unwrap();
+        harness.hold_completions().unwrap();
+        harness
+            .type_focused(HarnessWindow::Project, "An idea worth keeping.")
+            .unwrap();
+        if close_window {
+            harness.close(HarnessWindow::Project).unwrap();
+        } else {
+            harness
+                .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, draft)
+                .unwrap();
+        }
+        harness.release_completions(true).unwrap();
+        if close_window {
+            assert!(!harness.has_window(HarnessWindow::Project).unwrap());
+        } else {
+            assert!(
+                harness
+                    .contains_text(HarnessWindow::Project, "Save before closing?")
+                    .unwrap()
+            );
+            harness
+                .click_target(HarnessWindow::Project, HarnessTarget::ModalCancel)
+                .unwrap();
+            assert!(
+                harness
+                    .active_editor_body()
+                    .unwrap()
+                    .contains("An idea worth keeping.")
+            );
+            harness.close(HarnessWindow::Project).unwrap();
+        }
+        harness.shutdown().unwrap();
+        assert!(
+            canonical_bodies_in(&project.join("unfiled"))
+                .iter()
+                .any(|body| body.contains("An idea worth keeping."))
+        );
+    }
+}
+
+#[test]
+fn explicitly_saving_a_blank_tab_creates_only_the_chosen_document() {
+    let run = IsolatedRun::new("save-blank-tab").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Blank document");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::NewTab(EditorPane::Primary),
+        )
+        .unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "Chapter title")
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ModalConfirm)
+        .unwrap();
+    assert_eq!(harness.active_editor_tab_title().unwrap(), "Chapter title");
+    harness
+        .type_focused(HarnessWindow::Project, "The first words.")
+        .unwrap();
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert!(canonical_bodies_in(&project.join("unfiled")).is_empty());
+    assert!(
+        canonical_bodies_in(&project.join("manuscript"))
+            .iter()
+            .any(|body| body.contains("The first words."))
+    );
 }

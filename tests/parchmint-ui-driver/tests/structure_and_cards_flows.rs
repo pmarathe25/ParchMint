@@ -12,6 +12,340 @@ use parchmint_project_format::{CanonicalProjectPathMap, ProjectFormatCodec};
 use parchmint_ui_driver::{IsolatedRun, create_project};
 
 #[test]
+fn hierarchy_drag_previews_reflow_cancel_and_commit_on_both_surfaces() {
+    for surface in [
+        HarnessHierarchySurface::Cards,
+        HarnessHierarchySurface::Explorer,
+    ] {
+        let run = IsolatedRun::new("hierarchy-reflow").unwrap();
+        let project = run.root().join("reflow.parchmint");
+        let harness = create_project(&run, &project, "Live Outline");
+        create_group(&harness, "Manuscript", "Act One");
+        create_group(&harness, "Manuscript", "Act Two");
+        for title in ["Arrival", "Discovery", "Departure"] {
+            create_document(&harness, "Act One", title);
+        }
+        harness
+            .click_target(
+                HarnessWindow::Project,
+                HarnessTarget::Ribbon(match surface {
+                    HarnessHierarchySurface::Cards => RibbonDestination::Cards,
+                    HarnessHierarchySurface::Explorer => RibbonDestination::Editor,
+                }),
+            )
+            .unwrap();
+        let arrival = harness.hierarchy_node("Arrival").unwrap();
+        let departure = harness.hierarchy_node("Departure").unwrap();
+        let act_two = harness.hierarchy_node("Act Two").unwrap();
+        let original = harness.hierarchy_titles().unwrap();
+        let saved = fs::read(project.join("project.toml")).unwrap();
+
+        for escape in [true, false] {
+            harness
+                .preview_hierarchy_move(
+                    HarnessWindow::Project,
+                    surface,
+                    arrival.clone(),
+                    departure.clone(),
+                    HarnessDropPosition::After,
+                )
+                .unwrap();
+            if surface == HarnessHierarchySurface::Cards {
+                assert_order(
+                    &harness.preview_hierarchy_titles().unwrap(),
+                    &["Discovery", "Departure", "Arrival"],
+                );
+            } else {
+                assert_eq!(harness.preview_hierarchy_titles().unwrap(), original);
+            }
+            assert_eq!(harness.hierarchy_titles().unwrap(), original);
+            assert_eq!(fs::read(project.join("project.toml")).unwrap(), saved);
+            harness.redraw(HarnessWindow::Project).unwrap();
+            if surface == HarnessHierarchySurface::Cards {
+                assert_order(
+                    &harness.preview_hierarchy_titles().unwrap(),
+                    &["Discovery", "Departure", "Arrival"],
+                );
+            } else {
+                assert_eq!(harness.preview_hierarchy_titles().unwrap(), original);
+            }
+            if escape {
+                harness
+                    .press_key(HarnessWindow::Project, HarnessKey::Escape)
+                    .unwrap();
+            } else {
+                harness
+                    .move_pointer_outside(HarnessWindow::Project)
+                    .unwrap();
+            }
+            harness
+                .release_hierarchy_drag(HarnessWindow::Project)
+                .unwrap();
+            assert_eq!(harness.preview_hierarchy_titles().unwrap(), original);
+            assert_eq!(harness.hierarchy_titles().unwrap(), original);
+            assert_eq!(fs::read(project.join("project.toml")).unwrap(), saved);
+        }
+
+        harness
+            .drag_hierarchy_node(
+                HarnessWindow::Project,
+                surface,
+                arrival.clone(),
+                departure,
+                HarnessDropPosition::After,
+            )
+            .unwrap();
+        let reordered = harness.hierarchy_titles().unwrap();
+        assert_order(
+            &reordered,
+            &["Discovery", "Departure", "Arrival", "Act Two"],
+        );
+
+        if surface == HarnessHierarchySurface::Cards {
+            harness
+                .toggle_cards_group(HarnessWindow::Project, act_two.clone())
+                .unwrap();
+        }
+        harness
+            .preview_hierarchy_move(
+                HarnessWindow::Project,
+                surface,
+                arrival.clone(),
+                act_two.clone(),
+                HarnessDropPosition::Into,
+            )
+            .unwrap();
+        if surface == HarnessHierarchySurface::Cards {
+            assert_order(
+                &harness.preview_hierarchy_titles().unwrap(),
+                &["Discovery", "Departure", "Act Two", "Arrival"],
+            );
+        } else {
+            assert_eq!(harness.preview_hierarchy_titles().unwrap(), reordered);
+        }
+        assert_eq!(harness.hierarchy_titles().unwrap(), reordered);
+        if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+            harness
+                .snapshot(
+                    HarnessWindow::Project,
+                    Path::new(&root).join(format!("reflow-{surface:?}")),
+                )
+                .unwrap();
+        }
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::Escape)
+            .unwrap();
+        harness
+            .release_hierarchy_drag(HarnessWindow::Project)
+            .unwrap();
+        assert_eq!(harness.preview_hierarchy_titles().unwrap(), reordered);
+        harness
+            .drag_hierarchy_node(
+                HarnessWindow::Project,
+                surface,
+                arrival.clone(),
+                act_two,
+                HarnessDropPosition::Into,
+            )
+            .unwrap();
+        if surface == HarnessHierarchySurface::Cards {
+            assert!(
+                harness
+                    .cards_node_is_visible(HarnessWindow::Project, arrival)
+                    .unwrap(),
+                "the destination must stay expanded after the move completes"
+            );
+        }
+        let committed = harness.hierarchy_titles().unwrap();
+        assert_order(
+            &committed,
+            &["Discovery", "Departure", "Act Two", "Arrival"],
+        );
+        let discovery = harness.hierarchy_node("Discovery").unwrap();
+        let act_one = harness.hierarchy_node("Act One").unwrap();
+        harness
+            .drag_hierarchy_node(
+                HarnessWindow::Project,
+                surface,
+                discovery,
+                act_one,
+                HarnessDropPosition::Before,
+            )
+            .unwrap();
+        let committed = harness.hierarchy_titles().unwrap();
+        assert_order(
+            &committed,
+            &["Discovery", "Act One", "Departure", "Act Two", "Arrival"],
+        );
+        close(harness);
+        let reopened =
+            DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+        assert_eq!(reopened.hierarchy_titles().unwrap(), committed);
+        close(reopened);
+    }
+}
+
+#[test]
+fn outline_creation_flows_from_name_to_synopsis_and_preserves_actual_word_counts() {
+    let run = IsolatedRun::new("outline-planning").unwrap();
+    let project = run.root().join("planning.parchmint");
+    let harness = create_project(&run, &project, "Outline Planning");
+    create_group(&harness, "Manuscript", "Act One");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Act One")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create document")
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "The arrival")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CardsList)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
+            .unwrap()
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "Mara arrives at the harbor.")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::PrimaryEnter)
+        .unwrap();
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .unwrap()
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "The departure")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CardsList)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
+            .unwrap()
+    );
+    harness
+        .type_focused(HarnessWindow::Project, "She sets sail at dawn.")
+        .unwrap();
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 0 words")
+            .unwrap()
+    );
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Mara arrives at the harbor.")
+            .unwrap()
+    );
+    let arrival = harness.hierarchy_node("The arrival").unwrap();
+    let departure = harness.hierarchy_node("The departure").unwrap();
+    harness
+        .drag_hierarchy_node(
+            HarnessWindow::Project,
+            HarnessHierarchySurface::Cards,
+            departure,
+            arrival.clone(),
+            HarnessDropPosition::Before,
+        )
+        .unwrap();
+    assert_order(
+        &harness.hierarchy_titles().unwrap(),
+        &["The departure", "The arrival"],
+    );
+    harness
+        .double_click_cards_node(HarnessWindow::Project, arrival)
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "The harbor was silent.",
+        )
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
+        .click_cards_node(
+            HarnessWindow::Project,
+            harness.hierarchy_node("Act One").unwrap(),
+        )
+        .unwrap();
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Selected · 4 words")
+            .unwrap()
+    );
+    assert!(
+        harness
+            .contains_text(HarnessWindow::Project, "Manuscript · 4 words")
+            .unwrap()
+    );
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(
+                HarnessWindow::Project,
+                Path::new(&root).join("outline-planning"),
+            )
+            .unwrap();
+    }
+    close(harness);
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    reopened
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    assert_order(
+        &reopened.hierarchy_titles().unwrap(),
+        &["The departure", "The arrival"],
+    );
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "Mara arrives at the harbor.")
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "She sets sail at dawn.")
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .contains_text(HarnessWindow::Project, "Manuscript · 4 words")
+            .unwrap()
+    );
+    close(reopened);
+}
+
+#[test]
 fn explorer_keyboard_navigation_reaches_a_document_and_group_click_collapses_it() {
     let run = IsolatedRun::new("explorer-keyboard-structure").expect("isolated run");
     let project = run.root().join("explorer-keyboard-structure.parchmint");
@@ -101,7 +435,7 @@ fn explorer_keyboard_navigation_reaches_a_document_and_group_click_collapses_it(
 }
 
 #[test]
-fn explorer_add_menu_builds_a_multi_level_outline_in_the_selected_context() {
+fn explorer_context_menu_builds_a_multi_level_outline() {
     let run = IsolatedRun::new("nested-explorer-add").expect("isolated run");
     let project = run.root().join("nested-explorer-add.parchmint");
     let harness = create_project(&run, &project, "Nested Explorer Add");
@@ -175,7 +509,7 @@ fn cards_selection_can_move_an_outline_item_into_another_group() {
 }
 
 #[test]
-fn cards_group_click_expands_and_collapses_its_children() {
+fn cards_group_heading_and_chevron_toggle_the_same_disclosure() {
     let run = IsolatedRun::new("cards-group-disclosure").expect("isolated run");
     let project = run.root().join("cards-group-disclosure.parchmint");
     let harness = create_project(&run, &project, "Cards Group Disclosure");
@@ -200,28 +534,17 @@ fn cards_group_click_expands_and_collapses_its_children() {
     harness
         .click_cards_node(
             HarnessWindow::Project,
-            harness
-                .hierarchy_node("Part One")
-                .expect("resolve group Card"),
+            harness.hierarchy_node("Part One").unwrap(),
         )
-        .expect("collapse the group from its Card");
-    assert_eq!(
-        harness
-            .hierarchy()
-            .expect("inspect shared Cards selection")
-            .into_iter()
-            .find(|entry| entry.selected)
-            .map(|entry| entry.title),
-        Some("Part One".to_owned())
-    );
+        .unwrap();
     assert!(
         !harness
             .cards_node_is_visible(HarnessWindow::Project, opening.clone())
-            .expect("inspect the collapsed group")
+            .unwrap()
     );
 
     harness
-        .click_cards_node(
+        .toggle_cards_group(
             HarnessWindow::Project,
             harness
                 .hierarchy_node("Part One")
@@ -231,7 +554,7 @@ fn cards_group_click_expands_and_collapses_its_children() {
     assert!(
         harness
             .cards_node_is_visible(HarnessWindow::Project, opening)
-            .expect("inspect the re-expanded group")
+            .unwrap()
     );
 
     close(harness);
@@ -267,7 +590,7 @@ fn cards_document_click_selects_and_double_click_opens_the_document() {
     );
 
     harness
-        .double_click_cards_node(HarnessWindow::Project, chapter)
+        .double_click_cards_node(HarnessWindow::Project, chapter.clone())
         .expect("activate the document Card");
     assert_eq!(
         harness
@@ -285,6 +608,26 @@ fn cards_document_click_selects_and_double_click_opens_the_document() {
         harness
             .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
             .expect("inspect activated Editor route")
+    );
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .expect("return to Outline");
+    harness
+        .right_click_cards_node(HarnessWindow::Project, chapter)
+        .expect("open document menu");
+    harness
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("open the already active document");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .expect(
+                "context-menu Open returns to writing even when the document is already mounted"
+            )
     );
 
     close(harness);
@@ -367,7 +710,7 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
         .expect("resolve the final long-outline card");
     assert!(
         harness
-            .cards_node_is_visible(HarnessWindow::Project, first)
+            .cards_node_is_visible(HarnessWindow::Project, first.clone())
             .expect("inspect the initial Cards window")
     );
     assert!(
@@ -376,9 +719,45 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
             .expect("verify unmounted Cards rows")
     );
 
+    let original = harness.hierarchy_titles().unwrap();
+    harness
+        .preview_hierarchy_move(
+            HarnessWindow::Project,
+            HarnessHierarchySurface::Cards,
+            first,
+            harness.hierarchy_node("Bulk Card 001").unwrap(),
+            HarnessDropPosition::After,
+        )
+        .unwrap();
     harness
         .scroll_target_by(HarnessWindow::Project, HarnessTarget::CardsList, -50_000.0)
         .expect("scroll the semantic Cards list to its final window");
+    harness.redraw(HarnessWindow::Project).unwrap();
+    let preview = harness.preview_hierarchy_titles().unwrap();
+    assert_eq!(harness.hierarchy_titles().unwrap(), original);
+    assert!(
+        preview
+            .iter()
+            .position(|title| title == "Bulk Card 000")
+            .unwrap()
+            > 250
+    );
+    harness
+        .release_hierarchy_drag(HarnessWindow::Project)
+        .unwrap();
+    assert_eq!(
+        harness.hierarchy_titles().unwrap(),
+        preview,
+        "release commits the visible preview after scrolling unmounts the original source"
+    );
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(
+                HarnessWindow::Project,
+                std::path::Path::new(&root).join("long-outline-after-drag"),
+            )
+            .unwrap();
+    }
     assert!(
         harness
             .cards_node_is_visible(HarnessWindow::Project, last.clone())
@@ -401,6 +780,80 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
     assert_order(
         &harness.hierarchy_titles().expect("read reordered outline"),
         &["Bulk Card 302", "Bulk Card 304", "Bulk Card 303"],
+    );
+
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CardsList)
+            .unwrap(),
+        "reordering must keep Outline visible"
+    );
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Reorganized project")
+            .unwrap()
+    );
+    let final_card = harness
+        .hierarchy_node("Bulk Card 303")
+        .expect("resolve final card");
+    harness
+        .right_click_cards_node(HarnessWindow::Project, final_card)
+        .expect("open the last card's menu");
+    harness
+        .click_text(HarnessWindow::Project, "Rename")
+        .expect("rename the card");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("reveal the offscreen Explorer name field")
+    );
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("focus the revealed name field")
+    );
+    harness
+        .replace_target(
+            HarnessWindow::Project,
+            HarnessTarget::ExplorerRename,
+            "Final scene",
+        )
+        .expect("name the selected card");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit the title");
+    assert!(harness.hierarchy_node("Final scene").is_ok());
+    harness
+        .scroll_target_by(HarnessWindow::Project, HarnessTarget::CardsList, 50_000.0)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::OverviewAdd)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "A new ending")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    assert!(
+        harness
+            .cards_node_is_visible(
+                HarnessWindow::Project,
+                harness.hierarchy_node("A new ending").unwrap()
+            )
+            .unwrap(),
+        "creating from the top must reveal the new card at the end of a long outline"
+    );
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
+            .unwrap()
     );
 
     close(harness);
@@ -443,47 +896,10 @@ fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &st
 }
 
 fn add_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .click_text(HarnessWindow::Project, parent)
-        .expect("select the contextual add parent");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
-        .expect("open contextual Explorer add");
-    harness
-        .click_text(HarnessWindow::Project, "Group")
-        .expect("choose nested group");
-    harness
-        .redraw(HarnessWindow::Project)
-        .expect("render the nested group-name field");
-    harness
-        .type_focused(HarnessWindow::Project, title)
-        .expect("replace the selected nested group name");
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::Enter)
-        .expect("commit nested group name");
+    create_group(harness, parent, title);
 }
-
 fn add_document(harness: &DesktopInteractionHarness, parent: &str, title: &str) {
-    harness
-        .click_text(HarnessWindow::Project, parent)
-        .expect("select the contextual document parent");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
-        .expect("open contextual Explorer add");
-    harness
-        .click_text(HarnessWindow::Project, "Document")
-        .expect("choose nested document");
-    harness
-        .redraw(HarnessWindow::Project)
-        .expect("render the nested document-name field");
-    harness
-        .type_focused(HarnessWindow::Project, title)
-        .unwrap_or_else(|error| {
-            panic!("replace the selected nested document name {title:?}: {error}")
-        });
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::Enter)
-        .expect("commit nested document name");
+    create_document(harness, parent, title);
 }
 
 fn seed_large_cards_project(path: &Path, documents: usize) {

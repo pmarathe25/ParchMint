@@ -19,7 +19,6 @@ use crate::{EditorPane, RibbonDestination};
 pub enum HarnessTarget {
     Ribbon(RibbonDestination),
     ExplorerSearch,
-    ExplorerAdd,
     ExplorerRename,
     CardsList,
     HistoryTimeline,
@@ -34,20 +33,30 @@ pub enum HarnessTarget {
     InspectorTitle,
     InspectorSynopsis,
     MetadataFieldName,
+    AddComment,
     CommentDraft,
     CommentEdit,
     CommentReply,
     Bold,
-    SceneBreak,
-    PageBreak,
+    ParagraphStyle,
+    ListMenu,
+    ListBulleted,
+    ListNumbered,
+    OverviewAdd,
+    BreakMenu,
     LocalFind(EditorPane),
     LocalReplace(EditorPane),
     TabOverflow(EditorPane),
+    NewTab(EditorPane),
+    DraftTitle,
     ExportBrowse,
     ExportStart,
     ExportTitles,
     StyleInheritance,
-    PaneMenu(EditorPane),
+    ToggleCompanion,
+    PaneFocus(EditorPane),
+    ToggleExplorer,
+    ToggleInspector,
     CommentMenu(usize),
 }
 
@@ -62,7 +71,6 @@ impl HarnessTarget {
             Self::Ribbon(RibbonDestination::Settings) => "harness.ribbon.settings",
             Self::Ribbon(RibbonDestination::GlobalSearch) => "harness.ribbon.global-search",
             Self::ExplorerSearch => "harness.explorer.search",
-            Self::ExplorerAdd => "harness.explorer.add",
             Self::ExplorerRename => "harness.explorer.rename",
             Self::CardsList => "harness.cards.list",
             Self::HistoryTimeline => "harness.history.timeline",
@@ -77,24 +85,35 @@ impl HarnessTarget {
             Self::InspectorTitle => "harness.inspector.title",
             Self::InspectorSynopsis => "harness.inspector.synopsis",
             Self::MetadataFieldName => "harness.settings.metadata-field-name",
+            Self::AddComment => "harness.editor.add-comment",
             Self::CommentDraft => "harness.comment.draft",
             Self::CommentEdit => "harness.comment.edit",
             Self::CommentReply => "harness.comment.reply",
             Self::Bold => "harness.editor.bold",
-            Self::SceneBreak => "harness.editor.scene-break",
-            Self::PageBreak => "harness.editor.page-break",
+            Self::ParagraphStyle => "harness.editor.paragraph-style",
+            Self::ListBulleted => "list-bulleted",
+            Self::ListNumbered => "list-numbered",
+            Self::OverviewAdd => "overview-add",
+            Self::ListMenu => "harness.editor.list-menu",
+            Self::BreakMenu => "harness.editor.break-menu",
             Self::LocalFind(EditorPane::Primary) => "harness.local-find.primary",
             Self::LocalFind(EditorPane::Companion) => "harness.local-find.companion",
             Self::LocalReplace(EditorPane::Primary) => "harness.local-replace.primary",
             Self::LocalReplace(EditorPane::Companion) => "harness.local-replace.companion",
             Self::TabOverflow(EditorPane::Primary) => "harness.tab-overflow.primary",
             Self::TabOverflow(EditorPane::Companion) => "harness.tab-overflow.companion",
+            Self::NewTab(EditorPane::Primary) => "harness.new-tab.primary",
+            Self::NewTab(EditorPane::Companion) => "harness.new-tab.companion",
+            Self::DraftTitle => "harness.draft.title",
             Self::ExportBrowse => "harness.export.browse",
             Self::ExportStart => "harness.export.start",
             Self::ExportTitles => "harness.export.titles",
             Self::StyleInheritance => "harness.settings.style-inheritance",
-            Self::PaneMenu(EditorPane::Primary) => "harness.pane-menu.primary",
-            Self::PaneMenu(EditorPane::Companion) => "harness.pane-menu.companion",
+            Self::ToggleCompanion => "harness.toggle-companion",
+            Self::PaneFocus(EditorPane::Primary) => "harness.pane-focus.primary",
+            Self::PaneFocus(EditorPane::Companion) => "harness.pane-focus.companion",
+            Self::ToggleExplorer => "harness.toggle-explorer",
+            Self::ToggleInspector => "harness.toggle-inspector",
             Self::CommentMenu(index) => return format!("harness.comment.menu.{index}").into(),
         })
     }
@@ -131,12 +150,8 @@ pub(crate) fn card_id(node_id: &str) -> Id {
     format!("harness.cards.node.{node_id}").into()
 }
 
-pub(crate) fn card_drop_before_id(node_id: &str) -> Id {
-    format!("harness.cards.before.{node_id}").into()
-}
-
-pub(crate) fn card_drop_after_id(node_id: &str) -> Id {
-    format!("harness.cards.after.{node_id}").into()
+pub(crate) fn card_disclosure_id(node_id: &str) -> Id {
+    format!("harness.cards.disclosure.{node_id}").into()
 }
 
 pub(crate) fn history_checkpoint_id(checkpoint_id: &str) -> Id {

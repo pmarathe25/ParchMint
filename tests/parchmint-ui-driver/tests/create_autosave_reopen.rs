@@ -27,9 +27,6 @@ fn user_can_create_edit_autosave_close_and_reopen_a_project() {
         )
         .expect("enter destination");
     harness
-        .type_into(HarnessWindow::Launcher, "Author (optional)", "UI Harness")
-        .expect("enter author");
-    harness
         .click_text(HarnessWindow::Launcher, "Create and Open")
         .expect("create project");
     assert!(
@@ -65,9 +62,7 @@ fn user_can_create_edit_autosave_close_and_reopen_a_project() {
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("relaunch application");
-    reopened
-        .click_text(HarnessWindow::Launcher, "Flow Novel")
-        .expect("open recent project");
+    assert!(!reopened.has_window(HarnessWindow::Launcher).unwrap());
     assert!(
         reopened
             .active_editor_body()

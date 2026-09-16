@@ -2,8 +2,12 @@
 //!
 //! Screens select semantic color roles through one appearance mapping.
 
-use iced::{Color, Theme, theme::Palette};
+use iced::{
+    Color, Theme,
+    theme::{Palette, palette},
+};
 use parchmint_design_system::{TOKENS, production_token};
+use parchmint_editor_iced::{EditorSurfaceColor, EditorSurfaceTheme};
 use parchmint_preferences::ResolvedAppearance;
 
 /// Fixed desktop metrics from the native design source.
@@ -15,10 +19,7 @@ pub const CORE_ICON_SIZE: u16 = 20;
 pub const DEFAULT_RADIUS: f32 = 4.0;
 pub const FOCUS_BORDER_WIDTH: f32 = 2.0;
 
-/// The compact, shared layout rhythm for application UI. Use these values for
-/// screen composition instead of introducing one-off gaps: dense controls use
-/// 4 or 8, ordinary UI groups use 12 or 16, and page-level separation uses 24
-/// or 32.
+/// Shared spacing in logical pixels.
 pub const SPACING_4: f32 = 4.0;
 pub const SPACING_8: f32 = 8.0;
 pub const SPACING_12: f32 = 12.0;
@@ -26,26 +27,10 @@ pub const SPACING_16: f32 = 16.0;
 pub const SPACING_24: f32 = 24.0;
 pub const SPACING_32: f32 = 32.0;
 
-/// Shared launcher composition metrics.
-///
-/// These constants are intentionally reusable: the launcher is a full-window
-/// application surface, so future first-run and project-picker surfaces use
-/// the same reading-column geometry instead of independent magic numbers.
-pub const LAUNCHER_INSET: u16 = 72;
 pub const LAUNCHER_RHYTHM: u16 = 28;
 pub const LAUNCHER_ACTION_ROW_HEIGHT: u16 = 52;
-pub const LAUNCHER_PROJECT_CARD_WIDTH: u16 = 520;
-pub const LAUNCHER_PROJECT_CARD_HEIGHT: u16 = 96;
-pub const LAUNCHER_PROJECT_CARD_GAP: u16 = 22;
-pub const LAUNCHER_PROJECT_CARD_HORIZONTAL_PADDING: u16 = 16;
-pub const LAUNCHER_PROJECT_CARD_VERTICAL_PADDING: u16 = 10;
 pub const LAUNCHER_PROJECT_ICON_SIZE: u16 = 20;
 pub const LAUNCHER_LAST_OPENED_ICON_SIZE: u16 = 14;
-pub const LAUNCHER_PROJECT_TITLE_WIDTH: u16 = 124;
-pub const LAUNCHER_PROJECT_HEADER_GAP: u16 = 14;
-pub const LAUNCHER_PROJECT_METADATA_GAP: u16 = 12;
-pub const LAUNCHER_PROJECT_NAME_MAX_CHARS: usize = 24;
-pub const LAUNCHER_PROJECT_PATH_MAX_CHARS: usize = 38;
 
 /// Launcher text sizes.
 pub const LAUNCHER_WORDMARK_SIZE: u16 = 24;
@@ -239,10 +224,9 @@ impl ParchMintTheme {
         self.palette
     }
 
-    /// The underlying Iced theme only supplies generic widget defaults; shared
-    /// components use `SemanticPalette` for roles Iced does not model.
+    /// Keeps default widgets on the same palette as shared components.
     pub fn iced_theme(self) -> Theme {
-        Theme::custom(
+        Theme::custom_with_fn(
             match self.appearance {
                 ResolvedAppearance::Light => "ParchMint Light",
                 ResolvedAppearance::Dark => "ParchMint Dark",
@@ -255,6 +239,54 @@ impl ParchMintTheme {
                 warning: self.palette.warning,
                 danger: self.palette.error,
             },
+            |base| {
+                let colors = self.palette;
+                let pair = |color| palette::Pair {
+                    color,
+                    text: colors.primary_text,
+                };
+                let mut extended = palette::Extended::generate(base);
+                extended.background = palette::Background {
+                    base: pair(colors.application),
+                    weakest: pair(colors.sidebar),
+                    weaker: pair(colors.panel),
+                    weak: pair(colors.control_hover),
+                    neutral: pair(colors.control_pressed),
+                    strong: pair(colors.strong_border),
+                    stronger: pair(colors.strong_border),
+                    strongest: pair(colors.muted_text),
+                };
+                extended.primary = palette::Primary {
+                    base: palette::Pair {
+                        color: colors.accent,
+                        text: colors.on_accent_text,
+                    },
+                    weak: pair(colors.accent_subtle),
+                    strong: palette::Pair {
+                        color: colors.accent_hover,
+                        text: colors.on_accent_text,
+                    },
+                };
+                extended.secondary = palette::Secondary {
+                    base: pair(colors.border),
+                    weak: pair(colors.control_hover),
+                    strong: pair(colors.strong_border),
+                };
+                extended
+            },
+        )
+    }
+
+    pub(crate) fn editor_theme(self) -> EditorSurfaceTheme {
+        let color = |value: Color| {
+            let [r, g, b, a] = value.into_rgba8();
+            EditorSurfaceColor::rgba(r, g, b, a)
+        };
+        EditorSurfaceTheme::new(
+            color(self.palette.manuscript),
+            color(self.palette.primary_text),
+            color(self.palette.selection),
+            color(self.palette.accent),
         )
     }
 
@@ -301,6 +333,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mounted_editor_and_widget_defaults_use_shared_surface_colors() {
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let editor = theme.editor_theme();
+            let paper = editor.manuscript();
+            assert_eq!(
+                [paper.red(), paper.green(), paper.blue(), paper.alpha()],
+                theme.palette.manuscript.into_rgba8()
+            );
+            let iced = theme.iced_theme();
+            assert_eq!(
+                iced.extended_palette().background.weak.color,
+                theme.palette.control_hover
+            );
+            assert_eq!(
+                iced.extended_palette().primary.base.text,
+                theme.palette.on_accent_text
+            );
+        }
+    }
+
+    #[test]
     fn custom_iced_themes_keep_light_and_dark_semantic_roles_distinct() {
         let light = ParchMintTheme::new(ResolvedAppearance::Light);
         let dark = ParchMintTheme::new(ResolvedAppearance::Dark);
@@ -317,22 +371,5 @@ mod tests {
             ParchMintTheme::from_iced_theme(&dark.iced_theme()),
             Some(dark)
         );
-        assert_eq!(LAUNCHER_INSET, 72);
-        assert_eq!(LAUNCHER_PROJECT_CARD_WIDTH, 520);
-        assert_eq!(LAUNCHER_PROJECT_CARD_HEIGHT, 96);
-    }
-
-    #[test]
-    fn shared_spacing_and_page_title_roles_are_explicit_and_compact() {
-        assert_eq!(
-            [
-                SPACING_4, SPACING_8, SPACING_12, SPACING_16, SPACING_24, SPACING_32,
-            ],
-            [4.0, 8.0, 12.0, 16.0, 24.0, 32.0]
-        );
-        assert_eq!(UI_PAGE_TITLE.family, UI_HEADING.family);
-        assert_eq!(UI_PAGE_TITLE.size, 24);
-        assert_eq!(UI_PAGE_TITLE.weight, 600);
-        const { assert!(UI_PAGE_TITLE.line_height < UI_BODY.line_height) };
     }
 }

@@ -31,17 +31,22 @@ struct RightClickArea<'a, Message, Theme = iced::Theme, Renderer = iced::Rendere
     on_right_press: Box<dyn Fn(Point) -> Message + 'a>,
 }
 
+#[derive(Default)]
+struct PointerState {
+    window_position: Option<Point>,
+}
+
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for RightClickArea<'_, Message, Theme, Renderer>
 where
     Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::stateless()
+        tree::Tag::of::<PointerState>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::None
+        tree::State::new(PointerState::default())
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -88,14 +93,24 @@ where
             shell,
             viewport,
         );
+        let state = tree.state.downcast_mut::<PointerState>();
+        if let Event::Mouse(iced::mouse::Event::CursorMoved { position }) = event {
+            // Scrollables translate the cursor, but leave event coordinates unchanged.
+            state.window_position = Some(*position);
+        }
         if matches!(
             event,
             Event::Mouse(iced::mouse::Event::ButtonPressed(
                 iced::mouse::Button::Right
             ))
-        ) && let Some(point) = cursor.position_over(layout.bounds())
+        ) && !shell.is_event_captured()
+            && let Some(point) = cursor
+                .position_over(layout.bounds())
+                .filter(|point| viewport.contains(*point))
         {
-            shell.publish((self.on_right_press)(point));
+            shell.publish((self.on_right_press)(
+                state.window_position.unwrap_or(point),
+            ));
             shell.capture_event();
         }
     }

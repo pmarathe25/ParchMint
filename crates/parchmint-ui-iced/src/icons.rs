@@ -12,8 +12,18 @@ pub(crate) enum Icon {
     Export,
     Settings,
     BulletedList,
+    NumberedList,
+    Search,
+    ChevronDown,
+    ChevronRight,
     BlockQuote,
     Link,
+    SplitEditor,
+    ExplorerPane,
+    PageBreak,
+    Comment,
+    FocusWriting,
+    RestoreLayout,
 }
 
 impl Icon {
@@ -24,9 +34,19 @@ impl Icon {
             Self::RecentlyDeleted => "workspace-deleted",
             Self::Export => "workspace-export",
             Self::Settings => "workspace-settings",
+            Self::Search => "workspace-search",
+            Self::ChevronDown => "chevron-down",
+            Self::ChevronRight => "chevron-right",
             Self::BulletedList => "format-bulleted-list",
+            Self::NumberedList => "format-numbered-list",
             Self::BlockQuote => "format-block-quote",
             Self::Link => "format-link",
+            Self::SplitEditor => "editor-split",
+            Self::ExplorerPane => "explorer-pane",
+            Self::PageBreak => "format-page-break",
+            Self::Comment => "editor-comment",
+            Self::FocusWriting => "workspace-focus",
+            Self::RestoreLayout => "workspace-restore-layout",
         }
     }
 }
@@ -72,8 +92,17 @@ mod tests {
             Icon::Export,
             Icon::Settings,
             Icon::BulletedList,
+            Icon::Search,
+            Icon::ChevronDown,
+            Icon::ChevronRight,
             Icon::BlockQuote,
             Icon::Link,
+            Icon::SplitEditor,
+            Icon::ExplorerPane,
+            Icon::PageBreak,
+            Icon::Comment,
+            Icon::FocusWriting,
+            Icon::RestoreLayout,
         ] {
             assert!(production_icon_svg(icon_kind.catalog_name()).is_some());
         }

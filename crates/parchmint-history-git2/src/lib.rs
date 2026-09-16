@@ -1403,7 +1403,9 @@ fn is_history_resource(path: &CanonicalRelativePath) -> bool {
             | "styles.css"
             | "dictionary.txt"
             | "deletions.json"
-    ) || ((path.starts_with("manuscript/") || path.starts_with("research/"))
+    ) || ((path.starts_with("manuscript/")
+        || path.starts_with("research/")
+        || path.starts_with("unfiled/"))
         && path.ends_with(".html"))
         || (path.starts_with("annotations/") && path.ends_with(".json"))
 }
@@ -1430,7 +1432,7 @@ fn current_canonical_paths(root: &Path) -> Result<BTreeSet<CanonicalRelativePath
             Err(error) => return Err(current_path_io("inspect current project resource", error)),
         }
     }
-    for directory in ["manuscript", "research", "annotations"] {
+    for directory in ["manuscript", "research", "unfiled", "annotations"] {
         let target = root.join(directory);
         match fs::symlink_metadata(&target) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {

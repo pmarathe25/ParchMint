@@ -118,6 +118,14 @@ fn cards_disclosure_hides_descendants_without_narrowing_the_projection() {
     );
 
     workspace.update(ProjectMessage::ToggleHierarchyExpanded("part-one".into()));
+    assert!(
+        workspace
+            .cards()
+            .items()
+            .iter()
+            .any(|item| item.node_id == "chapter-one" && item.visible)
+    );
+    workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
     let cards = workspace.cards();
     assert!(cards.items().iter().any(|item| item.node_id == "part-one"));
     assert!(
@@ -413,13 +421,19 @@ fn production_replacement_preview_uses_streamed_matches_and_requires_revalidatio
             .can_apply(workspace.project_revision())
     );
 
-    workspace.update(ProjectMessage::SelectNoReplacementMatches);
+    workspace.update(ProjectMessage::SetReplacementIncluded {
+        node_id: "all-matches".into(),
+        included: false,
+    });
     assert!(
         workspace
             .update(ProjectMessage::ApplyReplacement)
             .is_empty()
     );
-    workspace.update(ProjectMessage::SelectAllReplacementMatches);
+    workspace.update(ProjectMessage::SetReplacementIncluded {
+        node_id: "all-matches".into(),
+        included: true,
+    });
     let effects = workspace.update(ProjectMessage::OpenReplacementPreview);
     assert!(matches!(
         effects.as_slice(),
@@ -1102,6 +1116,10 @@ fn snapshot_reconciliation_preserves_surviving_ui_state_and_removes_stale_refere
         .editor_mut()
         .update(EditorMessage::SetFindQuery("river".into()));
     workspace.update(ProjectMessage::ActivateCard(research_node_id.clone()));
+    workspace.update(ProjectMessage::SelectHierarchy {
+        node_id: manuscript_node_id.clone(),
+        gesture: SelectionGesture::Replace,
+    });
 
     let mut renamed_project = fixture.snapshot.project.clone();
     renamed_project.nodes.get_mut(fixture.group).unwrap().title = "Part I".into();
@@ -1194,11 +1212,11 @@ fn workspace_snapshot_restores_panes_tabs_views_split_scroll_and_mode() {
         node_id: research_node.clone(),
         gesture: SelectionGesture::Replace,
     });
+    let mut layout = ShellLayout::for_window(1440, 900);
+    layout.restore_panes(334, 418, true, false);
     workspace.update(ProjectMessage::SetCardsSection(id_string(
         NodeId::research_root().as_bytes(),
     )));
-    let mut layout = ShellLayout::for_window(1440, 900);
-    layout.restore_panes(334, 418, true, false);
 
     let saved = workspace.workspace_snapshot(&layout, RibbonDestination::Cards);
     assert_eq!(saved.layout.explorer_width, 334);

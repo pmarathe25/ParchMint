@@ -25,9 +25,19 @@ pub fn production_icon_svg(name: &str) -> Option<&'static str> {
         "workspace-deleted" => Some(WORKSPACE_DELETED_ICON_SVG),
         "workspace-export" => Some(WORKSPACE_EXPORT_ICON_SVG),
         "workspace-settings" => Some(WORKSPACE_SETTINGS_ICON_SVG),
+        "workspace-search" => Some(WORKSPACE_SEARCH_ICON_SVG),
+        "chevron-down" => Some(CHEVRON_DOWN_ICON_SVG),
+        "chevron-right" => Some(CHEVRON_RIGHT_ICON_SVG),
+        "editor-split" => Some(EDITOR_SPLIT_ICON_SVG),
+        "explorer-pane" => Some(EXPLORER_PANE_ICON_SVG),
+        "inspector-pane" => Some(INSPECTOR_PANE_ICON_SVG),
+        "editor-comment" => Some(EDITOR_COMMENT_ICON_SVG),
+        "workspace-focus" => Some(WORKSPACE_FOCUS_ICON_SVG),
+        "workspace-restore-layout" => Some(WORKSPACE_RESTORE_LAYOUT_ICON_SVG),
         "explorer-folder-closed" => Some(EXPLORER_FOLDER_CLOSED_ICON_SVG),
         "explorer-folder-open" => Some(EXPLORER_FOLDER_OPEN_ICON_SVG),
         "format-bulleted-list" => Some(FORMAT_BULLETED_LIST_ICON_SVG),
+        "format-numbered-list" => Some(FORMAT_NUMBERED_LIST_ICON_SVG),
         "format-block-quote" => Some(FORMAT_BLOCK_QUOTE_ICON_SVG),
         "format-link" => Some(FORMAT_LINK_ICON_SVG),
         "format-page-break" => Some(FORMAT_PAGE_BREAK_ICON_SVG),
@@ -46,9 +56,19 @@ pub const PRODUCTION_ICON_NAMES: &[&str] = &[
     "workspace-deleted",
     "workspace-export",
     "workspace-settings",
+    "workspace-search",
+    "chevron-down",
+    "chevron-right",
+    "editor-split",
+    "explorer-pane",
+    "inspector-pane",
+    "editor-comment",
+    "workspace-focus",
+    "workspace-restore-layout",
     "explorer-folder-closed",
     "explorer-folder-open",
     "format-bulleted-list",
+    "format-numbered-list",
     "format-block-quote",
     "format-link",
     "format-page-break",
@@ -104,3 +124,19 @@ pub const FORMAT_LINK_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg
 /// page outline and dashed horizontal rule match common word-processor
 /// page-break controls without depending on text glyph availability.
 pub const FORMAT_PAGE_BREAK_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill="currentColor" transform="translate(-3420 -1480)" fill-rule="evenodd" d="M3423,1481H3432L3437,1486V1499H3423V1481ZM3424.5,1482.5V1497.5H3435.5V1486.75L3431.25,1482.5H3424.5ZM3433,1483.5V1486H3435.5L3433,1483.5ZM3425.5,1490H3428.5V1491.5H3425.5V1490ZM3430,1490H3432.5V1491.5H3430V1490ZM3434,1490H3435.5V1491.5H3434V1490Z"/></svg>"#;
+
+pub const EDITOR_SPLIT_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M10 4v12"/></g></svg>"#;
+pub const EXPLORER_PANE_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M7 4v12"/></g></svg>"#;
+pub const INSPECTOR_PANE_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><g fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="3.5" width="15" height="13" rx="1.5"/><path d="M13 4v12"/></g></svg>"#;
+
+pub const EDITOR_COMMENT_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M5 14H4a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 4 3h12a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 16 14h-6l-5 3v-3Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>"#;
+
+pub const WORKSPACE_FOCUS_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+
+pub const WORKSPACE_RESTORE_LAYOUT_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M3 7h4V3m6 0v4h4M7 17v-4H3m14 0h-4v4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+
+pub const WORKSPACE_SEARCH_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></g></svg>"#;
+pub const CHEVRON_DOWN_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="m5 7.5 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+pub const CHEVRON_RIGHT_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="m7.5 5 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
+
+pub const FORMAT_NUMBERED_LIST_ICON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5h9M8 10h9M8 15h9M2 3l1.5-1v5M2 7h3M2 11c0-2 3-2 3 0 0 1-3 2-3 4h3"/></g></svg>"#;

@@ -6,7 +6,11 @@
 
 use parchmint_domain::decode_stable_id as stable_id_bytes;
 use parchmint_domain::encode_stable_id as stable_id_string;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
 use iced::widget::text_editor;
 #[cfg(feature = "diagnostics")]
@@ -90,10 +94,22 @@ struct TreeClipboard {
     node_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchySurface {
+    Explorer,
+    Cards,
+}
+
+#[derive(Debug, Clone)]
 struct HierarchyPointerDrag {
     source_id: String,
     destination: Option<DragDestination>,
+    surface: Option<HierarchySurface>,
+    preview: Option<ExplorerState>,
+    selected_before: BTreeSet<String>,
+    anchor_before: Option<String>,
+    grab_offset: Point,
+    card_width: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,8 +347,9 @@ impl ExplorerState {
                 },
             );
         }
-        let roots = [ProjectSection::Manuscript, ProjectSection::Research]
+        let roots = ProjectSection::ALL
             .into_iter()
+            .filter(|section| *section != ProjectSection::Unfiled)
             .map(|section| stable_id_string(section.root_id().as_bytes()))
             .collect::<Vec<_>>();
         Self {
@@ -512,7 +529,11 @@ impl ExplorerState {
         Some(
             node_ids
                 .into_iter()
-                .filter_map(|id| self.nodes.get(id).map(|node| node.title.as_str()))
+                .filter_map(|id| self.nodes.get(id))
+                .filter(|node| {
+                    node.id != stable_id_string(ProjectSection::Unfiled.root_id().as_bytes())
+                })
+                .map(|node| node.title.as_str())
                 .collect(),
         )
     }
@@ -588,9 +609,6 @@ impl ExplorerState {
                     HierarchyNodeKind::Root | HierarchyNodeKind::Group
                 ) {
                     return DragValidity::RejectedDocumentParent;
-                }
-                if source.parent.as_deref() == Some(target_id.as_str()) {
-                    return DragValidity::RejectedNoOp;
                 }
                 DragValidity::Allowed
             }
@@ -797,8 +815,11 @@ fn synopsis_editors(explorer: &ExplorerState) -> BTreeMap<String, text_editor::C
 /// Cards-specific projection over the shared hierarchy state.
 pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
+    expanded: &'a BTreeSet<String>,
     section_id: &'a str,
+    word_counts: BTreeMap<String, usize>,
     scroll_offset: f32,
+    measurements: &'a RefCell<BTreeMap<String, (u64, f32)>>,
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
@@ -807,32 +828,36 @@ pub struct CardsState<'a> {
     values: &'a BTreeMap<(String, String), String>,
 }
 
-// Cards deliberately use a single, stable row extent. Besides keeping a long
-// outline responsive, that makes the scroll projection honest: the padding
-// above and below the retained window represents rows that are not mounted.
-pub(crate) const CARDS_CARD_CONTENT_HEIGHT: f32 = 88.0;
-pub(crate) const CARDS_DROP_STRIP_HEIGHT: f32 = 4.0;
-pub(crate) const CARDS_ROW_HEIGHT: f32 =
-    CARDS_CARD_CONTENT_HEIGHT + 1.0 + (CARDS_DROP_STRIP_HEIGHT * 2.0);
+pub(crate) const CARDS_ROW_GAP: f32 = 9.0;
 const CARDS_WINDOW_SIZE: usize = 48;
 
 /// The mounted portion of a Cards outline and the space represented by rows
 /// outside that portion.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CardsWindow {
     pub start: usize,
     pub end: usize,
     pub top_padding: f32,
     pub bottom_padding: f32,
+    pub rows: Vec<CardsGridRow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CardsGridRow {
+    pub start: usize,
+    pub end: usize,
+    pub height: f32,
 }
 
 /// One ordered Cards item with effective visible metadata values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardItem<'a> {
+    pub(crate) editable_metadata: Vec<(&'a str, &'a str)>,
     pub node_id: &'a str,
     pub document_id: Option<&'a str>,
     pub title: &'a str,
     pub synopsis: &'a str,
+    pub words: usize,
     pub kind: HierarchyRowKind,
     pub depth: usize,
     pub expanded: bool,
@@ -866,16 +891,23 @@ impl<'a> CardsState<'a> {
         self.last_activated_document
     }
 
-    /// Cards are windowed rather than materializing an entire manuscript
-    /// hierarchy into widgets. This is intentionally a presentation fact so
-    /// interaction and diagnostics can assert it without knowing Iced.
+    /// Only a bounded window of grid rows is mounted.
     pub const fn is_virtualized(&self) -> bool {
         true
     }
 
-    /// The complete Cards projection for semantic contracts and diagnostics.
-    /// Rendering must use [`Self::windowed_items`] so a large manuscript never
-    /// becomes a large widget tree.
+    pub(crate) fn motion_generation(&self) -> u64 {
+        let mut hash = DefaultHasher::new();
+        self.section_id.hash(&mut hash);
+        self.expanded.hash(&mut hash);
+        for id in self.explorer.preorder_ids() {
+            id.hash(&mut hash);
+            self.explorer.nodes[id].parent.hash(&mut hash);
+        }
+        hash.finish()
+    }
+
+    /// Complete projection for contracts and diagnostics; rendering uses a window.
     pub fn items(&self) -> Vec<CardItem<'a>> {
         self.explorer
             .preorder_ids()
@@ -904,25 +936,89 @@ impl<'a> CardsState<'a> {
             .count()
     }
 
-    pub(crate) fn item_window(&self) -> CardsWindow {
-        let visible_item_count = self.visible_item_count();
-        let maximum_start = visible_item_count.saturating_sub(CARDS_WINDOW_SIZE);
-        let start = ((self.scroll_offset.max(0.0) / CARDS_ROW_HEIGHT) as usize).min(maximum_start);
-        let end = start
-            .saturating_add(CARDS_WINDOW_SIZE)
-            .min(visible_item_count);
+    fn grid_rows(&self, columns: usize, width: f32) -> Vec<CardsGridRow> {
+        let ids = self
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .filter(|node_id| self.is_visible_item(node_id))
+            .collect::<Vec<_>>();
+        let mut rows: Vec<CardsGridRow> = Vec::new();
+        let mut measurements = self.measurements.borrow_mut();
+        measurements.retain(|id, _| self.explorer.nodes.contains_key(id));
+        for (index, &node_id) in ids.iter().enumerate() {
+            let node = &self.explorer.nodes[node_id];
+            let item = self.item(node_id).expect("visible card");
+            let card_width = item.grid_width(width, columns.max(1));
+            let mut hasher = DefaultHasher::new();
+            (
+                card_width.to_bits(),
+                item.title,
+                item.synopsis,
+                item.kind == HierarchyRowKind::Group,
+                &item.metadata,
+                item.words,
+                item.expanded,
+                &item.editable_metadata,
+            )
+                .hash(&mut hasher);
+            let signature = hasher.finish();
+            // Scrolling and hover must not reshape unchanged text.
+            let height = match measurements.get(node_id) {
+                Some(&(previous, height)) if previous == signature => height,
+                _ => {
+                    let height = item.row_height(card_width);
+                    measurements.insert(node_id.to_owned(), (signature, height));
+                    height
+                }
+            };
+            let shares_row = rows.last().is_some_and(|row| {
+                let first = &self.explorer.nodes[ids[row.start]];
+                node.kind == HierarchyNodeKind::Document
+                    && first.kind == HierarchyNodeKind::Document
+                    && node.parent == first.parent
+                    && row.end - row.start < columns.max(1)
+            });
+            if shares_row {
+                let row = rows.last_mut().expect("existing grid row");
+                row.end = index + 1;
+                row.height = row.height.max(height);
+            } else {
+                rows.push(CardsGridRow {
+                    start: index,
+                    end: index + 1,
+                    height,
+                });
+            }
+        }
+        rows
+    }
+
+    pub(crate) fn item_window(&self, columns: usize, width: f32) -> CardsWindow {
+        let rows = self.grid_rows(columns, width);
+        let mut top_padding = 0.0;
+        let maximum_start = rows.len().saturating_sub(CARDS_WINDOW_SIZE);
+        let mut start = 0;
+        while start < maximum_start && top_padding + rows[start].height <= self.scroll_offset {
+            top_padding += rows[start].height;
+            start += 1;
+        }
+        let end = (start + CARDS_WINDOW_SIZE).min(rows.len());
         CardsWindow {
-            start,
-            end,
-            top_padding: start as f32 * CARDS_ROW_HEIGHT,
-            bottom_padding: visible_item_count.saturating_sub(end) as f32 * CARDS_ROW_HEIGHT,
+            start: rows.get(start).map_or(0, |row| row.start),
+            end: rows.get(end.saturating_sub(1)).map_or(0, |row| row.end),
+            top_padding,
+            bottom_padding: rows[end..].iter().map(|row| row.height).sum(),
+            rows: rows[start..end].to_vec(),
         }
     }
 
-    /// The small currently-mounted Cards projection in canonical hierarchy
-    /// order. Rows outside this window are represented by fixed padding.
+    /// Single-column window for semantic diagnostics.
     pub fn windowed_items(&self) -> Vec<CardItem<'a>> {
-        let window = self.item_window();
+        self.items_in_window(&self.item_window(1, 840.0))
+    }
+
+    pub(crate) fn items_in_window(&self, window: &CardsWindow) -> Vec<CardItem<'a>> {
         self.explorer
             .preorder_ids()
             .into_iter()
@@ -940,7 +1036,11 @@ impl<'a> CardsState<'a> {
                 .nodes
                 .get(node_id)
                 .is_some_and(|node| node.section_id == self.section_id)
-            && self.explorer.ancestors_are_expanded(node_id)
+            && self
+                .explorer
+                .ancestors(node_id)
+                .iter()
+                .all(|id| self.expanded.contains(*id))
     }
 
     fn item(&self, node_id: &'a str) -> Option<CardItem<'a>> {
@@ -964,17 +1064,33 @@ impl<'a> CardsState<'a> {
             })
             .collect();
         Some(CardItem {
+            editable_metadata: self
+                .field_order
+                .iter()
+                .filter_map(|id| {
+                    let field = self.definitions.get(id)?;
+                    field.applicability.applies_to(node.kind).then(|| {
+                        (
+                            field.label.as_str(),
+                            self.values
+                                .get(&(node_id.to_owned(), id.clone()))
+                                .map_or("", String::as_str),
+                        )
+                    })
+                })
+                .collect(),
             node_id,
             document_id: node.document_id.as_deref(),
             title: &node.title,
             synopsis: &node.synopsis,
+            words: self.word_counts.get(node_id).copied().unwrap_or_default(),
             kind: match node.kind {
                 HierarchyNodeKind::Root => HierarchyRowKind::Root,
                 HierarchyNodeKind::Group => HierarchyRowKind::Group,
                 HierarchyNodeKind::Document => HierarchyRowKind::Document,
             },
             depth: self.explorer.depth(node_id).saturating_sub(1),
-            expanded: self.explorer.expanded.contains(node_id),
+            expanded: self.expanded.contains(node_id),
             visible: true,
             selected: self.explorer.selected.contains(node_id),
             metadata,
@@ -2041,10 +2157,6 @@ impl ReplacementPreviewState {
         self.validation = ReplacementPreviewValidation::Draft;
     }
 
-    fn select_all(&mut self, included: bool) {
-        self.set_included("all-matches", included);
-    }
-
     fn mark_ready(&mut self, captured_project_revision: u64) {
         self.captured_project_revision = captured_project_revision;
         self.validation = ReplacementPreviewValidation::Ready;
@@ -2074,6 +2186,17 @@ pub enum HistoryRestoreScope {
 /// A project modal with the context required by its controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectModal {
+    SaveBeforeClosing {
+        pane: EditorPane,
+        document_id: String,
+        node_id: String,
+        title: String,
+    },
+    FileDraft {
+        node_id: String,
+        title: String,
+        parent_id: String,
+    },
     HistoryRestore {
         checkpoint_id: String,
         checkpoint_label: String,
@@ -2273,8 +2396,12 @@ impl HistoryComparison {
 fn comparison_line_word_count(line: &HistoryComparisonTextLine) -> usize {
     line.spans
         .iter()
-        .map(|span| span.text.split_whitespace().count())
-        .sum()
+        .flat_map(|span| span.text.chars())
+        .fold((0, false), |(count, in_word), character| {
+            let next_in_word = !character.is_whitespace();
+            (count + usize::from(next_in_word && !in_word), next_in_word)
+        })
+        .0
 }
 
 /// History list/detail presentation facts.
@@ -2613,8 +2740,7 @@ fn history_line_edits(before: &[&str], after: &[&str]) -> Vec<HistoryLineEdit> {
     edits
 }
 
-/// Keeps memory bounded for unusually large documents while preserving exact
-/// shared prefix/suffix lines and honestly marking the entire middle changed.
+/// Bounds memory by preserving shared ends and marking the middle changed.
 fn bounded_history_line_edits(before: &[&str], after: &[&str]) -> Vec<HistoryLineEdit> {
     let prefix = before
         .iter()
@@ -2760,98 +2886,67 @@ fn modified_history_spans(
     before: &str,
     after: &str,
 ) -> (Vec<HistoryComparisonSpan>, Vec<HistoryComparisonSpan>) {
-    let prefix_bytes = before
-        .chars()
-        .zip(after.chars())
-        .take_while(|(before, after)| before == after)
-        .map(|(character, _)| character.len_utf8())
-        .sum::<usize>();
-    let prefix_bytes = history_word_start(before, prefix_bytes);
-    let before_rest = &before[prefix_bytes..];
-    let after_rest = &after[prefix_bytes..];
-    let suffix_bytes = before_rest
-        .chars()
-        .rev()
-        .zip(after_rest.chars().rev())
-        .take_while(|(before, after)| before == after)
-        .map(|(character, _)| character.len_utf8())
-        .sum::<usize>();
-    let before_changed_end = history_word_end(before, before.len() - suffix_bytes);
-    let after_changed_end = history_word_end(after, after.len() - suffix_bytes);
-    (
-        history_change_spans(
-            before,
-            prefix_bytes,
-            before_changed_end,
-            HistoryComparisonSpanKind::Removed,
-        ),
-        history_change_spans(
-            after,
-            prefix_bytes,
-            after_changed_end,
-            HistoryComparisonSpanKind::Added,
-        ),
-    )
-}
-
-fn history_word_start(text: &str, mut boundary: usize) -> usize {
-    while boundary > 0 && boundary < text.len() {
-        let before = text[..boundary].chars().next_back();
-        let after = text[boundary..].chars().next();
-        if !before.is_some_and(history_word_character) || !after.is_some_and(history_word_character)
-        {
-            break;
+    let mut before_spans = Vec::new();
+    let mut after_spans = Vec::new();
+    for edit in history_line_edits(&history_tokens(before), &history_tokens(after)) {
+        match edit {
+            HistoryLineEdit::Unchanged(text) => {
+                append_history_span(
+                    &mut before_spans,
+                    HistoryComparisonSpanKind::Unchanged,
+                    &text,
+                );
+                append_history_span(
+                    &mut after_spans,
+                    HistoryComparisonSpanKind::Unchanged,
+                    &text,
+                );
+            }
+            HistoryLineEdit::Removed(text) => {
+                append_history_span(&mut before_spans, HistoryComparisonSpanKind::Removed, &text)
+            }
+            HistoryLineEdit::Added(text) => {
+                append_history_span(&mut after_spans, HistoryComparisonSpanKind::Added, &text)
+            }
         }
-        boundary = text[..boundary]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(index, _)| index);
     }
-    boundary
+    (before_spans, after_spans)
 }
 
-fn history_word_end(text: &str, mut boundary: usize) -> usize {
-    while boundary > 0 && boundary < text.len() {
-        let before = text[..boundary].chars().next_back();
-        let after = text[boundary..].chars().next();
-        if !before.is_some_and(history_word_character) || !after.is_some_and(history_word_character)
-        {
-            break;
+fn history_tokens(text: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    let mut previous = None;
+    for (index, character) in text.char_indices() {
+        let kind = if character.is_alphanumeric() || character == '_' {
+            0
+        } else if character.is_whitespace() {
+            1
+        } else {
+            2
+        };
+        if previous.is_some_and(|previous| previous != kind || kind == 2) {
+            tokens.push(&text[start..index]);
+            start = index;
         }
-        boundary += after
-            .expect("word boundary includes a following character")
-            .len_utf8();
+        previous = Some(kind);
     }
-    boundary
+    if start < text.len() {
+        tokens.push(&text[start..]);
+    }
+    tokens
 }
 
-fn history_word_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
-}
-
-fn history_change_spans(
+fn append_history_span(
+    spans: &mut Vec<HistoryComparisonSpan>,
+    kind: HistoryComparisonSpanKind,
     text: &str,
-    prefix_end: usize,
-    changed_end: usize,
-    changed_kind: HistoryComparisonSpanKind,
-) -> Vec<HistoryComparisonSpan> {
-    let mut spans = Vec::with_capacity(3);
-    if prefix_end > 0 {
-        spans.push(history_span(
-            HistoryComparisonSpanKind::Unchanged,
-            &text[..prefix_end],
-        ));
+) {
+    if let Some(last) = spans.last_mut().filter(|span| span.kind == kind) {
+        last.text.push_str(text);
+    } else {
+        spans.push(history_span(kind, text));
     }
-    if changed_end > prefix_end {
-        spans.push(history_span(changed_kind, &text[prefix_end..changed_end]));
-    }
-    if changed_end < text.len() {
-        spans.push(history_span(
-            HistoryComparisonSpanKind::Unchanged,
-            &text[changed_end..],
-        ));
-    }
-    spans
 }
 
 fn history_span(kind: HistoryComparisonSpanKind, text: &str) -> HistoryComparisonSpan {
@@ -2959,6 +3054,9 @@ impl RecentlyDeletedState {
             .collect::<BTreeMap<_, _>>();
         let mut items = BTreeMap::new();
         for (node_id, tombstone) in &project.deleted {
+            if tombstone.section == ProjectSection::Unfiled {
+                continue;
+            }
             let id = stable_id_string(node_id.as_bytes());
             let former_parent = stable_id_string(tombstone.former_parent.as_bytes());
             let section_id = stable_id_string(tombstone.section.root_id().as_bytes());
@@ -3568,6 +3666,17 @@ impl ProjectTaskCompletion {
 /// Widget messages at the project-workspace boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectMessage {
+    NewDraft(EditorPane),
+    EditScratch {
+        pane: EditorPane,
+        id: String,
+        action: text_editor::Action,
+    },
+    SetDraftTitle(String),
+    SetDraftParent(String),
+    ConfirmFileDraft,
+    SaveClosingDraft,
+    DiscardClosingDraft,
     ShowExplorer,
     ShowGlobalSearch,
     SelectHierarchy {
@@ -3575,28 +3684,30 @@ pub enum ProjectMessage {
         gesture: SelectionGesture,
     },
     ToggleHierarchyExpanded(String),
+    ToggleCardsExpanded(String),
+    SetCardsSection(String),
     SelectAndToggleHierarchyExpanded(String),
     NavigateExplorer(ExplorerNavigation),
     RequestCreateHierarchy {
         parent_id: String,
         kind: HierarchyItemKind,
     },
-    ToggleExplorerCreationMenu,
-    CloseExplorerCreationMenu,
     DeleteSelection,
     PreviewHierarchyNode(String),
     OpenHierarchyNode(String),
     OpenHierarchyNodeInCompanion(String),
-    RenameNode {
-        node_id: String,
-        title: String,
-    },
-    BeginInspectorTitleRename(String),
-    CommitInspectorTitleRename,
-    CancelInspectorTitleRename,
     BeginHierarchyRename(String),
     SetHierarchyRenameDraft(String),
     CommitHierarchyRename,
+    BeginOutlineField {
+        node_id: String,
+        field_id: Option<String>,
+    },
+    EndOutlineField {
+        node_id: String,
+        field_id: Option<String>,
+    },
+    CommitOutlineHierarchyRename,
     CancelHierarchyRename,
     SetSynopsis {
         node_id: String,
@@ -3606,6 +3717,11 @@ pub enum ProjectMessage {
     /// synopsis persistence effect.
     EditSynopsis {
         node_id: String,
+        action: text_editor::Action,
+    },
+    EditMetadata {
+        node_id: String,
+        field_id: String,
         action: text_editor::Action,
     },
     SetMetadataValue {
@@ -3671,12 +3787,21 @@ pub enum ProjectMessage {
     RequestDeleteStyle(String),
     ConfirmDeleteStyle,
     ActivateCard(String),
-    SetCardsSection(String),
     SetCardsScroll(f32),
+    BeginCardDrag {
+        source_id: String,
+        grab_offset: Point,
+        width: f32,
+    },
     BeginHierarchyDrag {
         source_id: String,
         gesture: SelectionGesture,
     },
+    PreviewHierarchyDrop {
+        surface: HierarchySurface,
+        destination: Option<DragDestination>,
+    },
+    LeaveHierarchySurface(HierarchySurface),
     SetDragDestination(Option<DragDestination>),
     ClearDragDestination(DragDestination),
     CommitHierarchyDrag,
@@ -3711,8 +3836,6 @@ pub enum ProjectMessage {
         node_id: String,
         included: bool,
     },
-    SelectAllReplacementMatches,
-    SelectNoReplacementMatches,
     CloseReplacementPreview,
     ApplyReplacement,
     SetHistoryDocumentFilter(Option<String>),
@@ -3732,6 +3855,7 @@ pub enum ProjectMessage {
     SelectRecentlyDeleted(String),
     RestoreDeleted(String),
     SetAppearance(AppearanceMode),
+    SetReducedMotion(bool),
     SelectSettingsCategory(SettingsCategory),
     SelectDictionaryScope(DictionaryScope),
     EditDictionaryWord(String),
@@ -3776,6 +3900,15 @@ pub enum ProjectMessage {
 /// Integration effects translated into application/service calls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectEffect {
+    CreateDraft {
+        pane: EditorPane,
+        scratch_id: String,
+    },
+    FileDraft {
+        node_id: String,
+        title: String,
+        parent_id: String,
+    },
     OpenDocumentInPrimary(String),
     OpenDocumentInCompanion(String),
     CreateHierarchy {
@@ -3889,14 +4022,17 @@ pub struct ProjectWorkspace {
     explorer: ExplorerState,
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
+    cards_expanded: BTreeSet<String>,
     cards_scroll_offset: f32,
+    pub(crate) card_positions: crate::motion::Positions,
+    cards_measurements: RefCell<BTreeMap<String, (u64, f32)>>,
     cards_drag_destination: Option<DragDestination>,
-    explorer_creation_menu_open: bool,
     pointer_drag: Option<HierarchyPointerDrag>,
+    drop_preview: Option<ExplorerState>,
     hierarchy_context_menu: Option<String>,
     hierarchy_context_point: Point,
     hierarchy_rename: Option<HierarchyRename>,
-    inspector_title_rename: Option<String>,
+    outline_field: Option<(String, Option<String>)>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
     open_created_after_rename: Option<String>,
     last_activated_document: Option<String>,
@@ -3906,6 +4042,8 @@ pub struct ProjectWorkspace {
     /// from replacing a newer editor draft.
     synopsis_drafts: BTreeMap<String, String>,
     metadata_values: BTreeMap<(String, String), String>,
+    metadata_editors: BTreeMap<(String, String), text_editor::Content>,
+    metadata_drafts: BTreeMap<(String, String), String>,
     settings: SettingsState,
     global_search: GlobalSearchState,
     replacement_preview: ReplacementPreviewState,
@@ -3916,6 +4054,8 @@ pub struct ProjectWorkspace {
     content_state: ContentState,
     recovery: RecoveryState,
     modal: Option<ProjectModal>,
+    close_after_filing: Option<(EditorPane, String)>,
+    close_after_promotion: Option<(EditorPane, String)>,
     editor: EditorWorkspace,
     pending: BTreeMap<ProjectTask, ProjectTaskTicket>,
     next_request: u64,
@@ -3974,24 +4114,29 @@ impl ProjectWorkspace {
             project_revision: 1,
             project_title: "The Glass Harbor".to_owned(),
             sidebar,
+            cards_expanded: explorer.nodes.keys().cloned().collect(),
             explorer,
             tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
             cards_scroll_offset: 0.0,
+            card_positions: crate::motion::Positions::default(),
+            cards_measurements: RefCell::default(),
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
-            explorer_creation_menu_open: false,
             pointer_drag: None,
+            drop_preview: None,
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
-            inspector_title_rename: None,
+            outline_field: None,
             pending_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
+            metadata_editors: BTreeMap::new(),
+            metadata_drafts: BTreeMap::new(),
             metadata_values: BTreeMap::from([(
                 ("chapter-one".to_owned(), "field-17".to_owned()),
                 "first person".to_owned(),
@@ -4015,6 +4160,8 @@ impl ProjectWorkspace {
                 details_expanded: false,
             },
             modal: None,
+            close_after_filing: None,
+            close_after_promotion: None,
             editor: EditorWorkspace::from_fixture(EditorFixture::DualPane),
             pending: BTreeMap::new(),
             next_request: 0,
@@ -4039,22 +4186,27 @@ impl ProjectWorkspace {
             project_revision: snapshot.project.revision.value(),
             project_title: snapshot.project.display_title.clone(),
             sidebar: SidebarSurface::Explorer,
+            cards_expanded: explorer.nodes.keys().cloned().collect(),
             explorer,
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_scroll_offset: 0.0,
+            card_positions: crate::motion::Positions::default(),
+            cards_measurements: RefCell::default(),
             cards_drag_destination: None,
-            explorer_creation_menu_open: false,
             pointer_drag: None,
+            drop_preview: None,
             hierarchy_context_menu: None,
             hierarchy_context_point: Point::default(),
             hierarchy_rename: None,
-            inspector_title_rename: None,
+            outline_field: None,
             pending_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
             synopsis_editors,
             synopsis_drafts: BTreeMap::new(),
+            metadata_editors: BTreeMap::new(),
+            metadata_drafts: BTreeMap::new(),
             metadata_values,
             settings,
             global_search: GlobalSearchState::default(),
@@ -4089,6 +4241,8 @@ impl ProjectWorkspace {
                 details_expanded: false,
             },
             modal: None,
+            close_after_filing: None,
+            close_after_promotion: None,
             editor: EditorWorkspace::from_snapshot(snapshot),
             pending: BTreeMap::new(),
             next_request: 0,
@@ -4102,13 +4256,33 @@ impl ProjectWorkspace {
     }
 
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        self.drop_preview = None;
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
         self.project_title = snapshot.project.display_title.clone();
         self.explorer.reconcile_project(&snapshot.project);
+        self.cards_expanded
+            .retain(|id| self.explorer.nodes.contains_key(id));
+        self.cards_expanded.extend(
+            self.explorer
+                .nodes
+                .keys()
+                .filter(|id| !prior_node_ids.contains(*id))
+                .cloned(),
+        );
         self.begin_rename_for_created_hierarchy(&prior_node_ids);
         self.reconcile_synopsis_editors();
         self.metadata_values = metadata_values_from_project(&snapshot.project);
+        self.metadata_drafts.retain(|(node, field), value| {
+            self.explorer.nodes.contains_key(node)
+                && snapshot
+                    .project
+                    .metadata
+                    .iter()
+                    .any(|definition| stable_id_string(definition.id.as_bytes()) == *field)
+                && self.metadata_values.get(&(node.clone(), field.clone())) != Some(value)
+        });
+        self.metadata_values.extend(self.metadata_drafts.clone());
         let selected_category = self.settings.selected_category;
         let selected_detail = self.settings.selected_detail.clone();
         let new_metadata_field = self.settings.new_metadata_field.clone();
@@ -4164,6 +4338,20 @@ impl ProjectWorkspace {
                         DragDestination::EditorPane(_) => true,
                     })
         });
+        if let Some(destination) = self.pointer_drag.as_ref().and_then(|drag| {
+            (drag.surface == Some(HierarchySurface::Cards))
+                .then(|| drag.destination.clone())
+                .flatten()
+        }) {
+            let preview = self.projected_drop(&destination);
+            if let Some(drag) = self.pointer_drag.as_mut() {
+                if preview.is_none() {
+                    drag.destination = None;
+                    self.cards_drag_destination = None;
+                }
+                drag.preview = preview;
+            }
+        }
         self.hierarchy_context_menu = self
             .hierarchy_context_menu
             .take()
@@ -4214,6 +4402,7 @@ impl ProjectWorkspace {
         }
         self.pending
             .retain(|_, ticket| ticket.captured_project_revision == self.project_revision);
+        self.sync_metadata_editors();
     }
 
     pub fn project_title(&self) -> &str {
@@ -4226,6 +4415,109 @@ impl ProjectWorkspace {
 
     pub const fn sidebar_surface(&self) -> SidebarSurface {
         self.sidebar
+    }
+
+    pub(crate) fn displayed_explorer(&self) -> &ExplorerState {
+        self.pointer_drag
+            .as_ref()
+            .and_then(|drag| drag.preview.as_ref())
+            .or(self.drop_preview.as_ref())
+            .unwrap_or(&self.explorer)
+    }
+
+    pub(crate) fn outline_field_is_editing(&self, node: &str, field: Option<&str>) -> bool {
+        self.pointer_drag.is_none()
+            && self
+                .outline_field
+                .as_ref()
+                .is_some_and(|(id, key)| id == node && key.as_deref() == field)
+    }
+
+    pub(crate) fn card_drag_geometry(&self) -> (Point, f32) {
+        self.pointer_drag
+            .as_ref()
+            .map_or((Point::new(20.0, 20.0), 320.0), |drag| {
+                (drag.grab_offset, drag.card_width)
+            })
+    }
+
+    pub(crate) fn dragged_subtree_contains(&self, id: &str) -> bool {
+        self.pointer_drag.is_some()
+            && self
+                .explorer
+                .normalized_selected_ids()
+                .iter()
+                .any(|source| *source == id || self.explorer.is_ancestor(source, id))
+    }
+
+    pub(crate) fn preview_destination(
+        &self,
+        id: &str,
+        destination: DragDestination,
+    ) -> Option<DragDestination> {
+        let drag = self.pointer_drag.as_ref()?;
+        if self.dragged_subtree_contains(id) {
+            return drag.destination.clone();
+        }
+        self.explorer
+            .normalized_selected_ids()
+            .iter()
+            .all(|source| {
+                self.explorer.drag_validity(source, destination.clone()) == DragValidity::Allowed
+            })
+            .then_some(destination)
+    }
+
+    fn projected_drop(&self, destination: &DragDestination) -> Option<ExplorerState> {
+        let moving = self
+            .explorer
+            .normalized_selected_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if moving.is_empty()
+            || moving.iter().any(|source| {
+                self.explorer.drag_validity(source, destination.clone()) != DragValidity::Allowed
+            })
+        {
+            return None;
+        }
+        let parent = match destination {
+            DragDestination::IntoGroup(id) => id.clone(),
+            DragDestination::BeforeSibling(id) | DragDestination::AfterSibling(id) => {
+                self.explorer.nodes.get(id)?.parent.clone()?
+            }
+            DragDestination::EditorPane(_) => return None,
+        };
+        let mut preview = self.explorer.clone();
+        preview.expanded = self.cards_expanded.clone();
+        for id in &moving {
+            let old_parent = preview.nodes[id].parent.clone()?;
+            preview
+                .nodes
+                .get_mut(&old_parent)?
+                .children
+                .retain(|child| child != id);
+        }
+        let siblings = &mut preview.nodes.get_mut(&parent)?.children;
+        let index = match destination {
+            DragDestination::BeforeSibling(id) => siblings.iter().position(|child| child == id)?,
+            DragDestination::AfterSibling(id) => siblings.iter().position(|child| child == id)? + 1,
+            _ => siblings.len(),
+        };
+        siblings.splice(index..index, moving.iter().cloned());
+        let section = preview.nodes[&parent].section_id.clone();
+        for id in &moving {
+            preview.nodes.get_mut(id)?.parent = Some(parent.clone());
+            let mut descendants = vec![id.clone()];
+            while let Some(id) = descendants.pop() {
+                let node = preview.nodes.get_mut(&id)?;
+                node.section_id = section.clone();
+                descendants.extend(node.children.iter().cloned());
+            }
+        }
+        preview.expanded.insert(parent);
+        Some(preview)
     }
 
     pub fn explorer(&self) -> &ExplorerState {
@@ -4284,10 +4576,6 @@ impl ProjectWorkspace {
         self.hierarchy_context_point
     }
 
-    pub const fn explorer_creation_menu_open(&self) -> bool {
-        self.explorer_creation_menu_open
-    }
-
     /// The Explorer-local creation menu follows the current structure context:
     /// a selected container, the selected document's parent, or Manuscript.
     pub fn explorer_creation_parent_id(&self) -> Option<&str> {
@@ -4306,16 +4594,16 @@ impl ProjectWorkspace {
             .or_else(|| self.explorer.root_ids().into_iter().next())
     }
 
+    pub(crate) fn renaming_created_item(&self) -> bool {
+        self.hierarchy_rename.as_ref().is_some_and(|rename| {
+            self.open_created_after_rename.as_deref() == Some(rename.node_id.as_str())
+        })
+    }
+
     pub fn hierarchy_rename(&self) -> Option<(&str, &str)> {
         self.hierarchy_rename
             .as_ref()
             .map(|rename| (rename.node_id.as_str(), rename.title.as_str()))
-    }
-
-    /// The Inspector title enters edit mode only after explicit activation so
-    /// ordinary inspection retains a quiet, read-only heading.
-    pub fn inspector_title_rename_node_id(&self) -> Option<&str> {
-        self.inspector_title_rename.as_deref()
     }
 
     /// Clears a cut payload only after the runtime reports a durable move and
@@ -4342,6 +4630,52 @@ impl ProjectWorkspace {
         self.explorer.normalize_selection();
     }
 
+    pub(crate) fn reveal_card(&mut self, node_id: &str, width: f32) -> Option<f32> {
+        let cards = self.cards();
+        let index = cards
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .filter(|id| cards.is_visible_item(id))
+            .position(|id| id == node_id)?;
+        let columns = crate::cards_layout::column_count(width);
+        let offset = cards
+            .grid_rows(columns, width)
+            .iter()
+            .take_while(|row| row.end <= index)
+            .map(|row| row.height)
+            .sum();
+        self.cards_scroll_offset = offset;
+        Some(offset)
+    }
+
+    pub(crate) fn outline_word_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::<String, usize>::new();
+        let explorer = self.displayed_explorer();
+        for id in explorer.preorder_ids().into_iter().rev() {
+            let node = &explorer.nodes[id];
+            let words = node
+                .document_id
+                .as_deref()
+                .and_then(|document| self.editor.document_word_count(document))
+                .unwrap_or_else(|| counts.get(id).copied().unwrap_or_default());
+            counts.insert(id.to_owned(), words);
+            if let Some(parent) = &node.parent {
+                *counts.entry(parent.clone()).or_default() += words;
+            }
+        }
+        counts
+    }
+
+    pub(crate) fn selected_outline_words(&self) -> usize {
+        let counts = self.outline_word_counts();
+        self.explorer
+            .normalized_selected_ids()
+            .into_iter()
+            .filter_map(|id| counts.get(id))
+            .sum()
+    }
+
     pub fn cards(&self) -> CardsState<'_> {
         let labels = self
             .settings
@@ -4352,9 +4686,18 @@ impl ProjectWorkspace {
             .map(|field| field.label.as_str())
             .collect();
         CardsState {
-            explorer: &self.explorer,
+            explorer: self.displayed_explorer(),
+            expanded: self
+                .pointer_drag
+                .as_ref()
+                .and_then(|drag| drag.preview.as_ref())
+                .or(self.drop_preview.as_ref())
+                .map(|preview| &preview.expanded)
+                .unwrap_or(&self.cards_expanded),
             section_id: &self.cards_section,
+            word_counts: self.outline_word_counts(),
             scroll_offset: self.cards_scroll_offset,
+            measurements: &self.cards_measurements,
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
@@ -4385,6 +4728,51 @@ impl ProjectWorkspace {
             definitions: &self.settings.metadata_definitions,
             field_order: &self.settings.metadata_order,
             values: &self.metadata_values,
+        }
+    }
+
+    pub(crate) fn metadata_editor(&self, node: &str, field: &str) -> Option<&text_editor::Content> {
+        self.metadata_editors
+            .get(&(node.to_owned(), field.to_owned()))
+    }
+
+    fn sync_metadata_editors(&mut self) {
+        self.metadata_editors.retain(|(node, field), _| {
+            self.explorer.nodes.contains_key(node)
+                && self.settings.metadata_definitions.contains_key(field)
+        });
+        let Some(node) = self
+            .outline_field
+            .as_ref()
+            .map(|(node, _)| node.clone())
+            .or_else(|| {
+                self.explorer
+                    .selected_ids()
+                    .first()
+                    .map(|id| (*id).to_owned())
+            })
+        else {
+            return;
+        };
+        let fields = self
+            .inspector()
+            .metadata_items(&node)
+            .into_iter()
+            .map(|item| {
+                (
+                    item.field_id.to_owned(),
+                    item.effective_value.unwrap_or_default().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (field, value) in fields {
+            let editor = self
+                .metadata_editors
+                .entry((node.clone(), field))
+                .or_default();
+            if editor.text() != value {
+                *editor = text_editor::Content::with_text(&value);
+            }
         }
     }
 
@@ -4500,6 +4888,7 @@ impl ProjectWorkspace {
     /// Records the technical cause locally and opens the shared modal language
     /// with safe, actionable copy for the author.
     pub fn report_error(&mut self, operation: &'static str, error: impl Into<String>) {
+        self.drop_preview = None;
         #[cfg(feature = "diagnostics")]
         let error = error.into();
         #[cfg(not(feature = "diagnostics"))]
@@ -4571,6 +4960,117 @@ impl ProjectWorkspace {
                 recovered_word_count: None,
                 last_edit: None,
                 revision: *revision,
+            })
+            .collect()
+    }
+
+    pub(crate) fn begin_closing_draft(&mut self, pane: EditorPane, document: &str) -> bool {
+        if self.editor.scratch_is_pending(document) {
+            self.close_after_promotion = Some((pane, document.to_owned()));
+            return true;
+        }
+        let other = match pane {
+            EditorPane::Primary => EditorPane::Companion,
+            EditorPane::Companion => EditorPane::Primary,
+        };
+        if self
+            .editor
+            .pane(other)
+            .tabs()
+            .iter()
+            .any(|tab| tab.id() == document)
+        {
+            return false;
+        }
+        let unfiled = stable_id_string(ProjectSection::Unfiled.root_id().as_bytes());
+        let Some(node) = self.explorer.nodes.values().find(|node| {
+            node.document_id.as_deref() == Some(document) && node.section_id == unfiled
+        }) else {
+            return false;
+        };
+        self.modal = Some(ProjectModal::SaveBeforeClosing {
+            pane,
+            document_id: document.to_owned(),
+            node_id: node.id.clone(),
+            title: node.title.clone(),
+        });
+        true
+    }
+
+    pub(crate) fn remap_promoted_close(&mut self, scratch: &str, document: &str) {
+        if let Some((_, id)) = &mut self.close_after_promotion
+            && id == scratch
+        {
+            *id = document.to_owned();
+        }
+    }
+
+    pub(crate) fn take_promoted_close(&mut self, document: &str) -> Option<(EditorPane, String)> {
+        if self
+            .close_after_promotion
+            .as_ref()
+            .is_some_and(|(_, id)| id == document)
+        {
+            self.close_after_promotion.take()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn take_filed_close(&mut self) -> Option<(EditorPane, String)> {
+        self.close_after_filing.take()
+    }
+
+    pub(crate) fn begin_filing_active_draft(&mut self) -> bool {
+        if self.modal.is_some() {
+            return false;
+        }
+        let Some(document) = self
+            .editor
+            .pane(self.editor.focused_pane())
+            .active_document()
+        else {
+            return false;
+        };
+        let unfiled = stable_id_string(ProjectSection::Unfiled.root_id().as_bytes());
+        let (node_id, title) = if self.editor.scratch(document).is_some() {
+            if self.editor.scratch_is_pending(document) {
+                return false;
+            }
+            (document.to_owned(), "Untitled".to_owned())
+        } else if let Some(node) = self.explorer.nodes.values().find(|node| {
+            node.document_id.as_deref() == Some(document) && node.section_id == unfiled
+        }) {
+            (node.id.clone(), node.title.clone())
+        } else {
+            return false;
+        };
+        self.modal = Some(ProjectModal::FileDraft {
+            node_id,
+            title,
+            parent_id: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
+        });
+        true
+    }
+
+    pub(crate) fn draft_destinations(&self) -> Vec<(String, String)> {
+        let unfiled = stable_id_string(ProjectSection::Unfiled.root_id().as_bytes());
+        self.explorer
+            .preorder_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let node = &self.explorer.nodes[id];
+                if node.section_id == unfiled || node.kind == HierarchyNodeKind::Document {
+                    return None;
+                }
+                let mut path = vec![node.title.as_str()];
+                let mut parent = node.parent.as_deref();
+                while let Some(ancestor) = parent.and_then(|id| self.explorer.nodes.get(id)) {
+                    path.push(&ancestor.title);
+                    parent = ancestor.parent.as_deref();
+                }
+                path.reverse();
+                Some((id.to_owned(), path.join(" › ")))
             })
             .collect()
     }
@@ -4667,7 +5167,7 @@ impl ProjectWorkspace {
                 split_ratio: self.editor.split_ratio(),
                 explorer_collapsed: !layout.explorer_is_visible(),
                 inspector_collapsed: !layout.inspector_is_visible(),
-                companion_open: self.editor.pane(EditorPane::Companion).is_populated(),
+                companion_open: self.editor.companion_is_visible(),
             },
             explorer: ExplorerWorkspaceState {
                 expanded_sections: self
@@ -4721,16 +5221,11 @@ impl ProjectWorkspace {
             .map(|id| (*id).to_owned());
         if let Some(section) = snapshot.cards_section {
             let section = stable_id_string(section.as_bytes());
-            if self
-                .explorer
-                .nodes
-                .get(&section)
-                .is_some_and(|node| node.kind == HierarchyNodeKind::Root)
-            {
+            if self.explorer.roots.contains(&section) {
                 self.cards_section = section;
             }
         }
-        self.sync_inspector_context_from_selection();
+        self.sync_selection_context();
         let tabs = snapshot
             .tabs
             .iter()
@@ -4765,14 +5260,29 @@ impl ProjectWorkspace {
             &scroll_offsets,
             &active_documents,
         );
+        let unfiled = stable_id_string(ProjectSection::Unfiled.root_id().as_bytes());
+        self.editor.restore_draft_tabs(
+            self.explorer
+                .nodes
+                .values()
+                .filter(|node| node.section_id == unfiled)
+                .filter_map(|node| {
+                    node.document_id
+                        .as_ref()
+                        .map(|id| TabSpec::new(id, &node.title))
+                }),
+        );
         self.editor.set_split_ratio(snapshot.layout.split_ratio);
+        self.editor
+            .set_companion_visible(snapshot.layout.companion_open);
         match snapshot.mode {
             WorkspaceMode::Editor => RibbonDestination::Editor,
             WorkspaceMode::Cards => RibbonDestination::Cards,
         }
     }
 
-    fn sync_inspector_context_from_selection(&mut self) {
+    fn sync_selection_context(&mut self) {
+        self.sync_metadata_editors();
         let Some(node_id) = self
             .explorer
             .selected_ids()
@@ -4809,7 +5319,7 @@ impl ProjectWorkspace {
             .active_document()
             .map(str::to_owned);
         if document_id.is_some_and(|document_id| self.explorer.reveal_document(&document_id)) {
-            self.sync_inspector_context_from_selection();
+            self.sync_selection_context();
         }
     }
 
@@ -4839,6 +5349,10 @@ impl ProjectWorkspace {
         self.recovery.resolving = true;
         self.recovery.error = None;
         self.begin_task(ProjectTask::ReconcileRecovery)
+    }
+
+    pub(crate) fn has_pending_tasks(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Starts one task and invalidates an older request for the same task key.
@@ -4908,23 +5422,104 @@ impl ProjectWorkspace {
     }
 
     pub fn update(&mut self, message: ProjectMessage) -> Vec<ProjectEffect> {
+        if self.pointer_drag.is_none()
+            && matches!(
+                message,
+                ProjectMessage::SetDragDestination(_)
+                    | ProjectMessage::ClearDragDestination(_)
+                    | ProjectMessage::PreviewHierarchyDrop { .. }
+                    | ProjectMessage::LeaveHierarchySurface(_)
+                    | ProjectMessage::CommitHierarchyDrag
+            )
+        {
+            return Vec::new();
+        }
         if !matches!(
             &message,
             ProjectMessage::OpenHierarchyContextMenu { .. }
                 | ProjectMessage::CloseHierarchyContextMenu
-                | ProjectMessage::RenameNode { .. }
         ) {
             self.hierarchy_context_menu = None;
         }
-        if !matches!(
-            &message,
-            ProjectMessage::ToggleExplorerCreationMenu
-                | ProjectMessage::CloseExplorerCreationMenu
-                | ProjectMessage::RequestCreateHierarchy { .. }
-        ) {
-            self.explorer_creation_menu_open = false;
-        }
         match message {
+            ProjectMessage::NewDraft(pane) => {
+                self.editor.new_scratch(pane);
+                Vec::new()
+            }
+            ProjectMessage::EditScratch { pane, id, action } => self
+                .editor
+                .edit_scratch(&id, action)
+                .then_some(ProjectEffect::CreateDraft {
+                    pane,
+                    scratch_id: id,
+                })
+                .into_iter()
+                .collect(),
+            ProjectMessage::SaveClosingDraft => {
+                if let Some(ProjectModal::SaveBeforeClosing {
+                    pane,
+                    document_id,
+                    node_id,
+                    title,
+                }) = self.modal.take()
+                {
+                    self.close_after_filing = Some((pane, document_id));
+                    self.modal = Some(ProjectModal::FileDraft {
+                        node_id,
+                        title,
+                        parent_id: stable_id_string(
+                            ProjectSection::Manuscript.root_id().as_bytes(),
+                        ),
+                    });
+                }
+                Vec::new()
+            }
+            ProjectMessage::DiscardClosingDraft => {
+                let Some(ProjectModal::SaveBeforeClosing { node_id, .. }) = self.modal.take()
+                else {
+                    return Vec::new();
+                };
+                vec![ProjectEffect::DeleteHierarchy(vec![node_id])]
+            }
+            ProjectMessage::SetDraftTitle(value) => {
+                if let Some(ProjectModal::FileDraft { title, .. }) = &mut self.modal {
+                    *title = value;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetDraftParent(value) => {
+                if self.draft_destinations().iter().any(|(id, _)| id == &value)
+                    && let Some(ProjectModal::FileDraft { parent_id, .. }) = &mut self.modal
+                {
+                    *parent_id = value;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ConfirmFileDraft => {
+                let Some(ProjectModal::FileDraft {
+                    node_id,
+                    title,
+                    parent_id,
+                }) = &self.modal
+                else {
+                    return Vec::new();
+                };
+                if title.trim().is_empty()
+                    || !self
+                        .draft_destinations()
+                        .iter()
+                        .any(|(id, _)| id == parent_id)
+                {
+                    return Vec::new();
+                }
+                let effect = ProjectEffect::FileDraft {
+                    node_id: node_id.clone(),
+                    title: title.trim().to_owned(),
+                    parent_id: parent_id.clone(),
+                };
+                self.modal = None;
+                vec![effect]
+            }
             ProjectMessage::ShowExplorer => {
                 self.sidebar = SidebarSurface::Explorer;
                 Vec::new()
@@ -4935,9 +5530,21 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
-                self.inspector_title_rename = None;
                 self.explorer.select(&node_id, gesture);
-                self.sync_inspector_context_from_selection();
+                self.sync_selection_context();
+                Vec::new()
+            }
+            ProjectMessage::SetCardsSection(section) => {
+                if self.explorer.roots.contains(&section) {
+                    self.cards_section = section;
+                    self.cards_scroll_offset = 0.0;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleCardsExpanded(node_id) => {
+                if !self.cards_expanded.remove(&node_id) {
+                    self.cards_expanded.insert(node_id);
+                }
                 Vec::new()
             }
             ProjectMessage::ToggleHierarchyExpanded(node_id) => {
@@ -4948,28 +5555,18 @@ impl ProjectWorkspace {
                 // A group click is both structural disclosure and a selection
                 // change. Explorer and Cards therefore keep Inspector context
                 // synchronized even when the click collapses the group.
-                self.inspector_title_rename = None;
                 self.explorer.select(&node_id, SelectionGesture::Replace);
-                self.sync_inspector_context_from_selection();
+                self.sync_selection_context();
                 self.explorer.toggle_expanded(&node_id);
                 Vec::new()
             }
             ProjectMessage::NavigateExplorer(navigation) => {
                 if self.explorer.navigate_visible(navigation) {
-                    self.sync_inspector_context_from_selection();
+                    self.sync_selection_context();
                 }
                 Vec::new()
             }
-            ProjectMessage::ToggleExplorerCreationMenu => {
-                self.explorer_creation_menu_open = !self.explorer_creation_menu_open;
-                Vec::new()
-            }
-            ProjectMessage::CloseExplorerCreationMenu => {
-                self.explorer_creation_menu_open = false;
-                Vec::new()
-            }
             ProjectMessage::RequestCreateHierarchy { parent_id, kind } => {
-                self.explorer_creation_menu_open = false;
                 let can_contain_children =
                     self.explorer.nodes.get(&parent_id).is_some_and(|node| {
                         matches!(
@@ -5012,22 +5609,6 @@ impl ProjectWorkspace {
             ProjectMessage::OpenHierarchyNodeInCompanion(node_id) => {
                 self.open_hierarchy_node(node_id, Some(EditorPane::Companion), false)
             }
-            ProjectMessage::RenameNode { node_id, title } => {
-                self.explorer.rename(&node_id, title.clone());
-                vec![ProjectEffect::CommitNodeTitle { node_id, title }]
-            }
-            ProjectMessage::BeginInspectorTitleRename(node_id) => {
-                if self.explorer.row(&node_id).is_none() {
-                    return Vec::new();
-                }
-                self.inspector_title_rename = Some(node_id);
-                Vec::new()
-            }
-            ProjectMessage::CommitInspectorTitleRename
-            | ProjectMessage::CancelInspectorTitleRename => {
-                self.inspector_title_rename = None;
-                Vec::new()
-            }
             ProjectMessage::BeginHierarchyRename(node_id) => {
                 let Some(node) = self.explorer.nodes.get(&node_id) else {
                     return Vec::new();
@@ -5036,6 +5617,7 @@ impl ProjectWorkspace {
                     return Vec::new();
                 }
                 self.hierarchy_context_menu = None;
+                self.sidebar = SidebarSurface::Explorer;
                 self.hierarchy_rename = Some(HierarchyRename {
                     node_id,
                     title: node.title.clone(),
@@ -5048,14 +5630,19 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
-            ProjectMessage::CommitHierarchyRename => {
+            ProjectMessage::CommitHierarchyRename
+            | ProjectMessage::CommitOutlineHierarchyRename => {
+                let open_document = matches!(message, ProjectMessage::CommitHierarchyRename);
                 let Some(rename) = self.hierarchy_rename.take() else {
                     return Vec::new();
                 };
+                if !open_document {
+                    self.outline_field = Some((rename.node_id.clone(), None));
+                }
                 let open_created = self
                     .open_created_after_rename
                     .take()
-                    .filter(|node_id| node_id == &rename.node_id);
+                    .filter(|node_id| open_document && node_id == &rename.node_id);
                 let title = rename.title.trim().to_owned();
                 if title.is_empty()
                     || self
@@ -5083,6 +5670,19 @@ impl ProjectWorkspace {
                 self.open_created_after_rename = None;
                 Vec::new()
             }
+            ProjectMessage::BeginOutlineField { node_id, field_id } => {
+                if self.explorer.nodes.contains_key(&node_id) {
+                    self.outline_field = Some((node_id, field_id));
+                    self.sync_metadata_editors();
+                }
+                Vec::new()
+            }
+            ProjectMessage::EndOutlineField { node_id, field_id } => {
+                if self.outline_field.as_ref() == Some(&(node_id, field_id)) {
+                    self.outline_field = None;
+                }
+                Vec::new()
+            }
             ProjectMessage::SetSynopsis { node_id, synopsis } => {
                 self.explorer.set_synopsis(&node_id, synopsis.clone());
                 self.replace_synopsis_editor(&node_id, &synopsis);
@@ -5105,6 +5705,39 @@ impl ProjectWorkspace {
                     .insert(node_id.clone(), synopsis.clone());
                 vec![ProjectEffect::CommitSynopsis { node_id, synopsis }]
             }
+            ProjectMessage::EditMetadata {
+                node_id,
+                field_id,
+                action,
+            } => {
+                let Some(editor) = self
+                    .metadata_editors
+                    .get_mut(&(node_id.clone(), field_id.clone()))
+                else {
+                    return Vec::new();
+                };
+                let edits = action.is_edit();
+                editor.perform(action);
+                if !edits {
+                    return Vec::new();
+                }
+                let mut value = editor.text();
+                if self
+                    .settings
+                    .metadata_definitions
+                    .get(&field_id)
+                    .is_some_and(|field| field.text_kind == MetadataFieldTextKind::SingleLine)
+                    && value.contains(['\r', '\n'])
+                {
+                    value = value.replace(['\r', '\n'], " ");
+                    *editor = text_editor::Content::with_text(&value);
+                }
+                self.update(ProjectMessage::SetMetadataValue {
+                    node_id,
+                    field_id,
+                    value,
+                })
+            }
             ProjectMessage::SetMetadataValue {
                 node_id,
                 field_id,
@@ -5116,8 +5749,20 @@ impl ProjectWorkspace {
                 {
                     return Vec::new();
                 }
+                if self
+                    .metadata_values
+                    .get(&(node_id.clone(), field_id.clone()))
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    == value
+                {
+                    return Vec::new();
+                }
+                self.metadata_drafts
+                    .insert((node_id.clone(), field_id.clone()), value.clone());
                 self.metadata_values
                     .insert((node_id.clone(), field_id.clone()), value.clone());
+                self.sync_metadata_editors();
                 vec![ProjectEffect::CommitMetadataValue {
                     node_id,
                     field_id,
@@ -5301,6 +5946,10 @@ impl ProjectWorkspace {
                     .retain(|candidate| candidate != &field_id);
                 self.metadata_values
                     .retain(|(_, candidate), _| candidate != &field_id);
+                self.metadata_drafts
+                    .retain(|(_, candidate), _| candidate != &field_id);
+                self.metadata_editors
+                    .retain(|(_, candidate), _| candidate != &field_id);
                 vec![ProjectEffect::DeleteMetadataField(field_id)]
             }
             ProjectMessage::SelectStyle(style_id) => {
@@ -5442,25 +6091,31 @@ impl ProjectWorkspace {
                 vec![ProjectEffect::DeleteStyle(style_id)]
             }
             ProjectMessage::ActivateCard(document_id) => self.activate_card(document_id),
-            ProjectMessage::SetCardsSection(section) => {
-                if self
-                    .explorer
-                    .nodes
-                    .get(&section)
-                    .is_some_and(|node| node.kind == HierarchyNodeKind::Root)
-                {
-                    self.cards_section = section;
-                    self.cards_scroll_offset = 0.0;
-                }
-                Vec::new()
-            }
             ProjectMessage::SetCardsScroll(offset) => {
                 if offset.is_finite() {
                     self.cards_scroll_offset = offset.max(0.0);
                 }
                 Vec::new()
             }
+            ProjectMessage::BeginCardDrag {
+                source_id,
+                grab_offset,
+                width,
+            } => {
+                let effects = self.update(ProjectMessage::BeginHierarchyDrag {
+                    source_id,
+                    gesture: SelectionGesture::Replace,
+                });
+                if let Some(drag) = self.pointer_drag.as_mut() {
+                    drag.grab_offset = grab_offset;
+                    drag.card_width = width;
+                }
+                effects
+            }
             ProjectMessage::BeginHierarchyDrag { source_id, gesture } => {
+                let selected_before = self.explorer.selected.clone();
+                let anchor_before = self.explorer.selection_anchor.clone();
+
                 if !self.explorer.nodes.contains_key(&source_id) {
                     return Vec::new();
                 }
@@ -5468,6 +6123,7 @@ impl ProjectWorkspace {
                     || gesture != SelectionGesture::Replace
                 {
                     self.explorer.select(&source_id, gesture);
+                    self.sync_selection_context();
                 }
                 if self
                     .explorer
@@ -5478,9 +6134,61 @@ impl ProjectWorkspace {
                     self.pointer_drag = Some(HierarchyPointerDrag {
                         source_id,
                         destination: None,
+                        surface: None,
+                        preview: None,
+                        selected_before,
+                        anchor_before,
+                        grab_offset: Point::new(20.0, 20.0),
+                        card_width: 320.0,
                     });
                     self.cards_drag_destination = None;
                     self.hierarchy_context_menu = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::PreviewHierarchyDrop {
+                surface,
+                destination,
+            } => {
+                // Crossing space between cards keeps the last preview; leaving
+                // the surface or Escape cancels it explicitly.
+                if surface == HierarchySurface::Cards
+                    && destination.is_none()
+                    && self
+                        .pointer_drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.surface == Some(surface))
+                {
+                    return Vec::new();
+                }
+                if self.pointer_drag.as_ref().is_none_or(|drag| {
+                    drag.surface == Some(surface) && drag.destination == destination
+                }) {
+                    return Vec::new();
+                }
+                let preview = if surface == HierarchySurface::Cards {
+                    destination
+                        .as_ref()
+                        .and_then(|destination| self.projected_drop(destination))
+                } else {
+                    None
+                };
+                if let Some(drag) = self.pointer_drag.as_mut() {
+                    drag.surface = Some(surface);
+                    drag.preview = preview;
+                    drag.destination = destination.clone();
+                    self.cards_drag_destination = destination;
+                }
+                Vec::new()
+            }
+            ProjectMessage::LeaveHierarchySurface(surface) => {
+                if let Some(drag) = self.pointer_drag.as_mut()
+                    && drag.surface == Some(surface)
+                {
+                    drag.surface = None;
+                    drag.preview = None;
+                    drag.destination = None;
+                    self.cards_drag_destination = None;
                 }
                 Vec::new()
             }
@@ -5490,6 +6198,8 @@ impl ProjectWorkspace {
                 {
                     self.cards_drag_destination = destination.clone();
                     drag.destination = destination;
+                    drag.surface = None;
+                    drag.preview = None;
                 }
                 Vec::new()
             }
@@ -5499,6 +6209,8 @@ impl ProjectWorkspace {
                 {
                     self.cards_drag_destination = None;
                     drag.destination = None;
+                    drag.surface = None;
+                    drag.preview = None;
                 }
                 Vec::new()
             }
@@ -5508,20 +6220,40 @@ impl ProjectWorkspace {
                 let Some(HierarchyPointerDrag {
                     source_id,
                     destination: Some(destination),
+                    preview,
+                    ..
                 }) = drag
                 else {
                     return Vec::new();
                 };
-                self.drop_hierarchy(source_id, destination)
+                let effects = self.drop_hierarchy(source_id, destination);
+                if !effects.is_empty() {
+                    if let Some(preview) = &preview {
+                        self.cards_expanded.clone_from(&preview.expanded);
+                    }
+                    self.drop_preview = preview;
+                }
+                effects
             }
             ProjectMessage::CancelHierarchyDrag => {
-                self.pointer_drag = None;
+                if let Some(drag) = self.pointer_drag.take() {
+                    self.explorer.selected = drag
+                        .selected_before
+                        .into_iter()
+                        .filter(|id| self.explorer.nodes.contains_key(id))
+                        .collect();
+                    self.explorer.selection_anchor = drag
+                        .anchor_before
+                        .filter(|id| self.explorer.nodes.contains_key(id));
+                    self.sync_selection_context();
+                }
                 self.cards_drag_destination = None;
                 Vec::new()
             }
             ProjectMessage::OpenHierarchyContextMenu { node_id, point } => {
                 if self.explorer.nodes.contains_key(&node_id) {
                     self.explorer.select(&node_id, SelectionGesture::Replace);
+                    self.sync_selection_context();
                     self.hierarchy_context_menu = Some(node_id);
                     self.hierarchy_context_point = point;
                     self.pointer_drag = None;
@@ -5683,14 +6415,6 @@ impl ProjectWorkspace {
                 self.replacement_preview.set_included(&node_id, included);
                 Vec::new()
             }
-            ProjectMessage::SelectAllReplacementMatches => {
-                self.replacement_preview.select_all(true);
-                Vec::new()
-            }
-            ProjectMessage::SelectNoReplacementMatches => {
-                self.replacement_preview.select_all(false);
-                Vec::new()
-            }
             ProjectMessage::CloseReplacementPreview => {
                 self.replacement_preview.close();
                 Vec::new()
@@ -5745,14 +6469,20 @@ impl ProjectWorkspace {
                 vec![ProjectEffect::PreviewHistory(checkpoint_id)]
             }
             ProjectMessage::SetNamedSnapshotDraft(value) => {
+                if self.history.creating_named_snapshot {
+                    return Vec::new();
+                }
                 self.history.named_snapshot_draft = value;
                 self.history.error = None;
                 Vec::new()
             }
             ProjectMessage::RequestNamedSnapshot(name) => {
+                if self.history.creating_named_snapshot {
+                    return Vec::new();
+                }
                 let name = name.trim().to_owned();
                 if name.is_empty() {
-                    self.history.error = Some("A snapshot name is required.".to_owned());
+                    self.history.error = Some("A milestone name is required.".to_owned());
                     return Vec::new();
                 }
                 self.history.named_snapshot_draft = name.clone();
@@ -5822,6 +6552,7 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::DismissModal => {
+                self.close_after_filing = None;
                 self.modal = None;
                 Vec::new()
             }
@@ -5836,6 +6567,7 @@ impl ProjectWorkspace {
                 let location = self.recently_deleted.restore_location(&node_id);
                 vec![ProjectEffect::RestoreDeletedSubtree { node_id, location }]
             }
+            ProjectMessage::SetReducedMotion(_) => Vec::new(),
             ProjectMessage::SetAppearance(appearance) => {
                 self.settings.appearance = appearance;
                 vec![ProjectEffect::ApplyAppearanceToAllWindows(appearance)]
@@ -5909,25 +6641,44 @@ impl ProjectWorkspace {
                 }
             }
             ProjectMessage::BrowseExportDestination => {
+                if !self.export.can_configure() {
+                    return Vec::new();
+                }
                 self.export.state = ExportState::ChoosingDestination;
                 vec![ProjectEffect::ChooseExportDestination]
             }
             ProjectMessage::SetExportDestination(destination) => {
-                self.export.destination = destination;
+                if !self.export.can_configure()
+                    && !matches!(self.export.state, ExportState::ChoosingDestination)
+                {
+                    return Vec::new();
+                }
+                if let Some(destination) = destination {
+                    self.export.destination = Some(destination);
+                }
                 self.export.state = ExportState::Ready;
                 Vec::new()
             }
             ProjectMessage::SetExportNumbering(number_documents) => {
+                if !self.export.can_configure() {
+                    return Vec::new();
+                }
                 self.export.numbering_documents = number_documents;
                 Vec::new()
             }
             ProjectMessage::SetExportTitleSetting(setting) => {
+                if !self.export.can_configure() {
+                    return Vec::new();
+                }
                 self.export.project_settings.emit_titles = setting;
                 vec![ProjectEffect::SetProjectExportSettings(
                     self.export.project_settings,
                 )]
             }
             ProjectMessage::SetExportPageBreak(starts_new_page) => {
+                if !self.export.can_configure() {
+                    return Vec::new();
+                }
                 self.export.project_settings.starts_new_page = starts_new_page;
                 vec![ProjectEffect::SetProjectExportSettings(
                     self.export.project_settings,
@@ -6170,6 +6921,8 @@ impl ProjectWorkspace {
         } else {
             EditorPane::Primary
         };
+        self.explorer.select(&node_id, SelectionGesture::Replace);
+        self.sync_selection_context();
         self.last_activated_document = Some(document_id.clone());
         let _ = self.editor.update(EditorMessage::OpenTab {
             pane,
@@ -6203,7 +6956,7 @@ impl ProjectWorkspace {
             return Vec::new();
         };
         self.explorer.select(&node_id, SelectionGesture::Replace);
-        self.sync_inspector_context_from_selection();
+        self.sync_selection_context();
         let pane = requested_pane.unwrap_or_else(|| {
             if is_research_section(&section_id) {
                 EditorPane::Companion
@@ -6256,9 +7009,11 @@ impl ProjectWorkspace {
         let node_id = node.id.clone();
         let title = node.title.clone();
         self.explorer.select(&node_id, SelectionGesture::Replace);
-        self.explorer.expanded.insert(pending.parent_id);
-        self.open_created_after_rename =
-            (expected_kind == HierarchyNodeKind::Document).then(|| node_id.clone());
+        self.explorer.expanded.insert(pending.parent_id.clone());
+        self.cards_expanded.insert(pending.parent_id);
+        self.sync_selection_context();
+        self.open_created_after_rename = Some(node_id.clone());
+        self.sidebar = SidebarSurface::Explorer;
         self.hierarchy_rename = Some(HierarchyRename { node_id, title });
     }
 
@@ -6296,6 +7051,9 @@ impl ProjectWorkspace {
         } else {
             vec![source_id]
         };
+        if let DragDestination::IntoGroup(group) = &destination {
+            self.explorer.expanded.insert(group.clone());
+        }
         vec![ProjectEffect::MoveHierarchy {
             node_ids,
             destination,
@@ -6824,6 +7582,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn overview_metadata_edits_preserve_lines_and_selection_across_updates() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace
+            .settings
+            .metadata_definitions
+            .get_mut("field-17")
+            .unwrap()
+            .text_kind = MetadataFieldTextKind::Multiline;
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".into(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::SetMetadataValue {
+            node_id: "chapter-one".into(),
+            field_id: "field-17".into(),
+            value: String::new(),
+        });
+        for action in [
+            text_editor::Edit::Insert('A'),
+            text_editor::Edit::Enter,
+            text_editor::Edit::Insert('B'),
+        ] {
+            workspace.update(ProjectMessage::EditMetadata {
+                node_id: "chapter-one".into(),
+                field_id: "field-17".into(),
+                action: text_editor::Action::Edit(action),
+            });
+        }
+        assert_eq!(
+            workspace
+                .inspector()
+                .metadata_value("chapter-one", "field-17"),
+            Some("A\nB")
+        );
+        workspace.sync_metadata_editors();
+        workspace.update(ProjectMessage::EditMetadata {
+            node_id: "chapter-one".into(),
+            field_id: "field-17".into(),
+            action: text_editor::Action::Edit(text_editor::Edit::Insert('C')),
+        });
+        assert_eq!(
+            workspace
+                .inspector()
+                .metadata_value("chapter-one", "field-17"),
+            Some("A\nBC")
+        );
+        workspace
+            .settings
+            .metadata_definitions
+            .get_mut("field-17")
+            .unwrap()
+            .text_kind = MetadataFieldTextKind::SingleLine;
+        workspace.update(ProjectMessage::EditMetadata {
+            node_id: "chapter-one".into(),
+            field_id: "field-17".into(),
+            action: text_editor::Action::Edit(text_editor::Edit::Enter),
+        });
+        assert!(
+            !workspace
+                .inspector()
+                .metadata_value("chapter-one", "field-17")
+                .unwrap()
+                .contains('\n')
+        );
+    }
+
+    #[test]
     fn style_property_drafts_survive_snapshots_and_only_commit_complete_values() {
         let snapshot = ProjectSnapshot {
             project: Project::new(parchmint_domain::ProjectId::from_bytes([7; 16])),
@@ -7024,15 +7849,13 @@ mod tests {
     }
 
     #[test]
-    fn explorer_creation_menu_uses_the_selected_document_parent_and_closes_on_create() {
+    fn creating_a_sibling_uses_the_selected_document_parent() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::SelectHierarchy {
             node_id: "chapter-one".to_owned(),
             gesture: SelectionGesture::Replace,
         });
 
-        workspace.update(ProjectMessage::ToggleExplorerCreationMenu);
-        assert!(workspace.explorer_creation_menu_open());
         assert_eq!(workspace.explorer_creation_parent_id(), Some("part-one"));
 
         assert_eq!(
@@ -7045,7 +7868,22 @@ mod tests {
                 kind: HierarchyItemKind::Document,
             }]
         );
-        assert!(!workspace.explorer_creation_menu_open());
+    }
+
+    #[test]
+    fn overview_section_changes_only_through_its_own_switch() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::SetCardsScroll(400.0));
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "research".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert_eq!(workspace.cards().section_id(), "manuscript");
+        assert_eq!(workspace.cards_scroll_offset, 400.0);
+        workspace.update(ProjectMessage::SetCardsSection("research".into()));
+        assert_eq!(workspace.cards().section_id(), "research");
+        assert_eq!(workspace.cards_scroll_offset, 0.0);
+        assert_eq!(workspace.explorer_creation_parent_id(), Some("research"));
     }
 
     #[test]
@@ -7174,6 +8012,62 @@ mod tests {
             Some("Earlier versions".to_owned())
         );
         assert_eq!(workspace.history().timeline_heading("older-legacy"), None);
+    }
+
+    #[test]
+    fn history_word_diff_preserves_unchanged_words_between_separate_edits() {
+        use HistoryComparisonSpanKind::{Added, Removed, Unchanged};
+        let (before, after) = modified_history_spans(
+            "The blue house beside the quiet river.",
+            "The green house beside the wild river.",
+        );
+        assert_eq!(
+            before,
+            vec![
+                history_span(Unchanged, "The "),
+                history_span(Removed, "blue"),
+                history_span(Unchanged, " house beside the "),
+                history_span(Removed, "quiet"),
+                history_span(Unchanged, " river."),
+            ]
+        );
+        assert_eq!(
+            after,
+            vec![
+                history_span(Unchanged, "The "),
+                history_span(Added, "green"),
+                history_span(Unchanged, " house beside the "),
+                history_span(Added, "wild"),
+                history_span(Unchanged, " river."),
+            ]
+        );
+    }
+
+    #[test]
+    fn history_word_diff_preserves_unicode_spacing_and_word_counts() {
+        for (before, after) in [
+            ("“Café,” she said.", "“Café!” she said."),
+            ("She\t waited.", "She waited patiently."),
+            ("你好，世界。", "你好，朋友。"),
+        ] {
+            let (before_spans, after_spans) = modified_history_spans(before, after);
+            for (original, spans) in [(before, before_spans), (after, after_spans)] {
+                assert_eq!(
+                    spans
+                        .iter()
+                        .map(|span| span.text.as_str())
+                        .collect::<String>(),
+                    original
+                );
+                assert_eq!(
+                    comparison_line_word_count(&HistoryComparisonTextLine {
+                        line_number: 1,
+                        spans,
+                    }),
+                    original.split_whitespace().count()
+                );
+            }
+        }
     }
 
     #[test]
@@ -7556,7 +8450,7 @@ mod tests {
         );
         assert_eq!(
             workspace.history().error(),
-            Some("A snapshot name is required.")
+            Some("A milestone name is required.")
         );
 
         let effects = workspace.update(ProjectMessage::RequestNamedSnapshot(
@@ -7569,6 +8463,13 @@ mod tests {
             )]
         );
         assert!(workspace.history().is_creating_named_snapshot());
+        assert!(
+            workspace
+                .update(ProjectMessage::RequestNamedSnapshot("Duplicate".into()))
+                .is_empty()
+        );
+        workspace.update(ProjectMessage::SetNamedSnapshotDraft("New draft".into()));
+        assert_eq!(workspace.history().named_snapshot_draft(), "Before launch");
         workspace.complete_history_workflow();
         assert!(!workspace.history().is_creating_named_snapshot());
         assert_eq!(workspace.history().named_snapshot_draft(), "");
@@ -7852,6 +8753,205 @@ mod tests {
     }
 
     #[test]
+    fn drag_preview_moves_selected_subtrees_without_changing_the_outline() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.explorer.expanded.remove("research");
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "part-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Additive,
+        });
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "part-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        let destination = DragDestination::IntoGroup("research".to_owned());
+        assert!(
+            workspace
+                .update(ProjectMessage::PreviewHierarchyDrop {
+                    surface: HierarchySurface::Cards,
+                    destination: Some(destination.clone()),
+                })
+                .is_empty()
+        );
+        let preview = workspace.displayed_explorer();
+        assert_eq!(
+            preview.nodes["research"].children,
+            ["research-notes", "part-one"]
+        );
+        assert_eq!(preview.nodes["manuscript"].children, ["chapter-three"]);
+        assert_eq!(
+            preview.nodes["part-one"].children,
+            ["chapter-one", "chapter-two"]
+        );
+        assert_eq!(preview.nodes["chapter-one"].section_id, "research");
+        assert!(preview.expanded.contains("research"));
+        assert_eq!(
+            workspace.explorer.nodes["part-one"].parent.as_deref(),
+            Some("manuscript")
+        );
+        assert_eq!(
+            workspace.explorer.nodes["chapter-one"].section_id,
+            "manuscript"
+        );
+        assert!(!workspace.explorer.expanded.contains("research"));
+        assert_eq!(
+            workspace.preview_destination(
+                "chapter-one",
+                DragDestination::BeforeSibling("chapter-one".to_owned())
+            ),
+            Some(destination)
+        );
+        workspace.update(ProjectMessage::LeaveHierarchySurface(
+            HierarchySurface::Explorer,
+        ));
+        assert!(workspace.displayed_explorer().expanded.contains("research"));
+        workspace.update(ProjectMessage::CancelHierarchyDrag);
+        assert!(!workspace.displayed_explorer().expanded.contains("research"));
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn card_drag_preserves_editing_geometry_and_cancel_restores_order() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let editing = |workspace: &ProjectWorkspace| {
+            workspace
+                .cards()
+                .items()
+                .into_iter()
+                .map(|item| (item.node_id.to_owned(), item.row_height(320.0)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let before = editing(&workspace);
+        let order = workspace
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-two".to_owned(),
+            grab_offset: Point::new(93.0, 31.0),
+            width: 270.0,
+        });
+        assert_eq!(editing(&workspace), before);
+        assert_eq!(
+            workspace.card_drag_geometry(),
+            (Point::new(93.0, 31.0), 270.0)
+        );
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::BeforeSibling("chapter-one".to_owned())),
+        });
+        assert_eq!(editing(&workspace), before);
+        let preview = workspace
+            .displayed_explorer()
+            .preorder_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: None,
+        });
+        assert_eq!(
+            workspace.displayed_explorer().preorder_ids(),
+            preview.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        workspace.update(ProjectMessage::CancelHierarchyDrag);
+        assert_eq!(editing(&workspace), before);
+        assert_eq!(
+            workspace.displayed_explorer().preorder_ids(),
+            order.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dragging_back_into_the_original_parent_restores_the_preview_order() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let original = workspace
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-two".into(),
+            gesture: SelectionGesture::Replace,
+        });
+        for parent in ["research", "part-one"] {
+            let destination =
+                workspace.preview_destination(parent, DragDestination::IntoGroup(parent.into()));
+            assert!(destination.is_some());
+            workspace.update(ProjectMessage::PreviewHierarchyDrop {
+                surface: HierarchySurface::Cards,
+                destination,
+            });
+        }
+        assert_eq!(workspace.displayed_explorer().preorder_ids(), original);
+    }
+
+    #[test]
+    fn dropping_into_a_collapsed_group_keeps_the_preview_disclosure() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.cards_expanded.remove("research");
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::IntoGroup("research".to_owned())),
+        });
+        assert!(!workspace.cards_expanded.contains("research"));
+        let effects = workspace.update(ProjectMessage::CommitHierarchyDrag);
+        assert!(matches!(
+            effects.as_slice(),
+            [ProjectEffect::MoveHierarchy { .. }]
+        ));
+        assert!(workspace.cards_expanded.contains("research"));
+    }
+
+    #[test]
+    fn committed_drag_keeps_its_preview_until_the_move_finishes() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "chapter-one".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::AfterSibling("chapter-two".to_owned())),
+        });
+        assert!(matches!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .as_slice(),
+            [ProjectEffect::MoveHierarchy { .. }]
+        ));
+        assert_eq!(
+            workspace.displayed_explorer().nodes["part-one"].children,
+            ["chapter-two", "chapter-one"]
+        );
+        assert_eq!(
+            workspace.explorer.nodes["part-one"].children,
+            ["chapter-one", "chapter-two"]
+        );
+        workspace.report_error("Move", "Failed".to_owned());
+        assert_eq!(
+            workspace.displayed_explorer().nodes["part-one"].children,
+            ["chapter-one", "chapter-two"]
+        );
+    }
+
+    #[test]
     fn pointer_drag_commits_only_a_live_validated_source_and_target() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::BeginHierarchyDrag {
@@ -7936,6 +9036,46 @@ mod tests {
     }
 
     #[test]
+    fn export_cancellation_preserves_destination_and_busy_controls_ignore_changes() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Export);
+        workspace.update(ProjectMessage::SetExportDestination(Some(
+            "/tmp/novel.html".into(),
+        )));
+        workspace.update(ProjectMessage::BrowseExportDestination);
+        assert!(
+            workspace
+                .update(ProjectMessage::BrowseExportDestination)
+                .is_empty()
+        );
+        workspace.update(ProjectMessage::SetExportDestination(None));
+        assert_eq!(workspace.export().destination(), Some("/tmp/novel.html"));
+        assert!(workspace.export().can_start());
+        workspace.update(ProjectMessage::StartExport);
+        for cancelling in [false, true] {
+            if cancelling {
+                workspace.update(ProjectMessage::CancelExport);
+            }
+            let before = workspace.export().state();
+            for action in [
+                ProjectMessage::BrowseExportDestination,
+                ProjectMessage::SetExportDestination(Some("/tmp/other.html".into())),
+                ProjectMessage::SetExportNumbering(true),
+                ProjectMessage::SetExportTitleSetting(ProjectExportSetting::Disabled),
+                ProjectMessage::SetExportPageBreak(true),
+            ] {
+                assert!(workspace.update(action).is_empty());
+            }
+            assert_eq!(workspace.export().state(), before);
+            assert_eq!(workspace.export().destination(), Some("/tmp/novel.html"));
+            assert!(!workspace.export().numbers_documents());
+            assert_eq!(
+                workspace.export().project_settings(),
+                ProjectExportSettings::default()
+            );
+        }
+    }
+
+    #[test]
     fn history_reinitialize_requires_availability_and_confirmation() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
         workspace.update(ProjectMessage::HistoryMaintenanceLoaded(
@@ -8015,20 +9155,33 @@ mod tests {
         assert_eq!(workspace.cards().visible_item_count(), 354);
         assert_eq!(workspace.cards().windowed_items().len(), 48);
 
-        workspace.update(ProjectMessage::SetCardsScroll(CARDS_ROW_HEIGHT * 300.0));
-        let window = workspace.cards().item_window();
+        let heights = workspace
+            .cards()
+            .items()
+            .iter()
+            .filter(|item| item.visible)
+            .map(|item| item.row_height(item.grid_width(840.0, 1)))
+            .collect::<Vec<_>>();
+        assert!(heights.iter().all(|height| *height > 0.0));
+        workspace.update(ProjectMessage::SetCardsScroll(heights[..300].iter().sum()));
+        let window = workspace.cards().item_window(1, 840.0);
         let rows = workspace.cards().windowed_items();
         assert_eq!(window.start, 300);
         assert_eq!(rows.len(), 48);
         assert_eq!(rows.first().map(|item| item.node_id), Some("bulk-card-296"));
         assert_eq!(
-            window.top_padding + rows.len() as f32 * CARDS_ROW_HEIGHT + window.bottom_padding,
-            workspace.cards().visible_item_count() as f32 * CARDS_ROW_HEIGHT,
+            window.top_padding
+                + rows
+                    .iter()
+                    .map(|item| item.row_height(item.grid_width(840.0, 1)))
+                    .sum::<f32>()
+                + window.bottom_padding,
+            heights.iter().sum::<f32>(),
         );
         let selected = rows[10].node_id.to_owned();
 
-        workspace.update(ProjectMessage::SetCardsScroll(CARDS_ROW_HEIGHT * 10_000.0));
-        let final_window = workspace.cards().item_window();
+        workspace.update(ProjectMessage::SetCardsScroll(1_000_000.0));
+        let final_window = workspace.cards().item_window(1, 840.0);
         let final_rows = workspace.cards().windowed_items();
         assert_eq!(final_window.start, 306);
         assert_eq!(final_rows.len(), 48);
@@ -8048,6 +9201,25 @@ mod tests {
                 .iter()
                 .any(|item| item.node_id == selected && item.selected)
         );
+
+        for columns in [2, 3, 6] {
+            workspace.update(ProjectMessage::SetCardsScroll(0.0));
+            let initial = workspace.cards().item_window(columns, 840.0);
+            let total =
+                initial.rows.iter().map(|row| row.height).sum::<f32>() + initial.bottom_padding;
+            assert_eq!(initial.rows[0].end, 1, "groups occupy their own row");
+            assert_eq!(initial.rows[1].start, 1);
+            assert_eq!(initial.rows[1].end, 3, "only siblings share a row");
+            workspace.update(ProjectMessage::SetCardsScroll(1_000_000.0));
+            let last = workspace.cards().item_window(columns, 840.0);
+            assert_eq!(last.end, 354);
+            assert!(last.rows.len() <= CARDS_WINDOW_SIZE);
+            assert_eq!(last.bottom_padding, 0.0);
+            assert_eq!(
+                last.top_padding + last.rows.iter().map(|row| row.height).sum::<f32>(),
+                total
+            );
+        }
     }
 
     #[test]
@@ -8175,6 +9347,62 @@ mod tests {
                 .map(|node| node.title),
             Some("Opening Scene")
         );
+    }
+
+    #[test]
+    fn outline_counts_include_collapsed_descendants_and_live_edits_once() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let mut outer = HierarchyNode::new(
+            "act",
+            "Act",
+            "manuscript",
+            Some("manuscript"),
+            HierarchyNodeKind::Group,
+        );
+        outer.children.push("part-one".into());
+        workspace.explorer.nodes.insert("act".into(), outer);
+        workspace.explorer.nodes.get_mut("part-one").unwrap().parent = Some("act".into());
+        workspace
+            .explorer
+            .nodes
+            .get_mut("manuscript")
+            .unwrap()
+            .children[0] = "act".into();
+        workspace.explorer.expanded.remove("part-one");
+        workspace
+            .editor
+            .update(EditorMessage::SetDocumentWordCount {
+                document_id: "research-notes".into(),
+                words: 99,
+            });
+        let counts = workspace.outline_word_counts();
+        assert_eq!(counts["part-one"], 779);
+        assert_eq!(counts["act"], 779);
+        assert_eq!(counts["manuscript"], 779);
+        assert_eq!(counts["research"], 99);
+        workspace
+            .explorer
+            .select("part-one", SelectionGesture::Replace);
+        workspace
+            .explorer
+            .select("chapter-one", SelectionGesture::Additive);
+        assert_eq!(workspace.selected_outline_words(), 779);
+        workspace.editor.update_live_counts(
+            EditorPane::Primary,
+            "chapter-one".into(),
+            500,
+            None,
+            true,
+        );
+        assert_eq!(workspace.outline_word_counts()["part-one"], 867);
+        assert_eq!(workspace.selected_outline_words(), 867);
+        let card = workspace
+            .cards()
+            .items()
+            .into_iter()
+            .find(|item| item.node_id == "chapter-one")
+            .unwrap();
+        assert_eq!(card.words, 500);
     }
 
     #[test]
@@ -8568,31 +9796,6 @@ mod tests {
 
         assert_eq!(workspace.sidebar_surface(), SidebarSurface::GlobalSearch);
         assert!(!workspace.editor().local_search(view).is_open());
-    }
-
-    #[test]
-    fn inspector_title_rename_is_explicit_and_clears_when_committed_or_reselected() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
-
-        workspace.update(ProjectMessage::BeginInspectorTitleRename(
-            "chapter-one".to_owned(),
-        ));
-        assert_eq!(
-            workspace.inspector_title_rename_node_id(),
-            Some("chapter-one")
-        );
-
-        workspace.update(ProjectMessage::CommitInspectorTitleRename);
-        assert_eq!(workspace.inspector_title_rename_node_id(), None);
-
-        workspace.update(ProjectMessage::BeginInspectorTitleRename(
-            "chapter-one".to_owned(),
-        ));
-        workspace.update(ProjectMessage::SelectHierarchy {
-            node_id: "chapter-three".to_owned(),
-            gesture: SelectionGesture::Replace,
-        });
-        assert_eq!(workspace.inspector_title_rename_node_id(), None);
     }
 
     #[test]

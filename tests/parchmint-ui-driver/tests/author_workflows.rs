@@ -48,7 +48,7 @@ fn novelist_can_plan_draft_and_autosave_a_chaptered_manuscript() {
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("switch to Cards");
-    assert!(visible(&harness, "Outline"));
+    assert!(visible(&harness, "Overview"));
     assert!(visible(&harness, "Part One"));
     assert!(visible(&harness, "Chapter One"));
 
@@ -116,7 +116,7 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
     reopened
         .click_text(HarnessWindow::Launcher, "Restore Writing Context")
         .expect("reopen project");
-    assert!(visible(&reopened, "Outline"));
+    assert!(visible(&reopened, "Overview"));
     assert!(visible(&reopened, "Harbor Notes"));
     assert!(
         reopened
@@ -182,32 +182,47 @@ fn author_can_configure_metadata_to_appear_on_cards() {
 }
 
 #[test]
-fn author_can_rename_a_chapter_from_the_inspector() {
-    let run = IsolatedRun::new("inspector-title").expect("isolated run");
-    let project = run.root().join("inspector-title.parchmint");
-    let harness = create_project(&run, &project, "Inspector Title");
-
+fn author_can_rename_a_chapter_while_reviewing_the_outline() {
+    let run = IsolatedRun::new("outline-title").expect("isolated run");
+    let project = run.root().join("outline-title.parchmint");
+    let harness = create_project(&run, &project, "Outline Title");
     create_group(&harness, "Manuscript", "Part One");
     create_document(&harness, "Part One", "Untitled Scene");
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::InspectorTitle)
-        .expect("begin renaming the selected chapter in Inspector");
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .expect("open Outline");
+    let chapter = harness
+        .hierarchy_node("Untitled Scene")
+        .expect("resolve chapter card");
+    harness
+        .right_click_cards_node(HarnessWindow::Project, chapter)
+        .expect("open the chapter card menu");
+    harness
+        .click_text(HarnessWindow::Project, "Rename")
+        .expect("rename action");
     harness
         .replace_target(
             HarnessWindow::Project,
-            HarnessTarget::InspectorTitle,
+            HarnessTarget::ExplorerRename,
             "The Breakwater",
         )
-        .expect("rename the selected chapter in Inspector");
-    assert!(visible(&harness, "The Breakwater"));
+        .expect("rename through the shared title field");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit title");
+    assert!(harness.hierarchy_node("The Breakwater").is_ok());
     assert!(
-        harness.hierarchy_node("The Breakwater").is_ok(),
-        "Inspector title edits must update the shared Explorer hierarchy"
+        !harness
+            .contains_text(HarnessWindow::Project, "Edit title")
+            .unwrap()
     );
     harness
         .close(HarnessWindow::Project)
-        .expect("close inspector-title project");
-    harness.shutdown().expect("stop inspector-title project");
+        .expect("close project");
+    harness.shutdown().expect("stop project");
 }
 
 #[test]
@@ -298,21 +313,29 @@ fn explorer_creation_replaces_the_selected_default_title() {
 }
 
 #[test]
-fn explorer_add_menu_creates_a_group_and_document_in_the_current_context() {
+fn overview_creates_a_group_and_document_without_explorer() {
     let run = IsolatedRun::new("explorer-add-menu").expect("isolated run");
     let project = run.root().join("explorer-add-menu.parchmint");
     let harness = create_project(&run, &project, "Explorer Add Menu");
 
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
-        .expect("open the Explorer-local creation menu");
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
     harness
-        .redraw(HarnessWindow::Project)
-        .expect("render the Explorer creation menu");
-    assert!(visible(&harness, "Add to Manuscript"));
+        .click_target(HarnessWindow::Project, HarnessTarget::OverviewAdd)
+        .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Group")
-        .expect("create a group from the Explorer menu");
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
     harness
         .redraw(HarnessWindow::Project)
         .expect("render the created group-name field");
@@ -334,12 +357,11 @@ fn explorer_add_menu_creates_a_group_and_document_in_the_current_context() {
         .expect("commit the group title");
 
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
-        .expect("open the creation menu for the selected group");
-    assert!(visible(&harness, "Add to Part One"));
+        .right_click_text(HarnessWindow::Project, "Part One")
+        .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Document")
-        .expect("create a document within the selected group");
+        .click_text(HarnessWindow::Project, "Create document")
+        .unwrap();
     harness
         .redraw(HarnessWindow::Project)
         .expect("render the created document-name field");
@@ -689,12 +711,12 @@ fn retained_focus_supports_cross_command_local_find_and_replace() {
             "river",
         )
         .expect("enter local search query");
-    assert!(visible(&harness, "1 of 2 matches · Left pane"));
+    assert!(visible(&harness, "1 of 2 matches"));
     harness
         .press_key(HarnessWindow::Project, HarnessKey::Enter)
         .expect("navigate from a retained Find focus");
     harness
-        .click_text(HarnessWindow::Project, "Replace")
+        .click_text(HarnessWindow::Project, "Replace…")
         .expect("show local replacement controls");
     harness
         .type_into_target(
@@ -811,6 +833,12 @@ fn novelist_can_turn_inspector_synopses_into_a_cards_outline() {
         .click_hierarchy_node(HarnessWindow::Project, opening_image)
         .expect("select the first chapter for Inspector editing");
     harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
         .click_target(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
         .expect("focus Inspector synopsis");
     assert!(
@@ -823,7 +851,13 @@ fn novelist_can_turn_inspector_synopses_into_a_cards_outline() {
             HarnessWindow::Project,
             "A storm puts the harbor under glass.",
         )
-        .expect("write a chapter synopsis in Inspector");
+        .expect("write a chapter synopsis in Overview");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .unwrap();
     create_document(&harness, "Act One", "The First Choice");
     let first_choice = harness
         .hierarchy_node("The First Choice")
@@ -831,19 +865,19 @@ fn novelist_can_turn_inspector_synopses_into_a_cards_outline() {
     harness
         .click_hierarchy_node(HarnessWindow::Project, first_choice)
         .expect("select the second chapter for Inspector editing");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::InspectorSynopsis,
-            "The protagonist chooses the impossible crossing.",
-        )
-        .expect("write the second chapter synopsis in Inspector");
+    outline_synopsis(&harness, "The protagonist chooses the impossible crossing.");
     harness
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("review the outline in Cards");
+    harness
+        .click_cards_node(
+            HarnessWindow::Project,
+            harness.hierarchy_node("Act One").unwrap(),
+        )
+        .unwrap();
     assert!(visible(&harness, "A storm puts the harbor under glass."));
     assert!(visible(
         &harness,
@@ -866,6 +900,14 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .type_into_target(HarnessWindow::Project, HarnessTarget::EditorPrimary, draft)
         .expect("draft a commentable sentence");
     harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
+        .unwrap();
+    for _ in 0..2 {
+        harness
+            .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+            .unwrap();
+    }
+    harness
         .select_editor_text(
             HarnessWindow::Project,
             EditorPane::Primary,
@@ -879,6 +921,14 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
             (0.5, 0.5),
         )
         .expect("open the selected-text popover");
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(
+                HarnessWindow::Project,
+                std::path::Path::new(&root).join("editor-context-after-split"),
+            )
+            .unwrap();
+    }
     assert!(visible(&harness, "Add Comment"));
     harness
         .click_text(HarnessWindow::Project, "Add Comment")
@@ -998,7 +1048,8 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_text(HarnessWindow::Project, "Confirm delete")
         .expect("delete the comment thread");
-    assert!(visible(&harness, "No comments"));
+    assert!(!visible(&harness, "Comments"));
+    assert!(!visible(&harness, "Verify the storm detail."));
     harness
         .close(HarnessWindow::Project)
         .expect("close comment project");
@@ -1041,9 +1092,6 @@ fn revision_author_can_search_and_replace_a_draft_phrase() {
         )
         .expect("review replacement");
     assert!(visible(&harness, "Review replacements"));
-    harness
-        .click_text(HarnessWindow::Project, "Refresh preview")
-        .expect("revalidate replacement");
     harness
         .click_text(HarnessWindow::Project, "Apply replacement")
         .expect("apply replacement");
@@ -1094,14 +1142,8 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
         )
         .expect("review replacement");
     assert!(visible(&harness, "Review replacements"));
-    harness
-        .click_text(HarnessWindow::Project, "Refresh preview")
-        .expect("revalidate the saved result");
     assert!(
-        visible(
-            &harness,
-            "The preview is current. Apply will replace the selected matches together.",
-        ),
+        visible(&harness, "Apply replacement",),
         "replacement selection was not ready to apply: {}",
         harness
             .replacement_status()
@@ -1167,13 +1209,10 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
     harness
         .click_hierarchy_node(HarnessWindow::Project, opening_image)
         .expect("select the opening chapter for Inspector editing");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::InspectorSynopsis,
-            "A storm seals the harbor and strands the cartographer.",
-        )
-        .expect("outline the opening chapter in Inspector");
+    outline_synopsis(
+        &harness,
+        "A storm seals the harbor and strands the cartographer.",
+    );
     create_document(&harness, "Act One", "The Crossing");
     let crossing = harness
         .hierarchy_node("The Crossing")
@@ -1181,13 +1220,7 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
     harness
         .click_hierarchy_node(HarnessWindow::Project, crossing)
         .expect("select the crossing chapter for Inspector editing");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::InspectorSynopsis,
-            "The cartographer chooses the forbidden channel.",
-        )
-        .expect("outline the second chapter in Inspector");
+    outline_synopsis(&harness, "The cartographer chooses the forbidden channel.");
     create_group(&harness, "Manuscript", "Act Two");
     create_document(&harness, "Act Two", "The Archive");
     let archive = harness
@@ -1196,13 +1229,10 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
     harness
         .click_hierarchy_node(HarnessWindow::Project, archive)
         .expect("select the archive chapter for Inspector editing");
-    harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::InspectorSynopsis,
-            "An old pilot log reveals why the tide turns to glass.",
-        )
-        .expect("outline the later chapter in Inspector");
+    outline_synopsis(
+        &harness,
+        "An old pilot log reveals why the tide turns to glass.",
+    );
 
     harness
         .click_target(
@@ -1354,4 +1384,26 @@ fn canonical_bodies_in(directory: &std::path::Path) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn outline_synopsis(harness: &DesktopInteractionHarness, synopsis: &str) {
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
+        .replace_target(
+            HarnessWindow::Project,
+            HarnessTarget::InspectorSynopsis,
+            synopsis,
+        )
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .unwrap();
 }

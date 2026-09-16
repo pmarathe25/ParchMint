@@ -1,15 +1,20 @@
 //! Iced desktop presentation state for the shell and editor workspace.
 
+mod action_menu;
 mod async_service_feeds;
+mod cards_layout;
 pub mod components;
 pub mod design_tokens;
+mod drag_ghost;
 mod editor_workspace;
 mod focus;
 mod harness_target;
 mod hierarchy_drag;
+mod history_diff;
 mod iced_editor_surface;
 mod iced_project_surface;
 mod icons;
+mod motion;
 mod native;
 mod project_runtime;
 mod project_workspace;
@@ -318,9 +323,7 @@ impl LauncherState {
         );
     }
 
-    /// Reconciles the launcher with the authoritative application preference
-    /// snapshot. Recent projects are global preferences, so this replaces the
-    /// projection instead of retaining stale launcher-only entries.
+    /// Replace the launcher list with the current global preferences.
     pub fn set_recent_projects(&mut self, projects: Vec<RecentProject>) {
         self.recent_projects = projects;
     }

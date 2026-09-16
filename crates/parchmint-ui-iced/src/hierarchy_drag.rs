@@ -1,9 +1,4 @@
-//! Stable pointer ownership for hierarchy drag sources and drop targets.
-//!
-//! Iced dispatches pointer events through the retained widget tree even when a
-//! pointer has left an individual widget. Keeping the press state here lets a
-//! source finish a drag outside its original row without making row layout
-//! depend on transient drag state.
+//! Hierarchy drag gestures and one hover decision per rendered surface.
 
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
@@ -11,26 +6,44 @@ use iced::advanced::{
 };
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Vector};
 use std::time::{Duration, Instant};
+use std::{cell::RefCell, rc::Rc};
 
 const DRAG_THRESHOLD: f32 = 4.0;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) fn source<'a, Message>(
+    id: impl Into<String>,
     content: impl Into<Element<'a, Message>>,
     on_click: Message,
     on_double_click: Option<Message>,
     on_drag_start: Message,
-    on_finish: Message,
 ) -> Element<'a, Message>
 where
     Message: Clone + 'a,
 {
     HierarchyDragSource {
+        id: id.into(),
         content: content.into(),
         on_click,
         on_double_click,
-        on_drag_start,
-        on_finish,
+        on_drag_start: Box::new(move |_, _| on_drag_start.clone()),
+    }
+    .into()
+}
+
+pub(crate) fn source_with_pointer<'a, Message: Clone + 'a>(
+    id: impl Into<String>,
+    content: impl Into<Element<'a, Message>>,
+    on_click: Message,
+    on_double_click: Option<Message>,
+    on_drag_start: impl Fn(Point, Rectangle) -> Message + 'a,
+) -> Element<'a, Message> {
+    HierarchyDragSource {
+        id: id.into(),
+        content: content.into(),
+        on_click,
+        on_double_click,
+        on_drag_start: Box::new(on_drag_start),
     }
     .into()
 }
@@ -54,23 +67,62 @@ where
     .into()
 }
 
+pub(crate) type HoverTargets<D> = Rc<RefCell<Option<(D, Rectangle)>>>;
+type DropResolver<'a, D> = dyn Fn(Rectangle, Point) -> Option<(D, Rectangle)> + 'a;
+
+pub(crate) fn targets<D>() -> HoverTargets<D> {
+    Rc::new(RefCell::new(None))
+}
+
 pub(crate) fn target<'a, Message, Destination>(
     content: impl Into<Element<'a, Message>>,
     indicator: Option<DropIndicator>,
+    targets: &HoverTargets<Destination>,
     destination_at: impl Fn(Rectangle, Point) -> Option<Destination> + 'a,
-    on_target: impl Fn(Destination) -> Message + 'a,
-    on_clear: impl Fn(Destination) -> Message + 'a,
 ) -> Element<'a, Message>
 where
     Destination: Clone + PartialEq + 'a + 'static,
     Message: 'a,
 {
+    target_with_zone(content, indicator, targets, move |bounds, point| {
+        destination_at(bounds, point).map(|destination| (destination, bounds))
+    })
+}
+
+pub(crate) fn target_with_zone<'a, Message: 'a, Destination: Clone + PartialEq + 'static>(
+    content: impl Into<Element<'a, Message>>,
+    indicator: Option<DropIndicator>,
+    targets: &HoverTargets<Destination>,
+    destination_at: impl Fn(Rectangle, Point) -> Option<(Destination, Rectangle)> + 'a,
+) -> Element<'a, Message> {
     HierarchyDropTarget {
         content: content.into(),
         indicator,
+        targets: Rc::clone(targets),
         destination_at: Box::new(destination_at),
-        on_target: Box::new(on_target),
-        on_clear: Box::new(on_clear),
+    }
+    .into()
+}
+
+pub(crate) fn surface<'a, Message, Destination>(
+    content: impl Into<Element<'a, Message>>,
+    targets: HoverTargets<Destination>,
+    active: bool,
+    stabilize: bool,
+    on_hover: impl Fn(Option<Destination>) -> Message + 'a,
+    on_leave: Message,
+) -> Element<'a, Message>
+where
+    Destination: Clone + PartialEq + 'a + 'static,
+    Message: Clone + 'a,
+{
+    HierarchyDragSurface {
+        content: content.into(),
+        targets,
+        active,
+        stabilize,
+        on_hover: Box::new(on_hover),
+        on_leave,
     }
     .into()
 }
@@ -89,21 +141,16 @@ pub(crate) struct DropIndicator {
 }
 
 struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
+    id: String,
     content: Element<'a, Message, Theme, Renderer>,
     on_click: Message,
     on_double_click: Option<Message>,
-    on_drag_start: Message,
-    on_finish: Message,
+    on_drag_start: Box<dyn Fn(Point, Rectangle) -> Message + 'a>,
 }
 
 struct CommitOnClickAway<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     on_click_away: Message,
-}
-
-#[derive(Default)]
-struct ClickAwayState {
-    last_pointer: Option<Point>,
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -113,11 +160,11 @@ where
     Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<ClickAwayState>()
+        tree::Tag::stateless()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(ClickAwayState::default())
+        tree::State::None
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -164,20 +211,12 @@ where
             shell,
             viewport,
         );
-        let state = tree.state.downcast_mut::<ClickAwayState>();
-        match event {
-            Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
-                state.last_pointer = Some(*position);
-            }
+        if matches!(
+            event,
             Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
-                if state
-                    .last_pointer
-                    .or_else(|| cursor.position())
-                    .is_some_and(|position| !layout.bounds().contains(position)) =>
-            {
-                shell.publish(self.on_click_away.clone());
-            }
-            _ => {}
+        ) && !cursor.is_over(layout.bounds())
+        {
+            shell.publish(self.on_click_away.clone());
         }
     }
 
@@ -251,8 +290,10 @@ where
 
 #[derive(Default)]
 struct SourceState {
+    id: String,
     last_pointer: Option<Point>,
     press_origin: Option<Point>,
+    grab_offset: Vector,
     dragging: bool,
     last_click: Option<(Point, Instant)>,
 }
@@ -268,7 +309,10 @@ where
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(SourceState::default())
+        tree::State::new(SourceState {
+            id: self.id.clone(),
+            ..Default::default()
+        })
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -276,6 +320,13 @@ where
     }
 
     fn diff(&self, tree: &mut Tree) {
+        let state = tree.state.downcast_mut::<SourceState>();
+        if state.id != self.id {
+            *state = SourceState {
+                id: self.id.clone(),
+                ..Default::default()
+            };
+        }
         tree.diff_children(std::slice::from_ref(&self.content));
     }
 
@@ -305,19 +356,16 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        // Click and drag ownership belongs to this wrapper. Forwarding a
-        // second press to a nested MouseArea lets Iced's double-click tracker
-        // activate a document before the pointer has moved far enough to be
-        // recognized as a drag. That makes a selected Cards document
-        // disappear into Editor when an author starts to reorder it.
+        // Nested MouseAreas must not open a document before a drag starts.
         let owns_left_pointer = {
             let state = tree.state.downcast_ref::<SourceState>();
             match event {
-                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => state
-                    .last_pointer
-                    .filter(|position| layout.bounds().contains(*position))
-                    .or_else(|| cursor.position_over(layout.bounds()))
-                    .is_some(),
+                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                    cursor
+                        .position_over(layout.bounds())
+                        .filter(|position| viewport.contains(*position))
+                        .is_some()
+                }
                 Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
                     state.press_origin.is_some()
                 }
@@ -339,6 +387,12 @@ where
 
         let state = tree.state.downcast_mut::<SourceState>();
         match event {
+            Event::Mouse(iced::mouse::Event::CursorLeft)
+            | Event::Window(iced::window::Event::Unfocused) => {
+                state.press_origin = None;
+                state.dragging = false;
+                state.last_pointer = None;
+            }
             Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                 state.last_pointer = Some(*position);
                 if let Some(origin) = state.press_origin
@@ -347,29 +401,26 @@ where
                 {
                     state.dragging = true;
                     state.last_click = None;
-                    shell.publish(self.on_drag_start.clone());
+                    shell.publish((self.on_drag_start)(
+                        layout.position() + state.grab_offset,
+                        layout.bounds(),
+                    ));
                 }
             }
             Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                let position = state
-                    .last_pointer
-                    .filter(|position| layout.bounds().contains(*position))
-                    .or_else(|| cursor.position_over(layout.bounds()));
+                let position = cursor
+                    .position_over(layout.bounds())
+                    .filter(|position| viewport.contains(*position));
                 if let Some(position) = position {
-                    state.press_origin = Some(position);
+                    state.press_origin = Some(state.last_pointer.unwrap_or(position));
+                    state.grab_offset = position - layout.position();
                     state.dragging = false;
                 }
             }
             Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
                 if state.press_origin.take().is_some() =>
             {
-                if state.dragging {
-                    shell.publish(self.on_finish.clone());
-                } else {
-                    // A group click must not also run when that press became
-                    // a drag. In particular, collapsing a Cards group before
-                    // its drag begins can remove its child Cards from the
-                    // virtualized surface mid-gesture.
+                if !state.dragging {
                     shell.publish(self.on_click.clone());
                     let now = Instant::now();
                     let is_double_click = state.last_click.is_some_and(|(last, at)| {
@@ -492,23 +543,8 @@ where
 {
     content: Element<'a, Message, Theme, Renderer>,
     indicator: Option<DropIndicator>,
-    destination_at: Box<dyn Fn(Rectangle, Point) -> Option<Destination> + 'a>,
-    on_target: Box<dyn Fn(Destination) -> Message + 'a>,
-    on_clear: Box<dyn Fn(Destination) -> Message + 'a>,
-}
-
-struct TargetState<Destination> {
-    left_down: bool,
-    active_target: Option<Destination>,
-}
-
-impl<Destination> Default for TargetState<Destination> {
-    fn default() -> Self {
-        Self {
-            left_down: false,
-            active_target: None,
-        }
-    }
+    destination_at: Box<DropResolver<'a, Destination>>,
+    targets: HoverTargets<Destination>,
 }
 
 impl<Message, Destination, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -518,11 +554,11 @@ where
     Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<TargetState<Destination>>()
+        tree::Tag::stateless()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(TargetState::<Destination>::default())
+        tree::State::None
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -570,32 +606,25 @@ where
             viewport,
         );
 
-        let state = tree.state.downcast_mut::<TargetState<Destination>>();
-        match event {
-            Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                state.left_down = true;
+        if let Some((destination, zone, point)) = cursor
+            .position()
+            .filter(|point| viewport.contains(*point))
+            .and_then(|point| {
+                (self.destination_at)(layout.bounds(), point)
+                    .map(|(destination, zone)| (destination, zone, point))
+            })
+        {
+            let mut target = self.targets.borrow_mut();
+            if target.is_none() {
+                *target = Some((
+                    destination,
+                    Rectangle {
+                        x: zone.x - point.x,
+                        y: zone.y - point.y,
+                        ..zone
+                    },
+                ));
             }
-            Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
-                state.left_down = false;
-                state.active_target = None;
-            }
-            Event::Mouse(iced::mouse::Event::CursorMoved { position }) if state.left_down => {
-                let next = (self.destination_at)(layout.bounds(), *position);
-                match (state.active_target.as_ref(), next) {
-                    (Some(current), Some(next)) if current == &next => {}
-                    (_, Some(next)) => {
-                        state.active_target = Some(next.clone());
-                        shell.publish((self.on_target)(next));
-                    }
-                    (Some(current), None) => {
-                        let current = current.clone();
-                        state.active_target = None;
-                        shell.publish((self.on_clear)(current));
-                    }
-                    (None, None) => {}
-                }
-            }
-            _ => {}
         }
     }
 
@@ -710,5 +739,348 @@ where
 {
     fn from(target: HierarchyDropTarget<'a, Message, Destination, Theme, Renderer>) -> Self {
         Element::new(target)
+    }
+}
+
+#[derive(Default)]
+struct SurfaceState {
+    inside: bool,
+    position: Option<Point>,
+    scrolled: bool,
+    accepted_zone: Option<Rectangle>,
+}
+
+struct HierarchyDragSurface<
+    'a,
+    Message,
+    Destination,
+    Theme = iced::Theme,
+    Renderer = iced::Renderer,
+> {
+    content: Element<'a, Message, Theme, Renderer>,
+    targets: HoverTargets<Destination>,
+    active: bool,
+    stabilize: bool,
+    on_hover: Box<dyn Fn(Option<Destination>) -> Message + 'a>,
+    on_leave: Message,
+}
+
+impl<Message, Destination, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for HierarchyDragSurface<'_, Message, Destination, Theme, Renderer>
+where
+    Destination: Clone + PartialEq + 'static,
+    Message: Clone,
+    Renderer: renderer::Renderer,
+{
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<SurfaceState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(SurfaceState::default())
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        self.content
+            .as_widget_mut()
+            .layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        *self.targets.borrow_mut() = None;
+        self.content.as_widget_mut().update(
+            &mut tree.children[0],
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+        let state = tree.state.downcast_mut::<SurfaceState>();
+        if !self.active {
+            *state = SurfaceState::default();
+            return;
+        }
+        if matches!(
+            event,
+            Event::Mouse(iced::mouse::Event::WheelScrolled { .. })
+        ) {
+            // Hit test again after Scrollable applies the new offset.
+            state.scrolled = true;
+            return;
+        }
+        let after_scroll = state.scrolled
+            && matches!(
+                event,
+                Event::Window(iced::window::Event::RedrawRequested(_))
+            );
+        if !matches!(
+            event,
+            Event::Mouse(
+                iced::mouse::Event::CursorMoved { .. }
+                    | iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
+            )
+        ) && !after_scroll
+        {
+            return;
+        }
+        let point = cursor
+            .position()
+            .filter(|point| layout.bounds().contains(*point) && viewport.contains(*point));
+        if let Some(point) = point {
+            let moved = state
+                .position
+                .is_none_or(|previous| previous.distance(point) >= DRAG_THRESHOLD);
+            if (moved || state.scrolled)
+                && (!self.stabilize
+                    || state.scrolled
+                    || state.accepted_zone.is_none_or(|zone| !zone.contains(point)))
+            {
+                let candidate = self.targets.borrow_mut().take();
+                state.accepted_zone = candidate.as_ref().map(|(_, zone)| Rectangle {
+                    x: zone.x + point.x,
+                    y: zone.y + point.y,
+                    ..*zone
+                });
+                shell.publish((self.on_hover)(
+                    candidate.map(|(destination, _)| destination),
+                ));
+                state.position = Some(point);
+            }
+            state.inside = true;
+            state.scrolled = false;
+        } else if state.inside {
+            shell.publish(self.on_leave.clone());
+            *state = SurfaceState::default();
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &Renderer,
+    ) -> mouse::Interaction {
+        if self.active && cursor.position_over(layout.bounds()).is_some() {
+            return mouse::Interaction::Grabbing;
+        }
+        self.content.as_widget().mouse_interaction(
+            &tree.children[0],
+            layout,
+            cursor,
+            viewport,
+            renderer,
+        )
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout,
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
+impl<'a, Message, Destination, Theme, Renderer>
+    From<HierarchyDragSurface<'a, Message, Destination, Theme, Renderer>>
+    for Element<'a, Message, Theme, Renderer>
+where
+    Message: Clone + 'a,
+    Destination: Clone + PartialEq + 'static,
+    Theme: 'a,
+    Renderer: renderer::Renderer + 'a,
+{
+    fn from(surface: HierarchyDragSurface<'a, Message, Destination, Theme, Renderer>) -> Self {
+        Element::new(surface)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::advanced::renderer::Headless;
+
+    #[test]
+    fn live_drop_target_stays_put_until_the_pointer_leaves_its_zone() {
+        use iced::advanced::renderer::Headless;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let make = |destination: &'static str| {
+            let targets = targets();
+            surface(
+                target_with_zone(
+                    iced::widget::Space::new().width(300).height(180),
+                    None,
+                    &targets,
+                    move |bounds, point| {
+                        bounds.contains(point).then_some((
+                            destination,
+                            Rectangle {
+                                height: 24.0,
+                                ..bounds
+                            },
+                        ))
+                    },
+                ),
+                targets,
+                true,
+                true,
+                |target| target,
+                None,
+            )
+        };
+        let mut element = make("before group");
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(600.0, 400.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(50.0, 50.0));
+        let mut messages = Vec::new();
+        for (destination, point) in [
+            ("before group", Point::new(80.0, 60.0)),
+            ("after document", Point::new(82.0, 66.0)),
+            ("after document", Point::new(82.0, 90.0)),
+        ] {
+            element = make(destination);
+            tree.diff(&element);
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                Layout::new(&node),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(600.0, 400.0)),
+            );
+        }
+        assert_eq!(messages, [Some("before group"), Some("after document")]);
+    }
+
+    #[test]
+    fn pickup_offset_uses_scrolled_content_coordinates() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element = source_with_pointer(
+            "card",
+            iced::widget::Space::new().width(200).height(100),
+            None,
+            None,
+            |point, bounds| Some(point - bounds.position()),
+        );
+        let mut tree = Tree::new(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(200.0, 100.0)),
+            )
+            .move_to(Point::new(0.0, 400.0));
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::CursorMoved {
+                position: Point::new(90.0, 30.0),
+            },
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::CursorMoved {
+                position: Point::new(96.0, 30.0),
+            },
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Mouse(event),
+                Layout::new(&node),
+                mouse::Cursor::Available(Point::new(90.0, 430.0)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::new(Point::new(0.0, 400.0), Size::new(200.0, 100.0)),
+            );
+        }
+        assert_eq!(messages, vec![Some(Vector::new(90.0, 30.0))]);
     }
 }

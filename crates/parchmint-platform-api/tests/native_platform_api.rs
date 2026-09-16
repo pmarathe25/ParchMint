@@ -160,3 +160,24 @@ fn dialog_and_clipboard_results_remain_untrusted_after_generation_validation() {
     // These values still need project-path validation or clipboard sanitizing;
     // wrapping them does not grant filesystem or editor authority.
 }
+
+#[test]
+fn browser_links_allow_web_schemes_and_reject_executable_or_file_targets() {
+    for url in [
+        "http://example.com/story",
+        "https://example.com/story?draft=1#scene",
+    ] {
+        assert_eq!(
+            ValidatedExternalIntent::browser_url(url).unwrap().as_url(),
+            url
+        );
+    }
+    for url in [
+        "javascript:alert(1)",
+        "file:///tmp/story",
+        "https://example.com/\ncommand",
+        "http://user@example.com",
+    ] {
+        assert!(ValidatedExternalIntent::browser_url(url).is_err());
+    }
+}

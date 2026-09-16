@@ -11,6 +11,7 @@ styles.css
 dictionary.txt
 manuscript/**/*.html
 research/**/*.html
+unfiled/**/*.html
 annotations/<document-id>.json
 .parchmint/format-version
 ```
@@ -18,7 +19,8 @@ annotations/<document-id>.json
 `project.toml` lists project identity, hierarchy and order, titles, Synopsis,
 metadata values and field definitions, style semantics, export settings,
 word-count summaries, deletion tombstones, resource paths, and the fixed `en-US`
-language. The manifest determines which files belong to the project.
+language. The manifest determines which files belong to the project. Unfiled documents use
+the same format and persistence paths as other documents until the author places them.
 
 Each document body is read and written with its annotation sidecar. Open editor
 sessions own editable text and comments. History, recovery, caches, and workspace

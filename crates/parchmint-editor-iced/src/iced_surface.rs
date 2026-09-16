@@ -202,6 +202,7 @@ pub enum MountedEditorMessage {
     Clipboard(MountedEditorClipboardIntent),
     ToggleInlineMark(InlineMarkKind),
     SetLink(Option<String>),
+    OpenLink(String),
     ToggleBlockFormat(BlockFormatKind),
     InsertAtomicBlock(AtomicBlockKind),
     ApplyParagraphStyle(StyleId),
@@ -216,6 +217,7 @@ pub enum MountedEditorMessage {
     OpenSpellingMenu {
         comment_range: EditorSelection,
         spelling_range: Option<EditorSelection>,
+        link_target: Option<String>,
         invocation_point: (f32, f32),
     },
 }
@@ -305,6 +307,7 @@ struct SurfaceState {
     drag_anchor: Option<DocumentPosition>,
     last_click: Option<SurfaceClick>,
     hovered_comment: Option<String>,
+    hovered_link: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -322,6 +325,7 @@ impl Default for SurfaceState {
             drag_anchor: None,
             last_click: None,
             hovered_comment: None,
+            hovered_link: None,
         }
     }
 }
@@ -382,6 +386,15 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     }
                     return None;
                 };
+                if state.modifiers.command()
+                    && let Some(url) = content.geometry.link_at(position.x, position.y)
+                {
+                    state.drag_anchor = None;
+                    return Some(
+                        Action::publish(MountedEditorMessage::OpenLink(url.to_owned()))
+                            .and_capture(),
+                    );
+                }
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
                 self.set_focus(true);
@@ -429,6 +442,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 )
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                let link = cursor
+                    .position_in(bounds)
+                    .and_then(|p| content.geometry.link_at(p.x, p.y))
+                    .map(str::to_owned);
+                let link_changed = state.hovered_link != link;
+                state.hovered_link = link;
                 let (comment_id, anchor_bounds) = cursor
                     .position_in(bounds)
                     .map(|position| {
@@ -437,7 +456,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     })
                     .unwrap_or((None, (0.0, 0.0, 0.0, 0.0)));
                 if state.hovered_comment == comment_id {
-                    return None;
+                    return link_changed.then(Action::request_redraw);
                 }
                 state.hovered_comment = comment_id.clone();
                 Some(Action::publish(MountedEditorMessage::HoverComment {
@@ -470,6 +489,10 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     Action::publish(MountedEditorMessage::OpenSpellingMenu {
                         comment_range,
                         spelling_range: spelling_range_at(&content, position.x, position.y),
+                        link_target: content
+                            .geometry
+                            .link_at(position.x, position.y)
+                            .map(str::to_owned),
                         invocation_point: (position.x, position.y),
                     })
                     .and_capture(),
@@ -521,7 +544,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let content = self.content();
         let mut frame = Frame::new(renderer, bounds.size());
@@ -695,6 +718,48 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             }
         });
 
+        if let Some(url) = cursor
+            .position_in(bounds)
+            .filter(|_| state.drag_anchor.is_none())
+            .and_then(|point| content.geometry.link_at(point.x, point.y))
+        {
+            let hint = if cfg!(target_os = "macos") {
+                "⌘ click to open"
+            } else {
+                "Ctrl+click to open"
+            };
+            let label = format!("{url}  ·  {hint}");
+            let width = (label.chars().count() as f32 * 6.2 + 16.0)
+                .min(bounds.width - 16.0)
+                .max(1.0);
+            let height = (label.chars().count() as f32 * 6.2 / (width - 16.0).max(1.0))
+                .ceil()
+                .max(1.0)
+                * 17.0
+                + 12.0;
+            let y = (bounds.height - height - 8.0).max(0.0);
+            let preview = canvas::Path::rounded_rectangle(
+                Point::new(8.0, y),
+                iced::Size::new(width, height),
+                4.0.into(),
+            );
+            frame.fill(&preview, content.theme.manuscript().iced());
+            let mut border = content.theme.text().iced();
+            border.a = 0.18;
+            frame.stroke(
+                &preview,
+                canvas::Stroke::default().with_color(border).with_width(1.0),
+            );
+            frame.fill_text(canvas::Text {
+                content: label,
+                position: Point::new(16.0, y + 6.0),
+                max_width: (width - 16.0).max(1.0),
+                size: 12.0.into(),
+                line_height: iced::Pixels(17.0).into(),
+                color: content.theme.link().iced(),
+                ..Default::default()
+            });
+        }
         vec![frame.into_geometry()]
     }
 
@@ -704,7 +769,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if cursor.is_over(bounds) {
+        if cursor
+            .position_in(bounds)
+            .is_some_and(|p| self.content().geometry.link_at(p.x, p.y).is_some())
+        {
+            mouse::Interaction::Pointer
+        } else if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::default()
@@ -737,7 +807,11 @@ impl EditorSurface {
     }
 
     fn sync_focus(&self, state: &mut SurfaceState) {
-        state.focused = self.content().focused;
+        state.focused = self
+            .content
+            .lock()
+            .expect("editor surface content lock")
+            .focused;
     }
 
     fn draws_focused_caret(&self, _state: &SurfaceState, content: &SurfaceContent) -> bool {
@@ -1060,7 +1134,8 @@ fn apply_surface_message(
         // before it executes an action. The canvas has already performed the
         // range hit test before publishing this message.
         MountedEditorMessage::OpenSpellingMenu { .. }
-        | MountedEditorMessage::HoverComment { .. } => Ok(()),
+        | MountedEditorMessage::HoverComment { .. }
+        | MountedEditorMessage::OpenLink(_) => Ok(()),
     }
 }
 
@@ -1985,6 +2060,93 @@ mod tests {
                 .text(),
             "a\tbc"
         );
+    }
+
+    #[test]
+    fn links_preview_open_and_copy_the_exact_destination_without_moving_the_caret() {
+        let url = "https://example.com/chapter?draft=2#notes";
+        let semantic = parchmint_editor_api::SemanticDocument::new(vec![
+            parchmint_editor_api::SemanticBlock::new(
+                BlockId::from_bytes([89; 16]),
+                parchmint_editor_api::SemanticBlockKind::Paragraph,
+                None,
+                "link plain",
+                vec![parchmint_editor_api::SemanticMarkRange::new(
+                    EditorSelection::new(0.into(), 4.into()),
+                    parchmint_editor_api::SemanticInlineMark::Link(url.into()),
+                )],
+            ),
+        ]);
+        let viewport = EditorViewport::new(300.0, 120.0).unwrap();
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::from_semantic(BlockId::from_bytes([89; 16]), &semantic, 0.into()),
+            viewport,
+            0.0,
+            crate::EditorLayoutMetrics::default(),
+            None,
+        )
+        .unwrap();
+        let glyph = geometry.draw_scalars()[1].bounds;
+        let point = Point::new(glyph.x + glyph.width / 2.0, glyph.y + glyph.height / 2.0);
+        assert_eq!(geometry.link_at(point.x, point.y), Some(url));
+        assert_eq!(geometry.link_at(290.0, point.y), None);
+        let surface = EditorSurface {
+            content: Arc::new(Mutex::new(SurfaceContent {
+                geometry,
+                selection: EditorSelection::new(6.into(), 6.into()),
+                focused: true,
+                viewport,
+                theme: EditorSurfaceTheme::light(),
+                spellcheck: vec![],
+                comments: vec![],
+            })),
+        };
+        let mut state = SurfaceState::default();
+        let bounds = Rectangle::with_size(Size::new(300.0, 120.0));
+        let cursor = mouse::Cursor::Available(point);
+        canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            bounds,
+            cursor,
+        );
+        assert_eq!(state.hovered_link.as_deref(), Some(url));
+        state.modifiers = keyboard::Modifiers::COMMAND;
+        let action = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            bounds,
+            cursor,
+        )
+        .unwrap();
+        assert_eq!(
+            action.into_inner().0,
+            Some(MountedEditorMessage::OpenLink(url.into()))
+        );
+        assert!(state.drag_anchor.is_none());
+        let action = canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)),
+            bounds,
+            cursor,
+        )
+        .unwrap();
+        assert!(
+            matches!(action.into_inner().0, Some(MountedEditorMessage::OpenSpellingMenu { link_target: Some(target), .. }) if target == url)
+        );
+        canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Mouse(mouse::Event::CursorMoved {
+                position: Point::new(290.0, 90.0),
+            }),
+            bounds,
+            mouse::Cursor::Available(Point::new(290.0, 90.0)),
+        );
+        assert!(state.hovered_link.is_none());
     }
 
     #[test]

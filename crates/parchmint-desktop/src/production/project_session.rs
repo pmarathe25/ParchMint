@@ -836,6 +836,31 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             })?,
             controls: self.shared.controls.clone(),
         });
+        let inventory = recovery::RecoveryJournal::inspect(recovery.as_ref()).map_err(|error| {
+            ProjectFilesystemError::failed("inspect recovery", error.to_string())
+        })?;
+        if inventory.records.iter().any(|record| {
+            record.project_revision.is_none_or(|revision| {
+                revision.value() > persistence_frontier.recovery_project_revision
+            })
+        }) {
+            // Replay needs canonical hashes for unopened documents too.
+            for summary in &document_summaries {
+                document_owner
+                    .snapshot(summary.document_id)
+                    .map_err(|error| {
+                        ProjectFilesystemError::failed("load recovery base", error.to_string())
+                    })?;
+                if let Some(hash) = document_loader.recovery_hash(summary.document_id) {
+                    recovery_base.hashes.insert(
+                        recovery::ResourceId::DocumentById {
+                            document_id: stable_id_text(summary.document_id.as_bytes()),
+                        },
+                        hash,
+                    );
+                }
+            }
+        }
         let search = Arc::new(ControlledSearch {
             inner: SqliteSearchIndex::new(&root_path),
             controls: self.shared.controls.clone(),
@@ -1062,7 +1087,7 @@ fn canonical_resources(
             }
         }
     }
-    for directory in ["manuscript", "research", "annotations"] {
+    for directory in ["manuscript", "research", "unfiled", "annotations"] {
         collect_canonical_paths(root_path, &root_path.join(directory), &mut paths)?;
     }
     paths.sort();
@@ -1143,7 +1168,10 @@ fn collect_canonical_paths(
 
 fn is_canonical_resource(path: &CanonicalRelativePath) -> bool {
     let path = path.as_str();
-    ((path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html"))
+    ((path.starts_with("manuscript/")
+        || path.starts_with("research/")
+        || path.starts_with("unfiled/"))
+        && path.ends_with(".html"))
         || (path.starts_with("annotations/") && path.ends_with(".json"))
 }
 
@@ -1343,12 +1371,15 @@ fn application_state(
         let mut section_counts = BTreeMap::from([
             (NodeId::manuscript_root(), 0usize),
             (NodeId::research_root(), 0usize),
+            (NodeId::unfiled_root(), 0usize),
         ]);
         for path in &resources.document_paths {
             let document_id = parchmint_project_format::legacy_document_id(path);
             canonical_paths.documents.insert(document_id, path.clone());
             let node_id = NodeId::from_bytes(stable_id(b"node", path.as_str().as_bytes()));
-            let parent = if path.as_str().starts_with("research/") {
+            let parent = if path.as_str().starts_with("unfiled/") {
+                NodeId::unfiled_root()
+            } else if path.as_str().starts_with("research/") {
                 NodeId::research_root()
             } else {
                 NodeId::manuscript_root()
@@ -1423,6 +1454,7 @@ fn application_state(
     let mut document_order = Vec::new();
     append_document_ids(&project, NodeId::manuscript_root(), &mut document_order);
     append_document_ids(&project, NodeId::research_root(), &mut document_order);
+    append_document_ids(&project, NodeId::unfiled_root(), &mut document_order);
     let summaries = document_order
         .iter()
         .enumerate()
@@ -1526,7 +1558,9 @@ fn recovery_base(
             "project.toml" => recovery::ResourceId::Manifest,
             "styles.css" => recovery::ResourceId::Styles,
             "dictionary.txt" => recovery::ResourceId::Dictionary,
-            path if (path.starts_with("manuscript/") || path.starts_with("research/"))
+            path if (path.starts_with("manuscript/")
+                || path.starts_with("research/")
+                || path.starts_with("unfiled/"))
                 && path.ends_with(".html") =>
             {
                 let document_id = paths
@@ -1584,7 +1618,10 @@ fn recovery_document_content_hash(
 
 fn is_document_resource(path: &CanonicalRelativePath) -> bool {
     let path = path.as_str();
-    (path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html")
+    (path.starts_with("manuscript/")
+        || path.starts_with("research/")
+        || path.starts_with("unfiled/"))
+        && path.ends_with(".html")
 }
 
 fn searchable_text(html: &str) -> String {

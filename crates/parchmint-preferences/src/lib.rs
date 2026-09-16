@@ -71,6 +71,8 @@ pub enum ResolvedAppearance {
 /// Settings stored outside a ParchMint project.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationPreferences {
+    #[serde(default)]
+    pub reduced_motion: bool,
     pub appearance: AppearanceMode,
     pub recent_projects: Vec<RecentProject>,
     pub global_dictionary: Vec<String>,
@@ -119,6 +121,7 @@ pub struct PreferenceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreferenceCommand {
     SetAppearance(AppearanceMode),
+    SetReducedMotion(bool),
     AddRecentProject(RecentProject),
     RemoveRecentProject(String),
     ClearRecentProjects,
@@ -276,6 +279,7 @@ impl FilePreferenceStore {
                 Ok(PreferenceSnapshot {
                     revision: stored.revision,
                     values: ApplicationPreferences {
+                        reduced_motion: false,
                         appearance: stored.preferences.appearance,
                         recent_projects: stored
                             .preferences
@@ -494,6 +498,7 @@ impl PreferenceService for PreferenceCoordinator {
 
 fn apply_command(values: &mut ApplicationPreferences, command: PreferenceCommand) {
     match command {
+        PreferenceCommand::SetReducedMotion(value) => values.reduced_motion = value,
         PreferenceCommand::SetAppearance(mode) => values.appearance = mode,
         PreferenceCommand::AddRecentProject(project) => {
             values

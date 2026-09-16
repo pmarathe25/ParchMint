@@ -12,11 +12,11 @@ use crate::stable_id_string;
 
 const TAB_HEIGHT: f32 = 32.0;
 const TAB_MAX_WIDTH: f32 = 200.0;
-const TAB_MIN_WIDTH: f32 = 128.0;
+const TAB_MIN_WIDTH: f32 = 72.0;
 const TAB_CLOSE_WIDTH: f32 = 24.0;
-const TAB_OVERFLOW_WIDTH: f32 = 52.0;
+const TAB_OVERFLOW_WIDTH: f32 = 44.0;
 const TAB_TITLE_INSET: f32 = 16.0;
-const APPROXIMATE_TITLE_SCALAR_WIDTH: f32 = 8.0;
+
 const SPELLING_MENU_WIDTH: f32 = 180.0;
 const SPELLING_MENU_MIN_HEIGHT: f32 = 128.0;
 
@@ -595,6 +595,7 @@ pub struct SpellingMenuRequest {
     in_project_dictionary: bool,
     in_global_dictionary: bool,
     include_spelling_actions: bool,
+    link_target: Option<String>,
 }
 
 impl SpellingMenuRequest {
@@ -614,7 +615,13 @@ impl SpellingMenuRequest {
             in_project_dictionary: false,
             in_global_dictionary: false,
             include_spelling_actions: true,
+            link_target: None,
         }
+    }
+
+    pub fn with_link_target(mut self, url: Option<String>) -> Self {
+        self.link_target = url;
+        self
     }
 
     pub fn with_suggestions(mut self, suggestions: Vec<String>) -> Self {
@@ -656,6 +663,7 @@ pub enum SpellingDictionaryScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpellingMenuAction {
     AddComment,
+    CopyLink(String),
     Replace(String),
     AddToDictionary(SpellingDictionaryScope),
     RemoveFromDictionary(SpellingDictionaryScope),
@@ -694,6 +702,9 @@ impl SpellingMenu {
         let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
         let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
         let mut actions = Vec::new();
+        if let Some(url) = request.link_target {
+            actions.push(SpellingMenuAction::CopyLink(url));
+        }
         if request.include_spelling_actions {
             actions.extend(
                 request
@@ -813,7 +824,6 @@ pub struct TabOverflowItem {
     id: String,
     title: String,
     dirty: bool,
-    preview: bool,
 }
 
 impl TabOverflowItem {
@@ -824,13 +834,12 @@ impl TabOverflowItem {
 
 impl std::fmt::Display for TabOverflowItem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let state = match (self.preview, self.dirty) {
-            (true, true) => " · Preview · Unsaved",
-            (true, false) => " · Preview",
-            (false, true) => " · Unsaved",
-            (false, false) => "",
-        };
-        write!(formatter, "{}{state}", self.title)
+        write!(
+            formatter,
+            "{}{}",
+            self.title,
+            if self.dirty { " •" } else { "" }
+        )
     }
 }
 
@@ -1233,6 +1242,8 @@ impl AsyncEditorCompletion {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorMessage {
     FocusPane(EditorPane),
+    TogglePaneFocus(EditorPane),
+    ToggleCompanion,
     FocusFormattingToolbar,
     OpenTab {
         pane: EditorPane,
@@ -1262,6 +1273,12 @@ pub enum EditorMessage {
     BeginTabDrag {
         pane: EditorPane,
         document_id: String,
+    },
+    BeginTabPointerDrag {
+        pane: EditorPane,
+        document_id: String,
+        grab_offset: Point,
+        width: f32,
     },
     SetTabDragTarget {
         pane: EditorPane,
@@ -1425,10 +1442,13 @@ pub enum EditorEffect {
 /// Deterministic editor workspace presentation state.
 #[derive(Debug, Clone)]
 pub struct EditorWorkspace {
+    pub(crate) tab_positions: [crate::motion::Positions; 2],
     source: EditorWorkspaceSource,
     primary: EditorPaneState,
     companion: EditorPaneState,
     focused_pane: EditorPane,
+    expanded_pane: Option<EditorPane>,
+    companion_hidden: bool,
     toolbar_focused: bool,
     style_names: Vec<String>,
     active_style: String,
@@ -1459,13 +1479,21 @@ pub struct EditorWorkspace {
     next_request: u64,
     split_ratio: f64,
     tab_drag: Option<TabPointerDrag>,
+    scratch_tabs: BTreeMap<String, text_editor::Content>,
+    promoting_scratch: BTreeSet<String>,
+    next_scratch: u64,
+    initial_prose: BTreeSet<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct TabPointerDrag {
+    grab_offset: Point,
+    width: f32,
     pane: EditorPane,
     document_id: String,
+    target_pane: EditorPane,
     target_index: usize,
+    target_valid: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1475,6 +1503,87 @@ enum EditorWorkspaceSource {
 }
 
 impl EditorWorkspace {
+    pub(crate) fn restore_draft_tabs(&mut self, drafts: impl IntoIterator<Item = TabSpec>) {
+        for tab in drafts {
+            if ![&self.primary, &self.companion]
+                .iter()
+                .any(|pane| pane.tabs.iter().any(|current| current.id == tab.id))
+            {
+                self.primary.tabs.push(tab);
+                if self.primary.active_tab.is_none() {
+                    self.primary.active_tab = Some(0);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn new_scratch(&mut self, pane: EditorPane) -> String {
+        self.next_scratch += 1;
+        let id = format!("scratch-{}", self.next_scratch);
+        self.scratch_tabs
+            .insert(id.clone(), text_editor::Content::new());
+        self.open_tab(pane, TabSpec::new(&id, "Untitled"));
+        id
+    }
+
+    pub(crate) fn scratch(&self, id: &str) -> Option<&text_editor::Content> {
+        self.scratch_tabs.get(id)
+    }
+
+    pub(crate) fn edit_scratch(&mut self, id: &str, action: text_editor::Action) -> bool {
+        let Some(content) = self.scratch_tabs.get_mut(id) else {
+            return false;
+        };
+        content.perform(action);
+        id.starts_with("scratch-")
+            && !content.text().is_empty()
+            && self.promoting_scratch.insert(id.to_owned())
+    }
+
+    pub(crate) fn promote_scratch(
+        &mut self,
+        id: &str,
+        document: &str,
+        title: &str,
+    ) -> Option<String> {
+        let content = self.scratch_tabs.remove(id)?;
+        self.promoting_scratch.remove(id);
+        for pane in [&mut self.primary, &mut self.companion] {
+            for tab in &mut pane.tabs {
+                if tab.id == id {
+                    tab.id = document.to_owned();
+                    tab.title = title.to_owned();
+                }
+            }
+        }
+        let text = content.text();
+        self.scratch_tabs.insert(document.to_owned(), content);
+        self.promoting_scratch.insert(document.to_owned());
+        self.initial_prose.insert(document.to_owned());
+        Some(text)
+    }
+
+    pub(crate) fn take_initial_prose(&mut self, document: &str) -> Option<String> {
+        if !self.initial_prose.remove(document) {
+            return None;
+        }
+        self.scratch_tabs
+            .remove(document)
+            .map(|content| content.text())
+    }
+
+    pub(crate) fn finish_initial_prose(&mut self, document: &str) {
+        self.promoting_scratch.remove(document);
+    }
+
+    pub(crate) fn has_pending_scratch(&self) -> bool {
+        !self.promoting_scratch.is_empty()
+    }
+
+    pub(crate) fn scratch_is_pending(&self, id: &str) -> bool {
+        self.promoting_scratch.contains(id)
+    }
+
     pub fn from_fixture(fixture: EditorFixture) -> Self {
         let primary_view = ViewId::from_bytes([36; 16]);
         let companion_view = ViewId::from_bytes([37; 16]);
@@ -1520,10 +1629,13 @@ impl EditorWorkspace {
             document_id: "chapter-one".to_owned(),
         };
         Self {
+            tab_positions: Default::default(),
             source: EditorWorkspaceSource::Fixture,
             primary,
             companion,
             focused_pane: EditorPane::Primary,
+            expanded_pane: None,
+            companion_hidden: false,
             toolbar_focused: false,
             style_names: vec![
                 "Body".into(),
@@ -1562,6 +1674,10 @@ impl EditorWorkspace {
             next_request: 0,
             split_ratio: 0.5,
             tab_drag: None,
+            scratch_tabs: BTreeMap::new(),
+            promoting_scratch: BTreeSet::new(),
+            next_scratch: 0,
+            initial_prose: BTreeSet::new(),
         }
     }
 
@@ -1570,7 +1686,7 @@ impl EditorWorkspace {
         let hydrated = HydratedDocuments::from_snapshot(snapshot);
         let primary_view = production_view_id(snapshot, EditorPane::Primary);
         let companion_view = production_view_id(snapshot, EditorPane::Companion);
-        let primary_tabs = hydrated
+        let mut primary_tabs = hydrated
             .initial_document
             .as_deref()
             .and_then(|initial| {
@@ -1581,6 +1697,16 @@ impl EditorWorkspace {
             })
             .map(|document| vec![TabSpec::new(document.id.clone(), document.title.clone())])
             .unwrap_or_default();
+        for (_, node) in snapshot.project.nodes.iter() {
+            if snapshot.project.nodes.section(node.id) == Some(ProjectSection::Unfiled)
+                && let NodeKind::Document(document) = node.kind
+            {
+                let id = stable_id_string(document.as_bytes());
+                if !primary_tabs.iter().any(|tab| tab.id() == id) {
+                    primary_tabs.push(TabSpec::new(id, &node.title));
+                }
+            }
+        }
         let primary = if primary_tabs.is_empty() {
             EditorPaneState::empty(EditorPane::Primary, primary_view)
         } else {
@@ -1611,10 +1737,13 @@ impl EditorWorkspace {
             InspectorContext::None
         };
         Self {
+            tab_positions: Default::default(),
             source: EditorWorkspaceSource::Production,
             primary,
             companion,
             focused_pane: EditorPane::Primary,
+            expanded_pane: None,
+            companion_hidden: false,
             toolbar_focused: false,
             style_names: snapshot
                 .project
@@ -1650,6 +1779,10 @@ impl EditorWorkspace {
             next_request: 0,
             split_ratio: 0.5,
             tab_drag: None,
+            scratch_tabs: BTreeMap::new(),
+            promoting_scratch: BTreeSet::new(),
+            next_scratch: 0,
+            initial_prose: BTreeSet::new(),
         }
     }
 
@@ -1673,13 +1806,24 @@ impl EditorWorkspace {
                 .cloned()
                 .unwrap_or_else(|| "Body".into());
         }
-        let titles = hydrated
+        let mut titles = hydrated
             .ordered
             .iter()
             .map(|document| (document.id.clone(), document.title.clone()))
             .collect::<BTreeMap<_, _>>();
+        for id in self.scratch_tabs.keys() {
+            titles
+                .entry(id.clone())
+                .or_insert_with(|| "Untitled".to_owned());
+        }
         let primary_active_survived = self.primary.reconcile_tabs(&titles);
         let companion_active_survived = self.companion.reconcile_tabs(&titles);
+        if self
+            .expanded_pane
+            .is_some_and(|pane| !self.pane(pane).is_populated())
+        {
+            self.exit_pane_focus();
+        }
         self.tab_drag = self.tab_drag.take().filter(|drag| {
             self.pane(drag.pane)
                 .tabs()
@@ -1762,7 +1906,7 @@ impl EditorWorkspace {
         if !self.pane(self.focused_pane).is_populated() {
             self.focused_pane = if self.primary.is_populated() {
                 EditorPane::Primary
-            } else if self.companion.is_populated() {
+            } else if self.companion_is_visible() {
                 EditorPane::Companion
             } else {
                 EditorPane::Primary
@@ -1805,6 +1949,29 @@ impl EditorWorkspace {
         self.focused_pane
     }
 
+    pub fn expanded_pane(&self) -> Option<EditorPane> {
+        self.expanded_pane
+            .filter(|pane| self.pane(*pane).is_populated())
+    }
+
+    pub fn exit_pane_focus(&mut self) {
+        self.expanded_pane = None;
+    }
+
+    pub fn companion_is_visible(&self) -> bool {
+        !self.companion_hidden && self.companion.is_populated()
+    }
+
+    pub fn set_companion_visible(&mut self, visible: bool) {
+        self.companion_hidden = !visible;
+        if !visible && self.focused_pane == EditorPane::Companion {
+            self.focused_pane = EditorPane::Primary;
+            self.toolbar_focused = false;
+            self.inspector = InspectorContext::None;
+            self.focus_pane(EditorPane::Primary);
+        }
+    }
+
     pub const fn split_ratio(&self) -> f64 {
         self.split_ratio
     }
@@ -1819,8 +1986,41 @@ impl EditorWorkspace {
     pub fn tab_drag_target(&self, pane: EditorPane) -> Option<usize> {
         self.tab_drag
             .as_ref()
-            .filter(|drag| drag.pane == pane)
+            .filter(|drag| drag.target_pane == pane && drag.target_valid)
             .map(|drag| drag.target_index)
+    }
+
+    pub(crate) fn dragged_tab(&self) -> Option<(&TabSpec, Point, f32)> {
+        let drag = self.tab_drag.as_ref()?;
+        let tab = self
+            .pane(drag.pane)
+            .tabs()
+            .iter()
+            .find(|tab| tab.id() == drag.document_id)?;
+        Some((tab, drag.grab_offset, drag.width))
+    }
+
+    pub(crate) fn tab_drag_is_active(&self) -> bool {
+        self.tab_drag.is_some()
+    }
+
+    pub(crate) fn hover_tab_pane(&mut self, pane: EditorPane) {
+        let count = self.pane(pane).tabs.len();
+        if let Some(drag) = &mut self.tab_drag {
+            if drag.target_pane != pane {
+                drag.target_pane = pane;
+                drag.target_index = count;
+            }
+            drag.target_valid = true;
+        }
+    }
+
+    pub(crate) fn leave_tab_pane(&mut self, pane: EditorPane) {
+        if let Some(drag) = &mut self.tab_drag
+            && drag.target_pane == pane
+        {
+            drag.target_valid = false;
+        }
     }
 
     pub fn set_split_ratio(&mut self, ratio: f64) {
@@ -1842,6 +2042,8 @@ impl EditorWorkspace {
         scroll_offsets: &BTreeMap<ViewId, f32>,
         active_documents: &BTreeMap<ViewId, String>,
     ) {
+        self.expanded_pane = None;
+        self.companion_hidden = false;
         self.primary.tabs.clear();
         self.primary.active_tab = None;
         self.companion.tabs.clear();
@@ -2194,37 +2396,65 @@ impl EditorWorkspace {
             0.0
         };
         let active_source_index = tabs.iter().position(|tab| tab.id == active_id).unwrap_or(0);
-        let all_tabs_fit = available >= TAB_MIN_WIDTH * tabs.len() as f32;
-        let visible_count = if all_tabs_fit {
-            tabs.len()
-        } else {
-            ((available - TAB_OVERFLOW_WIDTH) / TAB_MIN_WIDTH)
-                .floor()
-                .max(1.0) as usize
-        }
-        .min(tabs.len());
-        let first_visible = if visible_count == tabs.len() {
-            0
-        } else {
-            active_source_index
-                .saturating_add(1)
-                .saturating_sub(visible_count)
-                .min(tabs.len() - visible_count)
-        };
-        let last_visible = first_visible + visible_count;
-        let tab_width_available = if visible_count == tabs.len() {
+        let widths = tabs
+            .iter()
+            .map(|tab| {
+                (tab_title_width(&tab.title, tab.is_preview()).ceil()
+                    + TAB_CLOSE_WIDTH
+                    + TAB_TITLE_INSET
+                    + if tab.dirty { 12.0 } else { 0.0 })
+                .clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+            })
+            .collect::<Vec<_>>();
+        let compact_widths = widths
+            .iter()
+            .map(|width| width.min(104.0))
+            .collect::<Vec<_>>();
+        let all_tabs_fit = compact_widths.iter().sum::<f32>() <= available;
+        let budget = if all_tabs_fit {
             available
         } else {
-            (available - TAB_OVERFLOW_WIDTH).max(TAB_MIN_WIDTH)
+            available - TAB_OVERFLOW_WIDTH
+        }
+        .max(0.0);
+        let mut first_visible = 0;
+        let mut last_visible = 1;
+        let mut used = compact_widths[0].min(budget);
+        while last_visible < tabs.len() && used + compact_widths[last_visible] <= budget {
+            used += compact_widths[last_visible];
+            last_visible += 1;
+        }
+        if active_source_index >= last_visible {
+            first_visible = active_source_index;
+            last_visible = active_source_index + 1;
+            used = compact_widths[active_source_index].min(budget);
+            while first_visible > 0 && used + compact_widths[first_visible - 1] <= budget {
+                first_visible -= 1;
+                used += compact_widths[first_visible];
+            }
+            while last_visible < tabs.len() && used + compact_widths[last_visible] <= budget {
+                used += compact_widths[last_visible];
+                last_visible += 1;
+            }
+        }
+        let desired = widths[first_visible..last_visible].iter().sum::<f32>();
+        let compact = compact_widths[first_visible..last_visible]
+            .iter()
+            .sum::<f32>();
+        let growth = if desired > compact {
+            ((budget - compact) / (desired - compact)).clamp(0.0, 1.0)
+        } else {
+            0.0
         };
-        let width_per_tab =
-            (tab_width_available / visible_count as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
         let mut x = 0.0;
         let layouts = tabs
             .iter()
             .enumerate()
             .filter(|(index, _)| (*index >= first_visible) && (*index < last_visible))
             .map(|(source_index, tab)| {
+                let width_per_tab = (compact_widths[source_index]
+                    + (widths[source_index] - compact_widths[source_index]) * growth)
+                    .min(budget);
                 let bounds = Rect::new(x, 0.0, width_per_tab, TAB_HEIGHT);
                 let close_bounds = Rect::new(
                     bounds.right() - TAB_CLOSE_WIDTH,
@@ -2232,7 +2462,11 @@ impl EditorWorkspace {
                     TAB_CLOSE_WIDTH,
                     TAB_HEIGHT,
                 );
-                let (display_title, tooltip) = fit_tab_title(&tab.title, width_per_tab);
+                let (display_title, tooltip) = fit_tab_title(
+                    &tab.title,
+                    width_per_tab - if tab.dirty { 12.0 } else { 0.0 },
+                    tab.is_preview(),
+                );
                 x += width_per_tab;
                 TabLayout {
                     source_index,
@@ -2255,7 +2489,6 @@ impl EditorWorkspace {
                 id: tab.id.clone(),
                 title: tab.title.clone(),
                 dirty: tab.dirty,
-                preview: tab.preview,
             })
             .collect();
         let active_index = layouts.iter().position(|tab| tab.active).or(Some(0));
@@ -2319,6 +2552,42 @@ impl EditorWorkspace {
                 self.focus_pane(pane);
                 Vec::new()
             }
+            EditorMessage::TogglePaneFocus(pane) => {
+                if !self.pane(pane).is_populated() {
+                    return Vec::new();
+                }
+                let expanded = self.expanded_pane() != Some(pane);
+                self.focus_pane(pane);
+                self.expanded_pane = expanded.then_some(pane);
+                vec![EditorEffect::RestoreEditorFocus {
+                    view: self.pane(pane).view,
+                }]
+            }
+            EditorMessage::ToggleCompanion => {
+                let companion_visible = self.companion_is_visible()
+                    && self.expanded_pane() != Some(EditorPane::Primary);
+                self.exit_pane_focus();
+                if companion_visible {
+                    self.set_companion_visible(false);
+                } else if self.companion.is_populated() {
+                    self.focus_pane(EditorPane::Companion);
+                } else if let Some(tab) = self
+                    .primary
+                    .tabs
+                    .iter()
+                    .find(|tab| Some(tab.id()) == self.primary.active_document())
+                    .cloned()
+                {
+                    return self.open_tab(EditorPane::Companion, tab);
+                }
+                self.pane(self.focused_pane)
+                    .is_populated()
+                    .then_some(EditorEffect::RestoreEditorFocus {
+                        view: self.pane(self.focused_pane).view,
+                    })
+                    .into_iter()
+                    .collect()
+            }
             EditorMessage::FocusFormattingToolbar => {
                 self.toolbar_focused = true;
                 Vec::new()
@@ -2333,7 +2602,16 @@ impl EditorWorkspace {
                 self.activate_tab(pane, &document_id)
             }
             EditorMessage::CloseTab { pane, document_id } => {
+                if self.scratch_is_pending(&document_id) {
+                    return Vec::new();
+                }
                 let effects = self.close_tab(pane, &document_id);
+                if ![&self.primary, &self.companion]
+                    .iter()
+                    .any(|pane| pane.tabs.iter().any(|tab| tab.id == document_id))
+                {
+                    self.scratch_tabs.remove(&document_id);
+                }
                 if self
                     .tab_drag
                     .as_ref()
@@ -2351,6 +2629,19 @@ impl EditorWorkspace {
                 self.pane_mut(pane).move_tab(&document_id, target_index);
                 Vec::new()
             }
+            EditorMessage::BeginTabPointerDrag {
+                pane,
+                document_id,
+                grab_offset,
+                width,
+            } => {
+                self.update(EditorMessage::BeginTabDrag { pane, document_id });
+                if let Some(drag) = &mut self.tab_drag {
+                    drag.grab_offset = grab_offset;
+                    drag.width = width;
+                }
+                Vec::new()
+            }
             EditorMessage::BeginTabDrag { pane, document_id } => {
                 if let Some(target_index) = self
                     .pane(pane)
@@ -2359,9 +2650,13 @@ impl EditorWorkspace {
                     .position(|tab| tab.id() == document_id)
                 {
                     self.tab_drag = Some(TabPointerDrag {
+                        grab_offset: Point::new(16.0, 16.0),
+                        width: 160.0,
                         pane,
                         document_id,
+                        target_pane: pane,
                         target_index,
+                        target_valid: true,
                     });
                 }
                 Vec::new()
@@ -2369,10 +2664,11 @@ impl EditorWorkspace {
             EditorMessage::SetTabDragTarget { pane, target_index } => {
                 let tab_count = self.pane(pane).tabs().len();
                 if let Some(drag) = self.tab_drag.as_mut()
-                    && drag.pane == pane
-                    && target_index < tab_count
+                    && target_index <= tab_count
                 {
+                    drag.target_pane = pane;
                     drag.target_index = target_index;
+                    drag.target_valid = true;
                 }
                 Vec::new()
             }
@@ -2380,6 +2676,25 @@ impl EditorWorkspace {
                 let Some(drag) = self.tab_drag.take() else {
                     return Vec::new();
                 };
+                if !drag.target_valid {
+                    return Vec::new();
+                }
+                if drag.target_pane != drag.pane {
+                    let Some(tab) = self
+                        .pane(drag.pane)
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id() == drag.document_id)
+                        .cloned()
+                    else {
+                        return Vec::new();
+                    };
+                    let mut effects = self.close_tab(drag.pane, &drag.document_id);
+                    effects.extend(self.open_tab(drag.target_pane, tab));
+                    self.pane_mut(drag.target_pane)
+                        .move_tab(&drag.document_id, drag.target_index);
+                    return effects;
+                }
                 self.update(EditorMessage::MoveTab {
                     pane: drag.pane,
                     document_id: drag.document_id,
@@ -2716,6 +3031,12 @@ impl EditorWorkspace {
         if !self.pane(pane).is_populated() {
             return;
         }
+        if self.expanded_pane.is_some_and(|expanded| expanded != pane) {
+            self.expanded_pane = None;
+        }
+        if pane == EditorPane::Companion {
+            self.companion_hidden = false;
+        }
         self.focused_pane = pane;
         self.toolbar_focused = false;
         let state = self.pane(pane);
@@ -2839,6 +3160,9 @@ impl EditorWorkspace {
         if !self.pane_mut(pane).close(document_id) {
             return Vec::new();
         }
+        if !self.pane(pane).is_populated() {
+            self.exit_pane_focus();
+        }
         self.invalidate_view_tasks(view);
         let mut effects = vec![EditorEffect::UnmountView { pane, view }];
         if self.pane(pane).is_populated() {
@@ -2949,7 +3273,7 @@ impl EditorWorkspace {
     ) -> Vec<EditorEffect> {
         let view = self.pane(pane).view;
         match action {
-            SpellingMenuAction::AddComment => Vec::new(),
+            SpellingMenuAction::AddComment | SpellingMenuAction::CopyLink(_) => Vec::new(),
             SpellingMenuAction::Replace(replacement) => vec![EditorEffect::Command {
                 view,
                 command: EditorCommand::ReplaceSpelling {
@@ -3119,7 +3443,7 @@ impl HydratedDocuments {
         let mut ordered = Vec::new();
         let mut manuscript_documents = Vec::new();
         let mut research_documents = Vec::new();
-        for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+        for section in ProjectSection::ALL {
             append_section_documents(
                 &snapshot.project,
                 section.root_id(),
@@ -3188,6 +3512,7 @@ fn append_section_documents(
             match section {
                 ProjectSection::Manuscript => manuscript_documents.push(id),
                 ProjectSection::Research => research_documents.push(id),
+                ProjectSection::Unfiled => {}
             }
         }
     }
@@ -3323,24 +3648,109 @@ fn payload_matches_task(task: &EditorTask, payload: &AsyncEditorPayload) -> bool
     )
 }
 
-fn fit_tab_title(title: &str, width: f32) -> (String, Option<String>) {
-    let capacity = ((width - TAB_CLOSE_WIDTH - TAB_TITLE_INSET) / APPROXIMATE_TITLE_SCALAR_WIDTH)
-        .floor()
-        .max(2.0) as usize;
-    if title.chars().count() <= capacity {
+fn tab_title_width(title: &str, preview: bool) -> f32 {
+    use iced::advanced::text::{Paragraph, Renderer, Text, Wrapping};
+    <iced::Renderer as Renderer>::Paragraph::with_text(Text {
+        content: title,
+        bounds: iced::Size::INFINITE,
+        size: 13.0.into(),
+        line_height: iced::Pixels(18.0).into(),
+        font: iced::Font {
+            weight: iced::font::Weight::Medium,
+            style: if preview {
+                iced::font::Style::Italic
+            } else {
+                iced::font::Style::Normal
+            },
+            ..iced::Font::with_name("Source Sans 3")
+        },
+        align_x: Default::default(),
+        align_y: iced::alignment::Vertical::Top,
+        shaping: Default::default(),
+        wrapping: Wrapping::None,
+    })
+    .min_width()
+}
+
+pub(crate) fn fit_tab_title(title: &str, width: f32, preview: bool) -> (String, Option<String>) {
+    let available = (width - TAB_CLOSE_WIDTH - TAB_TITLE_INSET).max(0.0);
+    if tab_title_width(title, preview) <= available {
         return (title.to_owned(), None);
     }
-    let mut display = title
-        .chars()
-        .take(capacity.saturating_sub(1).max(1))
-        .collect::<String>();
-    display.push('…');
-    (display, Some(title.to_owned()))
+    let boundaries = title
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let count = boundaries.partition_point(|end| {
+        tab_title_width(&format!("{}…", &title[..*end]), preview) <= available
+    });
+    let end = boundaries[count.saturating_sub(1)];
+    (format!("{}…", &title[..end]), Some(title.to_owned()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_pane_tab_drags_commit_once_and_cancel_outside_the_panes() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::BeginTabDrag {
+            pane: EditorPane::Primary,
+            document_id: "chapter-one".into(),
+        });
+        workspace.hover_tab_pane(EditorPane::Companion);
+        workspace.leave_tab_pane(EditorPane::Companion);
+        assert!(workspace.update(EditorMessage::CommitTabDrag).is_empty());
+        assert_eq!(workspace.primary.tabs.len(), 1);
+        workspace.update(EditorMessage::BeginTabDrag {
+            pane: EditorPane::Primary,
+            document_id: "chapter-one".into(),
+        });
+        workspace.update(EditorMessage::SetTabDragTarget {
+            pane: EditorPane::Companion,
+            target_index: 0,
+        });
+        assert!(!workspace.update(EditorMessage::CommitTabDrag).is_empty());
+        assert!(workspace.primary.tabs.is_empty());
+        assert_eq!(
+            workspace
+                .companion
+                .tabs
+                .iter()
+                .map(TabSpec::id)
+                .collect::<Vec<_>>(),
+            ["chapter-one", "chapter-two"]
+        );
+        assert_eq!(workspace.companion.active_document(), Some("chapter-one"));
+        assert!(workspace.update(EditorMessage::CommitTabDrag).is_empty());
+    }
+
+    #[test]
+    fn temporary_tabs_keep_input_through_promotion_and_do_not_create_duplicate_promotions() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let id = workspace.new_scratch(EditorPane::Primary);
+        assert!(!workspace.edit_scratch(&id, text_editor::Action::Move(text_editor::Motion::End)));
+        assert!(workspace.edit_scratch(
+            &id,
+            text_editor::Action::Edit(text_editor::Edit::Insert('A'))
+        ));
+        assert!(!workspace.edit_scratch(
+            &id,
+            text_editor::Action::Edit(text_editor::Edit::Insert('B'))
+        ));
+        workspace.promote_scratch(&id, "new-document", "Untitled");
+        assert!(!workspace.edit_scratch(
+            "new-document",
+            text_editor::Action::Edit(text_editor::Edit::Insert('C'))
+        ));
+        assert_eq!(
+            workspace.take_initial_prose("new-document").as_deref(),
+            Some("ABC")
+        );
+        assert!(workspace.take_initial_prose("new-document").is_none());
+        assert!(workspace.scratch("new-document").is_none());
+    }
 
     #[test]
     fn production_toolbar_commands_route_save_and_advanced_inline_marks() {
@@ -3535,6 +3945,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["three", "four", "five"]
         );
+    }
+
+    #[test]
+    fn tabs_fit_titles_and_use_spare_room_before_overflowing() {
+        let tabs = [
+            TabSpec::new("one", "I"),
+            TabSpec::new("two", "Two"),
+            TabSpec::new("three", "An unusually long chapter title"),
+            TabSpec::new("four", "IV"),
+        ];
+        let layout = EditorWorkspace::tab_strip_layout(350.0, &tabs, "three");
+        assert!(layout.overflow_tabs().is_empty());
+        assert_eq!(layout.tabs().len(), 4);
+        assert!(layout.tabs()[0].bounds().width() < layout.tabs()[2].bounds().width());
+        assert!(layout.tabs().last().unwrap().bounds().right() <= 350.0);
+        assert_eq!(layout.tabs()[0].display_title(), "I");
+        for width in [200.0, 280.0, 350.0, 900.0] {
+            for active in &tabs {
+                let layout = EditorWorkspace::tab_strip_layout(width, &tabs, active.id());
+                assert_eq!(layout.active_tab().id(), active.id());
+                let reserved = if layout.overflow_tabs().is_empty() {
+                    0.0
+                } else {
+                    TAB_OVERFLOW_WIDTH
+                };
+                assert!(layout.tabs().last().unwrap().bounds().right() + reserved <= width + 0.01);
+                assert!(
+                    layout
+                        .tabs()
+                        .windows(2)
+                        .all(|tabs| tabs[0].source_index() < tabs[1].source_index())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_pane_layouts_retain_tabs_scroll_and_split() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.set_split_ratio(0.37);
+        workspace.set_scroll_offset(EditorPane::Companion, 123.0);
+        for pane in [EditorPane::Primary, EditorPane::Companion] {
+            workspace.update(EditorMessage::TogglePaneFocus(pane));
+            assert_eq!(workspace.expanded_pane(), Some(pane));
+            assert_eq!(workspace.focused_pane(), pane);
+            workspace.update(EditorMessage::TogglePaneFocus(pane));
+            assert_eq!(workspace.expanded_pane(), None);
+        }
+        workspace.update(EditorMessage::ToggleCompanion);
+        assert!(!workspace.companion_is_visible());
+        workspace.update(EditorMessage::ToggleCompanion);
+        assert!(workspace.companion_is_visible());
+        assert_eq!(workspace.companion.active_document(), Some("chapter-two"));
+        assert_eq!(workspace.companion.scroll_offset(), 123.0);
+        assert_eq!(workspace.split_ratio(), 0.37);
+        workspace.update(EditorMessage::TogglePaneFocus(EditorPane::Companion));
+        workspace.update(EditorMessage::CloseTab {
+            pane: EditorPane::Companion,
+            document_id: "chapter-two".into(),
+        });
+        assert_eq!(workspace.expanded_pane(), None);
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
     }
 
     #[test]

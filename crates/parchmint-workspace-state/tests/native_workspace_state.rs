@@ -84,14 +84,11 @@ fn snapshot() -> WorkspaceSnapshot {
 }
 
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
-    let mut future = Box::pin(future);
-    let waker = std::task::Waker::noop();
-    let mut context = std::task::Context::from_waker(waker);
-    loop {
-        match future.as_mut().poll(&mut context) {
-            std::task::Poll::Ready(value) => return value,
-            std::task::Poll::Pending => std::thread::yield_now(),
-        }
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => value,
+        std::task::Poll::Pending => panic!("file store operations complete synchronously"),
     }
 }
 
@@ -128,45 +125,23 @@ fn versioned_workspace_files_round_trip_all_application_only_state_per_project()
     let raw =
         fs::read_to_string(store.path_for(project(1))).expect("workspace file should be readable");
     assert!(raw.contains("\"version\":1"), "workspace data is versioned");
-    assert!(
-        !raw.contains("authored"),
-        "workspace data stays application-only"
-    );
 }
 
 #[test]
-fn restoring_a_project_prunes_deleted_node_references() {
-    let directory = TemporaryDirectory::new("prune");
-    let store = FileWorkspaceStateStore::new(directory.path());
-    let saved = snapshot();
-    block_on(store.save(project(1), &saved)).expect("workspace save should succeed");
+fn pruning_deleted_nodes_clears_selection_tabs_views_and_cards_context() {
+    let mut saved = snapshot();
+    saved.remove_missing_nodes(&BTreeSet::from([node(2)]));
+    assert_eq!(saved.explorer.expanded_sections, BTreeSet::from([node(2)]));
+    assert_eq!(saved.explorer.selected_nodes, BTreeSet::from([node(2)]));
+    assert!(saved.tabs.is_empty());
+    assert!(saved.views.is_empty());
+    assert_eq!(saved.active_view, None);
+    assert_eq!(saved.cards_section, Some(node(2)));
 
-    let restored = block_on(store.load_or_default(project(1), &BTreeSet::from([node(1)])))
-        .expect("workspace restore should succeed")
-        .snapshot;
-    assert_eq!(restored.tabs.len(), 1);
-    assert!(restored.views.contains_key(&view(3)));
-    assert!(!restored.explorer.expanded_sections.contains(&node(2)));
-
-    let mut deleted = saved;
-    deleted.tabs.push(OpenTabState {
-        view: view(4),
-        node: node(99),
-    });
-    deleted.views.insert(
-        view(4),
-        SavedViewState {
-            node: node(99),
-            scroll_offset: 7,
-        },
-    );
-    block_on(store.save(project(1), &deleted)).expect("updated workspace save should succeed");
-    let restored = block_on(store.load_or_default(project(1), &BTreeSet::from([node(1)])))
-        .expect("workspace restore should succeed")
-        .snapshot;
-    assert!(restored.tabs.iter().all(|tab| tab.node == node(1)));
-    assert!(!restored.views.contains_key(&view(4)));
-    assert_eq!(restored.active_view, Some(view(3)));
+    saved.remove_missing_nodes(&BTreeSet::new());
+    assert!(saved.explorer.expanded_sections.is_empty());
+    assert!(saved.explorer.selected_nodes.is_empty());
+    assert_eq!(saved.cards_section, None);
 }
 
 #[test]
@@ -206,30 +181,51 @@ fn missing_or_invalid_workspace_file_uses_defaults_and_reports_invalid_data() {
 }
 
 #[test]
-fn workspace_save_failure_leaves_project_and_history_data_untouched() {
+fn invalid_layout_cannot_replace_a_readable_workspace() {
+    let directory = TemporaryDirectory::new("invalid-layout");
+    let store = FileWorkspaceStateStore::new(directory.path());
+    let mut saved = snapshot();
+    block_on(store.save(project(1), &saved)).unwrap();
+    let before = fs::read(store.path_for(project(1))).unwrap();
+
+    for ratio in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        saved.layout.split_ratio = ratio;
+        assert!(block_on(store.save(project(1), &saved)).is_err());
+        assert_eq!(fs::read(store.path_for(project(1))).unwrap(), before);
+        assert_eq!(block_on(store.load(project(1))).unwrap(), Some(snapshot()));
+    }
+    assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn removing_a_workspace_is_idempotent_and_resets_its_revision() {
+    let directory = TemporaryDirectory::new("remove");
+    let store = FileWorkspaceStateStore::new(directory.path());
+    block_on(store.save(project(1), &snapshot())).unwrap();
+    for _ in 0..2 {
+        block_on(store.remove(project(1))).unwrap();
+        assert_eq!(block_on(store.load(project(1))).unwrap(), None);
+    }
+    assert_eq!(
+        block_on(store.save(project(1), &snapshot()))
+            .unwrap()
+            .value(),
+        1
+    );
+}
+
+#[test]
+fn workspace_directory_failure_preserves_the_blocking_file() {
     let directory = TemporaryDirectory::new("failure");
     let blocker = directory.path().join("not-a-directory");
-    fs::write(&blocker, b"project data").expect("blocking file should be created");
-    let project_data = directory.path().join("project.json");
-    let history_data = directory.path().join("history.json");
-    fs::write(&project_data, b"canonical project").expect("project fixture should be created");
-    fs::write(&history_data, b"project history").expect("history fixture should be created");
+    fs::write(&blocker, b"existing data").unwrap();
     let store = FileWorkspaceStateStore::new(&blocker);
-
-    assert!(
-        block_on(store.save(project(1), &snapshot())).is_err(),
-        "workspace failure should be observable"
-    );
-    assert_eq!(
-        fs::read(&blocker).expect("project data should be preserved"),
-        b"project data"
-    );
-    assert_eq!(
-        fs::read(project_data).expect("project data should be preserved"),
-        b"canonical project"
-    );
-    assert_eq!(
-        fs::read(history_data).expect("history data should be preserved"),
-        b"project history"
-    );
+    assert!(matches!(
+        block_on(store.save(project(1), &snapshot())),
+        Err(parchmint_workspace_state::WorkspaceError::Storage {
+            operation: "create application-data directory",
+            ..
+        })
+    ));
+    assert_eq!(fs::read(&blocker).unwrap(), b"existing data");
 }

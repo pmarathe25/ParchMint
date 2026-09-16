@@ -140,6 +140,81 @@ impl NativeProjectEffectExecutor {
                 self.open_documents(&current, &resolvers, EditorPane::Companion, [document_id])
                     .await
             }
+            ProjectEffect::CreateDraft { .. } => {
+                let operation = self.operation_sequence.fetch_add(1, Ordering::Relaxed);
+                let parent = parchmint_domain::NodeId::unfiled_root();
+                let title = (1..)
+                    .map(|index| {
+                        if index == 1 {
+                            "Untitled".to_owned()
+                        } else {
+                            format!("Untitled {index}")
+                        }
+                    })
+                    .find(|title| {
+                        !current
+                            .project
+                            .nodes
+                            .iter()
+                            .any(|(_, node)| node.title == *title)
+                    })
+                    .expect("finite project has an available draft title");
+                let snapshot = self
+                    .ports
+                    .create_document(CreateDocumentWorkflow {
+                        node: generated_node_id(&current, operation),
+                        document: generated_document_id(&current, operation),
+                        parent,
+                        index: current.project.nodes.children(parent).len(),
+                        title,
+                    })
+                    .await?;
+                Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                    snapshot,
+                )))
+            }
+            ProjectEffect::FileDraft {
+                node_id,
+                title,
+                parent_id,
+            } => {
+                let parent = resolvers.node(&parent_id)?;
+                if node_id.starts_with("scratch-") {
+                    let operation = self.operation_sequence.fetch_add(1, Ordering::Relaxed);
+                    let snapshot = self
+                        .ports
+                        .create_document(CreateDocumentWorkflow {
+                            node: generated_node_id(&current, operation),
+                            document: generated_document_id(&current, operation),
+                            parent,
+                            index: current.project.nodes.children(parent).len(),
+                            title,
+                        })
+                        .await?;
+                    return Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                        snapshot,
+                    )));
+                }
+                let node = resolvers.node(&node_id)?;
+                if current.project.nodes.section(node)
+                    != Some(parchmint_domain::ProjectSection::Unfiled)
+                    || current.project.nodes.section(parent)
+                        == Some(parchmint_domain::ProjectSection::Unfiled)
+                {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "draft destination is no longer available",
+                    ));
+                }
+                self.execute_commands([
+                    ProjectCommand::rename_node(node, title),
+                    ProjectCommand::move_node(
+                        node,
+                        parent,
+                        current.project.nodes.children(parent).len(),
+                    ),
+                ])
+                .await
+            }
             ProjectEffect::CreateHierarchy { parent_id, kind } => {
                 let parent = resolvers.node(&parent_id)?;
                 let index = current.project.nodes.children(parent).len();
@@ -827,6 +902,23 @@ pub(crate) enum ProjectRuntimeError {
     Unsupported(UnsupportedEffect),
 }
 
+impl ProjectRuntimeError {
+    pub(crate) fn user_message(&self) -> String {
+        match self {
+            Self::Port { message, .. } => format!("The action could not complete: {message}"),
+            Self::StaleSession { .. } => "This project is no longer open.".to_owned(),
+            Self::StaleSnapshot { .. } => "The project changed. Please try again.".to_owned(),
+            Self::UnknownStableId { .. } => "This item is no longer available.".to_owned(),
+            Self::SaveDidNotReach { .. } => {
+                "Some changes could not be saved. Please try saving again.".to_owned()
+            }
+            Self::InvalidEffect(_) | Self::Unsupported(_) => {
+                "This action is unavailable in the current view.".to_owned()
+            }
+        }
+    }
+}
+
 impl fmt::Display for ProjectRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -867,6 +959,8 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::OpenDocumentInPrimary(_) => "open-document-primary",
         ProjectEffect::OpenDocumentInCompanion(_) => "open-document-companion",
         ProjectEffect::CreateHierarchy { .. } => "create-hierarchy",
+        ProjectEffect::CreateDraft { .. } => "create-draft",
+        ProjectEffect::FileDraft { .. } => "file-draft",
         ProjectEffect::DeleteHierarchy(_) => "delete-hierarchy",
         ProjectEffect::MoveHierarchy { .. } => "move-hierarchy",
         ProjectEffect::PasteCopiedSubtrees { .. } => "paste-copied-subtrees",
@@ -1551,6 +1645,10 @@ fn plan_moves(
 ) -> Result<Vec<ProjectCommand>, ProjectRuntimeError> {
     let mut simulated = snapshot.project.clone();
     let mut commands = Vec::with_capacity(nodes.len());
+    let mut nodes = nodes;
+    if matches!(destination, DragDestination::AfterSibling(_)) {
+        nodes.reverse();
+    }
     for node in nodes {
         let (parent, index) =
             match &destination {
@@ -1904,6 +2002,23 @@ mod tests {
     use crate::SpellingDecoration;
 
     use super::*;
+
+    #[test]
+    fn user_errors_keep_the_cause_without_service_names() {
+        let error = ProjectRuntimeError::Port {
+            service: "ProjectWorkflowPort::create_named_snapshot",
+            message: "History storage is unavailable".into(),
+        };
+        assert_eq!(
+            error.user_message(),
+            "The action could not complete: History storage is unavailable"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("ProjectWorkflowPort::create_named_snapshot")
+        );
+    }
 
     struct FakePorts {
         current: Mutex<bool>,
@@ -2751,6 +2866,45 @@ mod tests {
         assert!(created.project.nodes.iter().any(|(_, node)| {
             node.title == "New Group" && matches!(node.kind, NodeKind::Group)
         }));
+    }
+
+    #[test]
+    fn mixed_sibling_moves_preserve_order_before_and_after_a_group() {
+        let (mut snapshot, first, _, _) = fixture();
+        let group = NodeId::from_bytes([70; 16]);
+        let second = NodeId::from_bytes([71; 16]);
+        let root = NodeId::manuscript_root();
+        snapshot
+            .project
+            .nodes
+            .try_insert_group(group, root, 1, "Act")
+            .unwrap();
+        snapshot
+            .project
+            .nodes
+            .try_insert_document(second, DocumentId::from_bytes([72; 16]), root, 2, "Second")
+            .unwrap();
+        for (nodes, destination, expected) in [
+            (
+                vec![first, second],
+                DragDestination::AfterSibling(stable_id_string(group.as_bytes())),
+                vec![group, first, second],
+            ),
+            (
+                vec![second],
+                DragDestination::BeforeSibling(stable_id_string(group.as_bytes())),
+                vec![second, group, first],
+            ),
+        ] {
+            let resolvers = StableIdResolvers::from_snapshot(&snapshot);
+            for command in plan_moves(&snapshot, &resolvers, nodes, destination).unwrap() {
+                snapshot.project =
+                    apply_project_command(&snapshot.project, snapshot.project.revision, command)
+                        .unwrap()
+                        .project;
+            }
+            assert_eq!(snapshot.project.nodes.children(root), expected);
+        }
     }
 
     #[test]

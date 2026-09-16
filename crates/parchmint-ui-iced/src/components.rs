@@ -6,7 +6,7 @@ use iced::{
 };
 
 use crate::design_tokens::{
-    DEFAULT_RADIUS, FOCUS_BORDER_WIDTH, ParchMintTheme, SemanticPalette, UI_LABEL,
+    DEFAULT_RADIUS, FOCUS_BORDER_WIDTH, ParchMintTheme, UI_LABEL, UI_PAGE_TITLE,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,20 +45,16 @@ pub enum StatusKind {
     Error,
 }
 
-/// Ordinary actions share the secondary style; primary and destructive actions
-/// opt into their semantic role at the call site.
+/// Secondary action button; override the style for primary or destructive actions.
 pub fn semantic_button<'a, Message: Clone + 'a>(
     content: impl Into<iced::Element<'a, Message>>,
 ) -> iced::widget::Button<'a, Message> {
     button(content).padding([6, 10]).style(|theme, status| {
-        let presentation = presentation(theme);
-        let state = match status {
-            button::Status::Active => Interaction::Rest,
-            button::Status::Hovered => Interaction::Hovered,
-            button::Status::Pressed => Interaction::Pressed,
-            button::Status::Disabled => Interaction::Disabled,
-        };
-        button_style(presentation, ButtonKind::Secondary, state)
+        button_style(
+            presentation(theme),
+            ButtonKind::Secondary,
+            button_interaction(status, false),
+        )
     })
 }
 
@@ -68,15 +64,7 @@ pub fn semantic_text_input<'a, Message: Clone + 'a>(
 ) -> iced::widget::TextInput<'a, Message> {
     text_input(placeholder, value)
         .padding([7, 9])
-        .style(|theme, status| {
-            let state = match status {
-                text_input::Status::Active => Interaction::Rest,
-                text_input::Status::Hovered => Interaction::Hovered,
-                text_input::Status::Focused { .. } => Interaction::Focused,
-                text_input::Status::Disabled => Interaction::Disabled,
-            };
-            field_style(presentation(theme), state)
-        })
+        .style(|theme, status| field_style(presentation(theme), field_interaction(status)))
 }
 
 /// A select control with the same field, text, and focus tokens as text inputs.
@@ -110,21 +98,29 @@ where
                 border: field.border,
             }
         })
-        .menu_style(|theme| {
-            let theme = presentation(theme);
-            let panel = surface(theme, Surface::Elevated, Interaction::Rest);
-            iced::widget::overlay::menu::Style {
-                background: theme.palette().panel.into(),
-                border: panel.border,
-                text_color: theme.palette().primary_text,
-                selected_text_color: theme.palette().primary_text,
-                selected_background: theme.palette().accent_subtle.into(),
-                shadow: panel.shadow,
-            }
-        })
+        .menu_style(|theme| menu_style(presentation(theme)))
 }
 
-fn presentation(theme: &iced::Theme) -> ParchMintTheme {
+pub(crate) fn menu_style(theme: ParchMintTheme) -> iced::widget::overlay::menu::Style {
+    let panel = surface(theme, Surface::Elevated, Interaction::Rest);
+    iced::widget::overlay::menu::Style {
+        background: theme.palette().elevated.into(),
+        border: panel.border,
+        text_color: theme.palette().primary_text,
+        selected_text_color: theme.palette().primary_text,
+        selected_background: theme.palette().accent_subtle.into(),
+        shadow: panel.shadow,
+    }
+}
+
+pub(crate) fn scrim(theme: ParchMintTheme) -> container::Style {
+    container::Style {
+        background: Some(theme.palette().scrim.into()),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn presentation(theme: &iced::Theme) -> ParchMintTheme {
     ParchMintTheme::from_iced_theme(theme).unwrap_or_else(|| {
         ParchMintTheme::new(if theme.extended_palette().is_dark {
             parchmint_preferences::ResolvedAppearance::Dark
@@ -134,8 +130,17 @@ fn presentation(theme: &iced::Theme) -> ParchMintTheme {
     })
 }
 
-/// Text content for controls uses the shared label token instead of the
-/// ambient body font. Buttons are compact actions, not authored prose.
+pub(crate) fn page_title<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(value)
+        .size(u32::from(UI_PAGE_TITLE.size))
+        .line_height(UI_PAGE_TITLE.line_height)
+        .font(Font {
+            weight: font::Weight::Semibold,
+            ..Font::with_name(UI_PAGE_TITLE.family)
+        })
+}
+
+/// Control text in the shared label font.
 pub fn button_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(value)
         .size(u32::from(UI_LABEL.size))
@@ -144,6 +149,50 @@ pub fn button_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Tex
             weight: font::Weight::Semibold,
             ..Font::with_name(UI_LABEL.family)
         })
+}
+
+pub(crate) fn button_interaction(
+    status: iced::widget::button::Status,
+    selected: bool,
+) -> Interaction {
+    match status {
+        status if selected && status != iced::widget::button::Status::Disabled => {
+            Interaction::Selected
+        }
+        iced::widget::button::Status::Active => Interaction::Rest,
+        iced::widget::button::Status::Hovered => Interaction::Hovered,
+        iced::widget::button::Status::Pressed => Interaction::Pressed,
+        iced::widget::button::Status::Disabled => Interaction::Disabled,
+    }
+}
+
+pub(crate) fn field_interaction(status: iced::widget::text_input::Status) -> Interaction {
+    match status {
+        iced::widget::text_input::Status::Active => Interaction::Rest,
+        iced::widget::text_input::Status::Hovered => Interaction::Hovered,
+        iced::widget::text_input::Status::Focused { .. } => Interaction::Focused,
+        iced::widget::text_input::Status::Disabled => Interaction::Disabled,
+    }
+}
+
+pub(crate) fn multiline_field_style(
+    theme: ParchMintTheme,
+    status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    let interaction = match status {
+        iced::widget::text_editor::Status::Active => Interaction::Rest,
+        iced::widget::text_editor::Status::Hovered => Interaction::Hovered,
+        iced::widget::text_editor::Status::Focused { .. } => Interaction::Focused,
+        iced::widget::text_editor::Status::Disabled => Interaction::Disabled,
+    };
+    let field = field_style(theme, interaction);
+    iced::widget::text_editor::Style {
+        background: field.background,
+        border: field.border,
+        placeholder: field.placeholder,
+        value: field.value,
+        selection: field.selection,
+    }
 }
 
 pub fn surface(
@@ -170,11 +219,13 @@ pub fn surface(
         shadow: Shadow::default(),
         snap: true,
     };
-    // Panels and menus use borders and contrast for separation. Keep
-    // elevation reserved for modal dialogs so pointer hover cannot trigger a
-    // broad shadow repaint behind ordinary controls or context menus.
+    // Reserve shadows for dialogs to avoid broad repaints on pointer hover.
     if matches!(surface, Surface::Dialog) {
-        style.shadow = shadow(palette, surface);
+        style.shadow = Shadow {
+            color: palette.scrim,
+            offset: Vector::new(0.0, 12.0),
+            blur_radius: 32.0,
+        };
     }
     match interaction {
         Interaction::Focused => style.border = outlined(palette.focus_ring, FOCUS_BORDER_WIDTH),
@@ -210,6 +261,9 @@ pub fn button_style(
         ),
     };
     let (background, text_color) = match interaction {
+        Interaction::Hovered if matches!(kind, ButtonKind::Destructive) => {
+            (palette.destructive_subtle, palette.destructive)
+        }
         Interaction::Hovered => (
             if matches!(kind, ButtonKind::Primary) {
                 palette.accent_hover
@@ -221,12 +275,21 @@ pub fn button_style(
         Interaction::Pressed => (
             if matches!(kind, ButtonKind::Primary) {
                 palette.accent_pressed
+            } else if matches!(kind, ButtonKind::Destructive) {
+                palette.destructive
             } else {
                 palette.control_pressed
             },
             base_text,
         ),
-        Interaction::Disabled => (palette.control_disabled, palette.disabled_text),
+        Interaction::Disabled => (
+            if matches!(kind, ButtonKind::Quiet | ButtonKind::Tab) {
+                Color::TRANSPARENT
+            } else {
+                palette.control_disabled
+            },
+            palette.disabled_text,
+        ),
         Interaction::Selected => (palette.accent_subtle, palette.primary_text),
         _ => (base_background, base_text),
     };
@@ -234,6 +297,9 @@ pub fn button_style(
         Interaction::Focused => (palette.focus_ring, FOCUS_BORDER_WIDTH),
         Interaction::Selected => (Color::TRANSPARENT, 0.0),
         Interaction::Error => (palette.error, FOCUS_BORDER_WIDTH),
+        Interaction::Disabled if matches!(kind, ButtonKind::Quiet | ButtonKind::Tab) => {
+            (Color::TRANSPARENT, 0.0)
+        }
         Interaction::Disabled => (palette.border, 1.0),
         _ => (base_border, 1.0),
     };
@@ -251,6 +317,7 @@ pub fn field_style(theme: ParchMintTheme, interaction: Interaction) -> text_inpu
     let border_color = match interaction {
         Interaction::Focused => palette.focus_ring,
         Interaction::Error => palette.error,
+        Interaction::Hovered => palette.strong_border,
         Interaction::Disabled => palette.border,
         _ => palette.border,
     };
@@ -302,29 +369,82 @@ fn outlined(color: Color, width: f32) -> iced::Border {
 fn borderless() -> iced::Border {
     outlined(Color::TRANSPARENT, 0.0)
 }
-fn shadow(palette: SemanticPalette, surface: Surface) -> Shadow {
-    Shadow {
-        color: palette.scrim,
-        offset: Vector::new(
-            0.0,
-            if matches!(surface, Surface::Dialog) {
-                12.0
-            } else {
-                4.0
-            },
-        ),
-        blur_radius: if matches!(surface, Surface::Dialog) {
-            32.0
-        } else {
-            16.0
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use parchmint_preferences::ResolvedAppearance;
+
+    #[test]
+    fn filled_actions_keep_readable_text_through_pointer_states() {
+        fn luminance(color: Color) -> f32 {
+            let linear = |value: f32| {
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+        }
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            for kind in [
+                ButtonKind::Primary,
+                ButtonKind::Destructive,
+                ButtonKind::Secondary,
+            ] {
+                for interaction in [
+                    Interaction::Rest,
+                    Interaction::Hovered,
+                    Interaction::Pressed,
+                ] {
+                    let style = button_style(theme, kind, interaction);
+                    let Some(Background::Color(background)) = style.background else {
+                        panic!("filled action")
+                    };
+                    let foreground = luminance(style.text_color);
+                    let background = luminance(background);
+                    let contrast =
+                        (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                    assert!(
+                        contrast >= 4.5,
+                        "{appearance:?} {kind:?} {interaction:?}: {contrast}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn disabled_quiet_controls_stay_unboxed_and_menus_share_popup_surfaces() {
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let disabled = button_style(theme, ButtonKind::Quiet, Interaction::Disabled);
+            assert_eq!(disabled.background, Some(Color::TRANSPARENT.into()));
+            assert_eq!(disabled.border.width, 0.0);
+            let popup = surface(theme, Surface::Elevated, Interaction::Rest);
+            assert_eq!(popup.background, Some(menu_style(theme).background));
+        }
+    }
+
+    #[test]
+    fn pointer_states_preserve_selection_without_enabling_disabled_controls() {
+        for status in [
+            button::Status::Active,
+            button::Status::Hovered,
+            button::Status::Pressed,
+        ] {
+            assert_eq!(button_interaction(status, true), Interaction::Selected);
+        }
+        assert_eq!(
+            button_interaction(button::Status::Disabled, true),
+            Interaction::Disabled
+        );
+        assert_eq!(
+            button_interaction(button::Status::Hovered, false),
+            Interaction::Hovered
+        );
+    }
 
     #[test]
     fn structural_surfaces_are_borderless_but_elevated_surfaces_remain_framed() {

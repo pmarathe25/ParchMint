@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-#[cfg(any(feature = "visual-verification", feature = "interaction-harness"))]
+#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 use std::borrow::Cow;
 
 /// One UI fixture that can be rendered headlessly.
@@ -176,6 +176,7 @@ pub fn capture_visual(
 ) -> Result<VisualCapture, VisualCaptureError> {
     use iced::Size;
     use iced_test::Simulator;
+    let _motion = crate::motion::SettledMotion::new();
 
     let output_stem = output_stem.as_ref();
     let output_path = renderer_output_path(output_stem);
@@ -208,7 +209,7 @@ pub fn capture_visual(
     })
 }
 
-#[cfg(any(feature = "visual-verification", feature = "interaction-harness"))]
+#[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 pub(crate) fn visual_settings() -> iced::Settings {
     iced::Settings {
         default_font: iced::Font::with_name("Source Sans 3"),
@@ -282,6 +283,7 @@ fn production_element(
         &slots,
         None,
         &breadcrumbs,
+        workspace.hierarchy_drag_source().is_some(),
     )
     .map(ProjectSurfaceMessage::EditorCenter);
     let destination = match target {
@@ -332,10 +334,7 @@ fn editor_slots(
         )
         .expect("verification adapter starts");
         let viewport = verification_editor_viewport(target, pane, workspace);
-        let theme = match appearance {
-            VisualAppearance::Light => parchmint_editor_iced::EditorSurfaceTheme::light(),
-            VisualAppearance::Dark => parchmint_editor_iced::EditorSurfaceTheme::dark(),
-        };
+        let theme = presentation(appearance).editor_theme();
         let binding = parchmint_editor_iced::MountedEditorBinding::mount(
             &adapter,
             parchmint_editor_iced::MountedEditorBindingConfig::new(
@@ -378,10 +377,7 @@ fn verification_editor_viewport(
             );
             (
                 center.width,
-                center.height
-                    - FORMAT_TOOLBAR_HEIGHT
-                    - TAB_STRIP_HEIGHT
-                    - u32::from(crate::iced_editor_surface::EDITOR_BREADCRUMB_HEIGHT),
+                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
             )
         }
         VisualTarget::EditorDual => {
@@ -395,10 +391,7 @@ fn verification_editor_viewport(
             };
             (
                 (available_width as f64 * portion).round() as u32,
-                center.height
-                    - FORMAT_TOOLBAR_HEIGHT
-                    - TAB_STRIP_HEIGHT
-                    - u32::from(crate::iced_editor_surface::EDITOR_BREADCRUMB_HEIGHT),
+                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
             )
         }
         VisualTarget::GlobalSearch => {
@@ -436,8 +429,6 @@ fn verification_snapshot(target: VisualTarget) -> parchmint_ui_api::ProjectSnaps
     let map = DocumentId::from_bytes([0x42; 16]);
     let old_chapter = DocumentId::from_bytes([0x52; 16]);
     let point_of_view = MetadataFieldId::from_bytes([0x71; 16]);
-    let target_words = MetadataFieldId::from_bytes([0x72; 16]);
-    let words = MetadataFieldId::from_bytes([0x73; 16]);
     let status = MetadataFieldId::from_bytes([0x74; 16]);
     let mut project = Project::new(ProjectId::from_bytes([0x10; 16]));
     project.display_title = "The Glass Harbor".to_owned();
@@ -491,24 +482,6 @@ fn verification_snapshot(target: VisualTarget) -> parchmint_ui_api::ProjectSnaps
             visible_on_cards: true,
         },
         MetadataFieldDefinition {
-            id: target_words,
-            label: "Target".to_owned(),
-            description: None,
-            applicability: MetadataApplicability::Groups,
-            text_kind: MetadataTextKind::SingleLine,
-            default_value: None,
-            visible_on_cards: true,
-        },
-        MetadataFieldDefinition {
-            id: words,
-            label: "Words".to_owned(),
-            description: None,
-            applicability: MetadataApplicability::Documents,
-            text_kind: MetadataTextKind::SingleLine,
-            default_value: None,
-            visible_on_cards: true,
-        },
-        MetadataFieldDefinition {
             id: status,
             label: "Status".to_owned(),
             description: None,
@@ -549,10 +522,6 @@ fn verification_snapshot(target: VisualTarget) -> parchmint_ui_api::ProjectSnaps
         ),
         ProjectCommand::set_metadata_value(part_one, point_of_view, Some("Multiple".to_owned())),
         ProjectCommand::set_metadata_value(part_two, point_of_view, Some("Multiple".to_owned())),
-        ProjectCommand::set_metadata_value(part_one, target_words, Some("3,500 words".to_owned())),
-        ProjectCommand::set_metadata_value(part_two, target_words, Some("3,200 words".to_owned())),
-        ProjectCommand::set_metadata_value(chapter_one_node, words, Some("1,240".to_owned())),
-        ProjectCommand::set_metadata_value(chapter_two_node, words, Some("1,080".to_owned())),
         ProjectCommand::set_metadata_value(chapter_one_node, status, Some("Draft".to_owned())),
         ProjectCommand::delete_node_at(old_chapter_node, 1_725_000_000_000),
         ProjectCommand::delete_node_at(draft_scenes_node, 1_725_000_001_000),
@@ -753,9 +722,6 @@ fn verification_workspace(
                 .update(crate::EditorMessage::FocusPane(crate::EditorPane::Primary));
         }
         VisualTarget::Cards => {
-            let _ = workspace.update(ProjectMessage::SetCardsSection(stable_id(
-                parchmint_domain::NodeId::manuscript_root().as_bytes(),
-            )));
             let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one));
             let _ = workspace.update(ProjectMessage::ActivateCard(chapter_one));
         }
@@ -1040,10 +1006,10 @@ fn assert_scenario_contract(
                         .metadata
                         .iter()
                         .any(|(_, label, value)| *label == "POV" && *value == Some("Mara"))
-                    && item
-                        .metadata
-                        .iter()
-                        .any(|(_, label, value)| *label == "Words" && *value == Some("1,240"))
+                    && Some(item.words)
+                        == item
+                            .document_id
+                            .and_then(|id| workspace.editor().document_word_count(id))
             }));
             assert!(
                 cards
@@ -1365,7 +1331,7 @@ mod tests {
                 crate::EditorPane::Primary,
                 &single,
             ),
-            parchmint_editor_iced::EditorViewport::new(840.0, 712.0)
+            parchmint_editor_iced::EditorViewport::new(840.0, 736.0)
                 .expect("single-pane allocation"),
         );
 
@@ -1378,7 +1344,7 @@ mod tests {
         for pane in [crate::EditorPane::Primary, crate::EditorPane::Companion] {
             assert_eq!(
                 verification_editor_viewport(VisualTarget::EditorDual, pane, &dual),
-                parchmint_editor_iced::EditorViewport::new(416.0, 712.0)
+                parchmint_editor_iced::EditorViewport::new(416.0, 736.0)
                     .expect("dual-pane allocation"),
             );
         }
@@ -1433,8 +1399,9 @@ mod tests {
             production_element(target, appearance),
         );
 
-        assert!(simulator.find("Edit title").is_ok());
+        assert!(simulator.find("Edit title").is_err());
         assert!(simulator.find("No selection").is_err());
+        assert!(simulator.find("Comments").is_err());
         for content in [
             "Chapter One",
             "Synopsis",
@@ -1443,7 +1410,6 @@ mod tests {
             "Mara",
             "Status",
             "Draft",
-            "No comments",
         ] {
             assert!(
                 simulator.find(content).is_ok(),

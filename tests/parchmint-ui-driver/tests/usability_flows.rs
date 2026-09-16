@@ -26,7 +26,7 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Creation usability");
     assert!(
-        harness
+        !harness
             .text_is_visible(HarnessWindow::Project, "+ New")
             .unwrap()
     );
@@ -40,14 +40,18 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
             .contains_text(HarnessWindow::Project, "New group")
             .unwrap()
     );
-    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Manuscript")
+        .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Add to Manuscript")
+            .text_is_visible(HarnessWindow::Project, "Create group")
             .unwrap()
     );
     capture(&harness, "creation-menu");
-    harness.click_text(HarnessWindow::Project, "Group").unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create group")
+        .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "New Group", "Drafts")
         .unwrap();
@@ -57,14 +61,16 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
             .unwrap()
     );
     capture(&harness, "creation-banner");
-    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Drafts")
+        .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Add to Drafts")
+            .text_is_visible(HarnessWindow::Project, "Create document")
             .unwrap()
     );
     harness
-        .click_text(HarnessWindow::Project, "Document")
+        .click_text(HarnessWindow::Project, "Create document")
         .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Opening")
@@ -118,11 +124,31 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
     capture(&harness, "creation-expired");
     route(&harness, RibbonDestination::Settings);
     harness.click_text(HarnessWindow::Project, "Dark").unwrap();
+    capture(&harness, "appearance-dark-compact");
+    for (category, name) in [
+        ("Styles", "styles-dark-compact"),
+        ("Metadata fields", "metadata-dark-compact"),
+        ("Dictionaries", "dictionary-dark-compact"),
+    ] {
+        harness
+            .click_text(HarnessWindow::Project, category)
+            .unwrap();
+        if category == "Styles" {
+            harness.click_text(HarnessWindow::Project, "Body").unwrap();
+        }
+        capture(&harness, name);
+    }
+    route(&harness, RibbonDestination::Export);
+    capture(&harness, "export-dark-compact");
+    route(&harness, RibbonDestination::Cards);
+    capture(&harness, "outline-dark-compact");
     route(&harness, RibbonDestination::Editor);
-    harness.click_text(HarnessWindow::Project, "+ New").unwrap();
+    harness
+        .right_click_text(HarnessWindow::Project, "Later")
+        .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Document")
+            .text_is_visible(HarnessWindow::Project, "Create document")
             .unwrap()
     );
     capture(&harness, "creation-menu-dark-compact");
@@ -132,6 +158,11 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
             parchmint_desktop::HarnessKey::Escape,
         )
         .unwrap();
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Create document")
+            .unwrap()
+    );
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
 }
@@ -230,7 +261,8 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     );
     capture(&harness, "history-project-changes");
     for text in [
-        "Changes since this version",
+        "Saved version",
+        "Current",
         "Project outline and settings",
         "Added document · New ending",
         "Deleted document · Old ending",
@@ -246,7 +278,7 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     }
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Changes since this version")
+            .text_is_visible(HarnessWindow::Project, "Saved version")
             .unwrap()
     );
     route(&harness, RibbonDestination::Editor);
@@ -328,5 +360,152 @@ fn a_failed_history_action_is_reported_and_its_banner_expires() {
         harness.history_checkpoints().unwrap()
     );
     harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn reduced_motion_choice_survives_reopening_the_application() {
+    let run = IsolatedRun::new("motion-preference").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let preferences = run.root().join("configuration/preferences.json");
+    let harness = create_project(&run, &project, "Motion preference");
+    route(&harness, RibbonDestination::Settings);
+    harness
+        .click_text(HarnessWindow::Project, "Reduce motion")
+        .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&preferences).unwrap()).unwrap();
+    assert_eq!(saved["preferences"]["reduced_motion"], true);
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+
+    let harness = DesktopInteractionHarness::launch(
+        run.root(),
+        parchmint_desktop::LaunchRequest::open(&project),
+    )
+    .unwrap();
+    route(&harness, RibbonDestination::Settings);
+    harness
+        .click_text(HarnessWindow::Project, "Reduce motion")
+        .unwrap();
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(preferences).unwrap()).unwrap();
+    assert_eq!(saved["preferences"]["reduced_motion"], false);
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn launch_resumes_the_project_and_title_opens_a_safe_project_chooser() {
+    let run = IsolatedRun::new("resume-chooser").unwrap();
+    let project = run.root().join("novel.parchmint");
+    create_project(&run, &project, "Resume novel")
+        .shutdown()
+        .unwrap();
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), parchmint_desktop::LaunchRequest::launcher())
+            .unwrap();
+    assert!(harness.has_window(HarnessWindow::Project).unwrap());
+    assert!(!harness.has_window(HarnessWindow::Launcher).unwrap());
+    harness
+        .click_text(HarnessWindow::Project, "Resume novel")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Recent projects")
+            .unwrap()
+    );
+    capture(&harness, "project-chooser");
+    harness
+        .click_text(HarnessWindow::Project, "Create Project")
+        .unwrap();
+    harness
+        .type_into(HarnessWindow::Project, "Project title", "Another story")
+        .unwrap();
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Author · optional")
+            .unwrap()
+    );
+    capture(&harness, "project-create");
+    harness
+        .press_key(
+            HarnessWindow::Project,
+            parchmint_desktop::HarnessKey::Escape,
+        )
+        .unwrap();
+    assert!(
+        !harness
+            .text_is_visible(HarnessWindow::Project, "Create and Open")
+            .unwrap()
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Resume novel")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Resume novel")
+        .unwrap();
+    assert!(
+        !harness
+            .text_is_visible(HarnessWindow::Project, "Recent projects")
+            .unwrap()
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Resume novel")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create Project")
+        .unwrap();
+    let second = run.root().join("another.parchmint");
+    harness
+        .type_into(
+            HarnessWindow::Project,
+            "Project destination",
+            second.to_string_lossy(),
+        )
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Create and Open")
+        .unwrap();
+    assert!(second.join("project.toml").exists());
+    harness.shutdown().unwrap();
+
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), parchmint_desktop::LaunchRequest::launcher())
+            .unwrap();
+    std::fs::rename(&project, run.root().join("moved.parchmint")).unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Another story")
+        .unwrap();
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Resume novel")
+            .unwrap()
+    );
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn deleted_recent_project_is_pruned_and_startup_returns_to_the_chooser() {
+    let run = IsolatedRun::new("missing-recent-project").unwrap();
+    let project = run.root().join("novel.parchmint");
+    create_project(&run, &project, "Missing novel")
+        .shutdown()
+        .unwrap();
+    std::fs::rename(&project, run.root().join("moved.parchmint")).unwrap();
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), parchmint_desktop::LaunchRequest::launcher())
+            .unwrap();
+    assert!(harness.has_window(HarnessWindow::Launcher).unwrap());
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Launcher, "Missing novel")
+            .unwrap()
+    );
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Launcher, "Create Project")
+            .unwrap()
+    );
     harness.shutdown().unwrap();
 }

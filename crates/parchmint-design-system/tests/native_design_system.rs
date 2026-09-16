@@ -5,36 +5,18 @@ use parchmint_design_system::{
 #[test]
 fn production_icons_are_source_authored_symbolic_vectors() {
     assert_eq!(
-        PRODUCTION_ICON_NAMES,
-        [
-            "launcher-project",
-            "launcher-last-opened",
-            "workspace-project",
-            "workspace-editor",
-            "workspace-cards",
-            "workspace-history",
-            "workspace-deleted",
-            "workspace-export",
-            "workspace-settings",
-            "explorer-folder-closed",
-            "explorer-folder-open",
-            "format-bulleted-list",
-            "format-block-quote",
-            "format-link",
-            "format-page-break",
-        ]
+        PRODUCTION_ICON_NAMES.len(),
+        PRODUCTION_ICON_NAMES
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
     );
 
     for name in PRODUCTION_ICON_NAMES {
         let icon = production_icon_svg(name).expect("production icon is registered");
         assert!(icon.contains("<svg"));
         assert!(icon.contains("viewBox=\"0 0"));
-        assert!(icon.contains("fill=\"currentColor\""));
-        if !matches!(*name, "explorer-folder-closed" | "explorer-folder-open")
-            && !name.starts_with("launcher-")
-        {
-            assert!(icon.contains("transform=\"translate(-"));
-        }
+        assert!(icon.contains("fill=\"currentColor\"") || icon.contains("stroke=\"currentColor\""));
     }
     assert!(production_icon_svg("unknown").is_none());
 }

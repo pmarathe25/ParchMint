@@ -56,6 +56,7 @@ pub struct HarnessTraceEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessKey {
     Enter,
+    PrimaryEnter,
     Escape,
     Tab,
     F6,
@@ -137,7 +138,7 @@ pub struct HarnessHierarchyEntry {
 impl HarnessKey {
     fn into_iced(self) -> keyboard::Key {
         keyboard::Key::Named(match self {
-            Self::Enter => keyboard::key::Named::Enter,
+            Self::Enter | Self::PrimaryEnter => keyboard::key::Named::Enter,
             Self::Escape => keyboard::key::Named::Escape,
             Self::Tab => keyboard::key::Named::Tab,
             Self::F6 => keyboard::key::Named::F6,
@@ -300,6 +301,7 @@ impl PersistentSurface {
 /// It acknowledges Iced window actions in memory and routes every emitted
 /// product message back through [`NativeDesktop::update`].
 pub struct NativeDesktopHarness {
+    _motion: crate::motion::SettledMotion,
     desktop: NativeDesktop,
     surfaces: BTreeMap<window::Id, PersistentSurface>,
     trace: Vec<HarnessTraceEntry>,
@@ -312,8 +314,10 @@ pub struct NativeDesktopHarness {
 
 impl NativeDesktopHarness {
     pub fn boot(startup: NativeDesktopStartup) -> Result<Self, HarnessError> {
+        let motion = crate::motion::SettledMotion::new();
         let (desktop, task) = NativeDesktop::boot(startup);
         let mut harness = Self {
+            _motion: motion,
             desktop,
             surfaces: BTreeMap::new(),
             trace: Vec::new(),
@@ -643,11 +647,36 @@ impl NativeDesktopHarness {
         window: HarnessWindow,
         node: &HarnessNode,
     ) -> Result<(), HarnessError> {
+        let bounds = self.find_id_bounds(window, harness_target::card_id(node.id()))?;
+        let position = IcedPoint::new(bounds.center_x(), bounds.y + 24.0);
+        self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        self.record(window, format!("click Cards hierarchy node {node:?}"));
+        Ok(())
+    }
+
+    pub fn toggle_cards_group(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
+        let position = self
+            .find_id_bounds(window, harness_target::card_disclosure_id(node.id()))?
+            .center();
+        self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        self.record(window, format!("toggle Cards group {node:?}"));
+        Ok(())
+    }
+
+    pub fn right_click_cards_node(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
         let position = self
             .find_id_bounds(window, harness_target::card_id(node.id()))?
             .center();
-        self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
-        self.record(window, format!("click Cards hierarchy node {node:?}"));
+        self.dispatch_events(window, Self::click_events(position, mouse::Button::Right))?;
+        self.record(window, format!("right-click Cards hierarchy node {node:?}"));
         Ok(())
     }
 
@@ -659,9 +688,8 @@ impl NativeDesktopHarness {
         window: HarnessWindow,
         node: &HarnessNode,
     ) -> Result<(), HarnessError> {
-        let position = self
-            .find_id_bounds(window, harness_target::card_id(node.id()))?
-            .center();
+        let bounds = self.find_id_bounds(window, harness_target::card_id(node.id()))?;
+        let position = IcedPoint::new(bounds.center_x(), bounds.y + 24.0);
         for _ in 0..2 {
             self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
         }
@@ -721,7 +749,14 @@ impl NativeDesktopHarness {
     ) -> Result<(), HarnessError> {
         self.dispatch_events(
             window,
-            Self::key_tap_events(key.into_iced(), keyboard::Modifiers::NONE),
+            Self::key_tap_events(
+                key.into_iced(),
+                if key == HarnessKey::PrimaryEnter {
+                    keyboard::Modifiers::COMMAND
+                } else {
+                    keyboard::Modifiers::NONE
+                },
+            ),
         )?;
         self.record(window, format!("press key {key:?}"));
         Ok(())
@@ -995,7 +1030,10 @@ impl NativeDesktopHarness {
         let position = IcedPoint::new(size.width + 1.0, size.height + 1.0);
         self.dispatch_events(
             window,
-            [Event::Mouse(mouse::Event::CursorMoved { position })],
+            [
+                Event::Mouse(mouse::Event::CursorMoved { position }),
+                Event::Mouse(mouse::Event::CursorLeft),
+            ],
         )?;
         self.record(window, "move pointer outside window".to_owned());
         Ok(())
@@ -1648,10 +1686,30 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
-    /// Drags opaque hierarchy nodes through a projection-specific set of
-    /// production targets. Cards use their live insertion strips; Explorer
-    /// uses the before/inside/after regions of its complete row.
     pub fn drag_hierarchy_node(
+        &mut self,
+        window: HarnessWindow,
+        surface: HarnessHierarchySurface,
+        source: &HarnessNode,
+        destination: &HarnessNode,
+        position: HarnessDropPosition,
+    ) -> Result<(), HarnessError> {
+        self.preview_hierarchy_move(window, surface, source, destination, position)?;
+        self.release_hierarchy_drag(window)
+    }
+
+    pub fn release_hierarchy_drag(&mut self, window: HarnessWindow) -> Result<(), HarnessError> {
+        self.dispatch_events(
+            window,
+            [Event::Mouse(mouse::Event::ButtonReleased(
+                mouse::Button::Left,
+            ))],
+        )?;
+        self.record(window, "release hierarchy drag".to_owned());
+        Ok(())
+    }
+
+    pub fn preview_hierarchy_move(
         &mut self,
         window: HarnessWindow,
         surface: HarnessHierarchySurface,
@@ -1663,7 +1721,13 @@ impl NativeDesktopHarness {
             HarnessHierarchySurface::Explorer => harness_target::explorer_row_id(source.id()),
             HarnessHierarchySurface::Cards => harness_target::card_id(source.id()),
         };
-        let source_position = self.find_id_bounds(window, source_id)?.center();
+        let source_bounds = self.find_id_bounds(window, source_id)?;
+        let source_position = match surface {
+            HarnessHierarchySurface::Explorer => source_bounds.center(),
+            HarnessHierarchySurface::Cards => {
+                IcedPoint::new(source_bounds.center_x(), source_bounds.y + 24.0)
+            }
+        };
         let threshold_position = IcedPoint::new(source_position.x + 5.0, source_position.y);
         self.dispatch_events(
             window,
@@ -1684,27 +1748,29 @@ impl NativeDesktopHarness {
                 Self::drop_position(bounds, position)
             }
             HarnessHierarchySurface::Cards => {
-                let id = match position {
-                    HarnessDropPosition::Before => {
-                        harness_target::card_drop_before_id(destination.id())
+                let bounds =
+                    self.find_id_bounds(window, harness_target::card_id(destination.id()))?;
+                let list = self.find_id_bounds(window, HarnessTarget::CardsList.id())?;
+                if bounds.width < list.width * 0.75 {
+                    match position {
+                        HarnessDropPosition::Before => {
+                            IcedPoint::new(bounds.x + 16.0, bounds.center_y())
+                        }
+                        HarnessDropPosition::After => {
+                            IcedPoint::new(bounds.x + bounds.width - 16.0, bounds.center_y())
+                        }
+                        HarnessDropPosition::Into => bounds.center(),
                     }
-                    HarnessDropPosition::Into => harness_target::card_id(destination.id()),
-                    HarnessDropPosition::After => {
-                        harness_target::card_drop_after_id(destination.id())
-                    }
-                };
-                let bounds = self.find_id_bounds(window, id.clone())?;
-                bounds.center()
+                } else {
+                    Self::drop_position(bounds, position)
+                }
             }
         };
         self.dispatch_events(
             window,
-            [
-                Event::Mouse(mouse::Event::CursorMoved {
-                    position: destination_position,
-                }),
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
-            ],
+            [Event::Mouse(mouse::Event::CursorMoved {
+                position: destination_position,
+            })],
         )?;
         self.record(
             window,
@@ -2068,6 +2134,23 @@ impl NativeDesktopHarness {
             .explorer()
             .rows()
             .into_iter()
+            .map(|row| row.title.to_owned())
+            .collect())
+    }
+
+    pub fn preview_hierarchy_titles(&self) -> Result<Vec<String>, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let Some(NativeWindow::Project(state)) = self.desktop.windows.get(&id) else {
+            return Err(HarnessError::new("project window unavailable"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace unavailable"))?;
+        Ok(workspace
+            .displayed_explorer()
+            .rows()
+            .iter()
             .map(|row| row.title.to_owned())
             .collect())
     }

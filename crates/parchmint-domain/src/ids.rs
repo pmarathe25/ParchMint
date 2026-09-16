@@ -87,8 +87,16 @@ impl NodeId {
         Self(Self::RESEARCH_ROOT_BYTES)
     }
 
+    pub const fn unfiled_root() -> Self {
+        let mut bytes = Self::RESEARCH_ROOT_BYTES;
+        bytes[15] = 3;
+        Self(bytes)
+    }
+
     pub fn is_fixed_root(self) -> bool {
-        self.0 == Self::MANUSCRIPT_ROOT_BYTES || self.0 == Self::RESEARCH_ROOT_BYTES
+        self == Self::manuscript_root()
+            || self == Self::research_root()
+            || self == Self::unfiled_root()
     }
 }
 

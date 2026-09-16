@@ -73,6 +73,7 @@ fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_a
     let file = TemporaryFile::new("versioned");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        reduced_motion: true,
         appearance: AppearanceMode::Dark,
         recent_projects: vec![
             RecentProject::new("Second", "/work/second.parchment", 20),
@@ -349,6 +350,7 @@ fn application_preferences_do_not_modify_project_state() {
     fs::write(project.path(), project_state).expect("project fixture should be written");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        reduced_motion: true,
         appearance: AppearanceMode::Dark,
         recent_projects: vec![RecentProject::new(
             "Project",
@@ -364,4 +366,21 @@ fn application_preferences_do_not_modify_project_state() {
         fs::read(project.path()).expect("preference save must not rewrite a project"),
         project_state
     );
+}
+
+#[test]
+fn reduced_motion_defaults_for_existing_files_and_persists_through_the_service() {
+    let file = TemporaryFile::new("reduced-motion");
+    fs::write(file.path(), br#"{"version":2,"revision":4,"preferences":{"appearance":"Dark","recent_projects":[],"global_dictionary":[]}}"#).unwrap();
+    let store: Arc<dyn PreferenceStore> = Arc::new(FilePreferenceStore::new(file.path()));
+    let service = PreferenceCoordinator::new(store);
+    let current = block_on(service.load()).unwrap();
+    assert!(!current.values.reduced_motion);
+    let saved =
+        block_on(service.update(current.revision, PreferenceCommand::SetReducedMotion(true)))
+            .unwrap();
+    assert!(saved.values.reduced_motion);
+    let reopened = block_on(FilePreferenceStore::new(file.path()).load()).unwrap();
+    assert_eq!(reopened, saved);
+    assert_eq!(reopened.values.appearance, AppearanceMode::Dark);
 }

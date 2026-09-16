@@ -466,6 +466,7 @@ pub struct BlockLayoutGeometry {
     scalars: Vec<EditorScalarGeometry>,
     carets: Vec<(DocumentPosition, EditorRectangle)>,
     block_kinds: Vec<(DocumentPosition, DocumentPosition, SemanticBlockKind)>,
+    links: Vec<(EditorSelection, String)>,
     document_range: EditorSelection,
     content_height: f32,
     height_index: Arc<Vec<LineHeightEntry>>,
@@ -576,6 +577,14 @@ impl BlockLayoutGeometry {
 
         Ok(Self {
             block: input.block,
+            links: input
+                .mark_ranges
+                .iter()
+                .filter_map(|mark| match &mark.mark {
+                    SemanticInlineMark::Link(url) => Some((mark.range, url.clone())),
+                    _ => None,
+                })
+                .collect(),
             scalars,
             carets,
             block_kinds: input
@@ -604,6 +613,20 @@ impl BlockLayoutGeometry {
 
     pub const fn layout_work(&self) -> LayoutWork {
         self.work
+    }
+
+    pub(crate) fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        let scalar = self.scalars.iter().find(|scalar| {
+            scalar.link
+                && x >= scalar.bounds.x
+                && x < scalar.bounds.x + scalar.bounds.width
+                && y >= scalar.bounds.y
+                && y < scalar.bounds.y + scalar.bounds.height
+        })?;
+        self.links.iter().find_map(|(range, url)| {
+            (range.start() <= scalar.position && scalar.position < range.end())
+                .then_some(url.as_str())
+        })
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<DocumentPosition> {

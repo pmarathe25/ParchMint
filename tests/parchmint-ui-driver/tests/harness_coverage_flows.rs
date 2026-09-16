@@ -294,10 +294,47 @@ fn author_can_drag_a_research_note_onto_the_primary_pane() {
 }
 
 #[test]
-fn author_can_focus_a_two_pane_comparison_and_restore_its_sidebars() {
+fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
     let run = IsolatedRun::new("focused-two-pane-authoring").expect("isolated run");
     let project = run.root().join("focused-two-pane-authoring.parchmint");
     let harness = create_project(&run, &project, "Focused Two Pane Authoring");
+
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Primary),
+        )
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "Writing without sidebars.")
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("Writing without sidebars.")
+    );
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
+            .unwrap()
+    );
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::InspectorTitle)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .unwrap()
+    );
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Primary),
+        )
+        .unwrap();
 
     create_document(&harness, "Research", "Harbor Ledger");
     let note = harness
@@ -308,26 +345,156 @@ fn author_can_focus_a_two_pane_comparison_and_restore_its_sidebars() {
         .expect("open the research note beside the manuscript");
     assert!(
         harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
             .expect("inspect Explorer visibility before focusing")
     );
     harness
-        .click_text(HarnessWindow::Project, "Focus pane")
-        .expect("focus the two-pane comparison");
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Companion),
+        )
+        .expect("focus the companion pane");
     assert!(
         !harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    assert!(matches!(
+        harness.focus_target(HarnessWindow::Project).unwrap(),
+        parchmint_desktop::FocusTarget::EditorDocument(_)
+    ));
+    harness
+        .type_focused(HarnessWindow::Project, "A note without sidebars.")
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A note without sidebars.")
+    );
+    for _ in 0..7 {
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::F6)
+            .unwrap();
+        assert!(!matches!(
+            harness.focus_target(HarnessWindow::Project).unwrap(),
+            parchmint_desktop::FocusTarget::Explorer | parchmint_desktop::FocusTarget::Inspector
+        ));
+    }
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(
+                HarnessWindow::Project,
+                std::path::PathBuf::from(root).join("focused-writing"),
+            )
+            .unwrap();
+    }
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
             .expect("Explorer should be hidden while panes are focused")
     );
     harness
-        .click_text(HarnessWindow::Project, "Restore panes")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Companion),
+        )
         .expect("restore authoring sidebars");
     assert!(
         harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerAdd)
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
             .expect("Explorer should return to its prior visibility")
     );
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Primary),
+        )
+        .unwrap();
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Primary),
+        )
+        .unwrap();
+    let companion = harness
+        .active_editor_document_id(EditorPane::Companion)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    assert_eq!(
+        harness
+            .active_editor_document_id(EditorPane::Companion)
+            .unwrap(),
+        companion
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::PaneFocus(EditorPane::Primary),
+        )
+        .unwrap();
     close(harness);
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert!(
+        reopened
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
+            .unwrap()
+    );
+    assert!(
+        !reopened
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    reopened
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .active_editor_document_id(EditorPane::Companion)
+            .unwrap(),
+        companion
+    );
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains("A note without sidebars.")
+    );
+    close(reopened);
 }
 
 #[test]
@@ -350,7 +517,7 @@ fn author_opens_existing_global_search_with_the_standard_project_shortcut() {
 }
 
 #[test]
-fn global_search_opened_from_cards_omits_the_editor_surface() {
+fn global_search_from_overview_opens_the_editor_search_sidebar() {
     let run = IsolatedRun::new("global-search-route").expect("isolated run");
     let project = run.root().join("global-search-route.parchmint");
     let harness = create_project(&run, &project, "Global Search Route");
@@ -362,7 +529,7 @@ fn global_search_opened_from_cards_omits_the_editor_surface() {
         )
         .expect("open Cards before searching");
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ExplorerSearch)
+        .press_command_shift_key(HarnessWindow::Project, 'f')
         .expect("open global search from Explorer");
     assert!(
         harness
@@ -370,7 +537,7 @@ fn global_search_opened_from_cards_omits_the_editor_surface() {
             .expect("observe global-search query")
     );
     assert!(
-        !harness
+        harness
             .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
             .expect("observe editor replacement")
     );
@@ -624,12 +791,24 @@ fn author_can_export_the_manuscript_to_a_controlled_html_artifact() {
         )
         .expect("write manuscript body");
     harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
         .replace_target(
             HarnessWindow::Project,
             HarnessTarget::InspectorSynopsis,
             "Private outline material",
         )
         .expect("set non-exported synopsis");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Editor),
+        )
+        .unwrap();
     create_document(&harness, "Research", "Harbor Archive");
     harness
         .right_click_text(HarnessWindow::Project, "Harbor Archive")

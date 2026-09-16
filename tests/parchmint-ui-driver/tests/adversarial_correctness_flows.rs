@@ -1,6 +1,6 @@
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessDropPosition, HarnessHierarchySurface,
-    HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
+    HarnessKey, HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
 };
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
@@ -33,15 +33,21 @@ fn rapid_nested_moves_and_renames_keep_one_consistent_hierarchy() {
         .click_text(HarnessWindow::Project, "Opening")
         .expect("select moved Opening");
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::InspectorTitle)
-        .expect("begin renaming the moved document in Inspector");
+        .right_click_text(HarnessWindow::Project, "Opening")
+        .expect("open the moved document menu");
+    harness
+        .click_text(HarnessWindow::Project, "Rename")
+        .expect("rename action");
     harness
         .replace_target(
             HarnessWindow::Project,
-            HarnessTarget::InspectorTitle,
+            HarnessTarget::ExplorerRename,
             "Revised Opening",
         )
-        .expect("rename moved document in Inspector");
+        .expect("name the moved document");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("commit title");
 
     let titles = harness.hierarchy_titles().expect("read final hierarchy");
     assert!(
@@ -279,7 +285,7 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
         )
         .expect("set local search query");
     assert!(
-        visible(&harness, "1 of 2 matches · Left pane"),
+        visible(&harness, "1 of 2 matches"),
         "local search should find both occurrences"
     );
     harness
@@ -314,9 +320,6 @@ fn replacing_after_switching_search_modes_does_not_use_stale_query_state() {
             HarnessTarget::GlobalReplacementReview,
         )
         .expect("open replacement preview");
-    harness
-        .click_text(HarnessWindow::Project, "Refresh preview")
-        .expect("revalidate current selection");
     harness
         .click_text(HarnessWindow::Project, "Apply replacement")
         .expect("apply replacement to both documents");

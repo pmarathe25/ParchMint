@@ -960,7 +960,7 @@ fn domain_manifest(
     structure.insert("version".into(), toml::Value::Integer(1));
     let mut nodes = Vec::new();
     let mut paths = CanonicalProjectPathMap::default();
-    for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+    for section in ProjectSection::ALL {
         encode_node_children(project, section.root_id(), section, &mut nodes, &mut paths)?;
     }
     structure.insert("nodes".into(), toml::Value::Array(nodes));
@@ -1282,6 +1282,7 @@ fn encode_node_children(
                 let directory = match section {
                     ProjectSection::Manuscript => "manuscript",
                     ProjectSection::Research => "research",
+                    ProjectSection::Unfiled => "unfiled",
                 };
                 let path = CanonicalRelativePath::parse(format!(
                     "{directory}/{}.html",
@@ -1318,6 +1319,7 @@ fn encode_deletion_tombstone(tombstone: &DeletionTombstone) -> Result<toml::Valu
             match tombstone.section {
                 ProjectSection::Manuscript => "manuscript",
                 ProjectSection::Research => "research",
+                ProjectSection::Unfiled => "unfiled",
             }
             .into(),
         ),
@@ -1425,6 +1427,7 @@ fn encode_node_kind(value: &mut toml::Table, kind: NodeKind) {
                     match section {
                         ProjectSection::Manuscript => "manuscript",
                         ProjectSection::Research => "research",
+                        ProjectSection::Unfiled => "unfiled",
                     }
                     .into(),
                 ),
@@ -1804,6 +1807,7 @@ fn decode_section(value: &str) -> Result<ProjectSection, FormatError> {
     match value {
         "manuscript" => Ok(ProjectSection::Manuscript),
         "research" => Ok(ProjectSection::Research),
+        "unfiled" => Ok(ProjectSection::Unfiled),
         _ => Err(FormatError::InvalidManifest(
             "project section is invalid".into(),
         )),
@@ -2096,7 +2100,10 @@ fn validate_paths<'a>(
 }
 
 fn is_document_path(path: &str) -> bool {
-    (path.starts_with("manuscript/") || path.starts_with("research/")) && path.ends_with(".html")
+    (path.starts_with("manuscript/")
+        || path.starts_with("research/")
+        || path.starts_with("unfiled/"))
+        && path.ends_with(".html")
 }
 
 fn is_annotation_path(path: &str) -> bool {
@@ -3680,6 +3687,71 @@ mod tests {
                     resources,
                 })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn unfiled_documents_round_trip_and_move_without_changing_identity() {
+        use parchmint_domain::{ProjectCommand, apply_project_command};
+        let project_id = ProjectId::from_bytes([1; 16]);
+        let node = NodeId::from_bytes([2; 16]);
+        let document = DomainDocumentId::from_bytes([3; 16]);
+        let empty = Project::new(project_id);
+        let draft = apply_project_command(
+            &empty,
+            empty.revision,
+            ProjectCommand::create_document(node, document, NodeId::unfiled_root(), 0, "Untitled"),
+        )
+        .unwrap()
+        .project;
+        let bodies = BTreeMap::from([(document, "<p>Write before organizing.</p>".to_owned())]);
+        let encoding = codec()
+            .encode_domain_project_with_frontier(
+                &draft,
+                &bodies,
+                &BTreeMap::new(),
+                &CanonicalProjectPathMap::default(),
+                &CanonicalPersistenceFrontier::default(),
+            )
+            .unwrap();
+        let draft_path = &encoding.paths.documents[&document];
+        assert!(draft_path.as_str().starts_with("unfiled/"));
+        let manifest = codec()
+            .decode_manifest(
+                &encoding.resources[&CanonicalRelativePath::parse("project.toml").unwrap()].bytes,
+            )
+            .unwrap();
+        let (decoded, paths) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, draft);
+        assert_eq!(paths, encoding.paths);
+        let filed = apply_project_command(
+            &decoded,
+            decoded.revision,
+            ProjectCommand::move_node(node, NodeId::manuscript_root(), 0),
+        )
+        .unwrap()
+        .project;
+        let moved = codec()
+            .encode_domain_project_with_frontier(
+                &filed,
+                &bodies,
+                &BTreeMap::new(),
+                &paths,
+                &encoding.persistence_frontier,
+            )
+            .unwrap();
+        assert!(
+            moved.paths.documents[&document]
+                .as_str()
+                .starts_with("manuscript/")
+        );
+        assert!(moved.deletions.contains(draft_path));
+        assert_eq!(
+            moved.resources[&moved.paths.documents[&document]].bytes,
+            encoding.resources[draft_path].bytes
         );
     }
 

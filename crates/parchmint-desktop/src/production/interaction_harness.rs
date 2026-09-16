@@ -93,6 +93,8 @@ enum HarnessAction {
     HierarchyNode(String),
     ClickHierarchyNode(HarnessWindow, HarnessNode),
     ClickCardsNode(HarnessWindow, HarnessNode),
+    ToggleCardsGroup(HarnessWindow, HarnessNode),
+    RightClickCardsNode(HarnessWindow, HarnessNode),
     DoubleClickCardsNode(HarnessWindow, HarnessNode),
     SelectHierarchyNode(HarnessWindow, HarnessNode, HarnessSelectionGesture),
     RightClickHierarchyNode(HarnessWindow, HarnessNode),
@@ -107,6 +109,15 @@ enum HarnessAction {
         HarnessNode,
         HarnessDropPosition,
     ),
+    PreviewHierarchyMove(
+        HarnessWindow,
+        HarnessHierarchySurface,
+        HarnessNode,
+        HarnessNode,
+        HarnessDropPosition,
+    ),
+    ReleaseHierarchyDrag(HarnessWindow),
+    PreviewHierarchyTitles,
     DragHierarchyNodeToPane(HarnessWindow, HarnessNode, EditorPane),
     ContainsText(HarnessWindow, String),
     TextIsVisible(HarnessWindow, String),
@@ -299,6 +310,10 @@ fn execute_action(
             harness.click_hierarchy_node(window, &node)
         }
         HarnessAction::ClickCardsNode(window, node) => harness.click_cards_node(window, &node),
+        HarnessAction::ToggleCardsGroup(window, node) => harness.toggle_cards_group(window, &node),
+        HarnessAction::RightClickCardsNode(window, node) => {
+            harness.right_click_cards_node(window, &node)
+        }
         HarnessAction::DoubleClickCardsNode(window, node) => {
             harness.double_click_cards_node(window, &node)
         }
@@ -328,6 +343,16 @@ fn execute_action(
         }
         HarnessAction::DragHierarchyNode(window, surface, source, destination, position) => {
             harness.drag_hierarchy_node(window, surface, &source, &destination, position)
+        }
+        HarnessAction::PreviewHierarchyMove(window, surface, source, destination, position) => {
+            harness.preview_hierarchy_move(window, surface, &source, &destination, position)
+        }
+        HarnessAction::ReleaseHierarchyDrag(window) => harness.release_hierarchy_drag(window),
+        HarnessAction::PreviewHierarchyTitles => {
+            return harness
+                .preview_hierarchy_titles()
+                .map(HarnessValue::Texts)
+                .map_err(|error| error.to_string());
         }
         HarnessAction::DragHierarchyNodeToPane(window, source, pane) => {
             harness.drag_hierarchy_node_to_pane(window, &source, pane)
@@ -925,6 +950,24 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    pub fn toggle_cards_group(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ToggleCardsGroup(window, node))?
+            .into_unit()
+    }
+
+    pub fn right_click_cards_node(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::RightClickCardsNode(window, node))?
+            .into_unit()
+    }
+
     /// Double-clicks a mounted Cards row through its stable node target.
     pub fn double_click_cards_node(
         &self,
@@ -1028,6 +1071,37 @@ impl DesktopInteractionHarness {
             position,
         ))?
         .into_unit()
+    }
+
+    pub fn preview_hierarchy_move(
+        &self,
+        window: HarnessWindow,
+        surface: HarnessHierarchySurface,
+        source: HarnessNode,
+        destination: HarnessNode,
+        position: HarnessDropPosition,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::PreviewHierarchyMove(
+            window,
+            surface,
+            source,
+            destination,
+            position,
+        ))?
+        .into_unit()
+    }
+
+    pub fn release_hierarchy_drag(
+        &self,
+        window: HarnessWindow,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ReleaseHierarchyDrag(window))?
+            .into_unit()
+    }
+
+    pub fn preview_hierarchy_titles(&self) -> Result<Vec<String>, InteractionHarnessError> {
+        self.request(HarnessAction::PreviewHierarchyTitles)?
+            .into_texts()
     }
 
     /// Drags an Explorer document onto a production editor-pane drop target.

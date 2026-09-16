@@ -1,7 +1,4 @@
-//! Versioned, application-only workspace state for one ParchMint project.
-//!
-//! Workspace files contain arrangement data only. They are intentionally
-//! separate from project files, project saves, undo, and History.
+//! Per-project window layout, stored outside authored project data.
 
 use parchmint_domain::encode_stable_id as encode_id;
 use std::{
@@ -373,6 +370,13 @@ impl FileWorkspaceStateStore {
                 error.to_string(),
             )
         })?;
+        if !snapshot.layout.split_ratio.is_finite() {
+            return Err(self.storage(
+                "encode",
+                &self.path_for(project),
+                "pane split ratio must be finite",
+            ));
+        }
         let revision = self.revision_now(project)?.next();
         let encoded = serde_json::to_vec(&encode_snapshot(snapshot, revision))
             .map_err(|error| self.storage("encode", &self.path_for(project), error.to_string()))?;

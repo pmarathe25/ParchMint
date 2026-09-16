@@ -1,6 +1,10 @@
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
-    widget::{Operation, Tree, operation::Focusable, tree},
+    widget::{
+        Operation, Tree,
+        operation::{Focusable, Outcome, Scrollable, TextInput},
+        tree,
+    },
 };
 use iced::{Background, Border, Color, Element, Event, Length, Rectangle, Size, Vector, widget};
 
@@ -50,6 +54,8 @@ where
     FocusableRegion {
         id,
         content: content.into(),
+        outline: true,
+        input_enabled: None,
     }
     .into()
 }
@@ -61,15 +67,33 @@ pub(crate) fn f6_region<'a, Message>(
 where
     Message: 'a,
 {
-    region(
-        region_id(target).expect("an F6 region always has a stable widget ID"),
-        content,
-    )
+    FocusableRegion {
+        id: region_id(target).expect("an F6 region always has a stable widget ID"),
+        content: content.into(),
+        outline: target != F6Region::FocusedEditor,
+        input_enabled: None,
+    }
+    .into()
 }
 
-struct FocusableRegion<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
+pub(crate) fn input_scope<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    enabled: bool,
+) -> Element<'a, Message> {
+    FocusableRegion {
+        id: widget::Id::new("project-input-scope"),
+        content: content.into(),
+        outline: false,
+        input_enabled: Some(enabled),
+    }
+    .into()
+}
+
+struct FocusableRegion<'a, Message, Renderer = iced::Renderer> {
     id: widget::Id,
-    content: Element<'a, Message, Theme, Renderer>,
+    content: Element<'a, Message, iced::Theme, Renderer>,
+    outline: bool,
+    input_enabled: Option<bool>,
 }
 
 #[derive(Default)]
@@ -91,8 +115,8 @@ impl Focusable for State {
     }
 }
 
-impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for FocusableRegion<'_, Message, Theme, Renderer>
+impl<Message, Renderer> Widget<Message, iced::Theme, Renderer>
+    for FocusableRegion<'_, Message, Renderer>
 where
     Renderer: renderer::Renderer,
 {
@@ -134,11 +158,16 @@ where
         renderer: &Renderer,
         operation: &mut dyn Operation,
     ) {
-        operation.focusable(
-            Some(&self.id),
-            layout.bounds(),
-            tree.state.downcast_mut::<State>(),
-        );
+        if self.input_enabled == Some(false) {
+            return;
+        }
+        if self.input_enabled.is_none() {
+            operation.focusable(
+                Some(&self.id),
+                layout.bounds(),
+                tree.state.downcast_mut::<State>(),
+            );
+        }
         operation.traverse(&mut |operation| {
             self.content.as_widget_mut().operate(
                 &mut tree.children[0],
@@ -160,6 +189,12 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if self.input_enabled == Some(false) && !matches!(event, Event::Window(_)) {
+            return;
+        }
+        if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
+            tree.state.downcast_mut::<State>().focused = false;
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -193,7 +228,7 @@ where
         &self,
         tree: &Tree,
         renderer: &mut Renderer,
-        theme: &Theme,
+        theme: &iced::Theme,
         style: &renderer::Style,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
@@ -208,12 +243,12 @@ where
             cursor,
             viewport,
         );
-        if tree.state.downcast_ref::<State>().focused {
+        if self.outline && tree.state.downcast_ref::<State>().focused {
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: layout.bounds(),
                     border: Border {
-                        color: Color::from_rgb8(58, 132, 245),
+                        color: theme.palette().primary,
                         width: 2.0,
                         radius: 3.0.into(),
                     },
@@ -231,7 +266,10 @@ where
         renderer: &Renderer,
         viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, Renderer>> {
+        if self.input_enabled == Some(false) {
+            return None;
+        }
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
@@ -242,16 +280,84 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> From<FocusableRegion<'a, Message, Theme, Renderer>>
-    for Element<'a, Message, Theme, Renderer>
+impl<'a, Message, Renderer> From<FocusableRegion<'a, Message, Renderer>>
+    for Element<'a, Message, iced::Theme, Renderer>
 where
     Message: 'a,
-    Theme: 'a,
     Renderer: renderer::Renderer + 'a,
 {
-    fn from(region: FocusableRegion<'a, Message, Theme, Renderer>) -> Self {
+    fn from(region: FocusableRegion<'a, Message, Renderer>) -> Self {
         Element::new(region)
     }
+}
+
+pub(crate) fn reveal_text_input<Message: Send + 'static>(
+    scroll_id: widget::Id,
+    input_id: widget::Id,
+) -> iced::Task<Message> {
+    struct LocateInput {
+        scroll_id: widget::Id,
+        input_id: widget::Id,
+        viewport: Option<(Rectangle, Vector)>,
+        input: Option<Rectangle>,
+    }
+
+    impl Operation<f32> for LocateInput {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<f32>)) {
+            operate(self);
+        }
+
+        fn scrollable(
+            &mut self,
+            id: Option<&widget::Id>,
+            bounds: Rectangle,
+            _content_bounds: Rectangle,
+            translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            if id == Some(&self.scroll_id) {
+                self.viewport = Some((bounds, translation));
+            }
+        }
+
+        fn text_input(
+            &mut self,
+            id: Option<&widget::Id>,
+            bounds: Rectangle,
+            _state: &mut dyn TextInput,
+        ) {
+            if id == Some(&self.input_id) {
+                self.input = Some(bounds);
+            }
+        }
+
+        fn finish(&self) -> Outcome<f32> {
+            let (Some((viewport, translation)), Some(input)) = (self.viewport, self.input) else {
+                return Outcome::None;
+            };
+            let top = input.y - translation.y;
+            let bottom = top + input.height;
+            let delta = if top < viewport.y {
+                top - viewport.y
+            } else {
+                (bottom - viewport.y - viewport.height).max(0.0)
+            };
+            Outcome::Some(delta)
+        }
+    }
+
+    iced::advanced::widget::operate(LocateInput {
+        scroll_id: scroll_id.clone(),
+        input_id,
+        viewport: None,
+        input: None,
+    })
+    .then(move |y| {
+        widget::operation::scroll_by(
+            scroll_id.clone(),
+            widget::operation::AbsoluteOffset { x: 0.0, y },
+        )
+    })
 }
 
 #[cfg(test)]

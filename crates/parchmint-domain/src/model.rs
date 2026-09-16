@@ -9,13 +9,17 @@ use crate::{
 pub enum ProjectSection {
     Manuscript,
     Research,
+    Unfiled,
 }
 
 impl ProjectSection {
+    pub const ALL: [Self; 3] = [Self::Manuscript, Self::Research, Self::Unfiled];
+
     pub const fn root_id(self) -> NodeId {
         match self {
             Self::Manuscript => NodeId::manuscript_root(),
             Self::Research => NodeId::research_root(),
+            Self::Unfiled => NodeId::unfiled_root(),
         }
     }
 }
@@ -85,6 +89,7 @@ impl ProjectNode {
         let (id, title) = match section {
             ProjectSection::Manuscript => (NodeId::manuscript_root(), "Manuscript"),
             ProjectSection::Research => (NodeId::research_root(), "Research"),
+            ProjectSection::Unfiled => (NodeId::unfiled_root(), "Unfiled"),
         };
         Self {
             id,
@@ -123,7 +128,7 @@ where
 impl OrderedTree<NodeId, ProjectNode> {
     pub fn new_project() -> Self {
         let mut tree = Self::default();
-        for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+        for section in ProjectSection::ALL {
             let node = ProjectNode::root(section);
             tree.children.insert(node.id, Vec::new());
             tree.nodes.insert(node.id, node);
@@ -380,15 +385,16 @@ impl OrderedTree<NodeId, ProjectNode> {
     pub fn validate(&self) -> Result<(), DomainError> {
         self.validate_fixed_root(ProjectSection::Manuscript, "Manuscript")?;
         self.validate_fixed_root(ProjectSection::Research, "Research")?;
+        self.validate_fixed_root(ProjectSection::Unfiled, "Unfiled")?;
         if self
             .nodes
             .values()
             .filter(|node| matches!(node.kind, NodeKind::Root(_)))
             .count()
-            != 2
+            != ProjectSection::ALL.len()
         {
             return Err(DomainError::InvalidTree {
-                reason: "the tree must have exactly two fixed roots",
+                reason: "the tree must contain each fixed root exactly once",
             });
         }
 
@@ -444,6 +450,7 @@ impl OrderedTree<NodeId, ProjectNode> {
         let mut active = BTreeSet::new();
         self.visit(NodeId::manuscript_root(), &mut visited, &mut active)?;
         self.visit(NodeId::research_root(), &mut visited, &mut active)?;
+        self.visit(NodeId::unfiled_root(), &mut visited, &mut active)?;
         if visited.len() != self.nodes.len() {
             return Err(DomainError::InvalidTree {
                 reason: "all nodes must be reachable from one fixed root",

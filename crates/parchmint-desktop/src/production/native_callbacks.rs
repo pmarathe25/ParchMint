@@ -194,7 +194,8 @@ impl ProductionDesktopUi {
         };
         let preferences = block_on(self.preferences.load())
             .map_err(|error| DesktopUiError::new(error.to_string()))?;
-        let recent_projects = preferences.values.recent_projects;
+        let recent_projects =
+            refresh_recent_projects(self.preferences.as_ref()).map_err(DesktopUiError::new)?;
         let appearance_mode = capture
             .as_ref()
             .map_or(preferences.values.appearance, |capture| {
@@ -343,6 +344,28 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
         })
     }
 
+    fn resume_last_project(&self) -> bool {
+        true
+    }
+
+    fn recent_projects(&self) -> Result<Option<Vec<parchmint_preferences::RecentProject>>, String> {
+        refresh_recent_projects(self.preferences.as_ref()).map(Some)
+    }
+
+    fn reduced_motion(&self) -> bool {
+        block_on(self.preferences.load()).is_ok_and(|snapshot| snapshot.values.reduced_motion)
+    }
+
+    fn set_reduced_motion(&self, value: bool) -> Result<(), String> {
+        let current = block_on(self.preferences.load()).map_err(|error| error.to_string())?;
+        block_on(self.preferences.update(
+            current.revision,
+            parchmint_preferences::PreferenceCommand::SetReducedMotion(value),
+        ))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
     fn set_appearance(&self, mode: AppearanceMode) -> Result<ResolvedAppearance, String> {
         if mode == AppearanceMode::System {
             let system = block_on(self.platform.system_appearance.current_appearance())
@@ -375,4 +398,21 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
     fn project_window_destroyed(&self, window: WindowCapability) {
         self.registry.close_window(window);
     }
+}
+
+fn refresh_recent_projects(
+    preferences: &dyn PreferenceService,
+) -> Result<Vec<parchmint_preferences::RecentProject>, String> {
+    let mut current = block_on(preferences.load()).map_err(|error| error.to_string())?;
+    let missing = current.values.recent_projects.iter().filter(|project| {
+        matches!(std::fs::metadata(&project.path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    }).map(|project| project.path.clone()).collect::<Vec<_>>();
+    for path in missing {
+        current = block_on(preferences.update(
+            current.revision,
+            parchmint_preferences::PreferenceCommand::RemoveRecentProject(path),
+        ))
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(current.values.recent_projects)
 }

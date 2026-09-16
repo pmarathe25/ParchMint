@@ -9,36 +9,43 @@ Shortcuts use **Ctrl** on Windows and Linux or **Command** on macOS, called the
 
 ## Create or open a project
 
-From the launcher, select **Create Project**, enter a title, choose a folder,
-and optionally enter an author name. New projects contain one Manuscript document,
-**Untitled Document**, and an empty Research section.
+ParchMint reopens your most recently opened project. On first launch, or when
+that project cannot open, it shows the project chooser.
 
-Select a recent project to reopen it, or choose **Open Project** and its folder.
-Each project has one writable session; use its existing window if it is already
-open.
+Click the project title at the top left to create or open another project, or
+choose a recent project. Narrow windows show the project icon instead. Deleted
+project folders are removed from recents when the chooser opens.
+
+Choose **Create Project**, enter a title, and choose a folder. New projects contain
+one Manuscript document, **Untitled Document**, and an empty Research section.
+Each project has one writable session; opening it again focuses its existing window.
 
 ## Navigate the workspace
 
 | Area | Use |
 | --- | --- |
-| Explorer | Organize groups and documents under Manuscript and Research |
+| Explorer | Navigate documents while writing in Editor |
 | Editor | Write and format documents in one or two panes |
-| Outline | Review the hierarchy, Synopsis, and metadata as compact rows |
-| Inspector | Edit the selected item's title, Synopsis, and metadata; find document comments |
+| Overview | Create the project structure, edit planning details, and rearrange cards |
+| Comments | Find and navigate document comments |
 
-The top ribbon switches between **Editor** and **Outline** and opens History,
-Recently Deleted, Export, and Settings. The status bar shows document or selected
-word counts, save state, and sidebar controls.
+The top bar switches between **Editor** and **Overview**. Icons at the top right
+open History, Recently Deleted, Export, and Settings. Hover to see their names;
+the active screen has an underline. The status bar shows word counts, save state,
+and sidebar controls.
 
 Drag dividers to resize sidebars and panes. Press **F6** to move focus between
 workspace regions.
 
 ## Organize documents
 
-Select a destination in Explorer, open **+ New**, and choose **Document** or
-**Group**. The menu shows the destination; enter a name to finish. Row context
-menus offer the same actions. Groups can contain groups and documents; documents
-cannot have children.
+In Overview, use **+** beside Manuscript, Research, or a group to create a document
+or group there. Enter a name, then write its synopsis. Click any synopsis or
+metadata value to edit it; click elsewhere or press Escape to finish. Right-click a group’s header or the space around its cards to create items
+inside it; right-click the Overview background to create at the section root.
+Explorer’s right-click menu also supports creation. Groups can contain groups
+and documents. Choose **Rename** from an item’s context menu or press **F2**;
+Enter confirms and Escape cancels.
 
 Drag rows before or after siblings, into a group, or between Manuscript and
 Research. **Shift** selects a range; the primary modifier adds individual rows.
@@ -49,23 +56,61 @@ press **Enter**, edit, or deliberately open it to keep the tab. Manuscript opens
 in the primary pane; Research normally opens in the companion pane. Closing a
 tab leaves its document in the project.
 
-The pane menu's **Open beside** shows the document in another pane. **Focus pane**
-hides or restores sidebars. When both panes show the same document, edits,
+Use the split button at the right end of the tab bar to open the companion pane.
+The button stays at the right edge and is highlighted while the companion is open.
+It keeps its tabs when hidden; the first opening shows the current document beside itself.
+Drag tabs between panes, or drop an Explorer document into either pane to open it.
+Tabs fit their titles; the overflow button lists documents that do not fit.
+Each pane’s upper-right button expands that pane into a temporary focus view.
+Click it again to restore the split and sidebars. When both panes show the same document, edits,
 comments, undo, saves, and word counts are shared; cursors, selections, scrolling,
 and local searches remain independent.
 
-In Outline, select a row to edit its details in Inspector. Drag to reorganize,
-or double-click a document to open Editor.
+Each editor pane has a **+** button for a new tab (primary modifier plus **T**).
+Start writing before choosing a location. **Save** (primary modifier plus **S**)
+asks for a name and a location in Manuscript or Research. Closing a changed draft
+offers Save, Don’t Save, and Cancel. Empty, unchanged tabs close without creating
+project documents. Drafts receive autosave and recovery protection; their words
+are excluded from manuscript totals and export until filed in Manuscript.
+
+Overview has its own Manuscript/Research switch and group disclosures. Collapsing
+Explorer groups does not hide cards. Sibling documents share a grid row; groups
+remain separate headings. Click synopsis or metadata text to edit it, drag a title
+to reorganize, or double-click a document title to open Editor.
+Cards show the full synopsis and configured metadata. Their word counts come
+from document text; groups total their descendants, including collapsed groups.
+
+After naming a new card, focus moves to its synopsis. While writing a synopsis,
+press the primary modifier plus **Enter** to add the next document in the same
+group; add **Shift** to create a group.
+
+Click a group heading to expand or collapse it. Its synopsis and metadata sit
+above its children inside the expanded group.
+Drag onto the left or right half of a document card to insert before or after it.
+In a single column, use the upper or lower half. A group’s upper and lower edges
+place items before or after it; its middle accepts items inside the group and expands it.
+The dragged card follows the cursor while surrounding cards preview its placement.
+Explorer keeps its rows in place and marks the proposed destination. Release to keep the move; press **Escape** or leave the drop area to
+restore the original layout. Groups opened for the preview also return to their
+previous state when cancelled. Modifier selection, cut and paste, and Undo work
+with the shared Explorer selection.
 
 ## Write and format
 
-The toolbar acts on the focused editor pane. It provides paragraph styles, bold,
-italic, underline, strikethrough, lists, block quotes, links, scene breaks, page
-breaks, and comments. **B/I/U/S** shows active formatting. With no selection,
-a formatting toggle applies to subsequent typing.
+The formatting controls in the top bar act on the focused editor pane. It provides paragraph styles, bold,
+italic, underline, strikethrough, lists, block quotes, links, and comments.
+The list button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
+Hover a link to see its destination, Ctrl+click (Command+click on macOS) to open it,
+or choose **Copy link address** from its context menu.
+List icons apply bulleted or numbered lists; the break menu contains page
+and scene breaks. Hover over an icon to see its action. **B/I/U/S** shows
+active formatting. With no selection, a formatting toggle applies to subsequent
+typing.
 
-Document and manuscript word counts update as you write. Research does not add
-to the manuscript total. Inspector edits the selected item's Synopsis and metadata.
+Word counts update as you write. In Editor, the status bar labels the current
+Document or text Selection count. In Overview, Selected totals the selected
+chapters and groups without counting overlapping selections twice. Manuscript
+shows all manuscript document text; Research is excluded. Synopsis and metadata never contribute to word counts.
 
 Configure project formatting in **Settings → Styles**. Typography, spacing, and
 pagination have separate groups. Press **Enter** or **Apply** to save a property;
@@ -74,10 +119,10 @@ properties. **Settings → Metadata fields** controls fields and their display o
 
 ## Comment on writing
 
-Select text or place the cursor, then choose **Comment** in the toolbar or
+Select text or place the cursor, then click the speech-bubble icon (**Add comment**) in the toolbar or
 **Add Comment** in the editor context menu. The card beside the text supports
 replies, message edits and deletion, resolving or reopening, and thread deletion.
-Inspector lists document comments; select one to reveal its location.
+The Comments panel lists document comments; select one to reveal its location.
 Comments stay in the project and are excluded from export.
 
 A draft stays attached to its original document and selection while you consult
@@ -107,8 +152,9 @@ current project, or create a named snapshot for a milestone. Comparisons include
 unsaved drafts, added and deleted documents, outline changes, comments, and
 project settings. Opening History does not save a draft.
 
-Removed lines use **−** and added lines use **+**. Formatting-only changes show
-HTML differences; style changes show CSS. Restoring a checkpoint replaces the
+Comparisons show the saved version on the left and current writing on the right,
+with matching paragraphs aligned as you scroll. Changed words are highlighted.
+Formatting-only changes show HTML differences; style changes show CSS. Restoring a checkpoint replaces the
 whole project and creates a new History entry, preserving the earlier timeline.
 
 Notification banners can be dismissed and expire after five seconds. Errors stay
@@ -135,7 +181,8 @@ all projects on this device.
 
 **Settings → Appearance** offers System, Light, and Dark. System follows the OS
 appearance. This choice applies to every window without changing manuscript
-formatting or export.
+formatting or export. Enable **Reduce motion** here to make pane, card, tab, and
+menu transitions immediate. This setting is saved for all windows.
 
 ## Export a manuscript
 

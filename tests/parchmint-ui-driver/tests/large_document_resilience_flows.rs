@@ -231,9 +231,6 @@ fn large_document_project_wide_revision_preserves_every_match_after_restart() {
         )
         .expect("review project-wide replacement");
     harness
-        .click_text(HarnessWindow::Project, "Refresh preview")
-        .expect("revalidate large-document replacement");
-    harness
         .click_text(HarnessWindow::Project, "Apply replacement")
         .expect("apply large-document replacement");
 

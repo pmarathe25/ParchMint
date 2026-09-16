@@ -230,13 +230,14 @@ fn outline(project: &Project) -> String {
         project.author.as_deref().unwrap_or_default(),
         export_description(project.export_settings)
     );
-    for section in [ProjectSection::Manuscript, ProjectSection::Research] {
+    for section in ProjectSection::ALL {
         visit(
             project,
             section.root_id(),
             match section {
                 ProjectSection::Manuscript => "Manuscript",
                 ProjectSection::Research => "Research",
+                ProjectSection::Unfiled => "Unfiled",
             },
             &mut output,
         );

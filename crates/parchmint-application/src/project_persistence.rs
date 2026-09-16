@@ -1734,7 +1734,11 @@ fn normalized_subtree_roots(
     }
 
     let mut visible_order = Vec::new();
-    for root in [NodeId::manuscript_root(), NodeId::research_root()] {
+    for root in [
+        NodeId::manuscript_root(),
+        NodeId::research_root(),
+        NodeId::unfiled_root(),
+    ] {
         collect_subtree_ids(project, root, &mut visible_order);
     }
     Ok(visible_order

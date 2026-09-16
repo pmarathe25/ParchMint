@@ -28,6 +28,11 @@ fn explorer_rename_escape_preserves_selection_before_enter_commits() {
         .press_key(HarnessWindow::Project, HarnessKey::Escape)
         .expect("cancel the first rename");
     assert!(
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ExplorerRename)
+            .expect("rename field closes on Escape")
+    );
+    assert!(
         harness
             .hierarchy_titles()
             .expect("read hierarchy after cancellation")
@@ -132,7 +137,7 @@ fn cards_selection_and_explorer_selection_survive_route_switching() {
         .click_hierarchy_node(HarnessWindow::Project, opening)
         .expect("select the same document in Explorer");
     assert!(
-        harness
+        !harness
             .target_is_visible(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
             .expect("inspect the selected document Inspector")
     );
