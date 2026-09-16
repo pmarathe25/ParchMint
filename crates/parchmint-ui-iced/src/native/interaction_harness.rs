@@ -301,7 +301,8 @@ impl PersistentSurface {
 /// It acknowledges Iced window actions in memory and routes every emitted
 /// product message back through [`NativeDesktop::update`].
 pub struct NativeDesktopHarness {
-    _motion: crate::motion::SettledMotion,
+    settled_motion: Option<crate::motion::SettledMotion>,
+    frame_clock: Option<crate::motion::FixedTime>,
     desktop: NativeDesktop,
     surfaces: BTreeMap<window::Id, PersistentSurface>,
     trace: Vec<HarnessTraceEntry>,
@@ -317,7 +318,8 @@ impl NativeDesktopHarness {
         let motion = crate::motion::SettledMotion::new();
         let (desktop, task) = NativeDesktop::boot(startup);
         let mut harness = Self {
-            _motion: motion,
+            settled_motion: Some(motion),
+            frame_clock: None,
             desktop,
             surfaces: BTreeMap::new(),
             trace: Vec::new(),
@@ -412,6 +414,33 @@ impl NativeDesktopHarness {
         self.record(
             window,
             format!("click target {target:?} at offset {offset:?}"),
+        );
+        Ok(())
+    }
+
+    /// Grabs a tab without dropping it so intermediate pointer frames can be inspected.
+    pub fn begin_tab_drag(
+        &mut self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: &str,
+    ) -> Result<(), HarnessError> {
+        let bounds =
+            self.find_id_bounds(window, harness_target::editor_tab_id(pane, document_id))?;
+        let origin = IcedPoint::new(bounds.x + 20.0, bounds.center_y());
+        self.dispatch_events(
+            window,
+            [
+                Event::Mouse(mouse::Event::CursorMoved { position: origin }),
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: origin + iced::Vector::new(5.0, 0.0),
+                }),
+            ],
+        )?;
+        self.record(
+            window,
+            format!("begin dragging {pane:?} tab {document_id:?}"),
         );
         Ok(())
     }
@@ -1876,11 +1905,30 @@ impl NativeDesktopHarness {
     pub fn redraw(&mut self, window: HarnessWindow) -> Result<(), HarnessError> {
         self.dispatch_events(
             window,
-            [Event::Window(
-                window::Event::RedrawRequested(Instant::now()),
-            )],
+            [Event::Window(window::Event::RedrawRequested(
+                crate::motion::now(),
+            ))],
         )?;
         self.record(window, "render window frame".to_owned());
+        Ok(())
+    }
+
+    /// Enables animation and advances its frame clock without sleeping. Other clocks stay unchanged.
+    pub fn advance_motion(
+        &mut self,
+        window: HarnessWindow,
+        elapsed: Duration,
+    ) -> Result<(), HarnessError> {
+        if self.frame_clock.is_none() {
+            self.settled_motion.take();
+            self.frame_clock = Some(crate::motion::FixedTime::new(Instant::now()));
+        }
+        self.frame_clock.as_mut().unwrap().advance(elapsed);
+        self.redraw(window)?;
+        self.record(
+            window,
+            format!("advance motion by {}ms", elapsed.as_millis()),
+        );
         Ok(())
     }
 
@@ -2234,9 +2282,9 @@ impl NativeDesktopHarness {
         // Widget status lives in the rebuilt widget, not its cached tree. A
         // redraw event initializes enabled/focused/hovered styles before paint.
         let _ = interface.update(
-            &[Event::Window(
-                window::Event::RedrawRequested(Instant::now()),
-            )],
+            &[Event::Window(window::Event::RedrawRequested(
+                crate::motion::now(),
+            ))],
             surface.cursor,
             &mut surface.renderer,
             &mut iced::advanced::clipboard::Null,
@@ -2251,13 +2299,14 @@ impl NativeDesktopHarness {
             surface.cursor,
         );
         surface.cache = interface.into_cache();
+        let scale = if self.frame_clock.is_some() { 1.0 } else { 2.0 };
         let size = Size::new(
-            (surface.size.width * 2.0) as u32,
-            (surface.size.height * 2.0) as u32,
+            (surface.size.width * scale) as u32,
+            (surface.size.height * scale) as u32,
         );
         let rgba = surface
             .renderer
-            .screenshot(size, 2.0, base.background_color);
+            .screenshot(size, scale, base.background_color);
         let path = path.as_ref().with_extension("");
         let path = path.with_file_name(format!(
             "{}-{}.png",
@@ -2350,9 +2399,9 @@ impl NativeDesktopHarness {
                         .expect("surface was created")
                         .dispatch(
                             desktop.view(id),
-                            [Event::Window(
-                                window::Event::RedrawRequested(Instant::now()),
-                            )],
+                            [Event::Window(window::Event::RedrawRequested(
+                                crate::motion::now(),
+                            ))],
                         )
                 };
                 self.route_messages(messages)?;

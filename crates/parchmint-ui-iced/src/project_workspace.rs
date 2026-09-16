@@ -899,7 +899,6 @@ impl<'a> CardsState<'a> {
     pub(crate) fn motion_generation(&self) -> u64 {
         let mut hash = DefaultHasher::new();
         self.section_id.hash(&mut hash);
-        self.expanded.hash(&mut hash);
         for id in self.explorer.preorder_ids() {
             id.hash(&mut hash);
             self.explorer.nodes[id].parent.hash(&mut hash);

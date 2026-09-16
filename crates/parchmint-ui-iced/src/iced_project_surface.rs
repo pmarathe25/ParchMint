@@ -1221,15 +1221,8 @@ fn global_search_rail<'a>(
         },
     );
     let result_count = search.results().len();
-    let results = if search.results().is_empty() {
-        results.push(
-            text(if search.query().is_empty() {
-                "Search text, titles, synopsis, and metadata."
-            } else {
-                "No matches yet."
-            })
-            .size(12),
-        )
+    let results = if search.query().is_empty() {
+        results.push(text("Search text, titles, synopsis, and metadata.").size(12))
     } else {
         column![
             Space::new().height(search.result_window_start() as f32 * 44.0),
@@ -1286,10 +1279,13 @@ fn global_search_rail<'a>(
             content = content.push(column![replace, replace_action].spacing(8));
         }
         content = content.push(
-            text(global_search_result_count_label(
-                result_count,
-                document_count,
-            ))
+            text(if let Some(error) = search.error() {
+                error.to_owned()
+            } else if !search.is_complete() {
+                "Searching…".to_owned()
+            } else {
+                global_search_result_count_label(result_count, document_count)
+            })
             .size(12),
         );
     }
@@ -1708,7 +1704,14 @@ fn outline_card<'a>(
         .width(Length::Fill)
         .style(move |_| {
             let mut style = iced::widget::container::Style {
-                background: (!group).then_some(theme.palette().panel.into()),
+                background: Some(
+                    if group {
+                        theme.palette().application
+                    } else {
+                        theme.palette().panel
+                    }
+                    .into(),
+                ),
                 border: Border {
                     color: if group {
                         Color::TRANSPARENT
@@ -1760,6 +1763,7 @@ fn outline_card<'a>(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
+        !source_active,
         card,
     );
     let card = hierarchy_drag::target_with_zone(card, None, targets, move |bounds, point| {
@@ -6439,6 +6443,11 @@ mod tests {
             search_effects.last(),
             Some(crate::ProjectEffect::SearchProject { query, .. }) if query == "river"
         ));
+
+        interact(&workspace, RibbonDestination::GlobalSearch, |search| {
+            assert!(search.find("Searching…").is_ok());
+            assert!(search.find("0 matches in 0 documents").is_err());
+        });
 
         let search_ticket = workspace.begin_task(crate::ProjectTask::GlobalSearch {
             generation: workspace.global_search().query_generation(),

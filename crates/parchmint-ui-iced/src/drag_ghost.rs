@@ -1,8 +1,9 @@
-use crate::{cards_layout::CARD_FONT, design_tokens::ParchMintTheme};
+use crate::design_tokens::ParchMintTheme;
 use iced::{Point, Size, Vector, mouse, widget::canvas};
 
 pub(crate) struct DragGhost {
     title: String,
+    font: iced::Font,
     size: Size,
     theme: ParchMintTheme,
     grab_offset: Vector,
@@ -15,13 +16,18 @@ impl DragGhost {
         width: f32,
         theme: ParchMintTheme,
     ) -> Self {
+        let mut title = crate::editor_workspace::fit_tab_title(
+            tab.title(),
+            width - if tab.is_dirty() { 12.0 } else { 0.0 },
+            tab.is_preview(),
+        )
+        .0;
+        if tab.is_dirty() {
+            title.push_str(" •");
+        }
         Self {
-            title: crate::editor_workspace::fit_tab_title(
-                tab.title(),
-                (width - 28.0).max(1.0),
-                tab.is_preview(),
-            )
-            .0,
+            title,
+            font: crate::editor_workspace::tab_title_font(tab.is_preview()),
             size: Size::new(width, 34.0),
             theme,
             grab_offset: Vector::new(offset.x(), offset.y()),
@@ -69,11 +75,19 @@ impl<Message> canvas::Program<Message> for DragGhost {
         );
         frame.fill_text(canvas::Text {
             content: self.title.clone(),
-            position: Point::new(origin.x + 14.0, origin.y + 8.0),
+            position: Point::new(origin.x + 8.0, origin.y + 7.0),
             color: self.theme.palette().secondary_text,
             size: 13.0.into(),
-            font: CARD_FONT,
+            font: self.font,
             line_height: iced::Pixels(18.0).into(),
+            ..Default::default()
+        });
+        frame.fill_text(canvas::Text {
+            content: "×".to_owned(),
+            position: Point::new(origin.x + self.size.width - 17.0, origin.y + 7.0),
+            color: self.theme.palette().secondary_text,
+            size: 14.0.into(),
+            font: self.font,
             ..Default::default()
         });
         vec![frame.into_geometry()]
@@ -164,20 +178,22 @@ impl<Message> iced::advanced::Widget<Message, iced::Theme, iced::Renderer>
             return;
         };
         let translation = point - self.offset - layout.child(0).position();
-        renderer.with_translation(translation, |renderer| {
-            self.content.as_widget().draw(
-                &tree.children[0],
-                renderer,
-                theme,
-                style,
-                layout.child(0),
-                mouse::Cursor::Unavailable,
-                &iced::Rectangle {
-                    x: viewport.x - translation.x,
-                    y: viewport.y - translation.y,
-                    ..*viewport
-                },
-            )
+        renderer.with_layer(*viewport, |renderer| {
+            renderer.with_translation(translation, |renderer| {
+                self.content.as_widget().draw(
+                    &tree.children[0],
+                    renderer,
+                    theme,
+                    style,
+                    layout.child(0),
+                    mouse::Cursor::Unavailable,
+                    &iced::Rectangle {
+                        x: viewport.x - translation.x,
+                        y: viewport.y - translation.y,
+                        ..*viewport
+                    },
+                )
+            });
         });
     }
 }
@@ -198,7 +214,7 @@ mod tests {
             Some("tiny-skia"),
         ))
         .unwrap();
-        let mut element: iced::Element<'_, ()> = floating(
+        let ghost: iced::Element<'_, ()> = floating(
             iced::widget::container(iced::widget::Space::new().width(80).height(40))
                 .style(|_| iced::widget::container::Style {
                     background: Some(iced::Color::from_rgb(1.0, 0.0, 0.0).into()),
@@ -208,6 +224,18 @@ mod tests {
             crate::Point::new(10.0, 8.0),
             80.0,
         );
+        let mut element: iced::Element<'_, ()> = iced::widget::stack![
+            iced::widget::container(
+                iced::widget::text("Writing underneath").color(iced::Color::BLACK)
+            )
+            .padding(iced::Padding {
+                top: 45.0,
+                left: 90.0,
+                ..iced::Padding::ZERO
+            }),
+            ghost,
+        ]
+        .into();
         let mut tree = Tree::new(&element);
         let viewport = iced::Rectangle::with_size(Size::new(300.0, 200.0));
         let node = element.as_widget_mut().layout(

@@ -58,9 +58,10 @@ close waits for the final save. History resolves IDs from the selected manifest
 and compares live drafts, structure, comments, dictionary, and styles.
 
 Overview has independent section and disclosure state. Group headings toggle their
-contents; synopsis and metadata become editable when clicked. While dragging, a floating card follows the cursor and a
-temporary tree previews its placement. Explorer keeps its rows stationary and marks
-the destination. Window-wide release commits; cancellation discards the preview.
+contents; synopsis and metadata become editable when clicked. While dragging, a
+floating card follows the cursor and a temporary tree previews its placement.
+Explorer keeps its rows stationary and marks the destination. Window-wide release
+commits; cancellation discards the preview.
 Tabs can move between panes, and either pane accepts Explorer document drops.
 
 Spelling requests contain at most 4,096 scalars around a view's caret, including
@@ -76,4 +77,7 @@ pointer dragging remain immediate. Pane children stay mounted during focus and
 sidebar changes. Card drop targets use the destination layout while the cards
 move, avoiding feedback between animation and drag targeting. Reduced motion
 is an application preference. Headless workflows and captures settle motion;
-frame-level tests cover intermediate geometry and input.
+frame-level tests cover intermediate geometry and input. The interaction harness
+can also advance a controlled frame clock for full-workspace motion captures.
+Incoming panes retain readable text widths; moving cards draw as complete layers,
+and drop placeholders stay at their destinations.

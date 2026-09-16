@@ -11386,26 +11386,21 @@ fn project_chooser_content(
         ));
     }
     if creating_project {
-        let choose_destination = if opening_project {
-            launcher_button("Choosing Location…", ButtonKind::Secondary)
-                .height(36)
-                .width(104)
-        } else {
-            launcher_button("Browse…", ButtonKind::Secondary)
-                .height(36)
-                .width(104)
-                .on_press(Message::ChooseNewProjectDestination)
-        };
-        let create = if opening_project {
-            launcher_button("Creating Project…", ButtonKind::Primary)
-                .height(36)
-                .width(160)
-        } else {
-            launcher_button("Create and Open", ButtonKind::Primary)
-                .height(36)
-                .width(160)
-                .on_press(Message::CreateProject)
-        };
+        let choose_destination = launcher_button("Browse…", ButtonKind::Secondary)
+            .height(36)
+            .width(104)
+            .on_press_maybe((!opening_project).then_some(Message::ChooseNewProjectDestination));
+        let create = launcher_button(
+            if opening_project {
+                "Creating Project…"
+            } else {
+                "Create and Open"
+            },
+            ButtonKind::Primary,
+        )
+        .height(36)
+        .width(160)
+        .on_press_maybe((!opening_project).then_some(Message::CreateProject));
         content = content.push(
             column![
                 launcher_text(
@@ -12409,6 +12404,7 @@ mod tests {
                 Size::new(900.0, 620.0),
                 launcher_surface(&[], &draft, true, opening, None),
             );
+            assert!(simulator.find("Browse…").is_ok());
             simulator.click("Northbound").unwrap();
             simulator.tap_key(iced::keyboard::key::Named::Enter);
             let messages = simulator.into_messages().collect::<Vec<_>>();

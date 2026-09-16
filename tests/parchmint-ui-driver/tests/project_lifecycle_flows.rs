@@ -85,9 +85,6 @@ fn export_settings_survive_a_project_restart() {
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("relaunch configured application");
     reopened
-        .click_text(HarnessWindow::Launcher, "Export Preferences")
-        .expect("reopen configured project");
-    reopened
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Export),
@@ -105,22 +102,27 @@ fn export_settings_survive_a_project_restart() {
 }
 
 #[test]
-fn launcher_open_errors_fail_the_action_and_allow_retry() {
+fn opening_a_project_reports_errors_and_allows_retry() {
     let run = IsolatedRun::new("launcher-error-retry").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Retry Novel");
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
 
-    let reopened =
-        DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
+    let reopened = DesktopInteractionHarness::launch(
+        run.root().join("fresh-application"),
+        LaunchRequest::launcher(),
+    )
+    .unwrap();
     reopened.fail_next(ProductionFaultPoint::ProjectOpen, ProductionFaultKind::Io);
+    reopened.set_next_path_selection(&project);
     let error = reopened
-        .click_text(HarnessWindow::Launcher, "Retry Novel")
-        .expect_err("an error displayed by the launcher must fail the action");
+        .click_text(HarnessWindow::Launcher, "Open Project")
+        .expect_err("an open failure must be reported");
     assert!(error.to_string().contains("application reported an error"));
+    reopened.set_next_path_selection(&project);
     reopened
-        .click_text(HarnessWindow::Launcher, "Retry Novel")
+        .click_text(HarnessWindow::Launcher, "Open Project")
         .unwrap();
     assert!(!reopened.hierarchy_titles().unwrap().is_empty());
     reopened.close(HarnessWindow::Project).unwrap();

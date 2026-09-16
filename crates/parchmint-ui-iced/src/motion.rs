@@ -31,24 +31,28 @@ fn enabled() -> bool {
     !reduced() && !SETTLED.get() && !CAPTURE.get()
 }
 
-fn now() -> Instant {
-    #[cfg(test)]
+pub(crate) fn now() -> Instant {
+    #[cfg(any(test, feature = "interaction-harness"))]
     if let Some(now) = FRAME_TIME.get() {
         return now;
     }
     Instant::now()
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "interaction-harness"))]
 thread_local! { static FRAME_TIME: Cell<Option<Instant>> = const { Cell::new(None) }; }
-#[cfg(test)]
+#[cfg(any(test, feature = "interaction-harness"))]
 pub(crate) struct FixedTime(Option<Instant>);
-#[cfg(test)]
+#[cfg(any(test, feature = "interaction-harness"))]
 impl FixedTime {
     pub(crate) fn new(now: Instant) -> Self {
         Self(FRAME_TIME.replace(Some(now)))
     }
+    #[cfg(feature = "interaction-harness")]
+    pub(crate) fn advance(&mut self, elapsed: Duration) {
+        FRAME_TIME.set(Some(now() + elapsed));
+    }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "interaction-harness"))]
 impl Drop for FixedTime {
     fn drop(&mut self) {
         FRAME_TIME.set(self.0);
@@ -227,6 +231,28 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 _ => 0.0,
             })
             .sum();
+        let target_fixed: f32 = self
+            .slots
+            .iter()
+            .filter(|slot| slot.visible)
+            .map(|slot| {
+                if let Length::Fixed(width) = slot.width {
+                    width
+                } else {
+                    0.0
+                }
+            })
+            .sum();
+        let target_weight: f32 = self
+            .slots
+            .iter()
+            .filter(|slot| slot.visible)
+            .map(|slot| match slot.width {
+                Length::FillPortion(weight) => f32::from(weight),
+                Length::Fill => 1.0,
+                _ => 0.0,
+            })
+            .sum();
         let mut x = 0.0;
         let children = self
             .slots
@@ -245,8 +271,20 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 let content_width = match slot.width {
                     Length::Fixed(w) => w,
                     _ => {
-                        if width >= 160.0 {
-                            *previous_width = width;
+                        let weight = match slot.width {
+                            Length::FillPortion(weight) => f32::from(weight),
+                            _ => 1.0,
+                        };
+                        let target_width = (size.width - target_fixed).max(0.0) * weight
+                            / target_weight.max(0.001);
+                        if slot.visible {
+                            // Reveal incoming panes at a readable width instead of rewrapping
+                            // their prose into a shrinking sliver on every frame.
+                            *previous_width = if fraction < 1.0 {
+                                width.max(target_width)
+                            } else {
+                                width
+                            };
                         }
                         *previous_width
                     }
@@ -259,6 +297,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                         Size::new(content_width, size.height),
                     ),
                 );
+                let content = if matches!(slot.width, Length::Fixed(_)) {
+                    content
+                } else {
+                    content.move_to(Point::new((width - content_width).min(0.0), 0.0))
+                };
                 let child =
                     layout::Node::with_children(Size::new(width, size.height), vec![content])
                         .move_to(Point::new(x, 0.0));
@@ -516,7 +559,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             .layout(&mut tree.children[0], renderer, limits);
         let mut size = child.size();
         if self.reveal.is_some() {
-            if self.reveal == Some(true) || size.height > 0.0 {
+            if self.reveal == Some(true) || state.height == 0.0 {
                 state.height = size.height;
             }
             size.height = state.height * progress;
@@ -682,12 +725,14 @@ pub(crate) fn reflow<'a, Message: 'a>(
     positions: Positions,
     id: impl Into<String>,
     generation: u64,
+    animate: bool,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Reflow {
         positions,
         id: id.into(),
         generation,
+        animate,
         content: content.into(),
     })
 }
@@ -695,6 +740,7 @@ struct Reflow<'a, Message> {
     positions: Positions,
     id: String,
     generation: u64,
+    animate: bool,
     content: Element<'a, Message>,
 }
 struct ReflowState {
@@ -764,8 +810,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     x: Tween::new(target.x, *now, LAYOUT),
                     y: Tween::new(target.y, *now, LAYOUT),
                 });
-            if place.target != target {
-                let animate = enabled() && place.generation != self.generation;
+            if place.target != target || !self.animate || !enabled() {
+                let animate = self.animate && enabled() && place.generation != self.generation;
                 place.x.set(target.x, *now, animate);
                 place.y.set(target.y, *now, animate);
             }
@@ -816,24 +862,26 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             Vector::ZERO
         };
         let correction = desired - (layout.child(0).position() - layout.position());
-        renderer.with_translation(correction, |renderer| {
-            self.content.as_widget().draw(
-                &tree.children[0],
-                renderer,
-                theme,
-                style,
-                layout.child(0),
-                cursor
-                    .position()
-                    .map_or(mouse::Cursor::Unavailable, |point| {
-                        mouse::Cursor::Available(point - correction)
-                    }),
-                &Rectangle {
-                    x: viewport.x - correction.x,
-                    y: viewport.y - correction.y,
-                    ..*viewport
-                },
-            )
+        renderer.with_layer(*viewport, |renderer| {
+            renderer.with_translation(correction, |renderer| {
+                self.content.as_widget().draw(
+                    &tree.children[0],
+                    renderer,
+                    theme,
+                    style,
+                    layout.child(0),
+                    cursor
+                        .position()
+                        .map_or(mouse::Cursor::Unavailable, |point| {
+                            mouse::Cursor::Available(point - correction)
+                        }),
+                    &Rectangle {
+                        x: viewport.x - correction.x,
+                        y: viewport.y - correction.y,
+                        ..*viewport
+                    },
+                )
+            });
         });
     }
 
@@ -1114,13 +1162,101 @@ mod tests {
     }
 
     #[test]
+    fn incoming_panes_reveal_at_their_final_text_width() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let mut element: Element<'_, ()> = row(vec![
+            slot(pane(), Length::Fill, true),
+            slot(pane(), Length::Fill, false),
+        ]);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = row(vec![
+            slot(pane(), Length::Fill, true),
+            slot(pane(), Length::Fill, true),
+        ]);
+        tree.diff(&element);
+        for millis in [0, 16, 48, 96, 160, 240] {
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            frame(
+                &mut element,
+                &mut tree,
+                &renderer,
+                &node,
+                start + Duration::from_millis(millis),
+            );
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let incoming = &node.children()[1];
+            assert_eq!(incoming.children()[0].size().width, 400.0);
+            assert!(incoming.size().width <= 400.0);
+        }
+    }
+
+    #[test]
+    fn grabbed_cards_stop_reflow_and_keep_the_drop_slot_stationary() {
+        set_reduced(false);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let card = || iced::widget::Space::new().width(80).height(40);
+        let mut element: Element<'_, ()> = reflow(positions.clone(), "card", 1, true, card());
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let start = Instant::now();
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        element = reflow(positions.clone(), "card", 2, true, card());
+        tree.diff(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(200.0, 0.0));
+        frame(&mut element, &mut tree, &renderer, &node, start + LAYOUT);
+        assert_ne!(
+            tree.state.downcast_ref::<ReflowState>().offset,
+            Vector::ZERO
+        );
+        element = reflow(positions, "card", 2, false, card());
+        tree.diff(&element);
+        assert_eq!(
+            frame(
+                &mut element,
+                &mut tree,
+                &renderer,
+                &node,
+                start + LAYOUT + Duration::from_millis(16)
+            ),
+            iced::window::RedrawRequest::Wait
+        );
+        assert_eq!(
+            tree.state.downcast_ref::<ReflowState>().offset,
+            Vector::ZERO
+        );
+    }
+
+    #[test]
     fn moving_cards_keep_their_hit_boxes_and_scroll_without_animation() {
         set_reduced(false);
         let renderer = renderer();
         let positions = Positions::default();
         let card =
             || iced::widget::button(iced::widget::Space::new().width(80).height(40)).on_press(());
-        let mut element = reflow(positions.clone(), "card", 1, card());
+        let mut element = reflow(positions.clone(), "card", 1, true, card());
         let mut tree = Tree::new(&element);
         let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
         let original = element
@@ -1128,7 +1264,7 @@ mod tests {
             .layout(&mut tree, &renderer, &limits);
         let start = Instant::now();
         frame(&mut element, &mut tree, &renderer, &original, start);
-        element = reflow(positions, "card", 2, card());
+        element = reflow(positions, "card", 2, true, card());
         tree.diff(&element);
         let destination = element
             .as_widget_mut()

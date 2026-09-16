@@ -339,7 +339,7 @@ impl LocalSearchState {
     }
 
     fn close(&mut self) {
-        *self = Self::default();
+        self.open = false;
     }
 
     fn navigate(&mut self, direction: FindDirection) -> Option<FindMatch> {
@@ -2745,7 +2745,13 @@ impl EditorWorkspace {
             EditorMessage::Redo => self.command(EditorCommand::Redo),
             EditorMessage::Save => vec![EditorEffect::RequestSave],
             EditorMessage::OpenLocalFind => {
-                self.focused_search_mut().open = true;
+                let search = self.focused_search_mut();
+                if !search.open {
+                    *search = LocalSearchState {
+                        open: true,
+                        ..Default::default()
+                    };
+                }
                 Vec::new()
             }
             EditorMessage::CloseLocalFind => self.close_local_find(),
@@ -3648,6 +3654,18 @@ fn payload_matches_task(task: &EditorTask, payload: &AsyncEditorPayload) -> bool
     )
 }
 
+pub(crate) fn tab_title_font(preview: bool) -> iced::Font {
+    iced::Font {
+        weight: iced::font::Weight::Medium,
+        style: if preview {
+            iced::font::Style::Italic
+        } else {
+            iced::font::Style::Normal
+        },
+        ..iced::Font::with_name("Source Sans 3")
+    }
+}
+
 fn tab_title_width(title: &str, preview: bool) -> f32 {
     use iced::advanced::text::{Paragraph, Renderer, Text, Wrapping};
     <iced::Renderer as Renderer>::Paragraph::with_text(Text {
@@ -3655,15 +3673,7 @@ fn tab_title_width(title: &str, preview: bool) -> f32 {
         bounds: iced::Size::INFINITE,
         size: 13.0.into(),
         line_height: iced::Pixels(18.0).into(),
-        font: iced::Font {
-            weight: iced::font::Weight::Medium,
-            style: if preview {
-                iced::font::Style::Italic
-            } else {
-                iced::font::Style::Normal
-            },
-            ..iced::Font::with_name("Source Sans 3")
-        },
+        font: tab_title_font(preview),
         align_x: Default::default(),
         align_y: iced::alignment::Vertical::Top,
         shaping: Default::default(),

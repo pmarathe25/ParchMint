@@ -1250,6 +1250,7 @@ fn tab_strip_for_width(
                 positions.clone(),
                 tab.id(),
                 generation,
+                true,
                 tab_button(
                     tab,
                     presentation,
@@ -1428,13 +1429,7 @@ fn tab_button(
     } else {
         presentation.display_title().to_owned()
     };
-    let mut title_font = Font {
-        weight: font::Weight::Medium,
-        ..Font::with_name("Source Sans 3")
-    };
-    if tab.is_preview() {
-        title_font.style = font::Style::Italic;
-    }
+    let title_font = crate::editor_workspace::tab_title_font(tab.is_preview());
     let activate: Element<'static, EditorCenterMessage> =
         button(text(title).size(13).font(title_font))
             .padding([7, 8])
@@ -1569,7 +1564,15 @@ fn tab_container_style(
     if drag_target && !drag_source {
         components::surface(theme, Surface::Panel, Interaction::Selected)
     } else if drag_source {
-        components::surface(theme, Surface::Panel, Interaction::Focused)
+        iced::widget::container::Style {
+            background: Some(theme.palette().control_hover.into()),
+            border: iced::Border {
+                color: theme.palette().strong_border,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        }
     } else {
         iced::widget::container::Style::default()
     }
@@ -1581,10 +1584,6 @@ fn local_search_bar(
     theme: ParchMintTheme,
     slots: &EditorHostSlots,
 ) -> Element<'static, EditorCenterMessage> {
-    if !search.is_open() {
-        return Space::new().height(0).into();
-    }
-
     let draft = slots
         .slot(pane)
         .map(EditorPaneSlot::replace_draft)

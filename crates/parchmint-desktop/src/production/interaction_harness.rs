@@ -62,6 +62,7 @@ enum HarnessAction {
     ClickTarget(HarnessWindow, HarnessTarget),
     ClickTargetOffset(HarnessWindow, HarnessTarget, (f32, f32)),
     CloseEditorTab(HarnessWindow, EditorPane, String),
+    BeginTabDrag(HarnessWindow, EditorPane, String),
     RightClickText(HarnessWindow, String),
     RightClickTarget(HarnessWindow, HarnessTarget),
     RightClickTargetAt(HarnessWindow, HarnessTarget, (f32, f32)),
@@ -123,6 +124,7 @@ enum HarnessAction {
     TextIsVisible(HarnessWindow, String),
     Resize(HarnessWindow, f32, f32),
     Redraw(HarnessWindow),
+    AdvanceMotion(HarnessWindow, Duration),
     ElapseAutosaveIdle,
     ElapseRecoveryCapture,
     ElapseNotifications,
@@ -376,7 +378,11 @@ fn execute_action(
                 .map_err(|error| error.to_string());
         }
         HarnessAction::Resize(window, width, height) => harness.resize(window, width, height),
+        HarnessAction::BeginTabDrag(window, pane, document) => {
+            harness.begin_tab_drag(window, pane, &document)
+        }
         HarnessAction::Redraw(window) => harness.redraw(window),
+        HarnessAction::AdvanceMotion(window, elapsed) => harness.advance_motion(window, elapsed),
         HarnessAction::ElapseAutosaveIdle => harness.elapse_autosave_idle(),
         HarnessAction::ElapseRecoveryCapture => harness.elapse_recovery_capture(),
         HarnessAction::ElapseNotifications => harness.elapse_notifications(),
@@ -595,6 +601,21 @@ impl DesktopInteractionHarness {
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickTarget(window, target))?
             .into_unit()
+    }
+
+    /// Grabs a tab without releasing it.
+    pub fn begin_tab_drag(
+        &self,
+        window: HarnessWindow,
+        pane: EditorPane,
+        document_id: impl Into<String>,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::BeginTabDrag(
+            window,
+            pane,
+            document_id.into(),
+        ))?
+        .into_unit()
     }
 
     /// Closes a particular author-visible tab by its stable document ID.
@@ -1147,6 +1168,16 @@ impl DesktopInteractionHarness {
     /// Advances the native surface by one Iced render frame.
     pub fn redraw(&self, window: HarnessWindow) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::Redraw(window))?.into_unit()
+    }
+
+    /// Enables animation and advances its frame clock without sleeping.
+    pub fn advance_motion(
+        &self,
+        window: HarnessWindow,
+        elapsed: Duration,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::AdvanceMotion(window, elapsed))?
+            .into_unit()
     }
 
     pub fn elapse_autosave_idle(&self) -> Result<(), InteractionHarnessError> {

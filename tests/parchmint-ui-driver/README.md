@@ -37,6 +37,16 @@ timer subscriptions or reproduce every OS scheduling interleaving.
 Use these controls to test stale results and timer boundaries without sleeps.
 The JSON Lines command interface exposes the corresponding controls.
 
+For motion review, `advance_motion(window, Duration::ZERO)` enables animations
+with a frozen frame clock; subsequent calls advance it without sleeping.
+Snapshots preserve intermediate motion at 1× scale. `begin_tab_drag` holds a tab
+while pointer movement, snapshots, and release run separately. Ordinary flows
+still settle animations. Capture the motion review with:
+
+```console
+PARCHMINT_MOTION_FRAMES=/tmp/parchmint-motion cargo test --locked -j 1 -p parchmint-ui-driver --test motion_flows
+```
+
 ## Use the command driver
 
 Each input line is a JSON command; each output line is its result. Use isolated

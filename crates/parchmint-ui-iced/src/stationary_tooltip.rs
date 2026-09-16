@@ -95,10 +95,36 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
     ) {
         if matches!(
             event,
+            Event::Mouse(mouse::Event::CursorLeft) | Event::Window(iced::window::Event::Unfocused)
+        ) {
+            let state = tree.state.downcast_mut::<State>();
+            if matches!(state, State::Open { .. }) {
+                shell.invalidate_layout();
+            }
+            *state = State::Idle;
+        } else if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::WheelScrolled { .. })
+                | Event::Keyboard(iced::keyboard::Event::KeyPressed { .. })
+        ) {
+            let state = tree.state.downcast_mut::<State>();
+            if matches!(state, State::Open { .. }) {
+                shell.invalidate_layout();
+            }
+            *state = if cursor.is_over(layout.bounds()) {
+                State::Suppressed
+            } else {
+                State::Idle
+            };
+        } else if matches!(
+            event,
             Event::Mouse(_) | Event::Window(iced::window::Event::RedrawRequested(_))
         ) {
             let state = tree.state.downcast_mut::<State>();
-            let now = Instant::now();
+            let now = match event {
+                Event::Window(iced::window::Event::RedrawRequested(now)) => *now,
+                _ => crate::motion::now(),
+            };
             let point = cursor.position_over(layout.bounds());
             match (*state, point) {
                 (State::Idle, Some(point)) => {
@@ -120,8 +146,10 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
                     *state = State::Hovered { at: now, point };
                     shell.request_redraw_at(now + DELAY);
                 }
-                (State::Hovered { at, .. }, Some(_)) if at.elapsed() < DELAY => {
-                    shell.request_redraw_at(now + DELAY - at.elapsed());
+                (State::Hovered { at, .. }, Some(_))
+                    if now.saturating_duration_since(at) < DELAY =>
+                {
+                    shell.request_redraw_at(at + DELAY);
                 }
                 (State::Hovered { .. }, Some(point)) => {
                     *state = State::Open { point };
@@ -301,5 +329,83 @@ where
 {
     fn from(tooltip: StationaryTooltip<'a, Message>) -> Self {
         Element::new(tooltip)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::advanced::renderer::Headless;
+
+    #[test]
+    fn clicking_suppresses_tooltips_until_the_pointer_leaves() {
+        let start = Instant::now();
+        let _clock = crate::motion::FixedTime::new(start);
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, ()> = tooltip(
+            iced::widget::button("Split").on_press(()),
+            iced::widget::text("Open second pane"),
+            container::Style::default(),
+        );
+        let mut tree = Tree::new(&element);
+        let viewport = Rectangle::with_size(Size::new(400.0, 100.0));
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, viewport.size()),
+        );
+        let inside = mouse::Cursor::Available(node.bounds().center());
+        *tree.state.downcast_mut::<State>() = State::Open {
+            point: node.bounds().center(),
+        };
+        for (event, cursor, open) in [
+            (
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                inside,
+                false,
+            ),
+            (
+                Event::Window(iced::window::Event::RedrawRequested(start + DELAY * 2)),
+                inside,
+                false,
+            ),
+            (
+                Event::Mouse(mouse::Event::CursorLeft),
+                mouse::Cursor::Unavailable,
+                false,
+            ),
+            (
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: node.bounds().center(),
+                }),
+                inside,
+                false,
+            ),
+            (
+                Event::Window(iced::window::Event::RedrawRequested(start + DELAY * 3)),
+                inside,
+                true,
+            ),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut Vec::new()),
+                &viewport,
+            );
+            assert_eq!(
+                matches!(tree.state.downcast_ref::<State>(), State::Open { .. }),
+                open
+            );
+        }
     }
 }
