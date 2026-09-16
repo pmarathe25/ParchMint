@@ -1,0 +1,486 @@
+[parchmint-persistence]
+recovery-project-revision = 0
+save-identity = "4bec9a8ed9aad7ce3dc082ff8d6a3b05b15b12861b2f3955b1d78ff0245a5584"
+
+[parchmint-persistence.document-revisions]
+
+[parchmint-persistence.document-summaries.04040404040404040404040404040404]
+content-hash = "ccb14ca101b54483eab1b9b3b5dc413d9babd06d670fd70ac86694dfa2343014"
+revision = 0
+word-count = 13
+
+[parchmint-persistence.document-summaries.06060606060606060606060606060606]
+content-hash = "a7c9f7dbef779659ed147decb838bc57990ca1104a5dfbe9995ea2f26fd501bf"
+revision = 0
+word-count = 13
+
+[parchmint-persistence.document-summaries.08080808080808080808080808080808]
+content-hash = "48ff22d57d9f54af8f5e869924fafdf10e04181939a8a73c58e66ae423f953cc"
+revision = 0
+word-count = 11
+
+[parchmint-persistence.document-summaries.0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b]
+content-hash = "45721ca5982fa3e9609d4c9e33e7c5ba8587654ffdcd8688d31e9534fce5b6e8"
+revision = 0
+word-count = 13
+
+[parchmint-persistence.document-summaries.0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d]
+content-hash = "df3b0403c17f4e517371d6c065cbbc0bf2bb36c84cb034f1967abc70367b0813"
+revision = 0
+word-count = 12
+
+[parchmint-persistence.document-summaries.11111111111111111111111111111111]
+content-hash = "9627ce58a49726c30d6f387c3da1176caae6ab66f9a05c7c3137a092b73bf0df"
+revision = 0
+word-count = 13
+
+[parchmint-persistence.document-summaries.13131313131313131313131313131313]
+content-hash = "99a3d1a50ef44578c378ef8c71ece376b379e5404f3ebbd493de65de964cd275"
+revision = 0
+word-count = 15
+
+[parchmint-persistence.document-summaries.15151515151515151515151515151515]
+content-hash = "02c28a52943a30470ca216661c4a8be6e08033561009c0b0f3ba7788385d475e"
+revision = 0
+word-count = 15
+
+[parchmint-persistence.document-summaries.17171717171717171717171717171717]
+content-hash = "8f2465a9533c6a57c0f38638954c4fb8600b19658a0ef90f2affd5cbc3b763a1"
+revision = 0
+word-count = 60
+
+[parchmint-persistence.document-summaries.1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a]
+content-hash = "d50f297f420f27e2cb0e460c2575f2cd4fcae00556c953189fb5e0b5b0e6f659"
+revision = 0
+word-count = 14
+
+[parchmint-persistence.document-summaries.1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c]
+content-hash = "49f204bdc6aa6a99dd65e3b498adb8fd937adcc796f1207125ca893da97206bd"
+revision = 0
+word-count = 11
+
+[parchmint-persistence.document-summaries.1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f]
+content-hash = "02ba2926897c8dcf07f71258ad3e80e000b6070759d11d67b98b97d41294f4dc"
+revision = 0
+word-count = 13
+
+[parchmint-persistence.document-summaries.22222222222222222222222222222222]
+content-hash = "f62459e71395a37902bdd0364c1d704bb17074520ca12e14d976d4ff873b061f"
+revision = 0
+word-count = 11
+
+[parchmint-persistence.document-summaries.24242424242424242424242424242424]
+content-hash = "9f2a3e391cc3c7587b3d34fdaf9d3a9d5eff533bedd6dd20f7c737c668302f56"
+revision = 0
+word-count = 13
+
+[parchmint-structure]
+deletions = []
+version = 1
+
+[[parchmint-structure.metadata-fields]]
+applicability = "groups-and-documents"
+default = "Mara"
+description = "Narrating character or viewpoint for a scene."
+id = "91919191919191919191919191919191"
+label = "Point of view"
+text-kind = "single-line"
+visible-on-cards = true
+
+[[parchmint-structure.metadata-fields]]
+applicability = "groups-and-documents"
+default = "Draft"
+description = "Current editorial state for planning and revision."
+id = "92929292929292929292929292929292"
+label = "Draft status"
+text-kind = "single-line"
+visible-on-cards = true
+
+[[parchmint-structure.metadata-fields]]
+applicability = "groups-and-documents"
+default = "Harbor District"
+description = "Primary location for the scene or note."
+id = "93939393939393939393939393939393"
+label = "Setting"
+text-kind = "single-line"
+visible-on-cards = true
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "01010101010101010101010101010101"
+kind = "group"
+order = 0
+parent = "50415243484d494e5400000000000001"
+synopsis = "Mara arrives at the Ember Archive and follows the first clue beneath the city."
+title = "Part I — Smoke"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "02020202020202020202020202020202"
+kind = "group"
+order = 0
+parent = "01010101010101010101010101010101"
+synopsis = "An unfamiliar station, an impossible map, and a door that remembers heat."
+title = "Chapter 1 — Arrival"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "04040404040404040404040404040404"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "03030303030303030303030303030303"
+kind = "document"
+order = 0
+parent = "02020202020202020202020202020202"
+path = "manuscript/04040404040404040404040404040404.html"
+synopsis = "Mara reaches the rain-soaked terminus and learns the archive is expecting her."
+title = "1.1 The Station"
+
+[parchmint-structure.nodes.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "North Station"
+
+[[parchmint-structure.nodes]]
+document-id = "06060606060606060606060606060606"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "05050505050505050505050505050505"
+kind = "document"
+order = 1
+parent = "02020202020202020202020202020202"
+path = "manuscript/06060606060606060606060606060606.html"
+synopsis = "The map room turns the harbor's past into a route toward a missing signal."
+title = "1.2 The Map Room"
+
+[parchmint-structure.nodes.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Revised"
+93939393939393939393939393939393 = "Ember Archive"
+
+[[parchmint-structure.nodes]]
+document-id = "08080808080808080808080808080808"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "07070707070707070707070707070707"
+kind = "document"
+order = 2
+parent = "02020202020202020202020202020202"
+path = "manuscript/08080808080808080808080808080808.html"
+synopsis = "A warm handprint on a sealed door makes the archive's danger immediate."
+title = "1.3 A Door in Ash"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "09090909090909090909090909090909"
+kind = "group"
+order = 1
+parent = "01010101010101010101010101010101"
+synopsis = "Mara and Iven trace a signal through the bell tower during the night watch."
+title = "Chapter 2 — First Signal"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+kind = "document"
+order = 0
+parent = "09090909090909090909090909090909"
+path = "manuscript/0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b.html"
+synopsis = "Iven tracks the wire to a cellar connected to the floodgates."
+title = "2.1 Copper Wire"
+
+[parchmint-structure.nodes.metadata]
+91919191919191919191919191919191 = "Iven"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Bell Tower"
+
+[[parchmint-structure.nodes]]
+document-id = "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+kind = "document"
+order = 1
+parent = "09090909090909090909090909090909"
+path = "manuscript/0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d.html"
+synopsis = "The harbor lights spell a warning just as the watch changes."
+title = "2.2 Night Watch"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+kind = "group"
+order = 1
+parent = "50415243484d494e5400000000000001"
+synopsis = "The investigation moves to the harbor, where the tide begins erasing evidence."
+title = "Part II — Tides"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+kind = "group"
+order = 0
+parent = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+synopsis = "A salt-stained ledger connects vanished cargo to the archive's buried history."
+title = "Chapter 3 — The Harbor"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "11111111111111111111111111111111"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "10101010101010101010101010101010"
+kind = "document"
+order = 0
+parent = "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
+path = "manuscript/11111111111111111111111111111111.html"
+synopsis = "Mara finds a ledger whose missing shipments point to people, not goods."
+title = "3.1 Salt Ledger"
+
+[parchmint-structure.nodes.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Outline"
+93939393939393939393939393939393 = "Harbor District"
+
+[[parchmint-structure.nodes]]
+document-id = "13131313131313131313131313131313"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "12121212121212121212121212121212"
+kind = "document"
+order = 1
+parent = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+path = "manuscript/13131313131313131313131313131313.html"
+synopsis = "A brief legend explains the bell's code and raises the stakes for its next ring."
+title = "Interlude — The Bell"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "15151515151515151515151515151515"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "14141414141414141414141414141414"
+kind = "document"
+order = 2
+parent = "50415243484d494e5400000000000001"
+path = "manuscript/15151515151515151515151515151515.html"
+synopsis = "Mara keeps one page, leaves the archive changed, and faces calm water at dawn."
+title = "Epilogue — Morning"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "17171717171717171717171717171717"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "16161616161616161616161616161616"
+kind = "document"
+order = 3
+parent = "50415243484d494e5400000000000001"
+path = "manuscript/17171717171717171717171717171717.html"
+synopsis = "A compact reference document for testing every editor formatting control."
+title = "Formatting Gallery"
+
+[parchmint-structure.nodes.metadata]
+91919191919191919191919191919191 = "Test fixture"
+92929292929292929292929292929292 = "Ready"
+93939393939393939393939393939393 = "Editor"
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "18181818181818181818181818181818"
+kind = "group"
+order = 0
+parent = "50415243484d494e5400000000000002"
+synopsis = "Character references for the two investigators at the center of the story."
+title = "People"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "19191919191919191919191919191919"
+kind = "document"
+order = 0
+parent = "18181818181818181818181818181818"
+path = "research/1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a.html"
+synopsis = "Mara is an archivist whose fear of deep water conflicts with the investigation."
+title = "Mara Vale"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b"
+kind = "document"
+order = 1
+parent = "18181818181818181818181818181818"
+path = "research/1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c.html"
+synopsis = "Iven is a signal engineer whose practical knowledge balances Mara's instincts."
+title = "Iven Rook"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
+kind = "group"
+order = 1
+parent = "50415243484d494e5400000000000002"
+synopsis = "Location notes for the archive and the changing harbor district."
+title = "Places"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
+kind = "document"
+order = 0
+parent = "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
+path = "research/1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f.html"
+synopsis = "The fireproof library beneath the harbor stores records that should not survive."
+title = "The Ember Archive"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "20202020202020202020202020202020"
+kind = "group"
+order = 1
+parent = "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
+synopsis = "A working waterfront of towers, floodgates, warehouses, and old warnings."
+title = "Harbor District"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "22222222222222222222222222222222"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "21212121212121212121212121212121"
+kind = "document"
+order = 0
+parent = "20202020202020202020202020202020"
+path = "research/22222222222222222222222222222222.html"
+synopsis = "Quick reference for recurring settings and navigation points."
+title = "Landmarks"
+
+[parchmint-structure.nodes.metadata]
+
+[[parchmint-structure.nodes]]
+document-id = "24242424242424242424242424242424"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "23232323232323232323232323232323"
+kind = "document"
+order = 2
+parent = "50415243484d494e5400000000000002"
+path = "research/24242424242424242424242424242424.html"
+synopsis = "A day-by-day chronology for checking sequence, travel, and cause-and-effect."
+title = "Timeline Notes"
+
+[parchmint-structure.nodes.metadata]
+
+[project]
+author = "ParchMint Manual Test Suite"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+revision = 22
+spellcheck-language = "en-US"
+title = "The Ember Archive — Manual Test Project"
+
+[[style-definitions]]
+display-name = "Body"
+id = "50415243484d494e545354594c000001"
+order = 0
+role = "body"
+
+[[style-definitions]]
+display-name = "Document Title"
+id = "50415243484d494e545354594c000002"
+order = 1
+role = "document-title"
+
+[[style-definitions]]
+display-name = "Heading 1"
+id = "50415243484d494e545354594c000003"
+order = 2
+role = "heading-1"
+
+[[style-definitions]]
+display-name = "Heading 2"
+id = "50415243484d494e545354594c000004"
+order = 3
+role = "heading-2"
+
+[[style-definitions]]
+display-name = "Heading 3"
+id = "50415243484d494e545354594c000005"
+order = 4
+role = "heading-3"
+
+[[style-definitions]]
+display-name = "Block Quote"
+id = "50415243484d494e545354594c000006"
+order = 5
+role = "block-quote"
+
+[[style-definitions]]
+display-name = "Verse"
+id = "50415243484d494e545354594c000007"
+order = 6
+role = "verse"

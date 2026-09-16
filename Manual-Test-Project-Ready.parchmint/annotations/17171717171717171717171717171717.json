@@ -1,0 +1,45 @@
+{
+  "document_id": "17171717171717171717171717171717",
+  "schema": "parchmint.annotation-sidecar/v1",
+  "threads": [
+    {
+      "anchor": {
+        "kind": "document"
+      },
+      "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "messages": [
+        {
+          "body": "Confirm that inline emphasis remains intact after edits and undo/redo.",
+          "id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+        }
+      ],
+      "resolved": false
+    },
+    {
+      "anchor": {
+        "kind": "document"
+      },
+      "id": "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3",
+      "messages": [
+        {
+          "body": "Use this reference to test comment replies, resolving, and reopening.",
+          "id": "a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4"
+        }
+      ],
+      "resolved": false
+    },
+    {
+      "anchor": {
+        "kind": "document"
+      },
+      "id": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "messages": [
+        {
+          "body": "Replace the sample destination when testing link edits and export behavior.",
+          "id": "a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6"
+        }
+      ],
+      "resolved": false
+    }
+  ]
+}
