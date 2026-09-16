@@ -9,13 +9,8 @@ use parchmint_editor_api::{
 };
 use parchmint_editor_iced::{EditorViewport, MountedViewPresentation};
 use parchmint_platform_api::UntrustedClipboardContent;
-use parchmint_recovery_api::DocumentRevision;
-use parchmint_save::{SaveGeneration, SaveState};
 
-use fixtures::{
-    Boundary, EditorSaveRecoveryHarness, adapter_with_cache_limit, block, document_id,
-    durable_vector, mount, open, recovered_body, view, visible,
-};
+use fixtures::{adapter_with_cache_limit, block, mount, open, view, visible};
 
 #[test]
 fn mounts_two_views_on_one_core_session_with_independent_presentation_state() {
@@ -94,14 +89,14 @@ fn visible_block_cache_is_bounded_to_overscan_budget() {
     let adapter = adapter_with_cache_limit(6);
     let session = open(&adapter, "alpha");
     mount(&adapter, session.clone(), view(1));
-    adapter
+    let laid_out = adapter
         .cache_visible_blocks(
             session.clone(),
             view(1),
             (1..=12).map(|value| visible(block(value), "block")),
         )
         .expect("cache visible blocks");
-
+    assert_eq!(laid_out, (7..=12).map(block).collect::<Vec<_>>());
     assert_eq!(
         adapter
             .view_snapshot(session, view(1))
@@ -376,119 +371,4 @@ fn rich_paste_retains_multi_block_nested_structure_in_one_undoable_revision() {
             .body(),
         "<p>before after</p>"
     );
-}
-
-#[test]
-fn acknowledged_vector_survives_exactly_while_newer_mounted_input_remains_dirty() {
-    let mut harness = EditorSaveRecoveryHarness::new("");
-    let paused = [
-        Boundary::BeforeProjection,
-        Boundary::AfterProjection,
-        Boundary::BeforeRecoveryAppend,
-        Boundary::AfterRecoveryAppend,
-        Boundary::BeforeSave,
-        Boundary::AfterCanonicalCommit,
-        Boundary::BeforeSaveAcknowledgement,
-    ];
-    for boundary in paused {
-        harness.boundaries().pause_at(boundary);
-    }
-
-    let acknowledged = harness.type_text("one", true);
-    harness.boundaries().wait_until(Boundary::BeforeProjection);
-    let newer = harness.type_text(" two", false);
-    assert_eq!(acknowledged, EditorRevision::from(1));
-    assert_eq!(newer, EditorRevision::from(2));
-
-    for (index, boundary) in paused.iter().copied().enumerate() {
-        harness.boundaries().release(boundary);
-        if let Some(next) = paused.get(index + 1).copied() {
-            harness.boundaries().wait_until(next);
-            assert!(harness.acknowledgements().is_empty());
-        }
-    }
-    harness.wait_until_idle();
-
-    let acknowledgements = harness.acknowledgements();
-    assert_eq!(acknowledgements.len(), 1);
-    let acknowledgement = &acknowledgements[0];
-    assert_eq!(
-        acknowledgement.requested_revisions.open_documents[&document_id()],
-        DocumentRevision::from(1)
-    );
-    assert_eq!(
-        acknowledgement.requested_revisions.generation,
-        SaveGeneration::from(1)
-    );
-    assert!(
-        acknowledgement
-            .written_revisions
-            .covers(&acknowledgement.requested_revisions)
-    );
-    let status = harness.status();
-    assert_eq!(status.state, SaveState::Dirty);
-    assert_eq!(
-        status.saved_through.unwrap().open_documents[&document_id()],
-        DocumentRevision::from(1)
-    );
-    assert_eq!(harness.committed_bodies(), ["one"]);
-    assert_eq!(recovered_body(&harness.replay()), Some("one two"));
-
-    for boundary in paused {
-        assert!(
-            harness.boundaries().count(boundary) > 0,
-            "missing named boundary {boundary:?}"
-        );
-    }
-    harness.force_terminate();
-}
-
-#[test]
-fn forced_termination_reopens_and_replays_acknowledged_recovery_once_in_order() {
-    let mut harness = EditorSaveRecoveryHarness::new("");
-    harness.type_text("one", false);
-    harness.wait_until_idle();
-    harness.type_text(" two", false);
-    harness.wait_until_idle();
-    harness.force_terminate();
-
-    let replay = harness.replay_after_reopen("");
-    assert_eq!(replay.accepted.len(), 2);
-    assert!(replay.isolated.is_empty());
-    assert_eq!(
-        replay
-            .accepted
-            .iter()
-            .map(|batch| batch.documents[&document_id()].last)
-            .collect::<Vec<_>>(),
-        [DocumentRevision::from(1), DocumentRevision::from(2)]
-    );
-    assert_eq!(recovered_body(&replay), Some("one two"));
-    assert!(durable_vector(&replay).is_some());
-    assert_eq!(harness.boundaries().count(Boundary::ForcedTermination), 1);
-}
-
-#[test]
-fn continuous_typing_keeps_projection_and_recovery_backlog_bounded() {
-    let harness = EditorSaveRecoveryHarness::new("");
-    harness.boundaries().pause_at(Boundary::BeforeProjection);
-    harness.type_text("x", false);
-    harness.boundaries().wait_until(Boundary::BeforeProjection);
-    for _ in 0..64 {
-        harness.type_text("x", false);
-    }
-
-    assert!(harness.max_backlog() <= 2);
-    harness.boundaries().release(Boundary::BeforeProjection);
-    harness.wait_until_idle();
-
-    assert!(harness.max_backlog() <= 2);
-    assert_eq!(harness.projected_count(), 1);
-    assert_eq!(harness.recovery_batch_count(), 1);
-    let replay = harness.replay();
-    assert_eq!(replay.accepted.len(), 1);
-    let range = replay.accepted[0].documents[&document_id()];
-    assert_eq!(range.first, DocumentRevision::from(1));
-    assert_eq!(range.last, DocumentRevision::from(65));
-    assert_eq!(recovered_body(&replay).map(str::len), Some(65));
 }

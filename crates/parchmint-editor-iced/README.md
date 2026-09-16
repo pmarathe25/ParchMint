@@ -48,10 +48,22 @@ The host supplies visible blocks to `cache_visible_blocks`, bounded by
 materializes only scalars inside the viewport plus overscan. `next_frame` updates
 changed cached blocks in every mounted view; each pane paints on its next frame.
 
+Layout reads shared immutable paragraphs. `VisibleEditorBlock::text` joins them
+on demand; clones share an initialized text cache. Unchanged lines share widths,
+wrap offsets, and line-relative chunk metadata. Positions, spans, and marks
+refresh on every update. Text or style changes invalidate a line; viewport width
+or metric changes invalidate the full height index.
+
+Styles, font families, and layout hashes are resolved once per style per update.
+Widths use one-byte codes and a per-line scale, preserving exact floating-point
+values. Carets are built in document order; repeated boundaries replace the last
+entry. Tests compare incremental and full layouts, including paragraph-backed
+and joined-text inputs.
+
 The native shell releases other document hosts' focus when the active pane
 changes. Caret formatting survives selection advances caused by typing; explicit
 selection changes clear it.
 
 Input currently targets normal en-US keyboards and preserves valid UTF-8. IME,
 multilingual layout, bidirectional editing, and assistive-technology work remain
-in [future work](../../docs/future-work.md).
+in [future work](../../plans/unimplemented/future-work.md).

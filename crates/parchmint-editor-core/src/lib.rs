@@ -398,7 +398,7 @@ impl<E: DocumentEngine> EditorSession<E> {
                 let end = start
                     .checked_add(length)
                     .ok_or_else(|| invalid("selection range overflows"))?;
-                self.apply_format_change(|engine| {
+                self.apply_engine_change(|engine| {
                     engine.toggle_inline_mark(start, end, mark.semantic())
                 })
             }
@@ -410,7 +410,7 @@ impl<E: DocumentEngine> EditorSession<E> {
                 if let Some(target) = target {
                     validate_link_target(target)?;
                 }
-                self.apply_format_change(|engine| engine.set_link(start, end, target.clone()))
+                self.apply_engine_change(|engine| engine.set_link(start, end, target.clone()))
             }
             EditorCommandKind::ToggleBlockFormat { range, format } => {
                 let (start, length) = self.validated_range(*range)?;
@@ -422,7 +422,7 @@ impl<E: DocumentEngine> EditorSession<E> {
                     BlockFormatKind::NumberedList => SemanticBlockKind::OrderedListItem,
                     BlockFormatKind::BlockQuote => SemanticBlockKind::BlockQuote,
                 };
-                self.apply_format_change(|engine| engine.toggle_block_format(start, end, target))
+                self.apply_engine_change(|engine| engine.toggle_block_format(start, end, target))
             }
             EditorCommandKind::InsertAtomicBlock { selection, kind } => {
                 self.validate_selection(*selection)?;
@@ -446,7 +446,7 @@ impl<E: DocumentEngine> EditorSession<E> {
                 let end = start
                     .checked_add(length)
                     .ok_or_else(|| invalid("selection range overflows"))?;
-                self.apply_optional_format_change(|engine| {
+                self.apply_optional_engine_change(|engine| {
                     engine.adjust_list_depth(start, end, *change)
                 })
             }
@@ -490,7 +490,7 @@ impl<E: DocumentEngine> EditorSession<E> {
                     .checked_add(length)
                     .ok_or_else(|| invalid("selection range overflows"))?;
                 let style = canonical_style_id(*style);
-                self.apply_format_change(|engine| engine.apply_paragraph_style(start, end, style))
+                self.apply_engine_change(|engine| engine.apply_paragraph_style(start, end, style))
             }
         }
     }
@@ -519,28 +519,7 @@ impl<E: DocumentEngine> EditorSession<E> {
     }
 
     fn apply_new_edit(&mut self, edit: EngineEdit) -> Result<AppliedEditorChange, EditorError> {
-        let (id, revision) = self.next_change_identity()?;
-        let before = self.engine.snapshot();
-        let before_comments = self.comments.clone();
-        let change = self.engine.apply(edit).map_err(engine_error)?;
-        let after = self.engine.snapshot();
-        let changed_blocks = change.changed_blocks().to_vec();
-        self.finish_change(id, revision, change.mapping())?;
-        self.undo.push(UndoEntry {
-            unchanged_prefix: 0,
-            before,
-            after,
-            before_comments,
-            after_comments: self.comments.clone(),
-            forward_mapping: change.mapping(),
-            changed_blocks: changed_blocks.clone(),
-        });
-        self.redo.clear();
-        Ok(AppliedEditorChange {
-            revision: self.revision,
-            transaction: Some(id),
-            changed_blocks,
-        })
+        self.apply_engine_change(|engine| engine.apply(edit))
     }
 
     fn apply_new_semantic_edit(
@@ -548,31 +527,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         edit: EngineEdit,
         marks: Vec<document_engine::EngineMark>,
     ) -> Result<AppliedEditorChange, EditorError> {
-        let (id, revision) = self.next_change_identity()?;
-        let before = self.engine.snapshot();
-        let before_comments = self.comments.clone();
-        let change = self
-            .engine
-            .replace_with_marks(edit, marks)
-            .map_err(engine_error)?;
-        let after = self.engine.snapshot();
-        let changed_blocks = change.changed_blocks().to_vec();
-        self.finish_change(id, revision, change.mapping())?;
-        self.undo.push(UndoEntry {
-            unchanged_prefix: 0,
-            before,
-            after,
-            before_comments,
-            after_comments: self.comments.clone(),
-            forward_mapping: change.mapping(),
-            changed_blocks: changed_blocks.clone(),
-        });
-        self.redo.clear();
-        Ok(AppliedEditorChange {
-            revision: self.revision,
-            transaction: Some(id),
-            changed_blocks,
-        })
+        self.apply_engine_change(|engine| engine.replace_with_marks(edit, marks))
     }
 
     fn apply_new_fragment(
@@ -649,38 +604,18 @@ impl<E: DocumentEngine> EditorSession<E> {
         })
     }
 
-    fn apply_format_change(
+    fn apply_engine_change(
         &mut self,
         operation: impl FnOnce(&mut E) -> Result<document_engine::EngineChange, EngineError>,
     ) -> Result<AppliedEditorChange, EditorError> {
-        let (id, revision) = self.next_change_identity()?;
-        let before = self.engine.snapshot();
-        let before_comments = self.comments.clone();
-        let change = operation(&mut self.engine).map_err(engine_error)?;
-        let after = self.engine.snapshot();
-        let changed_blocks = change.changed_blocks().to_vec();
-        self.finish_change(id, revision, change.mapping())?;
-        self.undo.push(UndoEntry {
-            unchanged_prefix: 0,
-            before,
-            after,
-            before_comments,
-            after_comments: self.comments.clone(),
-            forward_mapping: change.mapping(),
-            changed_blocks: changed_blocks.clone(),
-        });
-        self.redo.clear();
-        Ok(AppliedEditorChange {
-            revision: self.revision,
-            transaction: Some(id),
-            changed_blocks,
-        })
+        self.apply_optional_engine_change(|engine| operation(engine).map(Some))
     }
 
-    fn apply_optional_format_change(
+    fn apply_optional_engine_change(
         &mut self,
         operation: impl FnOnce(&mut E) -> Result<Option<document_engine::EngineChange>, EngineError>,
     ) -> Result<AppliedEditorChange, EditorError> {
+        let (id, revision) = self.next_change_identity()?;
         let before = self.engine.snapshot();
         let before_comments = self.comments.clone();
         let Some(change) = operation(&mut self.engine).map_err(engine_error)? else {
@@ -690,7 +625,6 @@ impl<E: DocumentEngine> EditorSession<E> {
                 changed_blocks: Vec::new(),
             });
         };
-        let (id, revision) = self.next_change_identity()?;
         let after = self.engine.snapshot();
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
@@ -721,6 +655,10 @@ impl<E: DocumentEngine> EditorSession<E> {
             .checked_add(length)
             .ok_or_else(|| invalid("selection range overflows"))?;
         let after_id = derived_block_id(self.document_id, self.next_block);
+        let next_block = self
+            .next_block
+            .checked_add(1)
+            .ok_or_else(|| invalid("semantic block id space exhausted"))?;
         let (id, revision) = self.next_change_identity()?;
         let before = self.engine.snapshot();
         let before_comments = self.comments.clone();
@@ -732,10 +670,7 @@ impl<E: DocumentEngine> EditorSession<E> {
         let changed_blocks = change.changed_blocks().to_vec();
         self.finish_change(id, revision, change.mapping())?;
         if change.mapping() != PositionMapping::identity() {
-            self.next_block = self
-                .next_block
-                .checked_add(1)
-                .ok_or_else(|| invalid("semantic block id space exhausted"))?;
+            self.next_block = next_block;
             let caret = DocumentPosition::from(
                 u64::try_from(start + 1).map_err(|_| invalid("document position overflow"))?,
             );
@@ -1310,14 +1245,7 @@ impl EditorCoreSession {
             return Ok(None);
         }
         let (start, length) = selection_range(selection)?;
-        let text = self
-            .inner
-            .engine
-            .text()
-            .chars()
-            .skip(start)
-            .take(length)
-            .collect::<String>();
+        let text = self.inner.engine.selection_text(start, length);
         Ok(Some(
             text.split_whitespace()
                 .filter(|word| *word != "\u{fffc}")

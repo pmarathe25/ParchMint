@@ -6,7 +6,14 @@
 //! No type in this crate exposes an editor-engine document, transaction, or
 //! GUI handle.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, pin::Pin, sync::mpsc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, mpsc},
+};
 
 pub use parchmint_contracts::AnnotationValue;
 use parchmint_contracts::{AnnotationAnchor, AnnotationMessage};
@@ -614,10 +621,16 @@ pub enum ListDepthChange {
 pub struct SemanticBlock {
     id: BlockId,
     kind: SemanticBlockKind,
-    paragraph_style: Option<String>,
-    text: String,
-    marks: Vec<SemanticMarkRange>,
+    content: Arc<SemanticBlockContent>,
     list_depth: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SemanticBlockContent {
+    paragraph_style: Option<String>,
+    text: Arc<String>,
+    marks: Vec<SemanticMarkRange>,
+    scalar_len: usize,
 }
 
 impl SemanticBlock {
@@ -628,12 +641,31 @@ impl SemanticBlock {
         text: impl Into<String>,
         marks: Vec<SemanticMarkRange>,
     ) -> Self {
+        Self::from_shared_text(id, kind, paragraph_style, Arc::new(text.into()), marks)
+    }
+
+    /// Captures an immutable text buffer without copying its bytes. Subsequent
+    /// writes through `Arc::make_mut` leave this block and its clones unchanged.
+    pub fn from_shared_text(
+        id: BlockId,
+        kind: SemanticBlockKind,
+        paragraph_style: Option<String>,
+        text: Arc<String>,
+        marks: Vec<SemanticMarkRange>,
+    ) -> Self {
+        let scalar_len = match kind {
+            SemanticBlockKind::SceneBreak | SemanticBlockKind::PageBreak => 1,
+            _ => text.chars().count(),
+        };
         Self {
             id,
             kind,
-            paragraph_style,
-            text: text.into(),
-            marks,
+            content: Arc::new(SemanticBlockContent {
+                paragraph_style,
+                text,
+                marks,
+                scalar_len,
+            }),
             list_depth: 0,
         }
     }
@@ -647,15 +679,20 @@ impl SemanticBlock {
     }
 
     pub fn paragraph_style(&self) -> Option<&str> {
-        self.paragraph_style.as_deref()
+        self.content.paragraph_style.as_deref()
     }
 
     pub fn text(&self) -> &str {
-        &self.text
+        &self.content.text
     }
 
     pub fn marks(&self) -> &[SemanticMarkRange] {
-        &self.marks
+        &self.content.marks
+    }
+
+    /// Rendered Unicode scalar count, treating an atomic block as one scalar.
+    pub fn scalar_len(&self) -> usize {
+        self.content.scalar_len
     }
 
     pub const fn list_depth(&self) -> usize {
@@ -671,12 +708,14 @@ impl SemanticBlock {
 /// Renderable semantic content for one exact editor revision.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticDocument {
-    blocks: Vec<SemanticBlock>,
+    blocks: Arc<[SemanticBlock]>,
 }
 
 impl SemanticDocument {
     pub fn new(blocks: Vec<SemanticBlock>) -> Self {
-        Self { blocks }
+        Self {
+            blocks: blocks.into(),
+        }
     }
 
     pub fn blocks(&self) -> &[SemanticBlock] {

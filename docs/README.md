@@ -4,16 +4,21 @@
 system; component READMEs document their own interfaces. Tests define supported
 behavior.
 
+Keep current behavior in `docs/`, proposals in `plans/unimplemented/`, and brief
+completed plans and findings in `plans/implemented/`. Keep raw benchmark output
+outside the repository.
+
 ## Use ParchMint
 
 - **Install or update:** [Installation guide](install.md).
 - **Write and organize:** [User guide](user-guide.md).
-- **Review proposed features:** [Future work](future-work.md).
+- **Review proposed features:** [Future work](../plans/unimplemented/future-work.md).
 
 ## Develop and release
 
 - **Build, test, and lint:** [Repository README](../README.md#development).
 - **Understand ownership and find a crate:** [Architecture](architecture/architecture.md).
+- **Run editor benchmarks:** [Benchmark guide](../plans/implemented/editor-benchmark-guide.md).
 - **Follow repository instructions:** [AGENTS.md](../AGENTS.md).
 - **Build and publish installers:** [Release packaging](../packaging/README.md).
 

@@ -26,7 +26,7 @@ artifacts. Existing releases are not overwritten.
 
 The publish job uses `GITHUB_TOKEN` with `contents: write`; no extra secret is
 needed. Packages are unsigned. Signing and macOS notarization need platform
-credentials and remain [future work](../docs/future-work.md).
+credentials and remain [future work](../plans/unimplemented/future-work.md).
 
 ## Prepare the host
 

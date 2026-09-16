@@ -18,6 +18,9 @@ the shared document history.
 A `CanonicalProjection` is a deterministic project-file snapshot of one revision:
 body, comments, anchors, word count, and semantic blocks. Editing can continue
 while it is built. Requests outside the retained revision budget fail explicitly.
+Semantic clones share immutable data; `SemanticBlock::from_shared_text` accepts
+an existing shared buffer. Later edits cannot change captured blocks. Scalar
+counts include soft breaks and count each atomic block as one scalar.
 
 ## Interface
 

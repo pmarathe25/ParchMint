@@ -1,5 +1,130 @@
 use super::*;
-use crate::document_engine::SemanticBlockSnapshot;
+use crate::document_engine::SemanticBlockData;
+
+#[test]
+fn formatting_commands_after_atomic_blocks_target_the_selected_text() {
+    for kind in ["scene-break", "page-break"] {
+        let prefix = format!("<p>before</p><hr data-kind=\"{kind}\">");
+        let original = format!("{prefix}<p>after</p>");
+        for (operation, expected) in [
+            (
+                EditorCommandKind::ToggleInlineMark {
+                    range: selection(13, 14),
+                    mark: InlineMarkKind::Bold,
+                },
+                "<p>afte<strong>r</strong></p>",
+            ),
+            (
+                EditorCommandKind::SetLink {
+                    range: selection(13, 14),
+                    target: Some("https://example.com".into()),
+                },
+                "<p>afte<a href=\"https://example.com\">r</a></p>",
+            ),
+            (
+                EditorCommandKind::ApplyParagraphStyle {
+                    range: selection(14, 14),
+                    style: StyleCatalog::heading_1_id(),
+                },
+                "<p data-style-id=\"heading-1\">after</p>",
+            ),
+        ] {
+            let mut session = EditorCoreSession::open(load(&original)).unwrap();
+            session.attach_view(view(1)).unwrap();
+            session
+                .execute(origin(view(1)), command(0, operation))
+                .unwrap();
+            assert_eq!(
+                session.canonical_projection().body(),
+                format!("{prefix}{expected}")
+            );
+            session
+                .execute(origin(view(1)), command(1, EditorCommandKind::Undo))
+                .unwrap();
+            assert_eq!(session.canonical_projection().body(), original);
+        }
+        for operation in [
+            EditorCommandKind::ToggleInlineMark {
+                range: selection(7, 8),
+                mark: InlineMarkKind::Bold,
+            },
+            EditorCommandKind::SetLink {
+                range: selection(7, 8),
+                target: Some("https://example.com".into()),
+            },
+        ] {
+            let mut session = EditorCoreSession::open(load(&original)).unwrap();
+            session.attach_view(view(1)).unwrap();
+            let before = session.canonical_projection();
+            assert!(
+                session
+                    .execute(origin(view(1)), command(0, operation))
+                    .is_err()
+            );
+            assert_eq!(
+                session.canonical_projection(),
+                before,
+                "atomic blocks cannot carry inline marks"
+            );
+        }
+    }
+}
+
+#[test]
+fn inline_marks_after_atomic_blocks_use_document_scalar_positions() {
+    for kind in ["scene-break", "page-break"] {
+        let body = format!("<p>before</p><hr data-kind=\"{kind}\"><p><strong>after</strong></p>");
+        let mut session = EditorCoreSession::open(load(&body)).expect("open document");
+        session.attach_view(view(1)).expect("attach view");
+        for range in [selection(13, 14), selection(14, 14)] {
+            session
+                .execute(
+                    origin(view(1)),
+                    command(0, EditorCommandKind::SetSelection { selection: range }),
+                )
+                .expect("select marked text after break");
+            assert_eq!(
+                session.active_inline_marks(view(1)).unwrap(),
+                vec![SemanticInlineMark::Bold],
+                "formatting after {kind} at {range:?}"
+            );
+        }
+        session
+            .execute(
+                origin(view(1)),
+                command(
+                    0,
+                    EditorCommandKind::ToggleInlineMark {
+                        range: selection(14, 14),
+                        mark: InlineMarkKind::Italic,
+                    },
+                ),
+            )
+            .expect("add italic to the existing caret formatting");
+        session
+            .execute(
+                origin(view(1)),
+                command(
+                    0,
+                    EditorCommandKind::InsertText {
+                        at: position(14),
+                        text: "!".into(),
+                    },
+                ),
+            )
+            .expect("type after the marked text");
+        let projection = session.canonical_projection();
+        let paragraph = projection.semantic().blocks().last().unwrap();
+        assert_eq!(paragraph.text(), "after!");
+        for mark in [SemanticInlineMark::Bold, SemanticInlineMark::Italic] {
+            assert!(paragraph.marks().iter().any(|range| {
+                *range.mark() == mark
+                    && range.range().start() <= position(5)
+                    && range.range().end() == position(6)
+            }));
+        }
+    }
+}
 
 #[test]
 fn caret_formatting_is_view_local_and_applies_until_toggled_off() {
@@ -160,14 +285,17 @@ fn projection(revision: u64) -> Projection {
         document_id: document(9),
         revision: EditorRevision::from(revision),
         document: SemanticDocumentSnapshot {
-            blocks: vec![SemanticBlockSnapshot {
-                id: block(9),
-                kind: SemanticBlockKind::Paragraph,
-                attributes: BTreeMap::new(),
-                text: String::new(),
-                marks: Vec::new(),
-                list_depth: 0,
-            }],
+            blocks: vec![
+                SemanticBlockData {
+                    id: block(9),
+                    kind: SemanticBlockKind::Paragraph,
+                    attributes: BTreeMap::new(),
+                    text: String::new().into(),
+                    marks: Vec::new(),
+                    list_depth: 0,
+                }
+                .into(),
+            ],
             canonical_html: false,
         },
         comments: Vec::new(),
@@ -398,7 +526,7 @@ fn incremental_backlog_overflow_restarts_with_one_full_snapshot() {
     queue.offer(projection(1));
     queue.offer(projection(3));
     let mut latest = projection(5);
-    latest.document.blocks[0].text = "latest".into();
+    latest.document.blocks[0].text = "latest".to_owned().into();
     queue.offer(latest);
 
     assert!(matches!(
@@ -1491,25 +1619,44 @@ fn rejected_commands_leave_document_revision_and_history_unchanged() {
 #[test]
 fn exhausted_core_sequences_reject_an_edit_before_the_engine_changes() {
     let mounted = view(1);
-    let mut session = EditorCoreSession::open(load("alpha")).expect("open session");
-    session.attach_view(mounted).expect("attach view");
-    session.inner.next_transaction = u64::MAX;
-    let before = session.canonical_projection();
-
-    let result = session.execute(
-        origin(mounted),
-        command(
-            0,
+    for (body, operation, exhaust_blocks) in [
+        (
+            "alpha",
             EditorCommandKind::InsertText {
                 at: position(0),
                 text: "bad".into(),
             },
+            false,
         ),
-    );
-
-    assert!(matches!(result, Err(EditorError::InvalidCommand { .. })));
-    assert_eq!(session.revision(), revision(0));
-    assert_eq!(session.canonical_projection(), before);
+        (
+            "<ul><li>one</li><li>two</li></ul>",
+            EditorCommandKind::AdjustListDepth {
+                range: selection(4, 4),
+                change: ListDepthChange::Indent,
+            },
+            false,
+        ),
+        (
+            "alpha",
+            EditorCommandKind::SplitBlock {
+                selection: selection(2, 2),
+            },
+            true,
+        ),
+    ] {
+        let mut session = EditorCoreSession::open(load(body)).unwrap();
+        session.attach_view(mounted).unwrap();
+        if exhaust_blocks {
+            session.inner.next_block = u64::MAX;
+        } else {
+            session.inner.next_transaction = u64::MAX;
+        }
+        let before = session.canonical_projection();
+        let result = session.execute(origin(mounted), command(0, operation));
+        assert!(matches!(result, Err(EditorError::InvalidCommand { .. })));
+        assert_eq!(session.revision(), revision(0));
+        assert_eq!(session.canonical_projection(), before);
+    }
 }
 
 #[test]

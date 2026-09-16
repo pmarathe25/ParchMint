@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
@@ -166,21 +166,12 @@ struct SessionRuntime {
     pending_blocks: BTreeSet<BlockId>,
     projections: BTreeMap<EditorRevision, PreparedEditorProjection>,
     subscribers: Vec<mpsc::Sender<EditorEvent>>,
-    closed: bool,
 }
 
 impl SessionRuntime {
     fn publish(&mut self, event: EditorEvent) {
         self.subscribers
             .retain(|sender| sender.send(event.clone()).is_ok());
-    }
-
-    fn require_open(&self) -> Result<(), EditorError> {
-        if self.closed {
-            Err(EditorError::Closed)
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -199,6 +190,28 @@ impl Default for AdapterRuntime {
             hosts: BTreeMap::new(),
             sessions: BTreeMap::new(),
         }
+    }
+}
+
+impl AdapterRuntime {
+    fn missing_session_error(&self, session: &SharedEditorSession) -> EditorError {
+        // Successful opens issue contiguous tokens. Recognize closed sessions
+        // without retaining their documents or an ever-growing tombstone set.
+        if *session >= SharedEditorSession::new(1)
+            && *session < SharedEditorSession::new(self.next_session)
+        {
+            EditorError::Closed
+        } else {
+            EditorError::UnknownSession
+        }
+    }
+
+    fn session_mut(
+        &mut self,
+        session: &SharedEditorSession,
+    ) -> Result<&mut SessionRuntime, EditorError> {
+        let error = self.missing_session_error(session);
+        self.sessions.get_mut(session).ok_or(error)
     }
 }
 
@@ -264,12 +277,7 @@ impl EditorIcedAdapter {
         let core = EditorCoreSession::open(load)?;
         let initial = core.prepare_projection();
         let mut runtime = self.lock()?;
-        let live_sessions = runtime
-            .sessions
-            .values()
-            .filter(|session| !session.closed)
-            .count();
-        if live_sessions >= self.config.resource_limits.max_sessions {
+        if runtime.sessions.len() >= self.config.resource_limits.max_sessions {
             return Err(invalid("editor session resource limit reached"));
         }
         let token = runtime.next_session;
@@ -286,7 +294,6 @@ impl EditorIcedAdapter {
                 pending_blocks: BTreeSet::new(),
                 projections: BTreeMap::from([(initial.revision(), initial)]),
                 subscribers: Vec::new(),
-                closed: false,
             },
         );
         Ok(capability)
@@ -300,7 +307,6 @@ impl EditorIcedAdapter {
     ) -> Result<(), EditorError> {
         presentation.validate()?;
         self.with_session(session, |state| {
-            state.require_open()?;
             if !state.views.contains_key(&view) {
                 return Err(EditorError::UnknownView { view });
             }
@@ -313,8 +319,12 @@ impl EditorIcedAdapter {
                 .views
                 .get_mut(&view)
                 .ok_or(EditorError::UnknownView { view })?;
+            let geometry_changed = mounted.presentation.viewport != presentation.viewport
+                || mounted.presentation.pixel_scroll_y != presentation.pixel_scroll_y;
             mounted.presentation = presentation;
-            relayout_all(mounted, self.config.layout_metrics)?;
+            if geometry_changed {
+                relayout_all(mounted, self.config.layout_metrics)?;
+            }
             let maximum_scroll = mounted
                 .layouts
                 .values()
@@ -335,7 +345,6 @@ impl EditorIcedAdapter {
         view: ViewId,
     ) -> Result<MountedViewSnapshot, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let mounted = state
                 .views
                 .get(&view)
@@ -357,24 +366,26 @@ impl EditorIcedAdapter {
         view: ViewId,
         blocks: impl IntoIterator<Item = VisibleEditorBlock>,
     ) -> Result<Vec<BlockId>, EditorError> {
-        let mut blocks = blocks.into_iter().collect::<Vec<_>>();
         let limit = self.config.resource_limits.max_visible_blocks_per_view;
-        if blocks.len() > limit {
-            blocks.drain(..blocks.len() - limit);
+        let mut retained_blocks = VecDeque::new();
+        for block in blocks {
+            if retained_blocks.len() == limit {
+                retained_blocks.pop_front();
+            }
+            retained_blocks.push_back(block);
         }
         self.with_session(session, |state| {
-            state.require_open()?;
             let mounted = state
                 .views
                 .get_mut(&view)
                 .ok_or(EditorError::UnknownView { view })?;
-            let retained = blocks
+            let retained = retained_blocks
                 .iter()
                 .map(VisibleEditorBlock::block)
                 .collect::<BTreeSet<_>>();
             mounted.layouts.retain(|block, _| retained.contains(block));
             let mut laid_out = Vec::new();
-            for input in blocks {
+            for input in retained_blocks {
                 let block = input.block();
                 let unchanged = mounted
                     .layouts
@@ -404,41 +415,33 @@ impl EditorIcedAdapter {
         session: SharedEditorSession,
     ) -> Result<EditorFrameReport, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let revision = state.core.revision();
             let primary = state.core.primary_block();
             let projection = state.projections.get(&revision).ok_or_else(|| {
                 invalid("current editor projection is unavailable from the retained budget")
             })?;
-            let pending = std::mem::take(&mut state.pending_blocks);
+            let mut pending = std::mem::take(&mut state.pending_blocks);
+            if !pending.is_empty() {
+                // The primary cache entry contains the whole document, so
+                // edits to new blocks must invalidate it in every view too.
+                pending.insert(primary);
+            }
             let mut relayouts = Vec::new();
             for (view, mounted) in &mut state.views {
-                let mut blocks_to_relayout = pending.clone();
-                if !pending.is_empty() {
-                    // The primary cache entry is the complete semantic
-                    // document projection. A split can change a newly-created
-                    // block without listing the primary block itself, but the
-                    // retained surface must still receive that new prose.
-                    blocks_to_relayout.insert(primary);
-                }
-                for block in &blocks_to_relayout {
+                for block in &pending {
                     let Some(cached) = mounted.layouts.get_mut(block) else {
                         continue;
                     };
                     if *block == primary {
-                        cached.input = VisibleEditorBlock::from_semantic_with_styles(
-                            primary,
-                            projection.semantic(),
-                            cached.input.document_start(),
-                            state.core.style_catalog(),
-                        );
+                        cached
+                            .input
+                            .update_semantic(projection.semantic(), state.core.style_catalog());
                     }
-                    let previous = cached.geometry.clone();
                     cached.geometry = layout_block(
                         &cached.input,
                         mounted.presentation,
                         self.config.layout_metrics,
-                        Some(&previous),
+                        Some(&cached.geometry),
                     )?;
                     relayouts.push(BlockRelayout {
                         view: *view,
@@ -461,7 +464,6 @@ impl EditorIcedAdapter {
         block: BlockId,
     ) -> Result<BlockLayoutGeometry, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             state
                 .views
                 .get(&view)
@@ -482,7 +484,6 @@ impl EditorIcedAdapter {
         view: ViewId,
     ) -> Result<Vec<SpellcheckDecoration>, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             Ok(state
                 .views
                 .get(&view)
@@ -498,7 +499,6 @@ impl EditorIcedAdapter {
         view: ViewId,
     ) -> Result<Vec<CommentDecoration>, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let active = state
                 .views
                 .get(&view)
@@ -537,7 +537,6 @@ impl EditorIcedAdapter {
         comment: Option<CommentId>,
     ) -> Result<(), EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             state
                 .views
                 .get_mut(&view)
@@ -628,10 +627,7 @@ impl EditorIcedAdapter {
     }
 
     pub fn revision(&self, session: SharedEditorSession) -> Result<EditorRevision, EditorError> {
-        self.with_session(session, |state| {
-            state.require_open()?;
-            Ok(state.core.revision())
-        })
+        self.with_session(session, |state| Ok(state.core.revision()))
     }
 
     pub fn active_inline_marks(
@@ -664,10 +660,7 @@ impl EditorIcedAdapter {
         session: SharedEditorSession,
         view: ViewId,
     ) -> Result<parchmint_editor_api::StyleId, EditorError> {
-        self.with_session(session, |state| {
-            state.require_open()?;
-            state.core.active_style(view)
-        })
+        self.with_session(session, |state| state.core.active_style(view))
     }
 
     /// Copies at most `max_chars` Unicode scalars around this view's caret.
@@ -683,7 +676,6 @@ impl EditorIcedAdapter {
             return Err(invalid("text context requires a positive character budget"));
         }
         self.with_session(session, |state| {
-            state.require_open()?;
             let revision = state.core.revision();
             let caret = state.core.selection(view)?.end().value();
             let projection = state
@@ -709,7 +701,6 @@ impl EditorIcedAdapter {
         session: SharedEditorSession,
     ) -> Result<VisibleEditorBlock, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let revision = state.core.revision();
             let projection = state.projections.get(&revision).ok_or_else(|| {
                 invalid("current editor projection is unavailable from the retained budget")
@@ -914,11 +905,7 @@ impl EditorIcedAdapter {
         operation: impl FnOnce(&mut SessionRuntime) -> Result<T, EditorError>,
     ) -> Result<T, EditorError> {
         let mut runtime = self.lock()?;
-        let state = runtime
-            .sessions
-            .get_mut(&session)
-            .ok_or(EditorError::UnknownSession)?;
-        operation(state)
+        operation(runtime.session_mut(&session)?)
     }
 
     fn record_change(&self, state: &mut SessionRuntime, applied: &AppliedEditorChange) {
@@ -957,6 +944,7 @@ impl EditorAdapter for EditorIcedAdapter {
         host: ViewHostCapability,
     ) -> Result<(), EditorError> {
         let mut runtime = self.lock()?;
+        runtime.session_mut(&session)?;
         let host_record = runtime
             .hosts
             .get(&host)
@@ -969,11 +957,7 @@ impl EditorAdapter for EditorIcedAdapter {
             return Err(invalid("view-host capability is already mounted"));
         }
         {
-            let state = runtime
-                .sessions
-                .get_mut(&session)
-                .ok_or(EditorError::UnknownSession)?;
-            state.require_open()?;
+            let state = runtime.session_mut(&session)?;
             if state.views.len() >= self.config.resource_limits.max_views_per_session {
                 return Err(invalid("mounted view resource limit reached"));
             }
@@ -1010,11 +994,7 @@ impl EditorAdapter for EditorIcedAdapter {
     ) -> Result<EditorViewState, EditorError> {
         let mut runtime = self.lock()?;
         let (host, detached) = {
-            let state = runtime
-                .sessions
-                .get_mut(&session)
-                .ok_or(EditorError::UnknownSession)?;
-            state.require_open()?;
+            let state = runtime.session_mut(&session)?;
             let mounted = state
                 .views
                 .remove(&view)
@@ -1036,7 +1016,6 @@ impl EditorAdapter for EditorIcedAdapter {
         command: EditorCommand,
     ) -> Result<(), EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let applied = state.core.execute(origin, command)?;
             self.record_change(state, &applied);
             Ok(())
@@ -1048,10 +1027,7 @@ impl EditorAdapter for EditorIcedAdapter {
         session: SharedEditorSession,
         view: ViewId,
     ) -> Result<EditorSelection, EditorError> {
-        self.with_session(session, |state| {
-            state.require_open()?;
-            state.core.selection(view)
-        })
+        self.with_session(session, |state| state.core.selection(view))
     }
 
     fn selection_clipboard(
@@ -1059,10 +1035,7 @@ impl EditorAdapter for EditorIcedAdapter {
         session: SharedEditorSession,
         view: ViewId,
     ) -> Result<Option<EditorClipboardContent>, EditorError> {
-        self.with_session(session, |state| {
-            state.require_open()?;
-            state.core.selection_clipboard(view)
-        })
+        self.with_session(session, |state| state.core.selection_clipboard(view))
     }
 
     fn selection_geometry(
@@ -1071,7 +1044,6 @@ impl EditorAdapter for EditorIcedAdapter {
         view: ViewId,
     ) -> Result<Option<SelectionGeometry>, EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             let selection = state.core.selection(view)?;
             if selection.is_collapsed() {
                 return Ok(None);
@@ -1096,7 +1068,6 @@ impl EditorAdapter for EditorIcedAdapter {
         styles: StyleCatalogProjection,
     ) -> Result<(), EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             state.core.set_style_catalog(styles);
             let primary = state.core.primary_block();
             let revision = state.core.revision();
@@ -1106,19 +1077,15 @@ impl EditorAdapter for EditorIcedAdapter {
             for mounted in state.views.values_mut() {
                 for (block, cached) in &mut mounted.layouts {
                     if *block == primary {
-                        cached.input = VisibleEditorBlock::from_semantic_with_styles(
-                            primary,
-                            projection.semantic(),
-                            cached.input.document_start(),
-                            state.core.style_catalog(),
-                        );
+                        cached
+                            .input
+                            .update_semantic(projection.semantic(), state.core.style_catalog());
                     }
-                    let previous = cached.geometry.clone();
                     cached.geometry = layout_block(
                         &cached.input,
                         mounted.presentation,
                         self.config.layout_metrics,
-                        Some(&previous),
+                        Some(&cached.geometry),
                     )?;
                 }
             }
@@ -1133,7 +1100,6 @@ impl EditorAdapter for EditorIcedAdapter {
         decorations: Vec<SearchDecoration>,
     ) -> Result<(), EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             state
                 .views
                 .get_mut(&view)
@@ -1150,7 +1116,6 @@ impl EditorAdapter for EditorIcedAdapter {
         decorations: Vec<SpellcheckDecoration>,
     ) -> Result<(), EditorError> {
         self.with_session(session, |state| {
-            state.require_open()?;
             state
                 .views
                 .get_mut(&view)
@@ -1165,8 +1130,7 @@ impl EditorAdapter for EditorIcedAdapter {
         session: SharedEditorSession,
         _operation: ProjectDocumentOperation,
     ) -> Result<(), EditorError> {
-        self.with_session(session, |state| {
-            state.require_open()?;
+        self.with_session(session, |_| {
             Err(invalid(
                 "composite project edits are not available in the Iced adapter",
             ))
@@ -1179,7 +1143,6 @@ impl EditorAdapter for EditorIcedAdapter {
         through: EditorRevision,
     ) -> AsyncResult<Result<CanonicalProjection, EditorError>> {
         let projection = self.with_session(session, |state| {
-            state.require_open()?;
             state.projections.get(&through).cloned().ok_or_else(|| {
                 invalid("requested projection revision is outside the retained budget")
             })
@@ -1189,40 +1152,25 @@ impl EditorAdapter for EditorIcedAdapter {
 
     fn events(&self, session: SharedEditorSession) -> EventStream<EditorEvent> {
         let (sender, receiver) = mpsc::channel();
-        if let Ok(mut runtime) = self.runtime.lock()
-            && let Some(state) = runtime.sessions.get_mut(&session)
-        {
-            if state.closed {
-                let _ = sender.send(EditorEvent::Closed);
-            } else {
-                state.subscribers.push(sender);
+        if let Ok(mut runtime) = self.runtime.lock() {
+            match runtime.session_mut(&session) {
+                Ok(state) => state.subscribers.push(sender),
+                Err(EditorError::Closed) => {
+                    let _ = sender.send(EditorEvent::Closed);
+                }
+                Err(_) => (),
             }
         }
         EventStream::from_receiver(receiver)
     }
 
     fn close(&self, session: SharedEditorSession) -> AsyncResult<()> {
-        if let Ok(mut runtime) = self.runtime.lock() {
-            let hosts = if let Some(state) = runtime.sessions.get_mut(&session) {
-                if state.closed {
-                    Vec::new()
-                } else {
-                    state.closed = true;
-                    let hosts = state
-                        .views
-                        .values()
-                        .map(|view| view.host)
-                        .collect::<Vec<_>>();
-                    state.views.clear();
-                    state.publish(EditorEvent::Closed);
-                    state.subscribers.clear();
-                    hosts
-                }
-            } else {
-                Vec::new()
-            };
-            for host in hosts {
-                if let Some(record) = runtime.hosts.get_mut(&host) {
+        if let Ok(mut runtime) = self.runtime.lock()
+            && let Some(mut state) = runtime.sessions.remove(&session)
+        {
+            state.publish(EditorEvent::Closed);
+            for mounted in state.views.values() {
+                if let Some(record) = runtime.hosts.get_mut(&mounted.host) {
                     record.mounted = false;
                 }
             }
@@ -1256,12 +1204,11 @@ fn relayout_all(
     metrics: EditorLayoutMetrics,
 ) -> Result<(), EditorError> {
     for cached in mounted.layouts.values_mut() {
-        let previous = cached.geometry.clone();
         cached.geometry = layout_block(
             &cached.input,
             mounted.presentation,
             metrics,
-            Some(&previous),
+            Some(&cached.geometry),
         )?;
     }
     Ok(())
@@ -1283,4 +1230,82 @@ const fn startup(reason: &'static str) -> EditorStartupError {
 
 const fn invalid(reason: &'static str) -> EditorError {
     EditorError::InvalidCommand { reason }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::futures::executor::block_on;
+    use parchmint_editor_api::DocumentId;
+
+    #[test]
+    fn closing_sessions_releases_documents_and_preserves_closed_capabilities() {
+        let adapter = EditorIcedAdapter::new(EditorIcedConfig {
+            resource_limits: EditorResourceLimits {
+                max_sessions: 1,
+                ..EditorResourceLimits::default()
+            },
+            ..EditorIcedConfig::default()
+        })
+        .unwrap();
+        let view = ViewId::from_bytes([1; 16]);
+        let host = adapter
+            .create_view_host(WindowCapability::new(1, 1), view)
+            .unwrap();
+        for _ in 0..16 {
+            let session = adapter
+                .open_session(CanonicalDocumentLoad::new(
+                    DocumentId::from_bytes([1; 16]),
+                    "chapter ".repeat(20_000),
+                ))
+                .unwrap();
+            adapter.attach_view(session.clone(), view, host).unwrap();
+            adapter
+                .input_en_us(session.clone(), view, "new text")
+                .unwrap();
+            let captured = adapter.project(session.clone(), 1.into());
+            let mut events = adapter.events(session.clone());
+            block_on(adapter.close(session.clone()));
+            assert_eq!(events.next(), Some(EditorEvent::Closed));
+            assert_eq!(events.next(), None);
+            assert!(
+                adapter.lock().unwrap().sessions.is_empty(),
+                "closed documents must be released"
+            );
+            assert!(block_on(captured).unwrap().body().starts_with("new text"));
+            assert!(matches!(
+                adapter.revision(session.clone()),
+                Err(EditorError::Closed)
+            ));
+            assert!(matches!(
+                adapter.active_inline_marks(session.clone(), view),
+                Err(EditorError::Closed)
+            ));
+            assert!(matches!(
+                adapter.detach_view(session.clone(), view),
+                Err(EditorError::Closed)
+            ));
+            assert!(matches!(
+                adapter.attach_view(session.clone(), view, host),
+                Err(EditorError::Closed)
+            ));
+            assert!(matches!(
+                block_on(adapter.project(session.clone(), 0.into())),
+                Err(EditorError::Closed)
+            ));
+            let mut late_events = adapter.events(session.clone());
+            assert_eq!(late_events.next(), Some(EditorEvent::Closed));
+            assert_eq!(late_events.next(), None);
+            block_on(adapter.close(session));
+        }
+        for token in [0, 100] {
+            let unknown = SharedEditorSession::new(token);
+            block_on(adapter.close(unknown.clone()));
+            assert!(matches!(
+                adapter.revision(unknown.clone()),
+                Err(EditorError::UnknownSession)
+            ));
+            assert_eq!(adapter.events(unknown).next(), None);
+        }
+    }
 }

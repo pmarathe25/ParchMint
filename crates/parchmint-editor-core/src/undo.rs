@@ -88,22 +88,25 @@ impl UndoEntry {
             .into_iter()
             .flat_map(|snapshot| &snapshot.blocks)
             .map(|block| {
+                // Charge the complete allocation conservatively even when
+                // adjacent history entries share it.
                 std::mem::size_of_val(block)
+                    + block.allocation_size()
                     + block.text.capacity()
                     + block
                         .attributes
                         .iter()
-                        .map(|(key, value)| key.capacity() + value.capacity())
+                        .map(|(key, value)| key.capacity() + 2 * value.capacity())
                         .sum::<usize>()
                     + block
                         .marks
                         .iter()
                         .map(|mark| {
-                            std::mem::size_of_val(mark)
+                            2 * (std::mem::size_of_val(mark)
                                 + match &mark.mark {
                                     crate::SemanticInlineMark::Link(target) => target.capacity(),
                                     _ => 0,
-                                }
+                                })
                         })
                         .sum::<usize>()
             })

@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::{Arc, OnceLock};
 
 use crate::{
     AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, ListDepthChange, SemanticBlock,
@@ -20,14 +22,130 @@ pub(super) struct EngineFragmentBlock {
     pub(super) list_depth: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct SemanticBlockSnapshot(Arc<SharedBlock>);
+
+#[derive(Debug, Clone)]
+struct SharedBlock {
+    data: SemanticBlockData,
+    summary: OnceLock<BlockSummary>,
+    semantic: OnceLock<SemanticBlock>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BlockSummary {
+    scalars: usize,
+    words: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SemanticBlockSnapshot {
+pub(super) struct SemanticBlockData {
     pub(super) id: BlockId,
     pub(super) kind: SemanticBlockKind,
     pub(super) attributes: BTreeMap<String, String>,
-    pub(super) text: String,
+    pub(super) text: Arc<String>,
     pub(super) marks: Vec<EngineMark>,
     pub(super) list_depth: usize,
+}
+
+impl From<SemanticBlockData> for SemanticBlockSnapshot {
+    fn from(data: SemanticBlockData) -> Self {
+        Self(Arc::new(SharedBlock {
+            data,
+            summary: OnceLock::new(),
+            semantic: OnceLock::new(),
+        }))
+    }
+}
+
+impl PartialEq for SemanticBlockSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.data == other.0.data
+    }
+}
+
+impl Eq for SemanticBlockSnapshot {}
+
+impl SemanticBlockSnapshot {
+    fn marks_mut(&mut self) -> &mut Vec<EngineMark> {
+        let shared = Arc::make_mut(&mut self.0);
+        shared.semantic.take();
+        // Inline marks change neither the text buffer nor its cached counts.
+        &mut shared.data.marks
+    }
+
+    fn summary(&self) -> BlockSummary {
+        *self.0.summary.get_or_init(|| {
+            if is_atomic(self.kind) {
+                BlockSummary {
+                    scalars: 1,
+                    words: 0,
+                }
+            } else {
+                BlockSummary {
+                    scalars: self.text.chars().count(),
+                    words: self.text.split_whitespace().count(),
+                }
+            }
+        })
+    }
+
+    pub(super) const fn allocation_size(&self) -> usize {
+        // Include space for the lazily retained semantic payload even before
+        // projection initializes it. Text/mark payloads are charged by undo.
+        std::mem::size_of::<SharedBlock>()
+            + 8 * std::mem::size_of::<usize>()
+            + 2 * std::mem::size_of::<String>()
+            + std::mem::size_of::<Vec<SemanticMarkRange>>()
+    }
+
+    fn semantic_projection(&self) -> SemanticBlock {
+        self.0
+            .semantic
+            .get_or_init(|| {
+                let marks = self
+                    .marks
+                    .iter()
+                    .map(|mark| {
+                        SemanticMarkRange::new(
+                            EditorSelection::new(
+                                DocumentPosition::from(mark.start as u64),
+                                DocumentPosition::from(mark.end as u64),
+                            ),
+                            mark.mark.clone(),
+                        )
+                    })
+                    .collect();
+                SemanticBlock::from_shared_text(
+                    self.id,
+                    self.kind,
+                    self.attributes.get("data-style-id").cloned(),
+                    self.text.clone(),
+                    marks,
+                )
+                .with_list_depth(self.list_depth)
+            })
+            .clone()
+    }
+}
+
+impl Deref for SemanticBlockSnapshot {
+    type Target = SemanticBlockData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.data
+    }
+}
+
+impl DerefMut for SemanticBlockSnapshot {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // Undo, queued saves, and retained revisions share unchanged paragraphs.
+        // Text has its own copy-on-write buffer, so mark/style edits share it.
+        let shared = Arc::make_mut(&mut self.0);
+        shared.summary.take();
+        shared.semantic.take();
+        &mut shared.data
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,40 +167,22 @@ impl SemanticDocumentSnapshot {
     }
 
     pub(super) fn word_count(&self) -> usize {
+        self.blocks.iter().map(|block| block.summary().words).sum()
+    }
+
+    fn scalar_len(&self) -> usize {
         self.blocks
             .iter()
-            .filter(|block| !is_atomic(block.kind))
-            .map(|block| block.text.split_whitespace().count())
-            .sum()
+            .map(|block| block.summary().scalars)
+            .sum::<usize>()
+            + self.blocks.len().saturating_sub(1)
     }
 
     pub(super) fn semantic_projection(&self) -> SemanticDocument {
         let blocks = self
             .blocks
             .iter()
-            .map(|block| {
-                let marks = block
-                    .marks
-                    .iter()
-                    .map(|mark| {
-                        SemanticMarkRange::new(
-                            EditorSelection::new(
-                                DocumentPosition::from(mark.start as u64),
-                                DocumentPosition::from(mark.end as u64),
-                            ),
-                            mark.mark.clone(),
-                        )
-                    })
-                    .collect();
-                SemanticBlock::new(
-                    block.id,
-                    block.kind,
-                    block.attributes.get("data-style-id").cloned(),
-                    block.text.clone(),
-                    marks,
-                )
-                .with_list_depth(block.list_depth)
-            })
+            .map(SemanticBlockSnapshot::semantic_projection)
             .collect();
         SemanticDocument::new(blocks)
     }
@@ -250,14 +350,13 @@ pub(super) trait DocumentEngine {
     ) -> Result<EngineChange, EngineError>;
     fn snapshot(&self) -> SemanticDocumentSnapshot;
     fn inline_marks(&self, selection: EditorSelection) -> Vec<SemanticInlineMark>;
-    fn text(&self) -> &str;
+    fn selection_text(&self, start: usize, length: usize) -> String;
     fn scalar_len(&self) -> usize;
 }
 
 #[derive(Debug, Default)]
 pub(super) struct PrivateTextEngine {
     document: Option<SemanticDocumentSnapshot>,
-    text: String,
 }
 
 impl DocumentEngine for PrivateTextEngine {
@@ -270,7 +369,7 @@ impl DocumentEngine for PrivateTextEngine {
         let mut offset = 0;
         let mut common: Option<Vec<SemanticInlineMark>> = None;
         for block in &document.blocks {
-            let len = block.text.chars().count();
+            let len = block_scalar_len(block);
             if selection.is_collapsed() && start >= offset && start <= offset + len {
                 let local = start - offset;
                 return block
@@ -311,7 +410,6 @@ impl DocumentEngine for PrivateTextEngine {
         if document.blocks.is_empty() {
             return Err(EngineError::InvalidSnapshot);
         }
-        self.text = document.plain_text();
         self.document = Some(document);
         Ok(())
     }
@@ -334,17 +432,14 @@ impl DocumentEngine for PrivateTextEngine {
         let byte_start =
             scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
         let byte_end = scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
-        block
-            .text
-            .replace_range(byte_start..byte_end, &edit.inserted);
+        Arc::make_mut(&mut block.text).replace_range(byte_start..byte_end, &edit.inserted);
         update_marks_for_edit(
-            &mut block.marks,
+            block.marks_mut(),
             local_start,
             local_end,
             edit.inserted.chars().count(),
         );
         let changed_block = block.id;
-        self.text = document.plain_text();
         Ok(EngineChange {
             mapping: PositionMapping {
                 at: edit.at,
@@ -379,7 +474,7 @@ impl DocumentEngine for PrivateTextEngine {
             .collect::<Vec<_>>();
         for mark in existing {
             remove_mark(
-                &mut block.marks,
+                block.marks_mut(),
                 local_start,
                 local_start + inserted_len,
                 &mark,
@@ -387,7 +482,7 @@ impl DocumentEngine for PrivateTextEngine {
         }
         for mark in marks {
             add_mark(
-                &mut block.marks,
+                block.marks_mut(),
                 local_start + mark.start,
                 local_start + mark.end,
                 mark.mark,
@@ -407,7 +502,7 @@ impl DocumentEngine for PrivateTextEngine {
             return Err(EngineError::InvalidEdit);
         }
         let document = self.document.as_ref().ok_or(EngineError::InvalidSnapshot)?;
-        let before_len = document.plain_text().chars().count();
+        let before_len = document.scalar_len();
         let (start_index, local_start) = locate_position(&document.blocks, start, true)?;
         let (end_index, local_end) = locate_position(&document.blocks, end, true)?;
         if start_index > end_index
@@ -431,7 +526,7 @@ impl DocumentEngine for PrivateTextEngine {
             let byte =
                 scalar_to_byte(&start_block.text, local_start).ok_or(EngineError::InvalidEdit)?;
             let mut prefix = start_block.clone();
-            prefix.text = prefix.text[..byte].to_owned();
+            prefix.text = prefix.text[..byte].to_owned().into();
             prefix.marks = clipped_marks(&prefix.marks, 0, local_start);
             replacement.push(prefix);
             true
@@ -445,14 +540,17 @@ impl DocumentEngine for PrivateTextEngine {
             } else {
                 ids.next().ok_or(EngineError::InvalidEdit)?
             };
-            replacement.push(SemanticBlockSnapshot {
-                id,
-                kind: fragment.kind,
-                attributes: BTreeMap::new(),
-                text: fragment.text,
-                marks: fragment.marks,
-                list_depth: fragment.list_depth,
-            });
+            replacement.push(
+                SemanticBlockData {
+                    id,
+                    kind: fragment.kind,
+                    attributes: BTreeMap::new(),
+                    text: fragment.text.into(),
+                    marks: fragment.marks,
+                    list_depth: fragment.list_depth,
+                }
+                .into(),
+            );
         }
 
         if local_end < end_len {
@@ -465,7 +563,7 @@ impl DocumentEngine for PrivateTextEngine {
             };
             let mut suffix = end_block;
             suffix.id = suffix_id;
-            suffix.text = suffix.text[byte..].to_owned();
+            suffix.text = suffix.text[byte..].to_owned().into();
             suffix.marks = clipped_marks(&suffix.marks, local_end, end_len);
             replacement.push(suffix);
         }
@@ -473,8 +571,7 @@ impl DocumentEngine for PrivateTextEngine {
         let changed_blocks = replacement.iter().map(|block| block.id).collect::<Vec<_>>();
         let mut after = document.clone();
         after.blocks.splice(start_index..=end_index, replacement);
-        let after_text = after.plain_text();
-        let after_len = after_text.chars().count();
+        let after_len = after.scalar_len();
         let retained = before_len
             .checked_sub(end - start)
             .ok_or(EngineError::InvalidEdit)?;
@@ -482,7 +579,6 @@ impl DocumentEngine for PrivateTextEngine {
             .checked_sub(retained)
             .ok_or(EngineError::InvalidEdit)?;
         self.document = Some(after);
-        self.text = after_text;
         Ok(EngineChange {
             mapping: PositionMapping {
                 at: start,
@@ -503,33 +599,33 @@ impl DocumentEngine for PrivateTextEngine {
             return Err(EngineError::InvalidEdit);
         }
         let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
-        let before = document.clone();
         let mut changed = Vec::new();
         let mut offset = 0usize;
         let fully_marked = document.blocks.iter().all(|block| {
-            let block_end = offset.saturating_add(block.text.chars().count());
-            let local_start = start.saturating_sub(offset).min(block.text.chars().count());
-            let local_end = end.saturating_sub(offset).min(block.text.chars().count());
-            offset = block_end.saturating_add(1);
-            local_start >= local_end
+            let len = block_scalar_len(block);
+            let local_start = start.saturating_sub(offset).min(len);
+            let local_end = end.saturating_sub(offset).min(len);
+            offset = offset.saturating_add(len).saturating_add(1);
+            is_atomic(block.kind)
+                || local_start >= local_end
                 || range_fully_marked(&block.marks, local_start, local_end, &mark)
         });
         offset = 0;
         for block in &mut document.blocks {
-            let len = block.text.chars().count();
+            let len = block_scalar_len(block);
             let local_start = start.saturating_sub(offset).min(len);
             let local_end = end.saturating_sub(offset).min(len);
-            if local_start < local_end {
+            if !is_atomic(block.kind) && local_start < local_end {
                 if fully_marked {
-                    remove_mark(&mut block.marks, local_start, local_end, &mark);
+                    remove_mark(block.marks_mut(), local_start, local_end, &mark);
                 } else {
-                    add_mark(&mut block.marks, local_start, local_end, mark.clone());
+                    add_mark(block.marks_mut(), local_start, local_end, mark.clone());
                 }
                 changed.push(block.id);
             }
             offset = offset.saturating_add(len).saturating_add(1);
         }
-        if changed.is_empty() || *document == before {
+        if changed.is_empty() {
             return Err(EngineError::InvalidEdit);
         }
         Ok(EngineChange {
@@ -548,28 +644,30 @@ impl DocumentEngine for PrivateTextEngine {
             return Err(EngineError::InvalidEdit);
         }
         let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
-        let before = document.clone();
         let mut changed = Vec::new();
         let mut offset = 0usize;
         for block in &mut document.blocks {
-            let len = block.text.chars().count();
+            let len = block_scalar_len(block);
             let local_start = start.saturating_sub(offset).min(len);
             let local_end = end.saturating_sub(offset).min(len);
-            if local_start < local_end {
-                remove_links(&mut block.marks, local_start, local_end);
+            if !is_atomic(block.kind) && local_start < local_end {
+                let before = block.marks.clone();
+                remove_links(block.marks_mut(), local_start, local_end);
                 if let Some(target) = &target {
                     add_mark(
-                        &mut block.marks,
+                        block.marks_mut(),
                         local_start,
                         local_end,
                         SemanticInlineMark::Link(target.clone()),
                     );
                 }
-                changed.push(block.id);
+                if block.marks != before {
+                    changed.push(block.id);
+                }
             }
             offset = offset.saturating_add(len).saturating_add(1);
         }
-        if changed.is_empty() || *document == before {
+        if changed.is_empty() {
             return Err(EngineError::InvalidEdit);
         }
         Ok(EngineChange {
@@ -626,7 +724,6 @@ impl DocumentEngine for PrivateTextEngine {
             }
             changed.push(block.id);
         }
-        self.text = document.plain_text();
         Ok(EngineChange {
             mapping: PositionMapping::identity(),
             changed_blocks: changed,
@@ -641,14 +738,14 @@ impl DocumentEngine for PrivateTextEngine {
         after_id: BlockId,
     ) -> Result<EngineChange, EngineError> {
         let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
-        let before_len = document.plain_text().chars().count();
+        let before_len = document.scalar_len();
         let (index, local) = locate_position(&document.blocks, at, true)?;
         let block = document.blocks[index].clone();
         let len = block_scalar_len(&block);
         if local > len {
             return Err(EngineError::InvalidEdit);
         }
-        let atomic = SemanticBlockSnapshot {
+        let atomic: SemanticBlockSnapshot = SemanticBlockData {
             id: atomic_id,
             kind: match kind {
                 AtomicBlockKind::SceneBreak => SemanticBlockKind::SceneBreak,
@@ -661,10 +758,11 @@ impl DocumentEngine for PrivateTextEngine {
                     AtomicBlockKind::PageBreak => "page-break".into(),
                 },
             )]),
-            text: String::new(),
+            text: Arc::default(),
             marks: Vec::new(),
             list_depth: 0,
-        };
+        }
+        .into();
         let mut changed = vec![atomic_id];
         if is_atomic(block.kind) {
             let insertion = if local == 0 { index } else { index + 1 };
@@ -676,19 +774,18 @@ impl DocumentEngine for PrivateTextEngine {
         } else {
             let byte = scalar_to_byte(&block.text, local).ok_or(EngineError::InvalidEdit)?;
             let mut before = block.clone();
-            before.text = block.text[..byte].to_owned();
+            before.text = block.text[..byte].to_owned().into();
             before.marks = clipped_marks(&block.marks, 0, local);
             let mut after = block;
             after.id = after_id;
-            after.text = after.text[byte..].to_owned();
+            after.text = after.text[byte..].to_owned().into();
             after.marks = clipped_marks(&after.marks, local, len);
             changed.extend([before.id, after.id]);
             document
                 .blocks
                 .splice(index..=index, [before, atomic, after]);
         }
-        self.text = document.plain_text();
-        let after_len = self.text.chars().count();
+        let after_len = document.scalar_len();
         let inserted = after_len
             .checked_sub(before_len)
             .ok_or(EngineError::InvalidEdit)?;
@@ -736,7 +833,6 @@ impl DocumentEngine for PrivateTextEngine {
                 .attributes
                 .insert("data-style-id".into(), "body".into());
             let changed = current.id;
-            self.text = document.plain_text();
             return Ok(EngineChange {
                 mapping: PositionMapping::identity(),
                 changed_blocks: vec![changed],
@@ -747,12 +843,12 @@ impl DocumentEngine for PrivateTextEngine {
             scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
         let end_byte = scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
         let mut before = block.clone();
-        before.text = block.text[..start_byte].to_owned();
+        before.text = block.text[..start_byte].to_owned().into();
         before.marks = clipped_marks(&block.marks, 0, local_start);
 
         let mut after = block;
         after.id = after_id;
-        after.text = after.text[end_byte..].to_owned();
+        after.text = after.text[end_byte..].to_owned().into();
         after.marks = clipped_marks(&after.marks, local_end, len);
         if matches!(
             after.kind,
@@ -767,7 +863,6 @@ impl DocumentEngine for PrivateTextEngine {
 
         let before_id = before.id;
         document.blocks.splice(index..=index, [before, after]);
-        self.text = document.plain_text();
         Ok(EngineChange {
             mapping: PositionMapping {
                 at: start,
@@ -844,7 +939,6 @@ impl DocumentEngine for PrivateTextEngine {
             .into_iter()
             .map(|index| document.blocks[index].id)
             .collect();
-        self.text = document.plain_text();
         Ok(Some(EngineChange {
             mapping: PositionMapping::identity(),
             changed_blocks,
@@ -861,7 +955,7 @@ impl DocumentEngine for PrivateTextEngine {
         let mut changed = Vec::new();
         let mut offset = 0usize;
         for block in &mut document.blocks {
-            let len = block.text.chars().count();
+            let len = block_scalar_len(block);
             let block_end = offset.saturating_add(len);
             let selected = if start == end {
                 start >= offset && start <= block_end
@@ -889,10 +983,36 @@ impl DocumentEngine for PrivateTextEngine {
         self.document.clone().expect("loaded engine")
     }
     fn scalar_len(&self) -> usize {
-        self.text.chars().count()
+        self.document
+            .as_ref()
+            .map_or(0, SemanticDocumentSnapshot::scalar_len)
     }
-    fn text(&self) -> &str {
-        &self.text
+    fn selection_text(&self, mut start: usize, mut length: usize) -> String {
+        let mut selected = String::new();
+        let Some(document) = &self.document else {
+            return selected;
+        };
+        for (index, block) in document.blocks.iter().enumerate() {
+            if length == 0 {
+                break;
+            }
+            let separator = (index + 1 < document.blocks.len()).then_some('\n');
+            let scalars = block.summary().scalars + usize::from(separator.is_some());
+            if start >= scalars {
+                start -= scalars;
+                continue;
+            }
+            let take = length.min(scalars - start);
+            let text = if is_atomic(block.kind) {
+                "\u{fffc}"
+            } else {
+                &block.text
+            };
+            selected.extend(text.chars().chain(separator).skip(start).take(take));
+            length -= take;
+            start = 0;
+        }
+        selected
     }
 }
 
@@ -927,11 +1047,7 @@ fn locate_position(
 }
 
 fn block_scalar_len(block: &SemanticBlockSnapshot) -> usize {
-    if is_atomic(block.kind) {
-        1
-    } else {
-        block.text.chars().count()
-    }
+    block.summary().scalars
 }
 
 fn is_atomic(kind: SemanticBlockKind) -> bool {
@@ -1101,13 +1217,139 @@ mod tests {
     use super::*;
 
     fn block(id: u8, kind: SemanticBlockKind, text: &str) -> SemanticBlockSnapshot {
-        SemanticBlockSnapshot {
+        SemanticBlockData {
             id: BlockId::from_bytes([id; 16]),
             kind,
             attributes: BTreeMap::new(),
-            text: text.to_owned(),
+            text: text.to_owned().into(),
             marks: Vec::new(),
             list_depth: 0,
+        }
+        .into()
+    }
+
+    #[test]
+    fn snapshots_share_unchanged_paragraphs_and_isolate_mutations() {
+        let mut engine = PrivateTextEngine::default();
+        engine
+            .load(SemanticDocumentSnapshot {
+                blocks: vec![
+                    block(1, SemanticBlockKind::Paragraph, "éclair"),
+                    block(2, SemanticBlockKind::Paragraph, "unchanged"),
+                ],
+                canonical_html: true,
+            })
+            .unwrap();
+        let before = engine.snapshot();
+        let before_semantic = before.semantic_projection();
+        assert_eq!(
+            before.blocks[0].text.as_ptr(),
+            before_semantic.blocks()[0].text().as_ptr()
+        );
+        assert_eq!(before.word_count(), 2);
+        assert_eq!(before.scalar_len(), 16);
+        assert_eq!(
+            before.blocks[0],
+            block(1, SemanticBlockKind::Paragraph, "éclair")
+        );
+        engine.apply(EngineEdit::new(1, 0, "x".into())).unwrap();
+        let edited = engine.snapshot();
+        let edited_semantic = edited.semantic_projection();
+        assert_eq!(before_semantic.blocks()[0].text(), "éclair");
+        assert_eq!(edited_semantic.blocks()[0].text(), "éxclair");
+        assert_eq!(
+            before_semantic.blocks()[1].text().as_ptr(),
+            edited_semantic.blocks()[1].text().as_ptr()
+        );
+        assert!(!Arc::ptr_eq(&before.blocks[0].0, &edited.blocks[0].0));
+        assert!(Arc::ptr_eq(&before.blocks[1].0, &edited.blocks[1].0));
+        assert_eq!(before.plain_text(), "éclair\nunchanged");
+        assert_eq!(edited.plain_text(), "éxclair\nunchanged");
+        assert_eq!(edited.scalar_len(), 17);
+        engine
+            .toggle_inline_mark(0, 1, SemanticInlineMark::Bold)
+            .unwrap();
+        let formatted = engine.snapshot();
+        assert!(Arc::ptr_eq(
+            &edited.blocks[0].text,
+            &formatted.blocks[0].text
+        ));
+        assert!(formatted.blocks[0].0.summary.get().is_some());
+        assert!(edited.blocks[0].marks.is_empty());
+        assert_eq!(formatted.blocks[0].marks.len(), 1);
+        assert_eq!(formatted.semantic_projection().blocks()[0].marks().len(), 1);
+        assert!(edited_semantic.blocks()[0].marks().is_empty());
+        assert!(Arc::ptr_eq(&before.blocks[1].0, &formatted.blocks[1].0));
+        engine.load(before.clone()).unwrap();
+        assert_eq!(
+            engine.selection_text(0, engine.scalar_len()),
+            before.plain_text()
+        );
+        assert_eq!(edited.plain_text(), "éxclair\nunchanged");
+        engine.apply(EngineEdit::new(1, 0, " ".into())).unwrap();
+        assert_eq!(engine.snapshot().word_count(), 3);
+        assert_eq!(before.word_count(), 2);
+        let mut atomic = before.blocks[0].clone();
+        atomic.kind = SemanticBlockKind::SceneBreak;
+        assert_eq!(
+            atomic.semantic_projection().kind(),
+            SemanticBlockKind::SceneBreak
+        );
+        assert_eq!(atomic.summary().scalars, 1);
+        assert_eq!(atomic.summary().words, 0);
+        assert_eq!(before.blocks[0].summary().scalars, 6);
+        let mut restyled = before.blocks[0].clone();
+        restyled
+            .attributes
+            .insert("data-style-id".into(), "heading-1".into());
+        restyled.list_depth = 2;
+        let restyled_semantic = restyled.semantic_projection();
+        assert_eq!(restyled_semantic.paragraph_style(), Some("heading-1"));
+        assert_eq!(restyled_semantic.list_depth(), 2);
+        assert!(Arc::ptr_eq(&before.blocks[0].text, &restyled.text));
+        assert_eq!(before_semantic.blocks()[0].paragraph_style(), None);
+        assert_eq!(before_semantic.blocks()[0].list_depth(), 0);
+    }
+
+    #[test]
+    fn every_selection_matches_flattened_text_across_unicode_and_atomic_blocks() {
+        let mut engine = PrivateTextEngine::default();
+        engine
+            .load(SemanticDocumentSnapshot {
+                blocks: vec![
+                    block(1, SemanticBlockKind::Paragraph, ""),
+                    block(
+                        2,
+                        SemanticBlockKind::Paragraph,
+                        "é🦀 word\nnext\u{2003}tail",
+                    ),
+                    block(3, SemanticBlockKind::SceneBreak, ""),
+                    block(4, SemanticBlockKind::Paragraph, ""),
+                    block(5, SemanticBlockKind::PageBreak, ""),
+                    block(6, SemanticBlockKind::Paragraph, "end\n"),
+                    block(7, SemanticBlockKind::Paragraph, ""),
+                ],
+                canonical_html: true,
+            })
+            .unwrap();
+        for inserted in ["", "尾\n ", "word"] {
+            engine
+                .apply(EngineEdit::new(2, 0, inserted.into()))
+                .unwrap();
+            let text = engine.snapshot().plain_text();
+            assert_eq!(engine.scalar_len(), text.chars().count());
+            for start in 0..=engine.scalar_len() {
+                for end in start..=engine.scalar_len() {
+                    assert_eq!(
+                        engine.selection_text(start, end - start),
+                        text.chars()
+                            .skip(start)
+                            .take(end - start)
+                            .collect::<String>(),
+                        "selection {start}..{end}"
+                    );
+                }
+            }
         }
     }
 

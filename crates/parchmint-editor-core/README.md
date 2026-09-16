@@ -36,6 +36,14 @@ the size budget. Entries retain changed paragraphs and omit unchanged prefixes
 and suffixes. Undo restores prior paragraphs and reverses the position mapping;
 redo applies new paragraphs and the forward mapping.
 
+Snapshots share immutable paragraph data and text. Text edits copy the affected
+buffer; mark-only edits keep text and cached counts. Other changes invalidate
+paragraph caches. Each history entry's budget includes shared data and estimated
+projection storage, counting shared text once per paragraph.
+
+The engine keeps no joined document copy. Selection counts copy only the selected
+text, using cached scalar counts to skip preceding paragraphs.
+
 Formatting toggles at a collapsed caret affect subsequent typing. They create a
 document revision when text is entered.
 

@@ -14,6 +14,38 @@ use std::{
 use super::*;
 
 #[test]
+fn semantic_snapshots_share_immutable_payloads_and_count_rendered_scalars() {
+    let mut text = Arc::new("é\n🦀".to_owned());
+    let paragraph = SemanticBlock::from_shared_text(
+        BlockId::from_bytes([1; 16]),
+        SemanticBlockKind::OrderedListItem,
+        Some("body".into()),
+        text.clone(),
+        vec![SemanticMarkRange::new(
+            selection(0, 1),
+            SemanticInlineMark::Bold,
+        )],
+    );
+    assert!(Arc::ptr_eq(&text, &paragraph.content.text));
+    Arc::make_mut(&mut text).push_str(" changed");
+    assert_eq!(paragraph.text(), "é\n🦀");
+    let nested = paragraph.clone().with_list_depth(2);
+    assert_eq!(paragraph.list_depth(), 0);
+    assert_eq!(nested.list_depth(), 2);
+    assert!(Arc::ptr_eq(&paragraph.content, &nested.content));
+    assert_eq!(paragraph.scalar_len(), 3);
+    let document = SemanticDocument::new(vec![paragraph, nested]);
+    assert!(Arc::ptr_eq(&document.blocks, &document.clone().blocks));
+    assert_eq!(document.plain_text(), "é\n🦀\né\n🦀");
+    for kind in [SemanticBlockKind::SceneBreak, SemanticBlockKind::PageBreak] {
+        let atomic = SemanticBlock::new(BlockId::from_bytes([2; 16]), kind, None, "", vec![]);
+        assert_eq!(atomic.scalar_len(), 1);
+        assert_eq!(SemanticDocument::new(vec![atomic]).plain_text(), "\u{fffc}");
+    }
+    assert_eq!(SemanticDocument::default(), SemanticDocument::new(vec![]));
+}
+
+#[test]
 fn two_views_share_document_history_and_keep_selection_state_independent() {
     let adapter = adapter();
     let session = wait(adapter.open(load()));

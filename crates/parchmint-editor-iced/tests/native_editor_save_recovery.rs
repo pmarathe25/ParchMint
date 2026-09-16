@@ -4,7 +4,7 @@
 mod editor_save_recovery;
 
 use editor_save_recovery::{
-    Boundary, EditorSaveRecoveryHarness, PersistenceFailure, recovered_body,
+    Boundary, EditorSaveRecoveryHarness, PersistenceFailure, document_id, recovered_body,
 };
 use parchmint_editor_api::EditorRevision;
 use parchmint_recovery_api::{
@@ -92,7 +92,11 @@ fn default_eight_revision_retention_eviction_is_fallible_and_not_saved() {
         Some(PersistenceFailure::Projection(_))
     ));
     assert!(status.saved_through.is_none());
+    assert_eq!(status.state, SaveState::Error);
     assert_eq!(harness.production_status().state, SaveState::Error);
+    assert!(harness.acknowledgements().is_empty());
+    assert!(harness.committed_bodies().is_empty());
+    assert_eq!(recovered_body(&harness.replay()), Some("seedxxxxxxxx"));
     harness.force_terminate();
 }
 
@@ -170,6 +174,8 @@ fn longer_mixed_replay_preserves_each_batch_and_resumes_the_unacknowledged_tail(
     let replay = harness.replay_after_reopen("");
     assert_eq!(replay.accepted.len(), 6);
     assert!(replay.isolated.is_empty());
+    assert_eq!(harness.boundaries().count(Boundary::ForcedTermination), 1);
+    assert_eq!(recovered_body(&replay), Some("one two three four five six"));
     for (index, (batch, body)) in replay.accepted.iter().zip(bodies).enumerate() {
         assert_batch_exact(batch, (index + 1) as u64, (index + 1) as u64, body);
         assert_ne!(batch.base_hashes, batch.result_hashes);
@@ -187,25 +193,93 @@ fn longer_mixed_replay_preserves_each_batch_and_resumes_the_unacknowledged_tail(
 }
 
 #[test]
-fn interrupted_projection_never_reports_saved() {
-    let harness = EditorSaveRecoveryHarness::with_projection_budget("", 1);
-    harness.boundaries().pause_at(Boundary::BeforeProjection);
-    harness.type_text("first", true);
+fn acknowledged_vector_survives_exactly_while_newer_mounted_input_remains_dirty() {
+    let mut harness = EditorSaveRecoveryHarness::new("");
+    let paused = [
+        Boundary::BeforeProjection,
+        Boundary::AfterProjection,
+        Boundary::BeforeRecoveryAppend,
+        Boundary::AfterRecoveryAppend,
+        Boundary::BeforeSave,
+        Boundary::AfterCanonicalCommit,
+        Boundary::BeforeSaveAcknowledgement,
+    ];
+    for boundary in paused {
+        harness.boundaries().pause_at(boundary);
+    }
+
+    let acknowledged = harness.type_text("one", true);
     harness.boundaries().wait_until(Boundary::BeforeProjection);
-    harness.type_text(" second", false);
+    let newer = harness.type_text(" two", false);
+    assert_eq!(acknowledged, EditorRevision::from(1));
+    assert_eq!(newer, EditorRevision::from(2));
+
+    for (index, boundary) in paused.iter().copied().enumerate() {
+        harness.boundaries().release(boundary);
+        if let Some(next) = paused.get(index + 1).copied() {
+            harness.boundaries().wait_until(next);
+            assert!(harness.acknowledgements().is_empty());
+        }
+    }
+    harness.wait_until_idle();
+
+    let acknowledgements = harness.acknowledgements();
+    assert_eq!(acknowledgements.len(), 1);
+    let acknowledgement = &acknowledgements[0];
+    assert_eq!(
+        acknowledgement.requested_revisions.open_documents[&document_id()],
+        DocumentRevision::from(1)
+    );
+    assert_eq!(
+        acknowledgement.requested_revisions.generation,
+        SaveGeneration::from(1)
+    );
+    assert!(
+        acknowledgement
+            .written_revisions
+            .covers(&acknowledgement.requested_revisions)
+    );
+    let status = harness.status();
+    assert_eq!(status.state, SaveState::Dirty);
+    assert_eq!(
+        status.saved_through.unwrap().open_documents[&document_id()],
+        DocumentRevision::from(1)
+    );
+    assert_eq!(harness.committed_bodies(), ["one"]);
+    assert_eq!(recovered_body(&harness.replay()), Some("one two"));
+
+    for boundary in paused {
+        assert!(
+            harness.boundaries().count(boundary) > 0,
+            "missing named boundary {boundary:?}"
+        );
+    }
+    harness.force_terminate();
+}
+
+#[test]
+fn continuous_typing_keeps_projection_and_recovery_backlog_bounded() {
+    let harness = EditorSaveRecoveryHarness::new("");
+    harness.boundaries().pause_at(Boundary::BeforeProjection);
+    harness.type_text("x", false);
+    harness.boundaries().wait_until(Boundary::BeforeProjection);
+    for _ in 0..64 {
+        harness.type_text("x", false);
+    }
+
+    assert!(harness.max_backlog() <= 2);
     harness.boundaries().release(Boundary::BeforeProjection);
     harness.wait_until_idle();
 
-    let status = harness.status();
-    assert_eq!(status.state, SaveState::Error);
-    assert!(matches!(
-        status.failure,
-        Some(PersistenceFailure::Projection(_))
-    ));
-    assert!(status.saved_through.is_none());
-    assert!(harness.acknowledgements().is_empty());
-    assert!(harness.committed_bodies().is_empty());
-    assert_eq!(recovered_body(&harness.replay()), Some("first second"));
+    assert!(harness.max_backlog() <= 2);
+    assert_eq!(harness.projected_count(), 1);
+    assert_eq!(harness.recovery_batch_count(), 1);
+    let replay = harness.replay();
+    assert_eq!(replay.accepted.len(), 1);
+    let range = replay.accepted[0].documents[&document_id()];
+    assert_eq!(range.first, DocumentRevision::from(1));
+    assert_eq!(range.last, DocumentRevision::from(65));
+    assert_eq!(recovered_body(&replay).map(str::len), Some(65));
 }
 
 fn assert_batch_exact(

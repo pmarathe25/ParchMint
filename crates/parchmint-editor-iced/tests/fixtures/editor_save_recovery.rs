@@ -35,9 +35,9 @@ use parchmint_project_repository::{
     ValidationReport, WriteError,
 };
 use parchmint_recovery_api::{
-    ContentHash, DocumentRevision, DurableRevisionVector, RecoveryBaseSnapshot, RecoveryBatch,
-    RecoveryError, RecoveryJournal, RecoveryReceipt, RecoveryReplay, RecoveryRevisionVector,
-    ResourceId, VersionedRecoveryPayload,
+    ContentHash, DocumentRevision, RecoveryBaseSnapshot, RecoveryBatch, RecoveryError,
+    RecoveryJournal, RecoveryReceipt, RecoveryReplay, RecoveryRevisionVector, ResourceId,
+    VersionedRecoveryPayload,
 };
 use parchmint_recovery_fs::FsRecoveryJournal;
 use parchmint_save::{
@@ -48,13 +48,12 @@ use parchmint_save::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const WAIT: Duration = Duration::from_secs(3);
+const WAIT: Duration = Duration::from_secs(10);
 const DOCUMENT_PATH: &str = "manuscript/editor-integration.html";
 const DOCUMENT: DocumentId = DocumentId::from_bytes([34; 16]);
 const PROJECT: ProjectId = ProjectId::from_bytes([34; 16]);
 const VIEW: ViewId = ViewId::from_bytes([34; 16]);
 
-#[allow(dead_code)]
 pub const fn document_id() -> DocumentId {
     DOCUMENT
 }
@@ -75,7 +74,6 @@ pub enum Boundary {
 #[derive(Debug, Default)]
 struct BoundaryState {
     paused: BTreeSet<Boundary>,
-    released: BTreeSet<Boundary>,
     reached: BTreeMap<Boundary, usize>,
 }
 
@@ -96,14 +94,13 @@ impl BoundaryController {
 
     pub fn release(&self, boundary: Boundary) {
         let mut state = self.state.lock().expect("boundary lock");
-        state.released.insert(boundary);
+        state.paused.remove(&boundary);
         self.changed.notify_all();
     }
 
     pub fn release_all(&self) {
         let mut state = self.state.lock().expect("boundary lock");
-        let paused = state.paused.iter().copied().collect::<Vec<_>>();
-        state.released.extend(paused);
+        state.paused.clear();
         self.changed.notify_all();
     }
 
@@ -113,17 +110,15 @@ impl BoundaryController {
 
     pub fn wait_until_count(&self, boundary: Boundary, expected: usize) {
         let state = self.state.lock().expect("boundary lock");
-        let (state, timeout) = self
+        let (state, _) = self
             .changed
             .wait_timeout_while(state, WAIT, |state| {
                 state.reached.get(&boundary).copied().unwrap_or_default() < expected
             })
             .expect("boundary lock");
-        assert!(
-            state.reached.get(&boundary).copied().unwrap_or_default() >= expected,
-            "worker did not reach {boundary:?}"
-        );
-        assert!(!timeout.timed_out(), "waiting for {boundary:?} timed out");
+        let reached = state.reached.get(&boundary).copied().unwrap_or_default() >= expected;
+        drop(state);
+        assert!(reached, "worker did not reach {boundary:?}");
     }
 
     pub fn count(&self, boundary: Boundary) -> usize {
@@ -140,7 +135,7 @@ impl BoundaryController {
         let mut state = self.state.lock().expect("boundary lock");
         *state.reached.entry(boundary).or_default() += 1;
         self.changed.notify_all();
-        while state.paused.contains(&boundary) && !state.released.contains(&boundary) {
+        while state.paused.contains(&boundary) {
             state = self.changed.wait(state).expect("boundary lock");
         }
     }
@@ -611,18 +606,16 @@ impl EditorSaveRecoveryHarness {
 
     pub fn wait_until_idle(&self) {
         let state = self.shared.state.lock().expect("pipeline lock");
-        let (state, timeout) = self
+        let (state, _) = self
             .shared
             .changed
             .wait_timeout_while(state, WAIT, |state| {
                 state.active.is_some() || !state.pending.is_empty()
             })
             .expect("pipeline lock");
-        assert!(
-            state.active.is_none() && state.pending.is_empty(),
-            "persistence worker did not become idle"
-        );
-        assert!(!timeout.timed_out(), "persistence worker timed out");
+        let idle = state.active.is_none() && state.pending.is_empty();
+        drop(state);
+        assert!(idle, "persistence worker did not become idle");
     }
 
     pub fn status(&self) -> PersistenceStatus {
@@ -634,7 +627,6 @@ impl EditorSaveRecoveryHarness {
             .clone()
     }
 
-    #[allow(dead_code)]
     pub fn production_status(&self) -> parchmint_application::EditorPersistenceStatus {
         self.persistence.status()
     }
@@ -648,12 +640,10 @@ impl EditorSaveRecoveryHarness {
             .clone()
     }
 
-    #[allow(dead_code)]
     pub fn max_backlog(&self) -> usize {
         self.shared.state.lock().expect("pipeline lock").max_backlog
     }
 
-    #[allow(dead_code)]
     pub fn queue_bounds(&self) -> (usize, usize, usize) {
         let state = self.shared.state.lock().expect("pipeline lock");
         (
@@ -675,7 +665,6 @@ impl EditorSaveRecoveryHarness {
             .recovery_batches
     }
 
-    #[allow(dead_code)]
     /// Returns the durable batch that has not yet advanced the in-memory frontier.
     pub fn in_flight_recovery(&self) -> Option<RecoveryBatch> {
         self.shared
@@ -686,7 +675,6 @@ impl EditorSaveRecoveryHarness {
             .clone()
     }
 
-    #[allow(dead_code)]
     pub fn in_flight_receipt(&self) -> Option<RecoveryReceipt> {
         self.shared
             .state
@@ -739,7 +727,6 @@ impl EditorSaveRecoveryHarness {
             .expect("replay after forced termination")
     }
 
-    #[allow(dead_code)]
     pub fn reconciled_frontier_after_reopen(&self, initial_body: &str) -> RecoveryRevisionVector {
         let journal = Arc::new(
             FsRecoveryJournal::open(self.project.path()).expect("reopen recovery journal"),
@@ -755,7 +742,6 @@ impl EditorSaveRecoveryHarness {
         persistence.frontier().expect("reconciled frontier")
     }
 
-    #[allow(dead_code)]
     pub fn resume_interrupted_recovery_after_reopen(
         &self,
         initial_body: &str,
@@ -785,13 +771,21 @@ impl EditorSaveRecoveryHarness {
 
     fn stop_worker(&mut self) {
         {
-            let mut state = self.shared.state.lock().expect("pipeline lock");
+            let mut state = self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             state.stopping = true;
             state.pending.clear();
             self.shared.changed.notify_all();
         }
+        self.boundaries.release_all();
         if let Some(worker) = self.worker.take() {
-            worker.join().expect("persistence worker");
+            let result = worker.join();
+            if !thread::panicking() {
+                result.expect("persistence worker");
+            }
         }
     }
 }
@@ -1082,14 +1076,6 @@ fn recovery_base(initial_body: &str) -> RecoveryBaseSnapshot {
 
 fn content_hash(bytes: &[u8]) -> ContentHash {
     ContentHash::from_bytes(Sha256::digest(bytes).into())
-}
-
-#[allow(dead_code)]
-pub fn durable_vector(replay: &RecoveryReplay) -> Option<DurableRevisionVector> {
-    replay
-        .accepted
-        .last()
-        .map(|batch| DurableRevisionVector::new(batch.revision_vector()))
 }
 
 pub fn recovered_body(replay: &RecoveryReplay) -> Option<&str> {

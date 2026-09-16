@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use crate::document_engine::{EngineMark, SemanticBlockSnapshot, SemanticDocumentSnapshot};
+use crate::document_engine::{
+    EngineMark, SemanticBlockData, SemanticBlockSnapshot, SemanticDocumentSnapshot,
+};
 use crate::{BlockId, SemanticBlockKind, SemanticInlineMark};
 
 pub(super) fn parse(
@@ -9,14 +12,17 @@ pub(super) fn parse(
 ) -> Result<SemanticDocumentSnapshot, &'static str> {
     if !body.contains('<') {
         return Ok(SemanticDocumentSnapshot {
-            blocks: vec![SemanticBlockSnapshot {
-                id: primary,
-                kind: SemanticBlockKind::Paragraph,
-                attributes: BTreeMap::new(),
-                text: body.to_owned(),
-                marks: Vec::new(),
-                list_depth: 0,
-            }],
+            blocks: vec![
+                SemanticBlockData {
+                    id: primary,
+                    kind: SemanticBlockKind::Paragraph,
+                    attributes: BTreeMap::new(),
+                    text: body.to_owned().into(),
+                    marks: Vec::new(),
+                    list_depth: 0,
+                }
+                .into(),
+            ],
             canonical_html: false,
         });
     }
@@ -40,7 +46,7 @@ pub(super) fn parse(
                     SemanticBlockKind::Paragraph,
                     BTreeMap::new(),
                 );
-                current.as_mut().expect("block").text.push_str(&decoded);
+                Arc::make_mut(&mut current.as_mut().expect("block").text).push_str(&decoded);
             }
             cursor = next;
             continue;
@@ -112,7 +118,7 @@ pub(super) fn parse(
                     SemanticBlockKind::Paragraph,
                     BTreeMap::new(),
                 );
-                current.as_mut().expect("block").text.push('\n');
+                Arc::make_mut(&mut current.as_mut().expect("block").text).push('\n');
             }
             (false, "hr") => {
                 finish_block(&mut current, &mut open_marks, &mut blocks);
@@ -333,14 +339,17 @@ pub(super) fn serialize_selection(
                         })
                     })
                     .collect();
-                blocks.push(SemanticBlockSnapshot {
-                    id: block.id,
-                    kind: block.kind,
-                    attributes: block.attributes.clone(),
-                    text,
-                    marks,
-                    list_depth: block.list_depth,
-                });
+                blocks.push(
+                    SemanticBlockData {
+                        id: block.id,
+                        kind: block.kind,
+                        attributes: block.attributes.clone(),
+                        text: text.into(),
+                        marks,
+                        list_depth: block.list_depth,
+                    }
+                    .into(),
+                );
             }
         }
 
@@ -361,14 +370,15 @@ pub(super) fn serialize_selection(
 }
 
 fn empty_selection_block(id: BlockId) -> SemanticBlockSnapshot {
-    SemanticBlockSnapshot {
+    SemanticBlockData {
         id,
         kind: SemanticBlockKind::Paragraph,
         attributes: BTreeMap::new(),
-        text: String::new(),
+        text: Arc::default(),
         marks: Vec::new(),
         list_depth: 0,
     }
+    .into()
 }
 
 fn render_inline(block: &SemanticBlockSnapshot, output: &mut String) {
@@ -480,14 +490,17 @@ fn ensure_block(
         for (slot, byte) in bytes[8..].iter_mut().zip(index.to_be_bytes()) {
             *slot ^= byte;
         }
-        *current = Some(SemanticBlockSnapshot {
-            id: BlockId::from_bytes(bytes),
-            kind,
-            attributes,
-            text: String::new(),
-            marks: Vec::new(),
-            list_depth: 0,
-        });
+        *current = Some(
+            SemanticBlockData {
+                id: BlockId::from_bytes(bytes),
+                kind,
+                attributes,
+                text: Arc::default(),
+                marks: Vec::new(),
+                list_depth: 0,
+            }
+            .into(),
+        );
     }
 }
 

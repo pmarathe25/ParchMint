@@ -11,17 +11,106 @@ fn adapter() -> EditorIcedAdapter {
     EditorIcedAdapter::new(EditorIcedConfig::default()).expect("adapter")
 }
 
+fn require_release_build() {
+    #[cfg(debug_assertions)]
+    panic!("measure with --release");
+}
+
 /// Run with --release -- --ignored --nocapture on the target workstation.
 #[test]
 #[ignore = "opt-in workstation latency and memory measurement"]
 fn chapter_authoring_performance() {
+    authoring_measurement(250, 25);
+}
+
+#[test]
+#[ignore = "opt-in release best-case reference with the same sessions and undo depth"]
+fn small_document_authoring_reference() {
+    authoring_measurement(1, 1);
+}
+
+#[test]
+#[ignore = "opt-in release measurement of formatting without text changes"]
+fn long_paragraph_formatting_performance() {
+    use parchmint_editor_api::{
+        EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorSelection, InlineMarkKind,
+    };
     use std::time::Instant;
+
+    require_release_build();
+    let adapter = adapter();
+    let body = format!(
+        "<p>{}</p>",
+        "The harbor lantern shines through the rain tonight. ".repeat(2500)
+    );
+    let binding = MountedEditorBinding::mount(
+        &adapter,
+        config(
+            MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                DocumentId::from_bytes([1; 16]),
+                &body,
+            )),
+            30,
+            EditorSurfaceTheme::light(),
+        ),
+    )
+    .unwrap();
+    binding
+        .update(MountedEditorMessage::SetSelection(EditorSelection::new(
+            0.into(),
+            5.into(),
+        )))
+        .unwrap();
+    let rss_before = resident_kib();
+    let mut samples = Vec::new();
+    for _ in 0..512 {
+        let started = Instant::now();
+        binding
+            .update(MountedEditorMessage::ToggleInlineMark(InlineMarkKind::Bold))
+            .unwrap();
+        samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+    }
+    let rss_after = resident_kib();
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "20000-word single paragraph, 512 mark toggles: formatting_p95={:.4}ms RSS_before={rss_before:?}KiB RSS_after={rss_after:?}KiB",
+        samples[samples.len() * 95 / 100]
+    );
+    let project = || {
+        iced::futures::executor::block_on(adapter.project(
+            binding.session(),
+            adapter.revision(binding.session()).unwrap(),
+        ))
+        .unwrap()
+    };
+    assert_eq!(project().body(), body);
+    let execute = |kind| {
+        adapter
+            .execute(
+                binding.session(),
+                EditorCommandOrigin::new(binding.view()),
+                EditorCommand::new(adapter.revision(binding.session()).unwrap(), kind),
+            )
+            .unwrap();
+    };
+    execute(EditorCommandKind::Undo);
+    assert_eq!(project().semantic().blocks()[0].marks().len(), 1);
+    execute(EditorCommandKind::Redo);
+    assert_eq!(project().body(), body);
+    let session = binding.session();
+    binding.detach().unwrap();
+    iced::futures::executor::block_on(adapter.close(session));
+}
+
+fn authoring_measurement(chapter_paragraphs: usize, research_paragraphs: usize) {
+    use std::time::Instant;
+    require_release_build();
     let adapter = adapter();
     let paragraph = format!(
         "<p>{}</p>",
         "The harbor lantern shines through the rain tonight. ".repeat(10)
     );
-    let chapter = paragraph.repeat(250); // 20,000 words, many paragraphs.
+    let chapter = paragraph.repeat(chapter_paragraphs);
     let mut sessions = Vec::new();
     let started = Instant::now();
     for id in 1..=8 {
@@ -49,7 +138,7 @@ fn chapter_authoring_performance() {
         config(
             MountedEditorSession::Open(CanonicalDocumentLoad::new(
                 DocumentId::from_bytes([20; 16]),
-                paragraph.repeat(25),
+                paragraph.repeat(research_paragraphs),
             )),
             31,
             EditorSurfaceTheme::light(),
@@ -116,7 +205,9 @@ fn chapter_authoring_performance() {
         samples[(samples.len() * 95 / 100).min(samples.len() - 1)]
     }
     eprintln!(
-        "8 × 20k-word chapters + 2k Research: open={open_ms:.2}ms typing_p95={:.2}ms selection_p95={:.2}ms scroll_p95={:.2}ms switch_p95={:.2}ms projection={projection_ms:.2}ms RSS_before={rss_before:?}KiB RSS_after={rss_after:?}KiB",
+        "8 × {}-word chapters + {}-word Research: open={open_ms:.2}ms typing_p95={:.2}ms selection_p95={:.2}ms scroll_p95={:.2}ms switch_p95={:.2}ms projection={projection_ms:.2}ms RSS_before={rss_before:?}KiB RSS_after={rss_after:?}KiB",
+        chapter_paragraphs * 80,
+        research_paragraphs * 80,
         p95(&mut typing),
         p95(&mut selecting),
         p95(&mut scrolling),
@@ -135,6 +226,70 @@ fn resident_kib() -> Option<usize> {
                 .parse()
                 .ok()
         })
+}
+
+/// Compare unchanged-paragraph overhead with the same edited paragraph and undo depth.
+/// This is a best-case reference for this implementation, not a hardware lower bound.
+#[test]
+#[ignore = "opt-in release measurement of editor stages and a small-document reference"]
+fn chapter_edit_stage_costs() {
+    use std::time::Instant;
+
+    require_release_build();
+    for paragraphs in [1, 250] {
+        let adapter = adapter();
+        let body = format!(
+            "<p>{}</p>",
+            "The harbor lantern shines through the rain tonight. ".repeat(10)
+        )
+        .repeat(paragraphs);
+        let binding = MountedEditorBinding::mount(
+            &adapter,
+            config(
+                MountedEditorSession::Open(CanonicalDocumentLoad::new(
+                    DocumentId::from_bytes([1; 16]),
+                    body,
+                )),
+                30,
+                EditorSurfaceTheme::light(),
+            ),
+        )
+        .unwrap();
+        let mut samples = [const { Vec::new() }; 4];
+        for _ in 0..512 {
+            let started = Instant::now();
+            adapter
+                .input_en_us(binding.session(), binding.view(), "x")
+                .unwrap();
+            samples[0].push(started.elapsed().as_secs_f64() * 1_000.0);
+            let started = Instant::now();
+            adapter.next_frame(binding.session()).unwrap();
+            samples[1].push(started.elapsed().as_secs_f64() * 1_000.0);
+            let started = Instant::now();
+            binding.refresh_after_shared_frame().unwrap();
+            samples[2].push(started.elapsed().as_secs_f64() * 1_000.0);
+            let started = Instant::now();
+            std::hint::black_box(binding.active_style().unwrap());
+            samples[3].push(started.elapsed().as_secs_f64() * 1_000.0);
+        }
+        let p95 = samples.map(|mut values| {
+            values.sort_by(f64::total_cmp);
+            values[values.len() * 95 / 100]
+        });
+        eprintln!(
+            "{paragraphs} paragraphs: edit_p95={:.4}ms layout_p95={:.4}ms refresh_p95={:.4}ms style_p95={:.4}ms",
+            p95[0], p95[1], p95[2], p95[3]
+        );
+        let projection = iced::futures::executor::block_on(adapter.project(
+            binding.session(),
+            adapter.revision(binding.session()).unwrap(),
+        ))
+        .unwrap();
+        assert!(projection.body().contains(&"x".repeat(512)));
+        let session = binding.session();
+        binding.detach().unwrap();
+        iced::futures::executor::block_on(adapter.close(session));
+    }
 }
 
 fn config(

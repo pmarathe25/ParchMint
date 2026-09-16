@@ -118,7 +118,6 @@ real widgets and services with controlled input, clocks, and completion delivery
 compares PNGs; [usability review](../../tests/parchmint-ui-driver/USABILITY.md)
 checks whether complete tasks are understandable and usable.
 
-[Packaging](../../packaging/README.md) builds native installers and publishes
-version-tagged GitHub releases. [Future work](../future-work.md) separates proposed
-features from current behavior. Backwards compatibility is not required; add a
-migration only for a supported use.
+[Packaging](../../packaging/README.md) covers installers and GitHub releases.
+[Future work](../../plans/unimplemented/future-work.md) lists proposals.
+Backwards compatibility is not required; add migrations only for supported uses.
