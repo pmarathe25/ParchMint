@@ -9,6 +9,8 @@ use parchmint_editor_api::{
     StyleId, ViewId,
 };
 use std::{
+    cell::RefCell,
+    ops::Range,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -302,12 +304,84 @@ struct SurfaceContent {
 }
 
 struct SurfaceState {
+    drawing: RefCell<SurfaceDrawingCache>,
     focused: bool,
     modifiers: keyboard::Modifiers,
     drag_anchor: Option<DocumentPosition>,
     last_click: Option<SurfaceClick>,
     hovered_comment: Option<String>,
     hovered_link: Option<String>,
+}
+
+#[derive(Default)]
+struct SurfaceDrawingCache {
+    theme: Option<EditorSurfaceTheme>,
+    background: canvas::Cache,
+    scalars: Arc<[EditorScalarGeometry]>,
+    lines: Vec<(Range<usize>, canvas::Cache)>,
+}
+
+impl SurfaceDrawingCache {
+    fn draw(
+        &mut self,
+        renderer: &Renderer,
+        size: Size,
+        content: &SurfaceContent,
+    ) -> (canvas::Geometry, Vec<canvas::Geometry>) {
+        if self.theme != Some(content.theme) {
+            self.background.clear();
+            for (_, cache) in &self.lines {
+                cache.clear();
+            }
+            self.theme = Some(content.theme);
+        }
+        let background = self.background.draw(renderer, size, |frame| {
+            frame.fill(
+                &Path::rectangle(Point::ORIGIN, size),
+                content.theme.manuscript().iced(),
+            );
+        });
+        let scalars = content.geometry.shared_draw_scalars();
+        let mut geometry = Vec::new();
+        let mut start = 0;
+        while start < scalars.len() {
+            let end = start
+                + scalars[start..]
+                    .iter()
+                    .take_while(|scalar| scalar.bounds.y == scalars[start].bounds.y)
+                    .count();
+            let index = geometry.len();
+            if index == self.lines.len() {
+                self.lines.push((0..0, canvas::Cache::new()));
+            }
+            let (previous, cache) = &mut self.lines[index];
+            if !same_paint(&self.scalars[previous.clone()], &scalars[start..end]) {
+                cache.clear();
+            }
+            geometry.push(cache.draw(renderer, size, |frame| {
+                for scalar in &scalars[start..end] {
+                    draw_scalar_text(frame, scalar, content.theme);
+                }
+            }));
+            *previous = start..end;
+            start = end;
+        }
+        self.lines.truncate(geometry.len());
+        self.scalars = scalars;
+        (background, geometry)
+    }
+}
+
+fn same_paint(previous: &[EditorScalarGeometry], current: &[EditorScalarGeometry]) -> bool {
+    previous.len() == current.len()
+        && previous.iter().zip(current).all(|(old, new)| {
+            // Inserting in an earlier paragraph shifts document positions without
+            // changing these pixels. Hit testing still uses the current geometry.
+            EditorScalarGeometry {
+                position: new.position,
+                ..*old
+            } == *new
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -320,6 +394,7 @@ struct SurfaceClick {
 impl Default for SurfaceState {
     fn default() -> Self {
         Self {
+            drawing: RefCell::default(),
             focused: false,
             modifiers: keyboard::Modifiers::NONE,
             drag_anchor: None,
@@ -547,9 +622,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let content = self.content();
+        let (background, text) = state
+            .drawing
+            .borrow_mut()
+            .draw(renderer, bounds.size(), &content);
         let mut frame = Frame::new(renderer, bounds.size());
-        let background = Path::rectangle(Point::ORIGIN, bounds.size());
-        frame.fill(&background, content.theme.manuscript().iced());
+        let mut overlay = Frame::new(renderer, bounds.size());
 
         frame.with_clip(canvas_clip_bounds(bounds), |frame| {
             let range = content.geometry.document_range();
@@ -581,76 +659,11 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     continue;
                 }
                 if let Some(kind) = scalar.atomic {
-                    draw_atomic_block(frame, scalar, kind, content.theme);
+                    if kind == AtomicBlockKind::PageBreak {
+                        draw_atomic_block(frame, scalar, kind, content.theme);
+                    }
                     continue;
                 }
-                if let Some(marker) = scalar.list_marker {
-                    frame.fill_text(Text {
-                        content: if marker == 0 {
-                            "•".to_owned()
-                        } else {
-                            format!("{marker}.")
-                        },
-                        position: Point::new(scalar.bounds.x - 20.0, scalar.bounds.y),
-                        color: content.theme.text().iced(),
-                        size: iced::Pixels::from(16.0),
-                        ..Text::default()
-                    });
-                }
-                let raised = scalar.superscript;
-                let lowered = scalar.subscript;
-                let small_caps = scalar.small_caps && scalar.character.is_lowercase();
-                frame.fill_text(Text {
-                    content: if scalar.small_caps {
-                        scalar.character.to_uppercase().collect()
-                    } else {
-                        scalar.character.to_string()
-                    },
-                    position: Point::new(
-                        scalar.bounds.x,
-                        scalar.bounds.y
-                            + if raised {
-                                -scalar.bounds.height * 0.25
-                            } else if lowered {
-                                scalar.bounds.height * 0.25
-                            } else {
-                                0.0
-                            },
-                    ),
-                    color: if scalar.link {
-                        content.theme.link().iced()
-                    } else {
-                        content.theme.text().iced()
-                    },
-                    size: iced::Pixels::from(if raised || lowered || small_caps {
-                        scalar.font_size * 0.75
-                    } else {
-                        scalar.font_size
-                    }),
-                    font: iced::Font {
-                        family: match scalar.font_family {
-                            EditorFontFamily::SansSerif => {
-                                iced::font::Family::Name("Source Sans 3")
-                            }
-                            EditorFontFamily::Serif => iced::font::Family::Name("Source Serif 4"),
-                            EditorFontFamily::Monospace => iced::font::Family::Monospace,
-                        },
-                        weight: if scalar.bold || scalar.font_weight >= 700 {
-                            iced::font::Weight::Bold
-                        } else if scalar.font_weight >= 500 {
-                            iced::font::Weight::Medium
-                        } else {
-                            iced::font::Weight::Normal
-                        },
-                        style: if scalar.italic || scalar.block_italic {
-                            iced::font::Style::Italic
-                        } else {
-                            iced::font::Style::Normal
-                        },
-                        ..iced::Font::default()
-                    },
-                    ..Text::default()
-                });
                 if scalar.underline || scalar.link {
                     fill_rectangle(
                         frame,
@@ -750,7 +763,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 &preview,
                 canvas::Stroke::default().with_color(border).with_width(1.0),
             );
-            frame.fill_text(canvas::Text {
+            overlay.fill_text(canvas::Text {
                 content: label,
                 position: Point::new(16.0, y + 6.0),
                 max_width: (width - 16.0).max(1.0),
@@ -760,7 +773,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 ..Default::default()
             });
         }
-        vec![frame.into_geometry()]
+        let mut geometry = Vec::with_capacity(text.len() + 3);
+        geometry.push(background);
+        geometry.push(frame.into_geometry());
+        geometry.extend(text);
+        geometry.push(overlay.into_geometry());
+        geometry
     }
 
     fn mouse_interaction(
@@ -1605,6 +1623,83 @@ fn fill_rectangle(frame: &mut Frame, rectangle: EditorRectangle, color: Color) {
     frame.fill(&path, color);
 }
 
+fn draw_scalar_text(frame: &mut Frame, scalar: &EditorScalarGeometry, theme: EditorSurfaceTheme) {
+    if scalar.character == '\n' || scalar.character == '\t' {
+        return;
+    }
+    if let Some(kind) = scalar.atomic {
+        if kind == AtomicBlockKind::SceneBreak {
+            draw_atomic_block(frame, scalar, kind, theme);
+        }
+        return;
+    }
+    if let Some(marker) = scalar.list_marker {
+        frame.fill_text(Text {
+            content: if marker == 0 {
+                "•".to_owned()
+            } else {
+                format!("{marker}.")
+            },
+            position: Point::new(scalar.bounds.x - 20.0, scalar.bounds.y),
+            color: theme.text().iced(),
+            size: iced::Pixels::from(16.0),
+            ..Text::default()
+        });
+    }
+    let raised = scalar.superscript;
+    let lowered = scalar.subscript;
+    let small_caps = scalar.small_caps && scalar.character.is_lowercase();
+    frame.fill_text(Text {
+        content: if scalar.small_caps {
+            scalar.character.to_uppercase().collect()
+        } else {
+            scalar.character.to_string()
+        },
+        position: Point::new(
+            scalar.bounds.x,
+            scalar.bounds.y
+                + if raised {
+                    -scalar.bounds.height * 0.25
+                } else if lowered {
+                    scalar.bounds.height * 0.25
+                } else {
+                    0.0
+                },
+        ),
+        color: if scalar.link {
+            theme.link().iced()
+        } else {
+            theme.text().iced()
+        },
+        size: iced::Pixels::from(if raised || lowered || small_caps {
+            scalar.font_size * 0.75
+        } else {
+            scalar.font_size
+        }),
+        font: iced::Font {
+            family: match scalar.font_family {
+                EditorFontFamily::SansSerif => iced::font::Family::Name("Source Sans 3"),
+                EditorFontFamily::Serif => iced::font::Family::Name("Source Serif 4"),
+                EditorFontFamily::Monospace => iced::font::Family::Monospace,
+            },
+            weight: if scalar.bold || scalar.font_weight >= 700 {
+                iced::font::Weight::Bold
+            } else if scalar.font_weight >= 500 {
+                iced::font::Weight::Medium
+            } else {
+                iced::font::Weight::Normal
+            },
+            style: if scalar.italic || scalar.block_italic {
+                iced::font::Style::Italic
+            } else {
+                iced::font::Style::Normal
+            },
+            ..iced::Font::default()
+        },
+        ..Text::default()
+    });
+}
+
 fn draw_atomic_block(
     frame: &mut Frame,
     scalar: &EditorScalarGeometry,
@@ -1660,6 +1755,79 @@ mod tests {
             line_height: 20.0,
             caret_width: 1.0,
         }
+    }
+
+    #[test]
+    fn drawing_cache_reuses_unchanged_lines_and_invalidates_paint_changes() {
+        let renderer = Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0));
+        let mut cache = SurfaceDrawingCache::default();
+        let mut prior_text = None;
+        for step in 0..7 {
+            let viewport =
+                EditorViewport::new(if step == 5 { 260.0 } else { 300.0 }, 160.0).unwrap();
+            let input = VisibleEditorBlock::new(
+                BlockId::from_bytes([92; 16]),
+                if step == 2 {
+                    "first x\nlast"
+                } else {
+                    "first\nlast"
+                },
+                if step == 1 { 100.into() } else { 0.into() },
+            );
+            let content = SurfaceContent {
+                geometry: BlockLayoutGeometry::build(
+                    &input,
+                    viewport,
+                    if step == 6 { 10.0 } else { 0.0 },
+                    regression_layout_metrics(),
+                    None,
+                )
+                .unwrap(),
+                selection: EditorSelection::new(0.into(), (step as u64).into()),
+                focused: step != 3,
+                viewport,
+                theme: if step == 4 {
+                    EditorSurfaceTheme::dark()
+                } else {
+                    EditorSurfaceTheme::light()
+                },
+                spellcheck: vec![],
+                comments: vec![],
+            };
+            let size = Size::new(viewport.width, viewport.height);
+            let (_, lines) = cache.draw(&renderer, size, &content);
+            let (_, fresh) = SurfaceDrawingCache::default().draw(&renderer, size, &content);
+            assert_eq!(lines.len(), fresh.len());
+            for (line, fresh) in lines.iter().zip(&fresh) {
+                let (
+                    canvas::Geometry::<Renderer>::Cache(line),
+                    canvas::Geometry::<Renderer>::Cache(fresh),
+                ) = (line, fresh)
+                else {
+                    panic!("cached geometry")
+                };
+                assert_eq!(line.text, fresh.text, "stale text at step {step}");
+                assert_eq!(line.clip_bounds, fresh.clip_bounds);
+            }
+            let canvas::Geometry::<Renderer>::Cache(last) = lines.last().unwrap() else {
+                panic!("cached line")
+            };
+            if let Some(prior) = prior_text {
+                if step <= 3 {
+                    assert!(
+                        Arc::ptr_eq(&prior, &last.text),
+                        "unchanged last line was rebuilt at step {step}"
+                    );
+                } else {
+                    assert!(
+                        !Arc::ptr_eq(&prior, &last.text),
+                        "paint change was missed at step {step}"
+                    );
+                }
+            }
+            prior_text = Some(Arc::clone(&last.text));
+        }
+        assert_eq!(cache.lines.len(), 2, "retain only visible lines");
     }
 
     fn deterministic_settings() -> Settings {

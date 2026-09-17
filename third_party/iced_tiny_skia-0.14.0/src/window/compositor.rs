@@ -175,14 +175,8 @@ pub fn present(
 
     let damage = last_layers
         .and_then(|last_layers| {
-            (surface.background_color == background_color).then(|| {
-                damage::diff(
-                    last_layers,
-                    renderer.layers(),
-                    |layer| vec![layer.bounds],
-                    Layer::damage,
-                )
-            })
+            (surface.background_color == background_color)
+                .then(|| renderer.damage(last_layers, viewport.scale_factor()))
         })
         .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
 

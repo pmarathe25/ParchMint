@@ -1,0 +1,4 @@
+interface:
+  display_name: "ParchMint UI Review"
+  short_description: "Capture and review production UI and motion"
+  default_prompt: "Use $parchmint-ui-review to verify this ParchMint change with production workflows and animation captures."

@@ -1217,6 +1217,7 @@ struct NativeProjectState {
     /// snapshot, so generated files never silently omit current writing.
     pending_export: Option<PendingExport>,
     autosave: AutosaveState,
+    workspace_persist_due: Option<Instant>,
     /// The most recent project-wide search entered while a mounted draft is
     /// being persisted. The search starts from the freshly indexed snapshot.
     pending_global_search: Option<SearchRequest>,
@@ -1241,6 +1242,41 @@ struct PendingExport {
     ports: ProjectUiPorts,
     selection: parchmint_platform_api::UntrustedPathSelection,
     options: ExportRunOptions,
+}
+
+impl NativeProjectState {
+    fn next_timer_deadline(&self) -> Option<Instant> {
+        let persistence = (!self.project_mutations.blocks_close()
+            && !self.opaque_mutations.blocks_close())
+        .then(|| self.autosave.next_deadline())
+        .flatten();
+        persistence
+            .into_iter()
+            .chain(self.pending_spellchecks.values().copied())
+            .chain(self.workspace_persist_due)
+            .chain(
+                self.deferred_inspector_commits
+                    .pending
+                    .values()
+                    .map(|(due, _)| *due),
+            )
+            .chain(
+                self.notifications
+                    .iter()
+                    .filter_map(|notification| notification.expires_at),
+            )
+            .min()
+    }
+}
+
+fn deadline_ticks(deadline: &Instant) -> impl iced::futures::Stream<Item = Message> + use<> {
+    iced::futures::stream::unfold(*deadline, |deadline| async move {
+        tokio::time::sleep_until(deadline.into()).await;
+        let now = Instant::now();
+        // Successful work changes/removes the deadline and cancels this stream.
+        // Retain the old retry cadence if a due operation cannot make progress.
+        Some((Message::AutosaveTick(now), now + Duration::from_millis(250)))
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1802,12 +1838,42 @@ impl AutosaveState {
     }
 
     fn should_capture_recovery(&self, now: Instant) -> bool {
-        !self.dirty_sessions.is_empty()
+        self.has_unprojected_edits()
             && !self.save_in_flight
             && !self.recovery_projection_in_flight
             && self.last_recovery_projection.is_none_or(|last| {
                 now.saturating_duration_since(last) >= Self::RECOVERY_PROJECTION_INTERVAL
             })
+    }
+
+    fn has_unprojected_edits(&self) -> bool {
+        self.dirty_sessions.iter().any(|(session, revision)| {
+            self.projected_sessions
+                .get(session)
+                .is_none_or(|projected| projected < revision)
+        })
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        if self.dirty_sessions.is_empty()
+            || self.save_in_flight
+            || self.recovery_projection_in_flight
+        {
+            return None;
+        }
+        let save = self
+            .first_dirty
+            .map(|first| first + Self::CONTINUOUS_LIMIT)
+            .into_iter()
+            .chain(self.last_edit.map(|last| last + Self::IDLE_DELAY))
+            .min();
+        let recovery = self.has_unprojected_edits().then(|| {
+            self.last_recovery_projection.map_or_else(
+                || self.first_dirty.expect("dirty sessions have a timestamp"),
+                |last| last + Self::RECOVERY_PROJECTION_INTERVAL,
+            )
+        });
+        save.into_iter().chain(recovery).min()
     }
 
     fn record_projected(
@@ -2574,6 +2640,12 @@ impl NativeDesktop {
                             format!("Export could not record the latest draft: {error}"),
                         );
                     }
+                    if state.autosave.close_after_save {
+                        state.autosave.close_after_save = false;
+                        self.closing_windows.remove(&window);
+                        self.close_failures
+                            .insert(state.project.window, error.clone());
+                    }
                     self.status = Some(DesktopStatus::Error(error));
                     return Task::none();
                 }
@@ -2583,6 +2655,10 @@ impl NativeDesktop {
                     || state.pending_export.is_some();
                 let mutations_are_idle = !state.project_mutations.blocks_close()
                     && !state.opaque_mutations.blocks_close();
+                if state.autosave.close_after_save && mutations_are_idle {
+                    state.autosave.close_after_save = false;
+                    return self.continue_close_window(window);
+                }
                 if flush_pending_draft && mutations_are_idle {
                     let kind = if explicit_save {
                         ProjectSaveKind::Explicit
@@ -3718,9 +3794,19 @@ impl NativeDesktop {
     fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             window::close_requests().map(Message::CloseRequested),
-            iced::time::every(Duration::from_millis(250)).map(Message::AutosaveTick),
             event::listen_with(runtime_event),
         ];
+        if let Some(deadline) = self
+            .windows
+            .values()
+            .filter_map(|window| match window {
+                NativeWindow::Project(state) => state.next_timer_deadline(),
+                NativeWindow::Launcher => None,
+            })
+            .min()
+        {
+            subscriptions.push(Subscription::run_with(deadline, deadline_ticks));
+        }
         // A global cursor subscription rebuilds the complete editor surface for
         // every pointer move. Subscribe only while a splitter drag needs it.
         if self.windows.values().any(
@@ -6489,10 +6575,9 @@ impl NativeDesktop {
                             }
                             if !update.document_changed() {
                                 return if presentation_changed {
-                                    Task::batch([
-                                        Self::workspace_persist_task(id, state),
-                                        pane_focus_task,
-                                    ])
+                                    state.workspace_persist_due =
+                                        Some(Instant::now() + Duration::from_millis(500));
+                                    pane_focus_task
                                 } else {
                                     Task::none()
                                 };
@@ -6577,73 +6662,9 @@ impl NativeDesktop {
                             ));
                             return Task::batch([editor_tasks, retry]);
                         }
-                        if state.autosave.save_in_flight {
-                            // The active save captured an earlier immutable
-                            // frontier. Preserve this explicit request so its
-                            // projection/save runs after that frontier reaches
-                            // a terminal result.
-                            state.autosave.explicit_save_waiting = true;
-                            return Task::batch([
-                                editor_tasks,
-                                Self::workspace_persist_task(id, state),
-                            ]);
-                        }
-                        let Some(ports) = state.project.ports().cloned() else {
-                            self.status = Some(DesktopStatus::Error(
-                                "This project session has no persistence port.".into(),
-                            ));
-                            return editor_tasks;
-                        };
-                        let Some(adapter) = state.project.editor_adapter().cloned() else {
-                            self.status = Some(DesktopStatus::Error(
-                                "project editor adapter is unavailable".into(),
-                            ));
-                            return editor_tasks;
-                        };
-                        let sessions = deduplicated_editor_sessions(
-                            state
-                                .editor_bindings
-                                .values()
-                                .map(MountedEditorBinding::session),
-                            state.retained_editor_sessions.values().cloned(),
-                        );
-                        let plans = match editor_projection_plans(
-                            adapter.as_ref(),
-                            sessions,
-                            &state.autosave.projected_sessions,
-                        ) {
-                            Ok(plans) => plans,
-                            Err(error) => {
-                                self.status = Some(DesktopStatus::Error(error));
-                                return editor_tasks;
-                            }
-                        };
-                        if !state.autosave.requires_projection_save(!plans.is_empty()) {
-                            state.autosave.explicit_save_waiting = false;
-                            return Task::batch([
-                                editor_tasks,
-                                Self::workspace_persist_task(id, state),
-                            ]);
-                        }
-                        let ticket = AutosaveTicket {
-                            dirty_sessions: state.autosave.dirty_sessions.clone(),
-                        };
-                        let workspace = state.workspace.as_mut().expect("active workspace");
-                        let through_revision = workspace.project_revision();
-                        state.autosave.save_in_flight = true;
-                        workspace.update(ProjectMessage::StartSave(through_revision));
-                        return Task::batch([
-                            editor_tasks,
-                            Self::autosave_task(
-                                id,
-                                ports,
-                                adapter,
-                                plans,
-                                ticket,
-                                ProjectSaveKind::Explicit,
-                            ),
-                            Self::workspace_persist_task(id, state),
-                        ]);
+                        let persist = Self::workspace_persist_task(id, state);
+                        let save = self.start_projection_save(id, ProjectSaveKind::Explicit);
+                        return Task::batch([editor_tasks, save, persist]);
                     }
                     return Task::batch([
                         editor_tasks,
@@ -10089,6 +10110,10 @@ impl NativeDesktop {
                 continue;
             };
             expire_workspace_notifications(&mut state.notifications, now);
+            if state.workspace_persist_due.is_some_and(|due| due <= now) {
+                state.workspace_persist_due = None;
+                tasks.push(Self::workspace_persist_task(*window, state));
+            }
             let due_spellchecks = state
                 .pending_spellchecks
                 .iter()
@@ -10415,6 +10440,7 @@ impl NativeDesktop {
                 export_destination: None,
                 pending_export: None,
                 autosave: AutosaveState::default(),
+                workspace_persist_due: None,
                 pending_global_search: None,
                 next_spellcheck_generation: 0,
                 spellcheck_generation: BTreeMap::new(),
@@ -10712,7 +10738,7 @@ impl NativeDesktop {
             ));
             return retry;
         }
-        if state.autosave.save_in_flight {
+        if state.autosave.save_in_flight || state.autosave.recovery_projection_in_flight {
             let NativeWindow::Project(state) = self
                 .windows
                 .get_mut(&id)
@@ -10736,6 +10762,7 @@ impl NativeDesktop {
         if state.project_mutations.blocks_close()
             || state.opaque_mutations.blocks_close()
             || state.autosave.save_in_flight
+            || state.autosave.recovery_projection_in_flight
             || state
                 .workspace
                 .as_ref()
@@ -10807,7 +10834,7 @@ impl NativeDesktop {
             }),
             move |result| Message::ProjectCloseFinished { window: id, result },
         );
-        Task::batch([persist, close])
+        persist.chain(close)
     }
 
     fn finish_close(&mut self, id: window::Id) -> Task<Message> {
@@ -11990,6 +12017,62 @@ mod tests {
                 title: "Chapter one".into(),
             }),
             None
+        );
+    }
+
+    #[test]
+    fn project_timer_tracks_spelling_inspector_and_notification_deadlines() {
+        let project = legacy_project(PathBuf::from("/tmp/timer.parchmint"), 220);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        let start = Instant::now();
+        assert_eq!(state.next_timer_deadline(), None);
+        let mut notification = WorkspaceNotification::error("Retry available");
+        notification.expires_at = Some(start + Duration::from_secs(5));
+        state.notifications.push(notification);
+        state.deferred_inspector_commits.schedule(
+            ProjectEffect::CommitNodeTitle {
+                node_id: "chapter".into(),
+                title: "Changed title".into(),
+            },
+            start,
+        );
+        let view = ViewId::from_bytes([7; 16]);
+        state.pending_spellchecks.insert(view, start);
+        assert_eq!(state.next_timer_deadline(), Some(start));
+        state.pending_spellchecks.clear();
+        assert_eq!(
+            state.next_timer_deadline(),
+            Some(start + INSPECTOR_COMMIT_DELAY)
+        );
+        state
+            .deferred_inspector_commits
+            .take_due(start + INSPECTOR_COMMIT_DELAY);
+        assert_eq!(
+            state.next_timer_deadline(),
+            Some(start + Duration::from_secs(5))
+        );
+        expire_workspace_notifications(&mut state.notifications, start + Duration::from_secs(5));
+        assert_eq!(
+            state.notifications.len(),
+            1,
+            "errors remain available in the drawer"
+        );
+        assert_eq!(
+            state.next_timer_deadline(),
+            None,
+            "expired banners must not keep waking a clean window"
         );
     }
 
@@ -14009,6 +14092,37 @@ mod tests {
                 .focused,
             focus_before
         );
+    }
+
+    #[test]
+    fn persistence_deadlines_sleep_until_needed_and_rearm_for_new_edits() {
+        let start = Instant::now();
+        let session = SharedEditorSession::new(1);
+        let mut autosave = AutosaveState::default();
+        assert_eq!(autosave.next_deadline(), None);
+        autosave.mark_dirty(session.clone(), 1.into(), start);
+        assert_eq!(autosave.next_deadline(), Some(start));
+        autosave.recovery_projection_in_flight = true;
+        assert_eq!(autosave.next_deadline(), None);
+        autosave.recovery_projection_in_flight = false;
+        autosave.last_recovery_projection = Some(start);
+        autosave.record_projected([(session.clone(), 1.into())]);
+        assert!(!autosave.should_capture_recovery(start + Duration::from_secs(10)));
+        assert_eq!(
+            autosave.next_deadline(),
+            Some(start + AutosaveState::IDLE_DELAY)
+        );
+        autosave.mark_dirty(session.clone(), 2.into(), start + Duration::from_secs(1));
+        assert_eq!(
+            autosave.next_deadline(),
+            Some(start + AutosaveState::RECOVERY_PROJECTION_INTERVAL)
+        );
+        autosave.save_in_flight = true;
+        assert_eq!(autosave.next_deadline(), None);
+        autosave.finish_save(&AutosaveTicket {
+            dirty_sessions: BTreeMap::from([(session, 2.into())]),
+        });
+        assert_eq!(autosave.next_deadline(), None);
     }
 
     #[test]

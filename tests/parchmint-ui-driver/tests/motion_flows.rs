@@ -8,6 +8,14 @@ use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_pro
 
 const WINDOW: HarnessWindow = HarnessWindow::Project;
 
+fn capture_root(name: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("PARCHMINT_MOTION_FRAMES")?;
+    std::env::var("PARCHMINT_MOTION_FILTER")
+        .ok()
+        .is_none_or(|filter| filter.split(',').any(|part| name.starts_with(part)))
+        .then(|| PathBuf::from(root))
+}
+
 fn frames(harness: &DesktopInteractionHarness, name: &str) {
     window_frames(harness, WINDOW, name);
 }
@@ -19,16 +27,9 @@ fn window_frames(harness: &DesktopInteractionHarness, window: HarnessWindow, nam
         harness
             .advance_motion(window, Duration::from_millis(delta))
             .unwrap();
-        if let Some(root) = std::env::var_os("PARCHMINT_MOTION_FRAMES")
-            && std::env::var("PARCHMINT_MOTION_FILTER")
-                .ok()
-                .is_none_or(|filter| filter.split(',').any(|part| name.starts_with(part)))
-        {
+        if let Some(root) = capture_root(name) {
             harness
-                .snapshot(
-                    window,
-                    PathBuf::from(root).join(format!("{name}-{elapsed:03}")),
-                )
+                .snapshot(window, root.join(format!("{name}-{elapsed:03}")))
                 .unwrap();
         }
     }
@@ -36,6 +37,92 @@ fn window_frames(harness: &DesktopInteractionHarness, window: HarnessWindow, nam
 
 fn click(harness: &DesktopInteractionHarness, target: HarnessTarget) {
     harness.click_target(WINDOW, target).unwrap();
+}
+
+#[test]
+fn reduced_motion_shows_the_final_panes_on_the_first_frame() {
+    let run = IsolatedRun::new("reduced-motion-frames").unwrap();
+    let harness = create_project(&run, &run.root().join("novel.parchmint"), "Reduced motion");
+    harness
+        .type_into_target(
+            WINDOW,
+            HarnessTarget::EditorPrimary,
+            "The text stays in place.",
+        )
+        .unwrap();
+    click(&harness, HarnessTarget::Ribbon(RibbonDestination::Settings));
+    harness.click_text(WINDOW, "Reduce motion").unwrap();
+    click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
+    harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
+    click(&harness, HarnessTarget::ToggleCompanion);
+    assert!(harness.editor_panes_share_session().unwrap());
+    let output = capture_root("reduced-motion").unwrap_or_else(|| run.root().to_path_buf());
+    harness
+        .snapshot(WINDOW, output.join("reduced-motion-000"))
+        .unwrap();
+    harness
+        .advance_motion(WINDOW, Duration::from_millis(260))
+        .unwrap();
+    harness
+        .snapshot(WINDOW, output.join("reduced-motion-260"))
+        .unwrap();
+    assert!(
+        std::fs::read(output.join("reduced-motion-000-tiny-skia.png")).unwrap()
+            == std::fs::read(output.join("reduced-motion-260-tiny-skia.png")).unwrap(),
+        "reduced motion must settle the rendered panes immediately; inspect {}",
+        output.display(),
+    );
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn typing_and_undo_survive_interrupted_pane_motion() {
+    for appearance in ["Light", "Dark"] {
+        let run = IsolatedRun::new("typing-motion").unwrap();
+        let harness = create_project(&run, &run.root().join("novel.parchmint"), "Motion input");
+        click(&harness, HarnessTarget::Ribbon(RibbonDestination::Settings));
+        harness.click_text(WINDOW, appearance).unwrap();
+        click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
+        harness
+            .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Before motion.")
+            .unwrap();
+        harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
+        click(&harness, HarnessTarget::ToggleCompanion);
+        harness
+            .advance_motion(WINDOW, Duration::from_millis(48))
+            .unwrap();
+        assert!(harness.editor_panes_share_session().unwrap());
+        harness
+            .type_into_target(WINDOW, HarnessTarget::EditorPrimary, " During motion.")
+            .unwrap();
+        let edited = harness.active_editor_body().unwrap();
+        assert!(edited.contains("During motion."));
+        harness.press_command_key(WINDOW, 'z').unwrap();
+        assert!(
+            !harness
+                .active_editor_body()
+                .unwrap()
+                .contains("During motion.")
+        );
+        if cfg!(target_os = "macos") {
+            harness.press_command_shift_key(WINDOW, 'z').unwrap();
+        } else {
+            harness.press_command_key(WINDOW, 'y').unwrap();
+        }
+        assert_eq!(harness.active_editor_body().unwrap(), edited);
+        click(&harness, HarnessTarget::ToggleCompanion);
+        harness
+            .advance_motion(WINDOW, Duration::from_millis(16))
+            .unwrap();
+        click(&harness, HarnessTarget::ToggleCompanion);
+        frames(&harness, &format!("typing-interrupted-{appearance}"));
+        assert_eq!(harness.active_editor_body().unwrap(), edited);
+        assert!(harness.editor_panes_share_session().unwrap());
+        harness.elapse_autosave_idle().unwrap();
+        harness.close(WINDOW).unwrap();
+        harness.shutdown().unwrap();
+    }
 }
 
 #[test]

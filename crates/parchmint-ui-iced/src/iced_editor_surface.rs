@@ -2084,15 +2084,8 @@ mod tests {
 
     #[test]
     fn overflow_menu_selects_hidden_documents_and_stays_within_the_pane() {
-        for bytes in [
-            include_bytes!("../assets/fonts/source-sans-3/SourceSans3-Regular.ttf").as_slice(),
-            include_bytes!("../assets/fonts/source-sans-3/SourceSans3-Medium.ttf").as_slice(),
-        ] {
-            iced_test::renderer::graphics::text::font_system()
-                .write()
-                .unwrap()
-                .load_font(std::borrow::Cow::Borrowed(bytes));
-        }
+        let _motion = crate::motion::SettledMotion::new();
+        crate::visual_verification::load_test_fonts();
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         for (id, title) in [
             ("one", "The letter"),
@@ -2127,13 +2120,16 @@ mod tests {
                 .click(HarnessTarget::TabOverflow(EditorPane::Primary).id())
                 .unwrap();
             if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
-                simulator
-                    .snapshot(&theme.iced_theme())
-                    .unwrap()
-                    .matches_image(
-                        std::path::PathBuf::from(root).join(format!("tab-overflow-{appearance:?}")),
-                    )
-                    .unwrap();
+                assert!(
+                    simulator
+                        .snapshot(&theme.iced_theme())
+                        .unwrap()
+                        .matches_image(
+                            std::path::PathBuf::from(root)
+                                .join(format!("tab-overflow-{appearance:?}")),
+                        )
+                        .unwrap()
+                );
             }
             simulator.tap_key(iced::keyboard::key::Named::ArrowDown);
             simulator.tap_key(iced::keyboard::key::Named::Enter);
@@ -2829,12 +2825,7 @@ mod tests {
         let start = std::time::Instant::now();
         let _clock = crate::motion::FixedTime::new(start);
         let settings = crate::visual_verification::visual_settings();
-        for font in settings.fonts {
-            iced_test::renderer::graphics::text::font_system()
-                .write()
-                .unwrap()
-                .load_font(font);
-        }
+        crate::visual_verification::load_test_fonts();
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let (_adapter, _session, slots) = shared_document_slots(&workspace);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);

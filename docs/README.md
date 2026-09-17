@@ -27,4 +27,5 @@ outside the repository.
 - **Create project fixtures:** [Test support](../tests/parchmint-test-support/README.md).
 - **Exercise widgets and services:** [UI driver](../tests/parchmint-ui-driver/README.md).
 - **Judge complete UI tasks:** [Usability review](../tests/parchmint-ui-driver/USABILITY.md).
+- **Review visuals and motion:** [Repository skill](../.agents/skills/parchmint-ui-review/SKILL.md).
 - **Capture or compare images:** [Visual verification](../tests/parchmint-ui-verification/README.md).

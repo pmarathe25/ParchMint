@@ -48,11 +48,17 @@ The host supplies visible blocks to `cache_visible_blocks`, bounded by
 materializes only scalars inside the viewport plus overscan. `next_frame` updates
 changed cached blocks in every mounted view; each pane paints on its next frame.
 
-Layout reads shared immutable paragraphs. `VisibleEditorBlock::text` joins them
-on demand; clones share an initialized text cache. Unchanged lines share widths,
-wrap offsets, and line-relative chunk metadata. Positions, spans, and marks
+Layout reads shared immutable paragraphs and reuses their line-break boundaries.
+`VisibleEditorBlock::text` joins them on demand; clones share an initialized cache.
+Geometry snapshots share immutable buffers. Unchanged lines share one metrics
+group containing widths, wrap offsets, and chunk data. Positions, spans, and marks
 refresh on every update. Text or style changes invalidate a line; viewport width
 or metric changes invalidate the full height index.
+
+The canvas reuses background and visible-line drawing data. Carets, selections,
+and annotations update independently. Cache keys compare painted geometry and
+styles, ignoring shifted document positions; theme, size, and scroll changes
+invalidate affected drawings. Only visible lines are retained.
 
 Styles, font families, and layout hashes are resolved once per style per update.
 Widths use one-byte codes and a per-line scale, preserving exact floating-point

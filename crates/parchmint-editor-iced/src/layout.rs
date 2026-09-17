@@ -388,8 +388,29 @@ fn build_layout_lines(
     spans: &[VisibleBlockSpan],
     previous: Option<&VisibleEditorBlock>,
 ) -> Vec<VisibleLayoutLine> {
+    let old = previous.map_or(&[][..], |input| input.layout_lines.as_slice());
+    let mut old_cursor = 0;
     let mut text_lines = Vec::with_capacity(text.segment_count());
     for segment in 0..text.segment_count() {
+        let old_start = old_cursor;
+        while old
+            .get(old_cursor)
+            .is_some_and(|line| line.segment_index == segment)
+        {
+            old_cursor += 1;
+        }
+        if old_start != old_cursor
+            && previous.is_some_and(|input| {
+                std::ptr::eq(text.segment(segment), input.text.segment(segment))
+            })
+        {
+            text_lines.extend(
+                old[old_start..old_cursor]
+                    .iter()
+                    .map(|line| (segment, line.text_range.clone())),
+            );
+            continue;
+        }
         let mut start = 0;
         for line in text.segment(segment).split('\n') {
             let end = start + line.len();
@@ -397,7 +418,6 @@ fn build_layout_lines(
             start = end + 1;
         }
     }
-    let old = previous.map_or(&[][..], |input| input.layout_lines.as_slice());
     let matches = |segment: usize, range: std::ops::Range<usize>, line: &VisibleLayoutLine| {
         let old_text = previous.expect("previous line source").text.line(line);
         let new_text = &text.segment(segment)[range];
@@ -609,6 +629,22 @@ struct LineHeightEntry {
     line_index: usize,
     start: DocumentPosition,
     end: DocumentPosition,
+    start_y: f32,
+    end_y: f32,
+    metrics: Arc<LineMetrics>,
+}
+
+impl std::ops::Deref for LineHeightEntry {
+    type Target = LineMetrics;
+
+    fn deref(&self) -> &Self::Target {
+        &self.metrics
+    }
+}
+
+/// Unchanged lines share their position-independent metrics as one immutable group.
+#[derive(Debug, PartialEq)]
+struct LineMetrics {
     scalar_len: usize,
     /// Logical advances used by both the canvas positions and the caret map.
     ///
@@ -619,16 +655,14 @@ struct LineHeightEntry {
     scalar_advances: ScalarAdvances,
     /// Scalar offsets that begin a visual row. These are computed once from
     /// word boundaries and consumed by every geometry path.
-    wrap_before: Arc<[usize]>,
+    wrap_before: Box<[usize]>,
     /// A cursor state at every chunk boundary. Lookup may scan at most one
     /// chunk, keeping deep single-line documents linear to index and bounded
     /// to materialize.
-    prefix_cursors: Arc<[PrefixCursor]>,
-    start_y: f32,
-    end_y: f32,
+    prefix_cursors: Box<[PrefixCursor]>,
     line_height: f32,
     first_x: f32,
-    chunk_rows: Arc<[(usize, usize)]>,
+    chunk_rows: Box<[(usize, usize)]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -642,7 +676,7 @@ struct PrefixCursor {
 /// Store one byte per scalar instead of repeating the scaled f32 advance.
 #[derive(Debug, Clone, PartialEq)]
 struct ScalarAdvances {
-    codes: Arc<[u8]>,
+    codes: Box<[u8]>,
     base: f32,
 }
 
@@ -710,10 +744,10 @@ impl ScalarAdvances {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockLayoutGeometry {
     block: BlockId,
-    scalars: Vec<EditorScalarGeometry>,
-    carets: Vec<(DocumentPosition, EditorRectangle)>,
-    block_kinds: Vec<(DocumentPosition, DocumentPosition, SemanticBlockKind)>,
-    links: Vec<(EditorSelection, String)>,
+    scalars: Arc<[EditorScalarGeometry]>,
+    carets: Arc<[(DocumentPosition, EditorRectangle)]>,
+    block_kinds: Arc<[(DocumentPosition, DocumentPosition, SemanticBlockKind)]>,
+    links: Arc<[(EditorSelection, String)]>,
     document_range: EditorSelection,
     content_height: f32,
     height_index: Arc<Vec<LineHeightEntry>>,
@@ -835,8 +869,8 @@ impl BlockLayoutGeometry {
                     _ => None,
                 })
                 .collect(),
-            scalars,
-            carets,
+            scalars: scalars.into(),
+            carets: carets.into(),
             block_kinds: input
                 .block_spans
                 .iter()
@@ -859,6 +893,10 @@ impl BlockLayoutGeometry {
 
     pub fn draw_scalars(&self) -> &[EditorScalarGeometry] {
         &self.scalars
+    }
+
+    pub(crate) fn shared_draw_scalars(&self) -> Arc<[EditorScalarGeometry]> {
+        Arc::clone(&self.scalars)
     }
 
     pub const fn layout_work(&self) -> LayoutWork {
@@ -1197,15 +1235,17 @@ fn build_line_height(
         line_index: 0,
         start: line.start,
         end: line.end,
-        scalar_len: line.shape.scalar_len,
-        scalar_advances,
-        wrap_before: wrap_before.into(),
-        prefix_cursors: prefix_cursors.into(),
         start_y: 0.0,
         end_y: 0.0,
-        line_height,
-        first_x,
-        chunk_rows: chunk_rows.into(),
+        metrics: Arc::new(LineMetrics {
+            scalar_len: line.shape.scalar_len,
+            scalar_advances,
+            wrap_before: wrap_before.into(),
+            prefix_cursors: prefix_cursors.into(),
+            line_height,
+            first_x,
+            chunk_rows: chunk_rows.into(),
+        }),
     }
 }
 
@@ -1695,6 +1735,54 @@ mod tests {
         assert!(
             flattened.get().is_none(),
             "rendering must not join the document"
+        );
+    }
+
+    #[test]
+    fn geometry_snapshots_share_buffers_and_keep_previous_frames_immutable() {
+        let initial = SemanticDocument::new(vec![SemanticBlock::new(
+            block(1),
+            SemanticBlockKind::Paragraph,
+            None,
+            "first\nsecond",
+            vec![SemanticMarkRange::new(
+                EditorSelection::new(0.into(), 5.into()),
+                SemanticInlineMark::Link("https://example.com".into()),
+            )],
+        )]);
+        let mut input = VisibleEditorBlock::from_semantic(block(1), &initial, 20.into());
+        let viewport = EditorViewport::new(320.0, 240.0).unwrap();
+        let first =
+            BlockLayoutGeometry::build(&input, viewport, 0.0, regression_metrics(), None).unwrap();
+        let captured = first.clone();
+        assert!(Arc::ptr_eq(&first.scalars, &captured.scalars));
+        assert!(Arc::ptr_eq(&first.carets, &captured.carets));
+        assert!(Arc::ptr_eq(&first.block_kinds, &captured.block_kinds));
+        assert!(Arc::ptr_eq(&first.links, &captured.links));
+        let semantic = SemanticDocument::new(vec![SemanticBlock::new(
+            block(1),
+            SemanticBlockKind::Paragraph,
+            None,
+            "changed\n🦀\n",
+            vec![],
+        )]);
+        input.update_semantic(&semantic, &StyleCatalogProjection::default());
+        let next =
+            BlockLayoutGeometry::build(&input, viewport, 16.0, regression_metrics(), Some(&first))
+                .unwrap();
+        assert_eq!(captured, first);
+        assert_eq!(
+            captured
+                .draw_scalars()
+                .iter()
+                .map(|s| s.character)
+                .collect::<String>(),
+            "first\nsecond"
+        );
+        assert!(!Arc::ptr_eq(&next.scalars, &captured.scalars));
+        assert_eq!(
+            next,
+            BlockLayoutGeometry::build(&input, viewport, 16.0, regression_metrics(), None).unwrap()
         );
     }
 
@@ -2877,19 +2965,14 @@ mod tests {
             assert_eq!(incremental, fresh);
             assert_eq!(
                 Arc::ptr_eq(
-                    &first.height_index.last().unwrap().scalar_advances.codes,
-                    &incremental
-                        .height_index
-                        .last()
-                        .unwrap()
-                        .scalar_advances
-                        .codes,
+                    &first.height_index.last().unwrap().metrics,
+                    &incremental.height_index.last().unwrap().metrics,
                 ),
                 width == 200.0
             );
             assert!(!Arc::ptr_eq(
-                &first.height_index[0].scalar_advances.codes,
-                &incremental.height_index[0].scalar_advances.codes,
+                &first.height_index[0].metrics,
+                &incremental.height_index[0].metrics,
             ));
         }
     }

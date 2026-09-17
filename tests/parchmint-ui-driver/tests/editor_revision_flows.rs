@@ -7,6 +7,110 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_group, create_project};
 
 #[test]
+fn save_and_close_wait_for_recovery_before_projecting_again() {
+    for close_while_pending in [false, true] {
+        for later_edit in [false, true] {
+            let run = IsolatedRun::new("recovery-save-overlap").unwrap();
+            let project = run.root().join("novel.parchmint");
+            let harness = create_project(&run, &project, "Recovery overlap");
+            harness
+                .type_into_target(
+                    HarnessWindow::Project,
+                    HarnessTarget::EditorPrimary,
+                    "protectedmarker ",
+                )
+                .unwrap();
+            harness.hold_completions().unwrap();
+            harness.elapse_recovery_capture().unwrap();
+            if later_edit {
+                harness
+                    .type_focused(HarnessWindow::Project, "latermarker ")
+                    .unwrap();
+            }
+            if close_while_pending {
+                harness.close(HarnessWindow::Project).unwrap();
+            } else {
+                harness
+                    .press_command_key(HarnessWindow::Project, 's')
+                    .unwrap();
+            }
+            harness.release_completions(later_edit).unwrap();
+            if !close_while_pending {
+                harness.close(HarnessWindow::Project).unwrap();
+            }
+            harness.shutdown().unwrap();
+            let reopened =
+                DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
+                    .unwrap();
+            let body = reopened.active_editor_body().unwrap();
+            assert!(body.contains("protectedmarker"));
+            assert_eq!(body.contains("latermarker"), later_edit);
+            reopened.close(HarnessWindow::Project).unwrap();
+            reopened.shutdown().unwrap();
+        }
+    }
+}
+
+#[test]
+fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
+    let run = IsolatedRun::new("deferred-scroll-layout").unwrap();
+    let project = run.root().join("scroll.parchmint");
+    let harness = create_project(&run, &project, "Scroll layout");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "The harbor lantern shines through the rain tonight. ".repeat(40),
+        )
+        .unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
+    let workspace_path = std::fs::read_dir(run.root().join("data/workspaces"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let before = std::fs::read(&workspace_path).unwrap();
+    for _ in 0..5 {
+        harness
+            .scroll_target_by(HarnessWindow::Project, HarnessTarget::EditorPrimary, -20.0)
+            .unwrap();
+    }
+    assert_eq!(
+        std::fs::read(&workspace_path).unwrap(),
+        before,
+        "wheel input must not wait for a layout write"
+    );
+    harness.elapse_notifications().unwrap();
+    let settled: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&workspace_path).unwrap()).unwrap();
+    let previous: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    assert_ne!(settled["views"], previous["views"]);
+    harness
+        .scroll_target_by(HarnessWindow::Project, HarnessTarget::EditorPrimary, -20.0)
+        .unwrap();
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    let closed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&workspace_path).unwrap()).unwrap();
+    assert_ne!(
+        closed["views"], settled["views"],
+        "close must flush the final unexpired scroll position"
+    );
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+    let restored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&workspace_path).unwrap()).unwrap();
+    assert_eq!(restored["views"], closed["views"]);
+}
+
+#[test]
 fn empty_tabs_close_without_creating_project_documents() {
     let run = IsolatedRun::new("empty-draft-tabs").unwrap();
     let project = run.root().join("novel.parchmint");

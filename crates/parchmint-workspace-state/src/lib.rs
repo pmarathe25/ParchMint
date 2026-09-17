@@ -326,13 +326,6 @@ impl FileWorkspaceStateStore {
             .map_err(|reason| self.invalid_file(&self.path_for(project), reason))
     }
 
-    fn revision_now(&self, project: ProjectIdentity) -> Result<WorkspaceRevision, WorkspaceError> {
-        Ok(self
-            .read_stored(project)?
-            .map(|stored| WorkspaceRevision::from(stored.revision))
-            .unwrap_or_default())
-    }
-
     fn read_stored(
         &self,
         project: ProjectIdentity,
@@ -377,7 +370,19 @@ impl FileWorkspaceStateStore {
                 "pane split ratio must be finite",
             ));
         }
-        let revision = self.revision_now(project)?.next();
+        let stored = self.read_stored(project)?;
+        let previous = stored
+            .as_ref()
+            .map(|stored| WorkspaceRevision::from(stored.revision))
+            .unwrap_or_default();
+        if stored
+            .and_then(|stored| decode_snapshot(stored).ok())
+            .as_ref()
+            == Some(snapshot)
+        {
+            return Ok(previous);
+        }
+        let revision = previous.next();
         let encoded = serde_json::to_vec(&encode_snapshot(snapshot, revision))
             .map_err(|error| self.storage("encode", &self.path_for(project), error.to_string()))?;
         self.replace_durably(&self.path_for(project), &encoded)?;

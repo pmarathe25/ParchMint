@@ -1,7 +1,8 @@
-# `iced_tiny_skia` 0.14.0 transform backport
+# `iced_tiny_skia` 0.14.0
 
 **Purpose:** Fix transform scaling and Canvas text clipping in ParchMint's patched
-renderer. This directory contains source and normalized Cargo metadata from the
+renderer, and avoid unnecessary CPU painting. This directory contains source
+and normalized Cargo metadata from the
 [`iced_tiny_skia` 0.14.0 package](https://crates.io/crates/iced_tiny_skia/0.14.0).
 The original package checksum is
 `fe0acf8b75a3bc914aff5f2329fdffc1b36eeaea29dda0e4bd232f1c62e9cc3d`.
@@ -31,12 +32,37 @@ text. This prevents overscan text from painting across adjacent panes or the
 status bar, including at 2x scale. The renderer's pixel regression covers both
 live and cached text groups at 1x and 2x.
 
+Drawing reuses the clipping mask while its bounds are unchanged. All mask writes
+share one key, which resets each paint pass. This avoids clearing a window-sized
+buffer for every editor glyph or line.
+
+The glyph cache also remembers glyphs with no pixels, such as spaces, using the
+same eviction policy. Blank text no longer repeats font rasterization each frame.
+
+## Solid backgrounds
+
+Large, pixel-aligned opaque quads fill their flat middle directly and rasterize
+only the corner rows. Temporary masks are limited to those rows. Fractional
+layouts, borders, shadows, gradients, and translucent fills keep the original
+path. Pixel tests compare both paths at 1×, 1.25×, 1.5×, and 2×.
+Pixel-aligned opaque Canvas rectangles also fill their clipped area without a mask.
+
+## Incremental painting
+
+Damage comparison skips unchanged Canvas items and uses actual glyph bitmap
+bounds for cached text. Painting skips glyphs outside the damaged region and
+omits masks for fully contained glyphs. Dirty regions include old and new ink,
+stroke extents, and edge pixels. Regression tests compare incremental frames
+against full repaints through edits, clipping, and fractional movement.
+Immutable text groups reuse their ink bounds; unused entries are dropped each
+paint pass, and loading fonts invalidates them. No rasterized-line images are kept.
+
 ## Verify the patch
 
 From the workspace root:
 
 ```console
-cargo test -p iced_tiny_skia --lib --locked -j 1
+cargo test -p parchmint-ui-iced -p iced_tiny_skia --lib --locked -j 1
 ```
 
 ## License and removal
@@ -46,4 +72,4 @@ not include a license file. The official Iced license text is available at
 <https://github.com/iced-rs/iced/blob/master/LICENSE>.
 
 Remove this patch and its workspace Cargo override when the selected upstream
-version includes both fixes.
+version includes these fixes.

@@ -209,6 +209,19 @@ pub fn capture_visual(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn load_test_fonts() {
+    static FONTS: std::sync::Once = std::sync::Once::new();
+    FONTS.call_once(|| {
+        let mut fonts = iced_test::renderer::graphics::text::font_system()
+            .write()
+            .unwrap();
+        for font in visual_settings().fonts {
+            fonts.load_font(font);
+        }
+    });
+}
+
 #[cfg(any(test, feature = "visual-verification", feature = "interaction-harness"))]
 pub(crate) fn visual_settings() -> iced::Settings {
     iced::Settings {

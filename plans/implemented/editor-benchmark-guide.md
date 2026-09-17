@@ -24,5 +24,17 @@ latency or disk saves. RSS is a resident snapshot, not peak memory or live heap.
 The formatting test samples RSS before its text and undo/redo checks. Do not add
 individual stage p95 values to estimate end-to-end p95.
 
+For complete 50K-word project operations, run:
+
+```console
+PARCHMINT_BENCH_LAYOUT=chapters cargo test --release --locked -j 1 -p parchmint-ui-driver --test novel_performance novel_application_performance -- --exact --ignored --nocapture --test-threads=1
+```
+
+Layouts are `chapters` (10 × 5K words), `single` (1 × 50K), and `small` (10 × 80).
+The harness waits for services and excludes native painting/presentation. Use
+`seed_novel_benchmark` with `PARCHMINT_BENCH_FIXTURE` set to a new directory to
+generate the same project for native checks. Sample native memory separately
+with fresh application data; do not treat harness RSS as desktop RSS.
+
 Keep raw output and binaries outside the repository. Store only short findings
 and reproduction instructions in `plans/implemented/`.

@@ -25,9 +25,12 @@ pub enum Primitive {
 impl Primitive {
     /// Returns the visible bounds of the [`Primitive`].
     pub fn visible_bounds(&self) -> Rectangle {
-        let bounds = match self {
-            Primitive::Fill { path, .. } => path.bounds(),
-            Primitive::Stroke { path, .. } => path.bounds(),
+        let (bounds, outset) = match self {
+            Primitive::Fill { path, .. } => (path.bounds(), 0.0),
+            Primitive::Stroke { path, stroke, .. } => (
+                path.bounds(),
+                stroke.width * 0.5 * stroke.miter_limit.max(1.0),
+            ),
         };
 
         Rectangle {
@@ -36,5 +39,6 @@ impl Primitive {
             width: bounds.width(),
             height: bounds.height(),
         }
+        .expand(outset)
     }
 }

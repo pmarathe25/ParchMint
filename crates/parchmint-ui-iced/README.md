@@ -71,6 +71,10 @@ rendered controls and delayed completion delivery.
 
 ## Motion
 
+One deadline subscription handles pending spelling, Inspector edits, layout writes,
+notifications, autosave, and recovery. Clean windows have no polling timer;
+unchanged recovery projections are skipped. Animations schedule their own frames.
+
 `motion.rs` provides interruptible pane resizing, disclosures, card/tab reflow,
 and small entrances. Widgets request redraws only during transitions; typing and
 pointer dragging remain immediate. Pane children stay mounted during focus and

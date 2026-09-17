@@ -93,6 +93,37 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 }
 
 #[test]
+fn unchanged_workspace_saves_preserve_bytes_revision_and_file_identity() {
+    let directory = TemporaryDirectory::new("unchanged");
+    let store = FileWorkspaceStateStore::new(directory.path());
+    let saved = snapshot();
+    let revision = block_on(store.save(project(1), &saved)).unwrap();
+    let path = store.path_for(project(1));
+    let before = fs::metadata(&path).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    for _ in 0..3 {
+        assert_eq!(block_on(store.save(project(1), &saved)).unwrap(), revision);
+    }
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        before.modified().unwrap()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
+    }
+    let mut changed = saved.clone();
+    changed.layout.explorer_width += 1;
+    assert_eq!(
+        block_on(store.save(project(1), &changed)).unwrap(),
+        revision.next()
+    );
+    assert_eq!(block_on(store.load(project(1))).unwrap(), Some(changed));
+}
+
+#[test]
 fn versioned_workspace_files_round_trip_all_application_only_state_per_project() {
     let directory = TemporaryDirectory::new("round-trip");
     let store = FileWorkspaceStateStore::new(directory.path());

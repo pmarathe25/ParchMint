@@ -47,6 +47,9 @@ still settle animations. Capture the motion review with:
 PARCHMINT_MOTION_FRAMES=/tmp/parchmint-motion cargo test --locked -j 1 -p parchmint-ui-driver --test motion_flows
 ```
 
+The [UI-review skill](../../.agents/skills/parchmint-ui-review/SKILL.md) provides
+capture, frame playback, comparison, and isolated native-review scripts.
+
 ## Use the command driver
 
 Each input line is a JSON command; each output line is its result. Use isolated

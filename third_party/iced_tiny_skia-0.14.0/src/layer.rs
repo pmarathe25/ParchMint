@@ -215,7 +215,12 @@ impl Layer {
         ));
     }
 
-    pub fn damage(previous: &Self, current: &Self) -> Vec<Rectangle> {
+    pub fn damage(
+        previous: &Self,
+        current: &Self,
+        engine: &mut crate::engine::Engine,
+        scale: f32,
+    ) -> Vec<Rectangle> {
         if previous.bounds != current.bounds {
             return vec![previous.bounds, current.bounds];
         }
@@ -235,61 +240,31 @@ impl Layer {
             },
         );
 
-        let text = damage::diff(
+        damage.extend(item_damage(
             &previous.text,
             &current.text,
-            |item| {
-                item.as_slice()
-                    .iter()
-                    .filter_map(Text::visible_bounds)
-                    .map(|bounds| bounds * item.transformation())
-                    .collect()
+            current.bounds,
+            |text, transform| {
+                engine
+                    .text_bounds(
+                        text,
+                        core::Transformation::scale(scale) * transform,
+                    )
+                    .map(|bounds| bounds * (1.0 / scale))
             },
-            |text_a, text_b| {
-                damage::list(
-                    text_a.as_slice(),
-                    text_b.as_slice(),
-                    |text| {
-                        text.visible_bounds()
-                            .into_iter()
-                            .map(|bounds| bounds * text_a.transformation())
-                            .collect()
-                    },
-                    |text_a, text_b| text_a == text_b,
-                )
-            },
-        );
+        ));
 
-        let primitives = damage::list(
+        damage.extend(item_damage(
             &previous.primitives,
             &current.primitives,
-            |item| match item {
-                Item::Live(primitive) => vec![primitive.visible_bounds()],
-                Item::Group(primitives, group_bounds, transformation) => {
-                    primitives
-                        .as_slice()
-                        .iter()
-                        .map(Primitive::visible_bounds)
-                        .map(|bounds| bounds * *transformation)
-                        .filter_map(|bounds| bounds.intersection(group_bounds))
-                        .collect()
-                }
-                Item::Cached(_, bounds, transformation) => {
-                    vec![*bounds * *transformation]
-                }
+            current.bounds,
+            |primitive, transform| {
+                Some(
+                    (primitive.visible_bounds() * transform)
+                        .expand(1.0 / scale),
+                )
             },
-            |primitive_a, primitive_b| match (primitive_a, primitive_b) {
-                (
-                    Item::Cached(cache_a, bounds_a, transformation_a),
-                    Item::Cached(cache_b, bounds_b, transformation_b),
-                ) => {
-                    Arc::ptr_eq(cache_a, cache_b)
-                        && bounds_a == bounds_b
-                        && transformation_a == transformation_b
-                }
-                _ => false,
-            },
-        );
+        ));
 
         let images = damage::list(
             &previous.images,
@@ -298,11 +273,83 @@ impl Layer {
             Image::eq,
         );
 
-        damage.extend(text);
-        damage.extend(primitives);
         damage.extend(images);
+        // Unmasked antialiased primitives can cover the edge pixel just
+        // outside their logical clip. Include it when erasing old geometry.
         damage
+            .into_iter()
+            .map(|bounds| bounds.expand(1.0 / scale))
+            .collect()
     }
+}
+
+// Keep identical prefixes and suffixes, including when an edit inserts or
+// removes items. Unchanged Canvas backgrounds must not dirty the whole pane.
+fn changed<'a, T: PartialEq>(
+    mut previous: &'a [T],
+    mut current: &'a [T],
+) -> (&'a [T], &'a [T]) {
+    while !previous.is_empty()
+        && !current.is_empty()
+        && previous[0] == current[0]
+    {
+        previous = &previous[1..];
+        current = &current[1..];
+    }
+    while !previous.is_empty()
+        && !current.is_empty()
+        && previous.last() == current.last()
+    {
+        previous = &previous[..previous.len() - 1];
+        current = &current[..current.len() - 1];
+    }
+    (previous, current)
+}
+
+fn item_damage<T: PartialEq>(
+    previous: &[Item<T>],
+    current: &[Item<T>],
+    layer_bounds: Rectangle,
+    mut bounds: impl FnMut(&T, Transformation) -> Option<Rectangle>,
+) -> Vec<Rectangle> {
+    let mut damage = Vec::new();
+    for index in 0..previous.len().max(current.len()) {
+        let old = previous.get(index);
+        let new = current.get(index);
+        let (old_items, new_items) = match (old, new) {
+            (Some(old), Some(new))
+                if old.transformation() == new.transformation()
+                    && old.clip_bounds() == new.clip_bounds() =>
+            {
+                if let (Item::Cached(a, _, _), Item::Cached(b, _, _)) =
+                    (old, new)
+                    && Arc::ptr_eq(a, b)
+                {
+                    continue;
+                }
+                changed(old.as_slice(), new.as_slice())
+            }
+            _ => (
+                old.map_or(&[][..], Item::as_slice),
+                new.map_or(&[][..], Item::as_slice),
+            ),
+        };
+        for (group, items) in [(old, old_items), (new, new_items)] {
+            if let Some(group) = group {
+                for item in items {
+                    if let Some(bounds) = bounds(item, group.transformation())
+                        .and_then(|bounds| {
+                            bounds.intersection(&group.clip_bounds())
+                        })
+                        .and_then(|bounds| bounds.intersection(&layer_bounds))
+                    {
+                        damage.push(bounds);
+                    }
+                }
+            }
+        }
+    }
+    damage
 }
 
 impl Default for Layer {

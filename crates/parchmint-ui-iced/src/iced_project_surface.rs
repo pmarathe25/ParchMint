@@ -5519,6 +5519,8 @@ mod tests {
 
     #[test]
     fn expanded_recovery_keeps_actions_visible_with_many_documents() {
+        let _motion = crate::motion::SettledMotion::new();
+        crate::visual_verification::load_test_fonts();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::ErrorRecovery);
         let ticket = workspace.begin_task(crate::ProjectTask::ReconcileRecovery);
         workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
@@ -5550,11 +5552,13 @@ mod tests {
             assert!(bounds.y >= 0.0 && bounds.y + bounds.height <= 720.0);
         }
         if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
-            surface
-                .snapshot(&theme.iced_theme())
-                .unwrap()
-                .matches_image(std::path::PathBuf::from(root).join("recovery-many-documents"))
-                .unwrap();
+            assert!(
+                surface
+                    .snapshot(&theme.iced_theme())
+                    .unwrap()
+                    .matches_image(std::path::PathBuf::from(root).join("recovery-many-documents"))
+                    .unwrap()
+            );
         }
         surface.click("Recover changes").unwrap();
         assert_eq!(
@@ -6423,6 +6427,8 @@ mod tests {
 
     #[test]
     fn rendered_global_replace_flow_revalidates_before_one_typed_apply_effect() {
+        let _motion = crate::motion::SettledMotion::new();
+        crate::visual_verification::load_test_fonts();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
 
         let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
@@ -6502,11 +6508,13 @@ mod tests {
             assert!(preview.find("Select none").is_err());
             assert!(preview.find("Refresh preview").is_err());
             if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
-                preview
-                    .snapshot(&ParchMintTheme::new(ResolvedAppearance::Light).iced_theme())
-                    .unwrap()
-                    .matches_image(std::path::PathBuf::from(root).join("replacement-review"))
-                    .unwrap();
+                assert!(
+                    preview
+                        .snapshot(&ParchMintTheme::new(ResolvedAppearance::Light).iced_theme())
+                        .unwrap()
+                        .matches_image(std::path::PathBuf::from(root).join("replacement-review"))
+                        .unwrap()
+                );
             }
             preview
                 .click("All matches (1)")

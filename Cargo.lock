@@ -2657,7 +2657,9 @@ dependencies = [
 name = "parchmint-spellcheck-en-us"
 version = "0.1.0"
 dependencies = [
+ "fst",
  "harper-core",
+ "levenshtein_automata",
  "parchmint-editor-api",
  "parchmint-spellcheck-api",
 ]
@@ -2722,6 +2724,7 @@ dependencies = [
  "parchmint-ui-api",
  "parchmint-workspace-state",
  "png 0.18.1",
+ "tokio",
 ]
 
 [[package]]

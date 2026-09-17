@@ -4,7 +4,7 @@
 //! stay behind ParchMint-owned values. No checked text leaves this process.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
     future::Future,
@@ -16,7 +16,7 @@ use std::{
 
 use harper_core::{
     WordMetadata,
-    spell::{Dictionary, FstDictionary, MutableDictionary, suggest_correct_spelling_str},
+    spell::{Dictionary, MutableDictionary, suggest_correct_spelling_str},
 };
 use parchmint_editor_api::{DocumentPosition, EventStream};
 use parchmint_spellcheck_api::{
@@ -34,6 +34,9 @@ const MAX_WORD_CHARS: usize = 256;
 const SUGGESTION_LIMIT: usize = 1;
 const ENGINE_CANDIDATE_LIMIT: usize = 64;
 const SUGGESTION_DISTANCE: u8 = 2;
+
+mod bundled;
+use bundled::BundledDictionary;
 
 use parchmint_spellcheck_api::{SpellcheckError, SpellcheckOperation};
 
@@ -773,7 +776,8 @@ fn worker_loop(
 }
 
 struct PrivateSpellingRuntime {
-    bundled: Arc<FstDictionary>,
+    bundled: BundledDictionary,
+    bundled_suggestions: VecDeque<(String, Vec<String>)>,
     project_words: BTreeMap<ProjectId, (DictionaryRevision, Arc<MutableDictionary>)>,
     global_words: Option<(DictionaryRevision, Arc<MutableDictionary>)>,
 }
@@ -781,7 +785,8 @@ struct PrivateSpellingRuntime {
 impl PrivateSpellingRuntime {
     fn new() -> Self {
         Self {
-            bundled: FstDictionary::curated(),
+            bundled: BundledDictionary::new(),
+            bundled_suggestions: VecDeque::new(),
             project_words: BTreeMap::new(),
             global_words: None,
         }
@@ -808,7 +813,7 @@ impl PrivateSpellingRuntime {
         project: DictionaryRevision,
         global: DictionaryRevision,
     ) -> bool {
-        self.bundled.contains_word_str(word)
+        self.bundled.contains(word)
             || self
                 .project_words
                 .get(&project_id)
@@ -821,7 +826,7 @@ impl PrivateSpellingRuntime {
     }
 
     fn suggestions(
-        &self,
+        &mut self,
         word: &str,
         project_id: ProjectId,
         project: DictionaryRevision,
@@ -830,12 +835,24 @@ impl PrivateSpellingRuntime {
         if word.chars().count() > MAX_WORD_CHARS {
             return Vec::new();
         }
-        let mut candidates = suggest_correct_spelling_str(
-            word,
-            ENGINE_CANDIDATE_LIMIT,
-            SUGGESTION_DISTANCE,
-            self.bundled.as_ref(),
-        );
+        // Viewport checks repeatedly encounter the same words while scrolling
+        // or changing selection. Keep only bundled candidates so dictionary
+        // reloads and revision-specific custom words remain authoritative.
+        let mut candidates = if let Some((_, suggestions)) = self
+            .bundled_suggestions
+            .iter()
+            .find(|(cached, _)| cached == word)
+        {
+            suggestions.clone()
+        } else {
+            let suggestions = self.bundled.suggestions(word);
+            if self.bundled_suggestions.len() == 32 {
+                self.bundled_suggestions.pop_front();
+            }
+            self.bundled_suggestions
+                .push_back((word.to_owned(), suggestions.clone()));
+            suggestions
+        };
 
         if let Some((_, dictionary)) = self
             .project_words
@@ -861,8 +878,7 @@ impl PrivateSpellingRuntime {
                 dictionary.as_ref(),
             ));
         }
-        if let Some(transposition) = adjacent_transposition_correction(word, self.bundled.as_ref())
-        {
+        if let Some(transposition) = adjacent_transposition_correction(word, &self.bundled) {
             candidates.insert(0, transposition);
         }
         let mut seen = BTreeSet::new();
@@ -880,7 +896,7 @@ impl PrivateSpellingRuntime {
             .collect()
     }
 
-    fn suggest(&self, request: &SuggestionRequest) -> Vec<SpellingSuggestion> {
+    fn suggest(&mut self, request: &SuggestionRequest) -> Vec<SpellingSuggestion> {
         if self.contains(
             &request.word,
             request.project_id,
@@ -898,7 +914,7 @@ impl PrivateSpellingRuntime {
         }
     }
 
-    fn check(&self, request: &SpellcheckRequest) -> SpellcheckResult {
+    fn check(&mut self, request: &SpellcheckRequest) -> SpellcheckResult {
         let mut issues = Vec::new();
         for block in &request.blocks {
             let block_start = block.range.start().value();
@@ -940,12 +956,12 @@ impl PrivateSpellingRuntime {
     }
 }
 
-fn adjacent_transposition_correction(word: &str, dictionary: &impl Dictionary) -> Option<String> {
+fn adjacent_transposition_correction(word: &str, dictionary: &BundledDictionary) -> Option<String> {
     let mut characters = word.chars().collect::<Vec<_>>();
     for index in 0..characters.len().saturating_sub(1) {
         characters.swap(index, index + 1);
         let candidate = characters.iter().collect::<String>();
-        if dictionary.contains_word_str(&candidate) {
+        if dictionary.contains(&candidate) {
             return Some(candidate);
         }
         characters.swap(index, index + 1);
