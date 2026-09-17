@@ -217,6 +217,14 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
         )
         .unwrap();
     harness.elapse_autosave_idle().unwrap();
+    // Expire the deletion banner before making unsaved edits. Capture time
+    // must not decide whether History includes a banner or how far it scrolls.
+    harness.elapse_notifications().unwrap();
+    assert!(
+        !harness
+            .text_is_visible(HarnessWindow::Project, "Moved item to Recently Deleted")
+            .unwrap()
+    );
     harness
         .type_focused(HarnessWindow::Project, " They lit a fire.")
         .unwrap();

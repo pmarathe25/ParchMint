@@ -790,8 +790,12 @@ impl BlockLayoutGeometry {
         let overscan_top = (pixel_scroll_y - viewport.height).max(0.0);
         let overscan_bottom = pixel_scroll_y + viewport.height * 2.0;
         let first_line = height_index.partition_point(|line| line.end_y < overscan_top);
-        let mut scalars = Vec::new();
-        let mut carets = Vec::new();
+        // Start near the last viewport's size instead of repeatedly growing
+        // and copying these buffers on every edit.
+        let mut scalars =
+            Vec::with_capacity(previous.map_or(0, |p| p.scalars.len().next_power_of_two()));
+        let mut carets =
+            Vec::with_capacity(previous.map_or(0, |p| p.carets.len().next_power_of_two()));
         let mut work = LayoutWork::default();
         for entry in height_index.iter().skip(first_line) {
             if entry.start_y > overscan_bottom {
@@ -904,6 +908,9 @@ impl BlockLayoutGeometry {
     }
 
     pub(crate) fn link_at(&self, x: f32, y: f32) -> Option<&str> {
+        if self.links.is_empty() {
+            return None;
+        }
         let scalar = self.scalars.iter().find(|scalar| {
             scalar.link
                 && x >= scalar.bounds.x
@@ -1262,8 +1269,18 @@ fn cursor_after_prefix(
     let checkpoint = entry.prefix_cursors[checkpoint_index];
     let mut row = checkpoint.row;
     let mut x = checkpoint.x;
+    let mut wrap_index = entry
+        .wrap_before
+        .partition_point(|offset| *offset < checkpoint.scalar_offset);
     for scalar_offset in checkpoint.scalar_offset..scalar_count {
-        apply_wrap_before(scalar_offset, entry, &mut row, &mut x, metrics);
+        apply_wrap_before(
+            scalar_offset,
+            entry,
+            &mut wrap_index,
+            &mut row,
+            &mut x,
+            metrics,
+        );
         x += entry
             .scalar_advances
             .get(scalar_offset, metrics)
@@ -1275,13 +1292,15 @@ fn cursor_after_prefix(
 fn apply_wrap_before(
     scalar_offset: usize,
     entry: &LineHeightEntry,
+    wrap_index: &mut usize,
     row: &mut usize,
     x: &mut f32,
     metrics: EditorLayoutMetrics,
 ) {
-    if entry.wrap_before.binary_search(&scalar_offset).is_ok() {
+    if entry.wrap_before.get(*wrap_index) == Some(&scalar_offset) {
         *row = row.saturating_add(1);
         *x = metrics.inset_x;
+        *wrap_index += 1;
     }
 }
 
@@ -1344,6 +1363,9 @@ fn materialize_chunk(
     carets: &mut Vec<(DocumentPosition, EditorRectangle)>,
 ) -> Result<usize, &'static str> {
     let (mut row, mut x) = cursor_after_prefix(chunk.scalar_offset, entry, metrics);
+    let mut wrap_index = entry
+        .wrap_before
+        .partition_point(|offset| *offset < chunk.scalar_offset);
     let mut materialized = 0_usize;
     let line = &input.layout_lines[entry.line_index];
     let text = input.text.line(line);
@@ -1359,7 +1381,14 @@ fn materialize_chunk(
             .get(chunk.scalar_offset.saturating_add(offset), metrics)
             .ok_or("layout chunk advance is missing")?;
         let scalar_offset = chunk.scalar_offset.saturating_add(offset);
-        apply_wrap_before(scalar_offset, entry, &mut row, &mut x, metrics);
+        apply_wrap_before(
+            scalar_offset,
+            entry,
+            &mut wrap_index,
+            &mut row,
+            &mut x,
+            metrics,
+        );
         let global_y = entry.start_y + row as f32 * entry.line_height;
         let y = global_y - pixel_scroll_y;
         let visible = global_y + entry.line_height >= overscan_top && global_y <= overscan_bottom;
@@ -1409,7 +1438,7 @@ fn scalar_geometry(
     metrics: EditorLayoutMetrics,
 ) -> EditorScalarGeometry {
     let offset = position.value();
-    EditorScalarGeometry {
+    let mut scalar = EditorScalarGeometry {
         position,
         character,
         bounds: EditorRectangle {
@@ -1422,30 +1451,14 @@ fn scalar_geometry(
                     metrics.line_height * spacing.max(0.1)
                 }),
         },
-        bold: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Bold)
-        }),
-        italic: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Italic)
-        }),
-        underline: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Underline)
-        }),
-        strikethrough: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Strikethrough)
-        }),
-        link: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Link(_))
-        }),
-        small_caps: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::SmallCaps)
-        }),
-        superscript: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Superscript)
-        }),
-        subscript: has_mark(&input.mark_ranges, offset, |mark| {
-            matches!(mark, SemanticInlineMark::Subscript)
-        }),
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        link: false,
+        small_caps: false,
+        superscript: false,
+        subscript: false,
         block_kind: span.map_or(SemanticBlockKind::Paragraph, |span| span.kind),
         list_depth: span.map_or(0, |span| span.list_depth),
         list_marker: span.and_then(|span| {
@@ -1471,7 +1484,22 @@ fn scalar_geometry(
             .atomic_nodes
             .iter()
             .find_map(|(candidate, kind)| (*candidate == position).then_some(*kind)),
+    };
+    for range in &input.mark_ranges {
+        if range.range.start().value() <= offset && offset < range.range.end().value() {
+            match range.mark {
+                SemanticInlineMark::Bold => scalar.bold = true,
+                SemanticInlineMark::Italic => scalar.italic = true,
+                SemanticInlineMark::Underline => scalar.underline = true,
+                SemanticInlineMark::Strikethrough => scalar.strikethrough = true,
+                SemanticInlineMark::Link(_) => scalar.link = true,
+                SemanticInlineMark::SmallCaps => scalar.small_caps = true,
+                SemanticInlineMark::Superscript => scalar.superscript = true,
+                SemanticInlineMark::Subscript => scalar.subscript = true,
+            }
+        }
     }
+    scalar
 }
 
 fn line_intersects(entry: &LineHeightEntry, top: f32, bottom: f32) -> bool {
@@ -1646,18 +1674,6 @@ fn merge_style(target: &mut ResolvedBlockStyle, source: &StyleProperties) {
     replace!(line_spacing);
     replace!(space_before_points);
     replace!(space_after_points);
-}
-
-fn has_mark(
-    ranges: &[VisibleMarkRange],
-    position: u64,
-    predicate: impl Fn(&SemanticInlineMark) -> bool,
-) -> bool {
-    ranges.iter().any(|range| {
-        range.range.start().value() <= position
-            && position < range.range.end().value()
-            && predicate(&range.mark)
-    })
 }
 
 fn replace_or_push_caret(
@@ -2371,6 +2387,99 @@ mod tests {
         assert_eq!(scalars[0].bounds.x, metrics.inset_x);
         assert_eq!(scalars[0].bounds.y, metrics.inset_y);
         assert!(scalars[10].bounds.y >= metrics.inset_y + metrics.line_height);
+    }
+
+    #[test]
+    fn wrap_cursors_and_scrolled_chunks_match_a_sequential_reference() {
+        let metrics = regression_metrics();
+        let viewport = EditorViewport::new(112.0, 240.0).unwrap();
+        for text in ["a".repeat(3_072), "é🦀 word,\t wide\u{2003}".repeat(250)] {
+            let input = VisibleEditorBlock::new(block(12), text, 100.into());
+            let initial = BlockLayoutGeometry::build(&input, viewport, 0.0, metrics, None).unwrap();
+            let entry = &initial.height_index[0];
+            let mut expected = Vec::new();
+            let (mut row, mut x) = (0, entry.first_x);
+            // An independent, non-checkpointed reference also exercises wraps
+            // exactly at chunk boundaries and positions outside the viewport.
+            for offset in 0..entry.scalar_len {
+                assert_eq!(cursor_after_prefix(offset, entry, metrics), (row, x));
+                if entry.wrap_before.binary_search(&offset).is_ok() {
+                    row += 1;
+                    x = metrics.inset_x;
+                }
+                expected.push((x, entry.start_y + row as f32 * entry.line_height));
+                x += entry.scalar_advances.get(offset, metrics).unwrap();
+            }
+            assert_eq!(cursor_after_prefix(usize::MAX, entry, metrics), (row, x));
+            for scroll in [0.0, 2_000.0, entry.end_y - viewport.height] {
+                let geometry =
+                    BlockLayoutGeometry::build(&input, viewport, scroll, metrics, Some(&initial))
+                        .unwrap();
+                assert!(!geometry.scalars.is_empty());
+                for scalar in geometry.draw_scalars() {
+                    let offset = (scalar.position.value() - entry.start.value()) as usize;
+                    let (x, y) = expected[offset];
+                    assert_eq!((scalar.bounds.x, scalar.bounds.y), (x, y - scroll));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_unsorted_marks_preserve_every_style_and_half_open_boundary() {
+        let marks = [
+            SemanticInlineMark::Bold,
+            SemanticInlineMark::Italic,
+            SemanticInlineMark::Underline,
+            SemanticInlineMark::Strikethrough,
+            SemanticInlineMark::Link("https://example.com".into()),
+            SemanticInlineMark::SmallCaps,
+            SemanticInlineMark::Superscript,
+            SemanticInlineMark::Subscript,
+        ];
+        let mut input = VisibleEditorBlock::new(block(12), "aé🦀bcdefghij", 100.into());
+        input.mark_ranges = marks
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, mark)| VisibleMarkRange {
+                range: EditorSelection::new((100 + i as u64).into(), (104 + i as u64).into()),
+                mark: mark.clone(),
+            })
+            .collect();
+        input.mark_ranges.push(input.mark_ranges[0].clone());
+        let geometry = BlockLayoutGeometry::build(
+            &input,
+            EditorViewport::new(300.0, 240.0).unwrap(),
+            0.0,
+            regression_metrics(),
+            None,
+        )
+        .unwrap();
+        for scalar in geometry.draw_scalars() {
+            let expected = marks.each_ref().map(|mark| {
+                input.mark_ranges.iter().any(|range| {
+                    range.range.start() <= scalar.position
+                        && scalar.position < range.range.end()
+                        && range.mark == *mark
+                })
+            });
+            assert_eq!(
+                [
+                    scalar.bold,
+                    scalar.italic,
+                    scalar.underline,
+                    scalar.strikethrough,
+                    scalar.link,
+                    scalar.small_caps,
+                    scalar.superscript,
+                    scalar.subscript,
+                ],
+                expected,
+                "position {:?}",
+                scalar.position
+            );
+        }
     }
 
     #[test]

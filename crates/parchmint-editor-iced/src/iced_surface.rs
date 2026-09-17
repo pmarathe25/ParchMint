@@ -11,7 +11,7 @@ use parchmint_editor_api::{
 use std::{
     cell::RefCell,
     ops::Range,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -444,8 +444,8 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<MountedEditorMessage>> {
-        self.sync_focus(state);
-        let content = self.content();
+        let mut content = self.content();
+        state.focused = content.focused;
         match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
@@ -456,7 +456,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                     if state.focused {
                         state.focused = false;
                         state.drag_anchor = None;
-                        self.set_focus(false);
+                        content.focused = false;
                         return Some(Action::publish(MountedEditorMessage::Blur));
                     }
                     return None;
@@ -472,7 +472,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 }
                 let document = content.geometry.hit_test(position.x, position.y)?;
                 state.focused = true;
-                self.set_focus(true);
+                content.focused = true;
                 let clicks = state.register_left_click(position);
                 let extend = state.modifiers.contains(keyboard::Modifiers::SHIFT);
                 let anchor = if extend {
@@ -810,26 +810,8 @@ fn canvas_clip_bounds(bounds: Rectangle) -> Rectangle {
 }
 
 impl EditorSurface {
-    fn content(&self) -> SurfaceContent {
-        self.content
-            .lock()
-            .expect("editor surface content lock")
-            .clone()
-    }
-
-    fn set_focus(&self, focused: bool) {
-        self.content
-            .lock()
-            .expect("editor surface content lock")
-            .focused = focused;
-    }
-
-    fn sync_focus(&self, state: &mut SurfaceState) {
-        state.focused = self
-            .content
-            .lock()
-            .expect("editor surface content lock")
-            .focused;
+    fn content(&self) -> MutexGuard<'_, SurfaceContent> {
+        self.content.lock().expect("editor surface content lock")
     }
 
     fn draws_focused_caret(&self, _state: &SurfaceState, content: &SurfaceContent) -> bool {
@@ -838,6 +820,9 @@ impl EditorSurface {
 }
 
 fn spelling_range_at(content: &SurfaceContent, x: f32, y: f32) -> Option<EditorSelection> {
+    if content.spellcheck.is_empty() {
+        return None;
+    }
     let document = content.geometry.hit_test(x, y)?;
     content
         .spellcheck
@@ -869,6 +854,9 @@ fn comment_at(content: &SurfaceContent, x: f32, y: f32) -> Option<String> {
 }
 
 fn comment_hit(content: &SurfaceContent, x: f32, y: f32) -> Option<CommentHit> {
+    if content.comments.is_empty() {
+        return None;
+    }
     let document = content.geometry.hit_test(x, y)?;
     content.comments.iter().find_map(|decoration| {
         if decoration.range().start() > document || document >= decoration.range().end() {
@@ -904,10 +892,19 @@ struct SurfaceHandle {
 }
 
 impl SurfaceHandle {
+    #[cfg(test)]
     fn content(&self) -> SurfaceContent {
         self.content
             .lock()
             .expect("editor surface content lock")
+            .clone()
+    }
+
+    fn geometry(&self) -> BlockLayoutGeometry {
+        self.content
+            .lock()
+            .expect("editor surface content lock")
+            .geometry
             .clone()
     }
 
@@ -1165,7 +1162,7 @@ fn apply_key_command(
     command: MountedEditorKeyCommand,
 ) -> Result<(), EditorError> {
     let selection = adapter.selection(session.clone(), view)?;
-    let geometry = surface.content().geometry;
+    let geometry = surface.geometry();
     let head = selection.head();
     let selection_or_adjacent = match command {
         MountedEditorKeyCommand::Backspace => selection
@@ -1317,7 +1314,7 @@ fn ensure_caret_visible(
     head: DocumentPosition,
 ) -> Result<(), EditorError> {
     let snapshot = adapter.view_snapshot(session.clone(), view)?;
-    let Some(caret) = surface.content().geometry.caret(head) else {
+    let Some(caret) = surface.geometry().caret(head) else {
         return Ok(());
     };
     let top = caret.y;
@@ -2272,6 +2269,19 @@ mod tests {
         let mut state = SurfaceState::default();
         let bounds = Rectangle::with_size(Size::new(300.0, 120.0));
         let cursor = mouse::Cursor::Available(point);
+        assert_eq!(
+            canvas::Program::mouse_interaction(&surface, &state, bounds, cursor),
+            mouse::Interaction::Pointer,
+        );
+        assert_eq!(
+            canvas::Program::mouse_interaction(
+                &surface,
+                &state,
+                bounds,
+                mouse::Cursor::Unavailable
+            ),
+            mouse::Interaction::default(),
+        );
         canvas::Program::update(
             &surface,
             &mut state,
@@ -2315,6 +2325,27 @@ mod tests {
             mouse::Cursor::Available(Point::new(290.0, 90.0)),
         );
         assert!(state.hovered_link.is_none());
+        assert_eq!(
+            canvas::Program::mouse_interaction(
+                &surface,
+                &state,
+                bounds,
+                mouse::Cursor::Available(Point::new(290.0, 90.0)),
+            ),
+            mouse::Interaction::Text,
+        );
+        surface.content.lock().unwrap().geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(BlockId::from_bytes([89; 16]), "link plain", 0.into()),
+            viewport,
+            0.0,
+            crate::EditorLayoutMetrics::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            canvas::Program::mouse_interaction(&surface, &state, bounds, cursor),
+            mouse::Interaction::Text,
+        );
     }
 
     #[test]
