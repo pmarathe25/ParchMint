@@ -18,19 +18,20 @@ fn require_release_build() {
     panic!("measure with --release");
 }
 
-fn workload() -> (usize, usize) {
+fn workload() -> (usize, usize, bool) {
     match std::env::var("PARCHMINT_BENCH_LAYOUT")
         .as_deref()
         .unwrap_or("chapters")
     {
-        "chapters" => (10, 5_000),
-        "single" => (1, 50_000),
-        "small" => (10, 80),
+        "chapters" => (10, 5_000, false),
+        "single" => (1, 50_000, false),
+        "small" => (10, 80, false),
+        "formatted" => (1, 50_000, true),
         other => panic!("unknown benchmark layout: {other}"),
     }
 }
 
-fn seed(path: &Path, chapters: usize, words: usize) {
+fn seed(path: &Path, chapters: usize, words: usize, formatted: bool) {
     fs::create_dir(path).unwrap();
     fs::create_dir(path.join(".parchmint")).unwrap();
     fs::write(path.join(".parchmint/root-id"), "0000000000000001\n").unwrap();
@@ -44,7 +45,18 @@ fn seed(path: &Path, chapters: usize, words: usize) {
         "<p>Benchmarkanchor.</p>{}",
         tokens
             .chunks(80)
-            .map(|p| format!("<p>{}</p>", p.join(" ")))
+            .map(|p| {
+                if formatted {
+                    format!(
+                        "<p><strong>{}</strong> <em>{}</em> {}</p>",
+                        p[..2].join(" "),
+                        p[2..4].join(" "),
+                        p[4..].join(" ")
+                    )
+                } else {
+                    format!("<p>{}</p>", p.join(" "))
+                }
+            })
             .collect::<String>()
     );
     assert_eq!(tokens.len() + 1, words);
@@ -86,11 +98,12 @@ fn seed(path: &Path, chapters: usize, words: usize) {
 #[test]
 #[ignore = "generate a disposable novel fixture at PARCHMINT_BENCH_FIXTURE"]
 fn seed_novel_benchmark() {
-    let (chapters, words) = workload();
+    let (chapters, words, formatted) = workload();
     seed(
         Path::new(&std::env::var_os("PARCHMINT_BENCH_FIXTURE").expect("new fixture directory")),
         chapters,
         words,
+        formatted,
     );
 }
 
@@ -130,10 +143,10 @@ fn memory() -> BTreeMap<String, u64> {
 #[ignore = "opt-in full-application release timing; excludes native presentation"]
 fn novel_application_performance() {
     require_release_build();
-    let (chapters, words) = workload();
+    let (chapters, words, formatted) = workload();
     let run = IsolatedRun::new("novel-performance").unwrap();
     let project = run.root().join("novel.parchmint");
-    seed(&project, chapters, words);
+    seed(&project, chapters, words, formatted);
     let start = Instant::now();
     let harness =
         DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
@@ -207,12 +220,17 @@ fn novel_application_performance() {
     for index in 0..10 {
         assert!(body.contains(&format!("savedmarker{index}")));
     }
+    if formatted {
+        assert_eq!(body.matches("<strong>").count(), (words - 1).div_ceil(80));
+        assert_eq!(body.matches("<em>").count(), (words - 1).div_ceil(80));
+    }
     reopened.close(WINDOW).unwrap();
     reopened.shutdown().unwrap();
     eprintln!(
         "NOVEL_BENCH {}",
         json!({
-            "chapters": chapters, "words": chapters * words, "open_ms": open_ms,
+            "chapters": chapters, "words": chapters * words, "formatted": formatted,
+            "open_ms": open_ms,
             "typing_one": typing_one, "typing_split": typing_split, "split_ms": split_ms,
             "selection": selection, "scroll": scroll, "save_ms": save_times,
             "switching": switching, "reopen_ms": reopen_ms,

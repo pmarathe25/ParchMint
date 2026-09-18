@@ -2190,6 +2190,7 @@ impl NativeDesktop {
             let Some(workspace) = state.workspace.as_mut() else {
                 continue;
             };
+            workspace.apply_appearance_mode(self.appearance_mode);
             // Sessions own per-document focus, but keyboard input has one
             // owner across documents. A newly mounted Research pane must not
             // leave the previous document's retained Canvas accepting keys.
@@ -3517,7 +3518,19 @@ impl NativeDesktop {
                         self.apply_appearance(appearance);
                         self.status = None;
                     }
-                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
+                    Err(error) => {
+                        for native in self.windows.values_mut() {
+                            if let NativeWindow::Project(state) = native {
+                                append_workspace_notification(
+                                    &mut state.notifications,
+                                    WorkspaceNotification::error(format!(
+                                        "Could not change appearance: {error}"
+                                    )),
+                                );
+                            }
+                        }
+                        self.status = Some(DesktopStatus::Error(error));
+                    }
                 }
                 Task::none()
             }
@@ -4490,6 +4503,18 @@ impl NativeDesktop {
                 repeat: false,
                 ..
             }) if state.shell.focus_is_trapped() => {
+                if state.workspace.as_ref().is_some_and(|workspace| {
+                    matches!(
+                        workspace.modal(),
+                        Some(crate::ProjectModal::ManageSettings(_))
+                    )
+                }) {
+                    return if state.modifiers.shift() {
+                        iced::widget::operation::focus_previous()
+                    } else {
+                        iced::widget::operation::focus_next()
+                    };
+                }
                 if let Some(workspace) = state.workspace.as_ref()
                     && matches!(
                         workspace.modal(),
@@ -4594,8 +4619,17 @@ impl NativeDesktop {
                 {
                     if let Some(workspace) = state.workspace.as_mut() {
                         workspace.update(ProjectMessage::DismissModal);
+                        if workspace.modal().is_none() {
+                            state.shell.dismiss_dialog();
+                            if state.shell.destination() == RibbonDestination::Editor
+                                && let Some(binding) = state
+                                    .editor_bindings
+                                    .get(&workspace.editor().focused_pane())
+                            {
+                                let _ = binding.restore_focus();
+                            }
+                        }
                     }
-                    state.shell.dismiss_dialog();
                 } else if state.spelling_menu.is_some() {
                     state.pending_spelling_menu = None;
                     state.spelling_menu = None;
@@ -5006,6 +5040,11 @@ impl NativeDesktop {
                 Message::RecentProjectsRefreshed,
             );
         }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::SetAppearance(mode)) = message {
+            // The selection follows the saved application preference, not an
+            // optimistic per-window value that could outlive a failed write.
+            return self.update_inner(Message::AppearanceSelected(mode));
+        }
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
@@ -5014,6 +5053,11 @@ impl NativeDesktop {
         };
 
         let message = match message {
+            ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::ManageStyles) => {
+                ProjectSurfaceMessage::Project(ProjectMessage::ManageSettings(
+                    crate::SettingsCategory::Styles,
+                ))
+            }
             ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Scratch {
                 pane,
                 id,
@@ -5290,10 +5334,6 @@ impl NativeDesktop {
                     ProjectMessage::SetReducedMotion(value) => Some(*value),
                     _ => None,
                 };
-                let appearance = match &message {
-                    ProjectMessage::SetAppearance(mode) => Some(*mode),
-                    _ => None,
-                };
                 let history_filter = match &message {
                     ProjectMessage::SetHistoryDocumentFilter(document) => Some(document.clone()),
                     _ => None,
@@ -5359,6 +5399,13 @@ impl NativeDesktop {
                     state.modal_focus = ModalFocus::Cancel;
                 } else if modal_before && !modal_after {
                     state.shell.dismiss_dialog();
+                    if state.shell.destination() == RibbonDestination::Editor
+                        && let Some(binding) = state
+                            .editor_bindings
+                            .get(&workspace.editor().focused_pane())
+                    {
+                        let _ = binding.restore_focus();
+                    }
                 }
                 if let Some(status) = clipboard_status {
                     self.status = Some(DesktopStatus::Info(status.to_owned()));
@@ -5370,15 +5417,6 @@ impl NativeDesktop {
                             callbacks.set_reduced_motion(value)
                         }),
                         move |result| Message::MotionFinished { value, result },
-                    );
-                }
-                if let Some(mode) = appearance {
-                    let callbacks = Arc::clone(&self.callbacks);
-                    return Task::perform(
-                        Self::run_blocking_operation("set appearance", move || {
-                            callbacks.set_appearance(mode)
-                        }),
-                        move |result| Message::AppearanceFinished { mode, result },
                     );
                 }
                 let keep_explorer_focus =
@@ -9093,6 +9131,12 @@ impl NativeDesktop {
         };
 
         match command {
+            crate::EditorCommand::SetInlineFont(font) => {
+                execute(EditorCommandKind::SetInlineFont {
+                    range: selection,
+                    font,
+                })?;
+            }
             crate::EditorCommand::ApplyParagraphStyle(style) => {
                 let style = state
                     .project
@@ -15467,6 +15511,12 @@ mod tests {
             callbacks,
         });
 
+        let windows: Vec<_> = desktop.windows.keys().copied().collect();
+        for &id in &windows {
+            install_fixture_workspace(&mut desktop, id)
+                .shell
+                .select_destination(RibbonDestination::Settings);
+        }
         let _appearance = desktop.update(Message::AppearanceFinished {
             mode: AppearanceMode::Dark,
             result: Ok(ResolvedAppearance::Dark),
@@ -15476,6 +15526,44 @@ mod tests {
         let expected = ParchMintTheme::new(ResolvedAppearance::Dark).iced_theme();
         for id in desktop.windows.keys().copied() {
             assert_eq!(desktop.theme(id), expected);
+            let NativeWindow::Project(state) = &desktop.windows[&id] else {
+                panic!("project")
+            };
+            assert_eq!(
+                state.workspace.as_ref().unwrap().settings().appearance(),
+                AppearanceMode::Dark
+            );
+        }
+
+        // A failed save must not select the unsaved mode or silently disappear
+        // into launcher-only status. Exercise the actual Settings message path.
+        let pending = desktop.update_project_surface(
+            windows[0],
+            ProjectSurfaceMessage::Project(ProjectMessage::SetAppearance(AppearanceMode::Light)),
+        );
+        for &id in &windows {
+            let NativeWindow::Project(state) = &desktop.windows[&id] else {
+                panic!("project")
+            };
+            assert_eq!(
+                state.workspace.as_ref().unwrap().settings().appearance(),
+                AppearanceMode::Dark
+            );
+        }
+        complete_task(&mut desktop, pending);
+        assert_eq!(desktop.appearance, ResolvedAppearance::Dark);
+        for &id in &windows {
+            let mut surface = Simulator::<Message>::with_size(
+                Settings::default(),
+                Size::new(1280.0, 720.0),
+                desktop.view(id),
+            );
+            assert!(surface.find("Dark appearance").is_ok());
+            assert!(
+                surface
+                    .find("Could not change appearance: appearance settings are unavailable")
+                    .is_ok()
+            );
         }
     }
 

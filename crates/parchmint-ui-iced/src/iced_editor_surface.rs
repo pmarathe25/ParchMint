@@ -137,6 +137,7 @@ impl EditorHostSlots {
 /// workspace and mounted messages through their existing owners.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum EditorCenterMessage {
+    ManageStyles,
     NewTab(EditorPane),
     Scratch {
         pane: EditorPane,
@@ -173,6 +174,7 @@ impl EditorCenterMessage {
     pub(crate) fn workspace_messages(&self) -> Vec<EditorMessage> {
         match self {
             Self::Scratch { .. }
+            | Self::ManageStyles
             | Self::NewTab(_)
             | Self::BeginComment
             | Self::BeginSplitResize
@@ -467,6 +469,84 @@ pub(crate) fn formatting_toolbar(
         .padding([7, 8])
         .text_line_height(iced::Pixels(18.0)),
     );
+    use parchmint_editor_api::{InlineFont, InlineFontFamily, SemanticInlineMark};
+    let active_family = workspace
+        .active_inline_marks()
+        .iter()
+        .find_map(|mark| match mark {
+            SemanticInlineMark::FontFamily(family) => Some(match family {
+                InlineFontFamily::Serif => "Serif",
+                InlineFontFamily::SansSerif => "Sans serif",
+                InlineFontFamily::Monospace => "Monospace",
+            }),
+            _ => None,
+        });
+    let family = harness_target::target(
+        HarnessTarget::FontFamily,
+        toolbar_tooltip(
+            font_menu(
+                active_family.unwrap_or("Font").to_owned(),
+                ["Style default", "Serif", "Sans serif", "Monospace"]
+                    .into_iter()
+                    .map(|label| {
+                        let family = match label {
+                            "Serif" => Some(InlineFontFamily::Serif),
+                            "Sans serif" => Some(InlineFontFamily::SansSerif),
+                            "Monospace" => Some(InlineFontFamily::Monospace),
+                            _ => None,
+                        };
+                        (
+                            label.to_owned(),
+                            format_message(FormattingCommand::InlineFont(InlineFont::Family(
+                                family,
+                            ))),
+                        )
+                    })
+                    .collect(),
+                110.0,
+                theme,
+            ),
+            "Font family for selected text or subsequent typing; Font means inherited or mixed",
+            theme,
+        ),
+    );
+    let active_size = workspace
+        .active_inline_marks()
+        .iter()
+        .find_map(|mark| match mark {
+            SemanticInlineMark::FontSize(size) => Some(size.to_string()),
+            _ => None,
+        });
+    let mut sizes = vec!["Auto".to_owned()];
+    sizes.extend(
+        [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72].map(|size| size.to_string()),
+    );
+    if let Some(size) = &active_size
+        && !sizes.contains(size)
+    {
+        sizes.push(size.clone());
+    }
+    let size = harness_target::target(
+        HarnessTarget::FontSize,
+        toolbar_tooltip(
+            font_menu(
+                active_size.unwrap_or_else(|| "Size".into()),
+                sizes
+                    .into_iter()
+                    .map(|size| {
+                        let command = format_message(FormattingCommand::InlineFont(
+                            InlineFont::Size(size.parse().ok()),
+                        ));
+                        (size, command)
+                    })
+                    .collect(),
+                68.0,
+                theme,
+            ),
+            "Font size in points; Auto restores the paragraph style",
+            theme,
+        ),
+    );
     let mut marks = row![].spacing(2).align_y(Vertical::Center);
     for (label, command, mark) in [
         (
@@ -623,9 +703,32 @@ pub(crate) fn formatting_toolbar(
     .spacing(2)
     .align_y(Vertical::Center);
     container(
-        row![style_selector, marks, paragraphs, insertions]
-            .spacing(8)
-            .align_y(Vertical::Center),
+        row![
+            row![
+                style_selector,
+                harness_target::target(
+                    HarnessTarget::ManageStyles,
+                    toolbar_tooltip(
+                        toolbar_button(
+                            icon_sized(Icon::Settings, 14),
+                            EditorCenterMessage::ManageStyles,
+                            false,
+                            theme
+                        ),
+                        "Create and edit paragraph styles",
+                        theme
+                    )
+                )
+            ]
+            .spacing(2),
+            family,
+            size,
+            marks,
+            paragraphs,
+            insertions
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center),
     )
     .padding(0)
     .width(Length::Shrink)
@@ -635,6 +738,39 @@ pub(crate) fn formatting_toolbar(
 
 fn format_message(command: FormattingCommand) -> EditorCenterMessage {
     EditorCenterMessage::Workspace(EditorMessage::Format(command))
+}
+
+fn font_menu(
+    label: String,
+    options: Vec<(String, EditorCenterMessage)>,
+    width: f32,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    crate::action_menu::anchored_menu(
+        components::semantic_button(
+            row![
+                text(label).size(13),
+                Space::new().width(Length::Fill),
+                icon_sized(Icon::ChevronDown, 10)
+            ]
+            .align_y(Vertical::Center),
+        )
+        .width(width)
+        .height(32)
+        .padding([7, 8])
+        .on_press(())
+        .style(move |_, status| {
+            components::button_style(
+                theme,
+                ButtonKind::Secondary,
+                button_interaction(status, false),
+            )
+        })
+        .into(),
+        options,
+        theme,
+        width.max(120.0),
+    )
 }
 
 fn toolbar_button(
@@ -1887,6 +2023,7 @@ mod tests {
                 EditorCenterMessage::HierarchyDropTarget(_)
                 | EditorCenterMessage::ClearHierarchyDropTarget(_) => {}
                 unsupported @ (EditorCenterMessage::Scratch { .. }
+                | EditorCenterMessage::ManageStyles
                 | EditorCenterMessage::NewTab(_)
                 | EditorCenterMessage::BeginComment
                 | EditorCenterMessage::BeginSplitResize
@@ -2054,7 +2191,7 @@ mod tests {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::with_size(
             Settings::default(),
-            Size::new(540.0, 240.0),
+            Size::new(680.0, 240.0),
             formatting_toolbar(&workspace, theme),
         );
         simulator.click(HarnessTarget::ListBulleted.id()).unwrap();

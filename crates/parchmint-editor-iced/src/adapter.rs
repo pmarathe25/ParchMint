@@ -1221,6 +1221,8 @@ fn paste_mark(kind: &PasteMarkKind) -> SemanticInlineMark {
         PasteMarkKind::Underline => SemanticInlineMark::Underline,
         PasteMarkKind::Strikethrough => SemanticInlineMark::Strikethrough,
         PasteMarkKind::Link(target) => SemanticInlineMark::Link(target.clone()),
+        PasteMarkKind::FontFamily(family) => SemanticInlineMark::FontFamily(*family),
+        PasteMarkKind::FontSize(size) => SemanticInlineMark::FontSize(*size),
     }
 }
 

@@ -97,7 +97,7 @@ with the shared Explorer selection.
 
 ## Write and format
 
-The formatting controls in the top bar act on the focused editor pane. It provides paragraph styles, bold,
+The formatting controls in the top bar act on the focused editor pane. They provide paragraph styles, font family and size, bold,
 italic, underline, strikethrough, lists, block quotes, links, and comments.
 The list button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
 Hover a link to see its destination, Ctrl+click (Command+click on macOS) to open it,
@@ -107,15 +107,24 @@ and scene breaks. Hover over an icon to see its action. **B/I/U/S** shows
 active formatting. With no selection, a formatting toggle applies to subsequent
 typing.
 
+Font family and size apply to selected text or subsequent typing. Choose
+**Style default** for family or **Auto** for size to inherit the paragraph style.
+The **Font** and **Size** placeholders indicate inherited or mixed formatting.
+Copy and cut currently place plain text on the system clipboard. Rich-text paste
+retains supported formatting, including ParchMint's font attributes.
+
 Word counts update as you write. In Editor, the status bar labels the current
 Document or text Selection count. In Overview, Selected totals the selected
 chapters and groups without counting overlapping selections twice. Manuscript
 shows all manuscript document text; Research is excluded. Synopsis and metadata never contribute to word counts.
 
-Configure project formatting in **Settings → Styles**. Typography, spacing, and
+Create and edit paragraph styles using the settings icon beside the style picker.
+Manage metadata with **Fields…** in Overview; new fields appear on outline rows.
+Both editors are also available in **Settings**. Style changes apply throughout
+the project. Typography, spacing, and
 pagination have separate groups. Press **Enter** or **Apply** to save a property;
 leave it blank to inherit. Dropdowns control inheritance, alignment, and on/off
-properties. **Settings → Metadata fields** controls fields and their display order.
+properties. The metadata editor also controls field display order and applicability.
 
 ## Comment on writing
 

@@ -4,9 +4,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 
 use parchmint_editor_api::{
-    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, SelectionRectangle,
-    SemanticBlockKind, SemanticInlineMark, StyleCatalog, StyleCatalogProjection, StyleId,
-    StyleProperties, TextAlignment,
+    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, InlineFontFamily,
+    SelectionRectangle, SemanticBlockKind, SemanticInlineMark, StyleCatalog,
+    StyleCatalogProjection, StyleId, StyleProperties, TextAlignment,
 };
 
 const TAB_COLUMNS: f32 = 4.0;
@@ -200,6 +200,8 @@ struct VisibleBlockSpan {
     list_ordinal: usize,
     style: Arc<ResolvedBlockStyle>,
     style_signature: u64,
+    marks: std::ops::Range<usize>,
+    font_signature: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -298,7 +300,22 @@ impl VisibleEditorBlock {
         let mut resolved_styles = BTreeMap::new();
         for semantic_block in semantic.blocks() {
             let block_start = offset;
+            let mark_start = mark_ranges.len();
+            let mut font_hash = DefaultHasher::new();
             for mark in semantic_block.marks() {
+                match mark.mark() {
+                    SemanticInlineMark::FontFamily(family) => {
+                        mark.range().start().value().hash(&mut font_hash);
+                        mark.range().end().value().hash(&mut font_hash);
+                        (0_u8, *family).hash(&mut font_hash);
+                    }
+                    SemanticInlineMark::FontSize(size) => {
+                        mark.range().start().value().hash(&mut font_hash);
+                        mark.range().end().value().hash(&mut font_hash);
+                        (1_u8, *size).hash(&mut font_hash);
+                    }
+                    _ => {}
+                }
                 mark_ranges.push(VisibleMarkRange {
                     range: EditorSelection::new(
                         DocumentPosition::from(offset + mark.range().start().value()),
@@ -345,6 +362,8 @@ impl VisibleEditorBlock {
                 list_ordinal,
                 style: Arc::clone(style),
                 style_signature: *style_signature,
+                marks: mark_start..mark_ranges.len(),
+                font_signature: font_hash.finish(),
             });
             offset += scalar_len + 1;
         }
@@ -530,6 +549,7 @@ fn hash_span_layout(span: &VisibleBlockSpan, hash: &mut impl Hasher) {
     span.list_depth.hash(hash);
     span.list_ordinal.hash(hash);
     span.style_signature.hash(hash);
+    span.font_signature.hash(hash);
 }
 
 fn style_layout_signature(style: &ResolvedBlockStyle) -> u64 {
@@ -603,6 +623,8 @@ pub struct EditorScalarGeometry {
     pub list_marker: Option<usize>,
     pub block_start: bool,
     pub font_size: f32,
+    /// Offset within the row used to align mixed-size text baselines.
+    pub text_offset_y: f32,
     pub font_weight: u16,
     pub block_italic: bool,
     pub font_family: EditorFontFamily,
@@ -614,6 +636,16 @@ pub enum EditorFontFamily {
     SansSerif,
     Serif,
     Monospace,
+}
+
+impl From<InlineFontFamily> for EditorFontFamily {
+    fn from(family: InlineFontFamily) -> Self {
+        match family {
+            InlineFontFamily::Serif => Self::Serif,
+            InlineFontFamily::SansSerif => Self::SansSerif,
+            InlineFontFamily::Monospace => Self::Monospace,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -661,8 +693,36 @@ struct LineMetrics {
     /// to materialize.
     prefix_cursors: Box<[PrefixCursor]>,
     line_height: f32,
+    /// Only mixed-size lines need per-row vertical metrics.
+    rows: Box<[RowMetrics]>,
     first_x: f32,
     chunk_rows: Box<[(usize, usize)]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RowMetrics {
+    top: f32,
+    height: f32,
+    font_size: f32,
+}
+
+impl LineMetrics {
+    fn row_top(&self, row: usize) -> f32 {
+        self.rows.get(row).map_or_else(
+            || {
+                self.rows
+                    .last()
+                    .map_or(row as f32 * self.line_height, |last| last.top + last.height)
+            },
+            |row| row.top,
+        )
+    }
+
+    fn row_height(&self, row: usize) -> f32 {
+        self.rows
+            .get(row)
+            .map_or(self.line_height, |row| row.height)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -677,6 +737,14 @@ struct PrefixCursor {
 #[derive(Debug, Clone, PartialEq)]
 struct ScalarAdvances {
     codes: Box<[u8]>,
+    base: f32,
+    sizes: Box<[FontSizeRun]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FontSizeRun {
+    start: usize,
+    end: usize,
     base: f32,
 }
 
@@ -699,10 +767,79 @@ impl ScalarAdvances {
                 .map(|character| scalar_width_code(*character, family))
                 .collect(),
             base: metrics.scalar_width * (font_size / 20.0),
+            sizes: Box::default(),
         }
     }
 
-    fn width(&self, code: u8, metrics: EditorLayoutMetrics) -> f32 {
+    fn apply_fonts(
+        &mut self,
+        characters: &[char],
+        marks: &[VisibleMarkRange],
+        start: u64,
+        metrics: EditorLayoutMetrics,
+    ) {
+        let mut sizes = Vec::new();
+        for mark in marks {
+            let from = mark
+                .range
+                .start()
+                .value()
+                .saturating_sub(start)
+                .min(characters.len() as u64) as usize;
+            let to = mark
+                .range
+                .end()
+                .value()
+                .saturating_sub(start)
+                .min(characters.len() as u64) as usize;
+            if from >= to {
+                continue;
+            }
+            match mark.mark {
+                SemanticInlineMark::FontFamily(family) => {
+                    for (code, character) in
+                        self.codes[from..to].iter_mut().zip(&characters[from..to])
+                    {
+                        *code = scalar_width_code(*character, family.into());
+                    }
+                }
+                SemanticInlineMark::FontSize(points) => {
+                    if sizes.is_empty() {
+                        sizes.resize(characters.len(), self.base);
+                    }
+                    sizes[from..to]
+                        .fill(metrics.scalar_width * (points_to_pixels(f32::from(points)) / 20.0));
+                }
+                _ => {}
+            }
+        }
+        // Discard the temporary dense vector; retain only size transitions.
+        let mut runs = Vec::new();
+        let mut start = 0;
+        while start < sizes.len() {
+            let base = sizes[start];
+            let end = start
+                + sizes[start..]
+                    .iter()
+                    .take_while(|value| **value == base)
+                    .count();
+            if base != self.base {
+                runs.push(FontSizeRun { start, end, base });
+            }
+            start = end;
+        }
+        self.sizes = runs.into();
+    }
+
+    fn base_at(&self, index: usize) -> f32 {
+        let next = self.sizes.partition_point(|run| run.end <= index);
+        self.sizes
+            .get(next)
+            .filter(|run| run.start <= index)
+            .map_or(self.base, |run| run.base)
+    }
+
+    fn width(code: u8, base: f32, metrics: EditorLayoutMetrics) -> f32 {
         // Compute the same rounded f32 proportions as the original literals.
         // The compile-time table avoids a division while reading each scalar.
         static PROPORTIONS: [f32; 256] = {
@@ -716,13 +853,17 @@ impl ScalarAdvances {
         };
         match code {
             0 => metrics.scalar_width * TAB_COLUMNS,
-            1 => self.base,
-            _ => (self.base * PROPORTIONS[usize::from(code)]).max(metrics.caret_width),
+            // Generic monospace faces use approximately 0.6 em per cell;
+            // the proportional body base is only 0.45 em.
+            1 => base * (4.0 / 3.0),
+            _ => (base * PROPORTIONS[usize::from(code)]).max(metrics.caret_width),
         }
     }
 
     fn get(&self, index: usize, metrics: EditorLayoutMetrics) -> Option<f32> {
-        self.codes.get(index).map(|code| self.width(*code, metrics))
+        self.codes
+            .get(index)
+            .map(|code| Self::width(*code, self.base_at(index), metrics))
     }
 
     fn iter(&self, metrics: EditorLayoutMetrics) -> impl ExactSizeIterator<Item = f32> + '_ {
@@ -734,9 +875,23 @@ impl ScalarAdvances {
         range: std::ops::Range<usize>,
         metrics: EditorLayoutMetrics,
     ) -> impl ExactSizeIterator<Item = f32> + '_ {
+        let start = range.start;
+        let mut run = self.sizes.partition_point(|run| run.end <= start);
         self.codes[range]
             .iter()
-            .map(move |code| self.width(*code, metrics))
+            .enumerate()
+            .map(move |(offset, code)| {
+                let index = start + offset;
+                while self.sizes.get(run).is_some_and(|run| run.end <= index) {
+                    run += 1;
+                }
+                let base = self
+                    .sizes
+                    .get(run)
+                    .filter(|run| run.start <= index)
+                    .map_or(self.base, |run| run.base);
+                Self::width(*code, base, metrics)
+            })
     }
 }
 
@@ -805,11 +960,11 @@ impl BlockLayoutGeometry {
             work.materialized_lines += 1;
             let span = line.span_index.map(|index| &input.block_spans[index]);
             let first_chunk = entry.chunk_rows.partition_point(|(_, end_row)| {
-                entry.start_y + (end_row + 1) as f32 * entry.line_height < overscan_top
+                entry.start_y + entry.row_top(end_row + 1) < overscan_top
             });
             for (chunk_index, chunk) in line.shape.chunks.iter().enumerate().skip(first_chunk) {
                 let (start_row, _) = entry.chunk_rows[chunk_index];
-                let chunk_top = entry.start_y + start_row as f32 * entry.line_height;
+                let chunk_top = entry.start_y + entry.row_top(start_row);
                 if chunk_top > overscan_bottom {
                     break;
                 }
@@ -837,11 +992,19 @@ impl BlockLayoutGeometry {
             }
             if let Some(position) = line.hard_break {
                 let (row, x) = cursor_after_prefix(line.shape.scalar_len, entry, metrics);
-                let global_y = entry.start_y + row as f32 * entry.line_height;
-                if global_y + entry.line_height >= overscan_top && global_y <= overscan_bottom {
+                let global_y = entry.start_y + entry.row_top(row);
+                if global_y + entry.row_height(row) >= overscan_top && global_y <= overscan_bottom {
                     let y = global_y - pixel_scroll_y;
                     scalars.push(scalar_geometry(
-                        input, None, position, '\n', x, y, 0.0, metrics,
+                        input,
+                        None,
+                        position,
+                        '\n',
+                        x,
+                        y,
+                        0.0,
+                        metrics,
+                        input.mark_ranges.iter(),
                     ));
                     replace_or_push_caret(&mut carets, position, caret_rectangle(x, y, metrics));
                     let next = position
@@ -954,8 +1117,11 @@ impl BlockLayoutGeometry {
                 let (row, x) = cursor_after_prefix(offset, line, self.metrics);
                 Some(caret_rectangle(
                     x,
-                    line.start_y + row as f32 * line.line_height - self.pixel_scroll_y,
-                    self.metrics,
+                    line.start_y + line.row_top(row) - self.pixel_scroll_y,
+                    EditorLayoutMetrics {
+                        line_height: line.row_height(row),
+                        ..self.metrics
+                    },
                 ))
             })
     }
@@ -1168,7 +1334,7 @@ fn build_height_index(
             .expect("line end cursor")
             .row
             .saturating_add(1);
-        y += rows as f32 * entry.line_height;
+        y += entry.row_top(rows);
         if line.hard_break.is_some() && span.is_some_and(|span| span.end == line.end) {
             y += points_to_pixels(
                 span.and_then(|span| span.style.space_after_points)
@@ -1190,7 +1356,15 @@ fn build_line_height(
     signature: u64,
 ) -> LineHeightEntry {
     let characters = input.text.line(line).chars().collect::<Vec<_>>();
-    let scalar_advances = ScalarAdvances::new(&characters, span, metrics);
+    let mut scalar_advances = ScalarAdvances::new(&characters, span, metrics);
+    if let Some(span) = span {
+        scalar_advances.apply_fonts(
+            &characters,
+            &input.mark_ranges[span.marks.clone()],
+            line.start.value(),
+            metrics,
+        );
+    }
     let first_x = metrics.inset_x
         + span.map_or(0.0, |span| {
             block_indent(span, metrics)
@@ -1209,6 +1383,33 @@ fn build_line_height(
         .max(metrics.inset_x + metrics.scalar_width);
     let wrap_before =
         word_wrap_offsets(&characters, &scalar_advances, first_x, right_edge, metrics);
+    let rows = if scalar_advances.sizes.is_empty() {
+        Box::default()
+    } else {
+        let mut rows = Vec::with_capacity(wrap_before.len() + 1);
+        let default_size = scalar_advances.base / metrics.scalar_width * 20.0;
+        let mut start = 0;
+        let mut top = 0.0;
+        for end in wrap_before
+            .iter()
+            .copied()
+            .chain(std::iter::once(characters.len()))
+        {
+            let font_size = (start..end)
+                .map(|index| scalar_advances.base_at(index) / metrics.scalar_width * 20.0)
+                .reduce(f32::max)
+                .unwrap_or(default_size);
+            let height = (line_height * font_size / default_size).max(font_size * 1.2);
+            rows.push(RowMetrics {
+                top,
+                height,
+                font_size,
+            });
+            top += height;
+            start = end;
+        }
+        rows.into_boxed_slice()
+    };
     let mut prefix_cursors = Vec::with_capacity(line.shape.chunks.len().saturating_add(1));
     let mut chunk_rows = Vec::with_capacity(line.shape.chunks.len());
     let mut cursor = PrefixCursor {
@@ -1250,6 +1451,7 @@ fn build_line_height(
             wrap_before: wrap_before.into(),
             prefix_cursors: prefix_cursors.into(),
             line_height,
+            rows,
             first_x,
             chunk_rows: chunk_rows.into(),
         }),
@@ -1369,12 +1571,24 @@ fn materialize_chunk(
     let mut materialized = 0_usize;
     let line = &input.layout_lines[entry.line_index];
     let text = input.text.line(line);
+    let start = entry
+        .start
+        .value()
+        .checked_add(chunk.scalar_offset as u64)
+        .ok_or("document position overflowed")?;
+    let end = start
+        .checked_add(chunk.scalar_len as u64)
+        .ok_or("document position overflowed")?;
+    // Offscreen formatting must not be scanned again for every visible scalar.
+    // Keep overlapping ranges in their original order, including duplicates.
+    let marks: Vec<_> = input
+        .mark_ranges
+        .iter()
+        .filter(|mark| mark.range.start().value() < end && start < mark.range.end().value())
+        .collect();
     for (offset, character) in text[chunk.text_range.clone()].chars().enumerate() {
-        let position = entry
-            .start
-            .value()
-            .checked_add(chunk.scalar_offset as u64)
-            .and_then(|position| position.checked_add(offset as u64))
+        let position = start
+            .checked_add(offset as u64)
             .ok_or("document position overflowed")?;
         let width = entry
             .scalar_advances
@@ -1389,17 +1603,22 @@ fn materialize_chunk(
             &mut x,
             metrics,
         );
-        let global_y = entry.start_y + row as f32 * entry.line_height;
+        let global_y = entry.start_y + entry.row_top(row);
         let y = global_y - pixel_scroll_y;
-        let visible = global_y + entry.line_height >= overscan_top && global_y <= overscan_bottom;
+        let row_height = entry.row_height(row);
+        let row_metrics = EditorLayoutMetrics {
+            line_height: row_height,
+            ..metrics
+        };
+        let visible = global_y + row_height >= overscan_top && global_y <= overscan_bottom;
         if visible {
             materialized += 1;
             replace_or_push_caret(
                 carets,
                 DocumentPosition::from(position),
-                caret_rectangle(x, y, metrics),
+                caret_rectangle(x, y, row_metrics),
             );
-            scalars.push(scalar_geometry(
+            let mut scalar = scalar_geometry(
                 input,
                 span,
                 DocumentPosition::from(position),
@@ -1408,7 +1627,13 @@ fn materialize_chunk(
                 y,
                 width,
                 metrics,
-            ));
+                marks.iter().copied(),
+            );
+            scalar.bounds.height = row_height;
+            if let Some(row) = entry.rows.get(row) {
+                scalar.text_offset_y = (row.font_size - scalar.font_size).max(0.0) * 0.9;
+            }
+            scalars.push(scalar);
         }
         x += width;
         if visible {
@@ -1419,7 +1644,7 @@ fn materialize_chunk(
                         .checked_add(1)
                         .ok_or("document position overflowed")?,
                 ),
-                caret_rectangle(x, y, metrics),
+                caret_rectangle(x, y, row_metrics),
             );
         }
     }
@@ -1427,7 +1652,7 @@ fn materialize_chunk(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scalar_geometry(
+fn scalar_geometry<'a>(
     input: &VisibleEditorBlock,
     span: Option<&VisibleBlockSpan>,
     position: DocumentPosition,
@@ -1436,6 +1661,7 @@ fn scalar_geometry(
     y: f32,
     width: f32,
     metrics: EditorLayoutMetrics,
+    marks: impl IntoIterator<Item = &'a VisibleMarkRange>,
 ) -> EditorScalarGeometry {
     let offset = position.value();
     let mut scalar = EditorScalarGeometry {
@@ -1476,6 +1702,7 @@ fn scalar_geometry(
         font_weight: span
             .and_then(|span| span.style.weight)
             .unwrap_or_else(|| default_font_weight(span.map(|span| span.kind))),
+        text_offset_y: 0.0,
         block_italic: span.and_then(|span| span.style.italic).unwrap_or(false),
         font_family: span
             .and_then(|span| span.style.font_family)
@@ -1485,7 +1712,7 @@ fn scalar_geometry(
             .iter()
             .find_map(|(candidate, kind)| (*candidate == position).then_some(*kind)),
     };
-    for range in &input.mark_ranges {
+    for range in marks {
         if range.range.start().value() <= offset && offset < range.range.end().value() {
             match range.mark {
                 SemanticInlineMark::Bold => scalar.bold = true,
@@ -1496,6 +1723,10 @@ fn scalar_geometry(
                 SemanticInlineMark::SmallCaps => scalar.small_caps = true,
                 SemanticInlineMark::Superscript => scalar.superscript = true,
                 SemanticInlineMark::Subscript => scalar.subscript = true,
+                SemanticInlineMark::FontFamily(family) => scalar.font_family = family.into(),
+                SemanticInlineMark::FontSize(size) => {
+                    scalar.font_size = points_to_pixels(f32::from(size))
+                }
             }
         }
     }
@@ -2036,6 +2267,8 @@ mod tests {
                         list_depth: 0,
                         list_ordinal: 0,
                         style_signature: 0,
+                        marks: 0..0,
+                        font_signature: 0,
                         style: Arc::new(ResolvedBlockStyle {
                             font_family: family,
                             font_size_points,
@@ -2091,12 +2324,12 @@ mod tests {
             .unwrap_or(EditorFontFamily::Serif);
         let base = metrics.scalar_width * (font_size / 20.0);
         if family == EditorFontFamily::Monospace {
-            return base;
+            return base * (4.0 / 3.0);
         }
 
         // Source Serif 4's common Latin advances, normalized to the 9px body
         // advance at 20px. The same ratios remain a close deterministic model for
-        // Source Sans 3; the monospace path above remains exact.
+        // Source Sans 3; monospace uses a separate cell width above.
         let proportion = match character {
             ' ' => 0.52,
             '\u{2009}' | '\u{200A}' => 0.25,
@@ -2133,6 +2366,100 @@ mod tests {
             _ => 1.22,
         };
         (base * proportion).max(metrics.caret_width)
+    }
+
+    #[test]
+    fn inline_fonts_reflow_only_changed_lines_and_keep_carets_in_mixed_size_rows() {
+        let text =
+            "Small words surround LARGE and continue across several wrapped rows. ".repeat(40);
+        let make = |marks| {
+            SemanticDocument::new(vec![
+                SemanticBlock::new(
+                    block(1),
+                    SemanticBlockKind::Paragraph,
+                    None,
+                    text.clone(),
+                    marks,
+                ),
+                SemanticBlock::new(
+                    block(2),
+                    SemanticBlockKind::Paragraph,
+                    None,
+                    "Unchanged tail",
+                    vec![],
+                ),
+            ])
+        };
+        let mut input = VisibleEditorBlock::from_semantic(block(1), &make(vec![]), 0.into());
+        let viewport = EditorViewport::new(480.0, 300.0).unwrap();
+        let metrics = EditorLayoutMetrics::default();
+        let before = BlockLayoutGeometry::build(&input, viewport, 0.0, metrics, None).unwrap();
+        let marks = vec![
+            SemanticMarkRange::new(
+                EditorSelection::new(21.into(), 26.into()),
+                SemanticInlineMark::FontSize(48),
+            ),
+            SemanticMarkRange::new(
+                EditorSelection::new(21.into(), 26.into()),
+                SemanticInlineMark::FontFamily(InlineFontFamily::Monospace),
+            ),
+            SemanticMarkRange::new(
+                EditorSelection::new(1050.into(), 1300.into()),
+                SemanticInlineMark::FontSize(9),
+            ),
+        ];
+        input.update_semantic(&make(marks), &StyleCatalogProjection::default());
+        let after =
+            BlockLayoutGeometry::build(&input, viewport, 0.0, metrics, Some(&before)).unwrap();
+        let full = BlockLayoutGeometry::build(&input, viewport, 0.0, metrics, None).unwrap();
+        assert_eq!(after, full);
+        assert!(!Arc::ptr_eq(
+            &before.height_index[0].metrics,
+            &after.height_index[0].metrics
+        ));
+        assert!(Arc::ptr_eq(
+            &before.height_index[1].metrics,
+            &after.height_index[1].metrics
+        ));
+        let large = after
+            .scalars
+            .iter()
+            .find(|scalar| scalar.position == 21.into())
+            .unwrap();
+        assert_eq!(large.font_size, 64.0);
+        assert_eq!(large.font_family, EditorFontFamily::Monospace);
+        assert!(large.bounds.height >= large.font_size);
+        assert!(
+            after.height_index[0]
+                .rows
+                .iter()
+                .any(|row| row.height == metrics.line_height)
+        );
+        for scalar in &*after.scalars {
+            if scalar.character == '\n' {
+                continue;
+            }
+            let caret = after.caret(scalar.position).unwrap();
+            assert_eq!(caret.y, scalar.bounds.y);
+            assert_eq!(caret.height, scalar.bounds.height);
+            assert_eq!(
+                after.hit_test(caret.x, caret.y + caret.height * 0.5),
+                Some(scalar.position)
+            );
+        }
+        let scroll = after.caret(1200.into()).unwrap().y;
+        let scrolled =
+            BlockLayoutGeometry::build(&input, viewport, scroll, metrics, Some(&after)).unwrap();
+        assert_eq!(
+            scrolled,
+            BlockLayoutGeometry::build(&input, viewport, scroll, metrics, None).unwrap()
+        );
+        assert!(
+            scrolled
+                .scalars
+                .iter()
+                .any(|scalar| scalar.font_size == 12.0)
+        );
     }
 
     #[test]
@@ -2426,7 +2753,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_unsorted_marks_preserve_every_style_and_half_open_boundary() {
+    fn overlapping_unsorted_marks_preserve_styles_across_chunks_and_hard_breaks() {
         let marks = [
             SemanticInlineMark::Bold,
             SemanticInlineMark::Italic,
@@ -2437,48 +2764,78 @@ mod tests {
             SemanticInlineMark::Superscript,
             SemanticInlineMark::Subscript,
         ];
-        let mut input = VisibleEditorBlock::new(block(12), "aé🦀bcdefghij", 100.into());
-        input.mark_ranges = marks
-            .iter()
-            .enumerate()
-            .rev()
-            .map(|(i, mark)| VisibleMarkRange {
-                range: EditorSelection::new((100 + i as u64).into(), (104 + i as u64).into()),
-                mark: mark.clone(),
-            })
-            .collect();
+        let paragraph = "aé🦀bcdefghij".repeat(400);
+        let mut input =
+            VisibleEditorBlock::new(block(12), format!("{paragraph}\n{paragraph}"), 100.into());
+        // Straddle 1,024-scalar chunk boundaries and the hard break at 4,900.
+        let anchors = [100, 1_120, 2_144, 4_896, 4_900, 5_920];
+        for anchor in anchors.into_iter().rev() {
+            input
+                .mark_ranges
+                .extend(
+                    marks
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .map(|(i, mark)| VisibleMarkRange {
+                            range: EditorSelection::new(
+                                (anchor + i as u64).into(),
+                                (anchor + 4 + i as u64).into(),
+                            ),
+                            mark: mark.clone(),
+                        }),
+                );
+        }
         input.mark_ranges.push(input.mark_ranges[0].clone());
-        let geometry = BlockLayoutGeometry::build(
+        let full = BlockLayoutGeometry::build(
             &input,
-            EditorViewport::new(300.0, 240.0).unwrap(),
+            EditorViewport::new(300.0, 100_000.0).unwrap(),
             0.0,
             regression_metrics(),
             None,
         )
         .unwrap();
-        for scalar in geometry.draw_scalars() {
-            let expected = marks.each_ref().map(|mark| {
-                input.mark_ranges.iter().any(|range| {
-                    range.range.start() <= scalar.position
-                        && scalar.position < range.range.end()
-                        && range.mark == *mark
-                })
-            });
-            assert_eq!(
-                [
-                    scalar.bold,
-                    scalar.italic,
-                    scalar.underline,
-                    scalar.strikethrough,
-                    scalar.link,
-                    scalar.small_caps,
-                    scalar.superscript,
-                    scalar.subscript,
-                ],
-                expected,
-                "position {:?}",
-                scalar.position
-            );
+        for anchor in anchors {
+            let scroll = full
+                .draw_scalars()
+                .iter()
+                .find(|scalar| scalar.position.value() == anchor)
+                .unwrap()
+                .bounds
+                .y;
+            let geometry = BlockLayoutGeometry::build(
+                &input,
+                EditorViewport::new(300.0, 240.0).unwrap(),
+                scroll,
+                regression_metrics(),
+                Some(&full),
+            )
+            .unwrap();
+            assert!(!geometry.draw_scalars().is_empty());
+            for scalar in geometry.draw_scalars() {
+                let expected = marks.each_ref().map(|mark| {
+                    input.mark_ranges.iter().any(|range| {
+                        range.range.start() <= scalar.position
+                            && scalar.position < range.range.end()
+                            && range.mark == *mark
+                    })
+                });
+                assert_eq!(
+                    [
+                        scalar.bold,
+                        scalar.italic,
+                        scalar.underline,
+                        scalar.strikethrough,
+                        scalar.link,
+                        scalar.small_caps,
+                        scalar.superscript,
+                        scalar.subscript,
+                    ],
+                    expected,
+                    "position {:?}",
+                    scalar.position
+                );
+            }
         }
     }
 

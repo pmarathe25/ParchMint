@@ -33,6 +33,10 @@ The default `diagnostics` feature records warnings and errors. Debug and harness
 builds also record traces and timing summaries. Build with `--no-default-features`
 to omit logging. See [diagnostics](../parchmint-diagnostics/README.md) for limits.
 
+The opt-in `renderer-verification` feature checks every native frame for stale
+pixels; see the [renderer guide](../../third_party/iced_tiny_skia-0.14.0/README.md#verify-the-patch).
+Use it for visual checks, not benchmarks.
+
 Logs use `logs/parchmint-debug.log` below these application-data directories:
 
 | Platform | Directory |

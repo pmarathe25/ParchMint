@@ -1,6 +1,6 @@
 //! Sanitization for untrusted clipboard content.
 
-use crate::{DocumentPosition, EditorSelection};
+use crate::{DocumentPosition, EditorSelection, InlineFontFamily, SemanticInlineMark};
 
 /// Supported formatting retained from rich clipboard content.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +10,8 @@ pub enum PasteMarkKind {
     Underline,
     Strikethrough,
     Link(String),
+    FontFamily(InlineFontFamily),
+    FontSize(u16),
 }
 
 /// One retained mark over scalar positions in sanitized text.
@@ -96,6 +98,7 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
     let mut lists: Vec<String> = Vec::new();
     let mut quote_depth = 0usize;
     let mut open_marks: Vec<(String, usize, PasteMarkKind)> = Vec::new();
+    let mut font_spans = Vec::new();
     let mut unsafe_content_removed = false;
     let mut omitted_images = 0;
     let mut cursor = 0;
@@ -261,6 +264,31 @@ fn sanitize_html(html: &str) -> SanitizedPaste {
                     PasteMarkKind::Strikethrough,
                 ));
             }
+            (false, "span") => {
+                let mark = crate::semantic_html::parse_attributes("span", &raw_tag[name.len()..])
+                    .and_then(|attributes| crate::semantic_html::inline_mark("span", &attributes));
+                let kind = match mark {
+                    Ok(Some(SemanticInlineMark::FontFamily(family))) => {
+                        Some(PasteMarkKind::FontFamily(family))
+                    }
+                    Ok(Some(SemanticInlineMark::FontSize(size))) => {
+                        Some(PasteMarkKind::FontSize(size))
+                    }
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    font_spans.push(true);
+                    open_marks.push((name.into(), text.chars().count(), kind));
+                } else {
+                    font_spans.push(false);
+                    unsafe_content_removed = true;
+                }
+            }
+            (true, "span") => {
+                if font_spans.pop() == Some(true) {
+                    close_mark(name, text.chars().count(), &mut open_marks, &mut marks);
+                }
+            }
             (false, "a") => {
                 if let Some(link) = safe_href(raw_tag) {
                     if raw_tag.matches('=').count() != 1 {
@@ -363,13 +391,39 @@ fn close_mark(
         return;
     };
     let (_, start, kind) = open.remove(index);
-    if start < end {
+    let ranges = if matches!(
+        kind,
+        PasteMarkKind::FontFamily(_) | PasteMarkKind::FontSize(_)
+    ) {
+        crate::semantic_html::uncovered_ranges(
+            start,
+            end,
+            output
+                .iter()
+                .filter(|mark| {
+                    matches!(
+                        (&kind, &mark.kind),
+                        (PasteMarkKind::FontFamily(_), PasteMarkKind::FontFamily(_))
+                            | (PasteMarkKind::FontSize(_), PasteMarkKind::FontSize(_))
+                    )
+                })
+                .map(|mark| {
+                    (
+                        mark.range.start().value() as usize,
+                        mark.range.end().value() as usize,
+                    )
+                }),
+        )
+    } else {
+        vec![(start, end)]
+    };
+    for (start, end) in ranges.into_iter().filter(|(start, end)| start < end) {
         output.push(PasteMark {
             range: EditorSelection::new(
                 DocumentPosition::from(start as u64),
                 DocumentPosition::from(end as u64),
             ),
-            kind,
+            kind: kind.clone(),
         });
     }
 }
@@ -459,6 +513,25 @@ mod tests {
 
     fn selection(start: u64, end: u64) -> EditorSelection {
         EditorSelection::new(start.into(), end.into())
+    }
+
+    #[test]
+    fn rich_paste_keeps_safe_font_overrides_without_crossing_ignored_spans() {
+        let paste = sanitize_paste(PasteSource::RichHtml(
+            r#"<p><span data-font-family="monospace"><span style="color:red">a</span>b<span data-font-size="24">C<span data-font-size="12">d</span>E</span></span></p>"#,
+        ));
+        assert_eq!(paste.text(), "abCdE");
+        assert!(paste.unsafe_content_removed());
+        assert!(paste.marks().contains(&PasteMark {
+            range: selection(0, 5),
+            kind: PasteMarkKind::FontFamily(InlineFontFamily::Monospace)
+        }));
+        for (start, end, size) in [(2, 3, 24), (3, 4, 12), (4, 5, 24)] {
+            assert!(paste.marks().contains(&PasteMark {
+                range: selection(start, end),
+                kind: PasteMarkKind::FontSize(size)
+            }));
+        }
     }
 
     #[test]

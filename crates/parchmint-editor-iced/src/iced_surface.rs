@@ -1655,6 +1655,7 @@ fn draw_scalar_text(frame: &mut Frame, scalar: &EditorScalarGeometry, theme: Edi
         position: Point::new(
             scalar.bounds.x,
             scalar.bounds.y
+                + scalar.text_offset_y
                 + if raised {
                     -scalar.bounds.height * 0.25
                 } else if lowered {

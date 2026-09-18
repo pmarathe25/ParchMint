@@ -55,6 +55,103 @@ mod clipping_tests {
     use crate::core::{alignment, text};
 
     #[test]
+    fn moving_shadows_match_full_repaints() {
+        use crate::core::Renderer as _;
+        let bounds = Rectangle::with_size(Size::new(240.0, 180.0));
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for background in [Color::WHITE, Color::from_rgb8(25, 28, 32)] {
+                let viewport = Viewport::with_physical_size(
+                    Size::new((240.0 * scale) as u32, (180.0 * scale) as u32),
+                    scale,
+                );
+                let size = viewport.physical_size();
+                let mut renderer = Renderer::new(Font::DEFAULT, Pixels(20.0));
+                let mut pixels =
+                    tiny_skia::Pixmap::new(size.width, size.height).unwrap();
+                let mut mask =
+                    tiny_skia::Mask::new(size.width, size.height).unwrap();
+                let mut previous = Vec::new();
+                for step in 0..12 {
+                    renderer.reset(bounds);
+                    let (layer, _) = renderer.layers.current_mut();
+                    if step != 11 {
+                        layer.draw_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: if step < 2 {
+                                        45.0
+                                    } else {
+                                        45.0 + step as f32 * 0.75
+                                    },
+                                    y: 40.0,
+                                    width: 100.0,
+                                    height: 65.0,
+                                },
+                                border: core::border::rounded(8.0),
+                                shadow: core::Shadow {
+                                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                                    offset: core::Vector::new(7.0, -4.0),
+                                    blur_radius: 12.0,
+                                },
+                                ..Default::default()
+                            },
+                            Color::from_rgb8(150, 175, 190).into(),
+                            Transformation::IDENTITY,
+                        );
+                    }
+                    // An unrelated small repaint must neither darken nor erase
+                    // the surrounding shadow, including outside the card.
+                    if step == 1 {
+                        layer.draw_quad(
+                            renderer::Quad {
+                                bounds: Rectangle {
+                                    x: 149.0,
+                                    y: 65.0,
+                                    width: 2.0,
+                                    height: 12.0,
+                                },
+                                ..Default::default()
+                            },
+                            Color::BLACK.into(),
+                            Transformation::IDENTITY,
+                        );
+                    }
+                    let damage = if previous.is_empty() {
+                        vec![bounds]
+                    } else {
+                        graphics::damage::group(
+                            renderer.damage(&previous, scale),
+                            bounds,
+                        )
+                    };
+                    renderer.draw(
+                        &mut pixels.as_mut(),
+                        &mut mask,
+                        &viewport,
+                        &damage,
+                        background,
+                    );
+                    let mut full =
+                        tiny_skia::Pixmap::new(size.width, size.height)
+                            .unwrap();
+                    renderer.draw(
+                        &mut full.as_mut(),
+                        &mut mask,
+                        &viewport,
+                        &[bounds],
+                        background,
+                    );
+                    assert!(
+                        pixels.data() == full.data(),
+                        "shadow trail: scale={scale}, background={background:?}, step={step}"
+                    );
+                    previous = renderer.layers().to_vec();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn incremental_canvas_frames_match_full_repaints() {
         use crate::core::Renderer as _;
         let bounds = Rectangle::with_size(Size::new(320.0, 200.0));

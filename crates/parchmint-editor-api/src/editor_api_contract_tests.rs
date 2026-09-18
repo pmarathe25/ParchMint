@@ -487,6 +487,7 @@ impl EditorAdapter for NativeEditorAdapter {
                     });
                 }
                 EditorCommandKind::ToggleInlineMark { .. }
+                | EditorCommandKind::SetInlineFont { .. }
                 | EditorCommandKind::SetLink { .. }
                 | EditorCommandKind::ToggleBlockFormat { .. }
                 | EditorCommandKind::InsertAtomicBlock { .. }

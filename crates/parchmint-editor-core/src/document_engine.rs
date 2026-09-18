@@ -3,8 +3,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, ListDepthChange, SemanticBlock,
-    SemanticBlockKind, SemanticDocument, SemanticInlineMark, SemanticMarkRange,
+    AtomicBlockKind, BlockId, DocumentPosition, EditorSelection, InlineFont, ListDepthChange,
+    SemanticBlock, SemanticBlockKind, SemanticDocument, SemanticInlineMark, SemanticMarkRange,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +311,12 @@ pub(super) trait DocumentEngine {
         end: usize,
         mark: SemanticInlineMark,
     ) -> Result<EngineChange, EngineError>;
+    fn set_inline_font(
+        &mut self,
+        start: usize,
+        end: usize,
+        font: InlineFont,
+    ) -> Result<Option<EngineChange>, EngineError>;
     fn set_link(
         &mut self,
         start: usize,
@@ -632,6 +638,39 @@ impl DocumentEngine for PrivateTextEngine {
             mapping: PositionMapping::identity(),
             changed_blocks: changed,
         })
+    }
+
+    fn set_inline_font(
+        &mut self,
+        start: usize,
+        end: usize,
+        font: InlineFont,
+    ) -> Result<Option<EngineChange>, EngineError> {
+        let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
+        let mut changed = Vec::new();
+        let mut offset = 0usize;
+        for block in &mut document.blocks {
+            let len = block_scalar_len(block);
+            let local_start = start.saturating_sub(offset).min(len);
+            let local_end = end.saturating_sub(offset).min(len);
+            if !is_atomic(block.kind) && local_start < local_end {
+                let before = block.marks.clone();
+                remove_marks_where(block.marks_mut(), local_start, local_end, |mark| {
+                    font.matches(mark)
+                });
+                if let Some(mark) = font.mark() {
+                    add_mark(block.marks_mut(), local_start, local_end, mark);
+                }
+                if block.marks != before {
+                    changed.push(block.id);
+                }
+            }
+            offset = offset.saturating_add(len).saturating_add(1);
+        }
+        Ok((!changed.is_empty()).then_some(EngineChange {
+            mapping: PositionMapping::identity(),
+            changed_blocks: changed,
+        }))
     }
 
     fn set_link(
@@ -1134,38 +1173,24 @@ fn add_mark(marks: &mut Vec<EngineMark>, start: usize, end: usize, mark: Semanti
 }
 
 fn remove_mark(marks: &mut Vec<EngineMark>, start: usize, end: usize, kind: &SemanticInlineMark) {
-    let mut replacements = Vec::new();
-    marks.retain(|mark| {
-        if &mark.mark != kind || mark.end <= start || mark.start >= end {
-            return true;
-        }
-        if mark.start < start {
-            replacements.push(EngineMark {
-                start: mark.start,
-                end: start,
-                mark: mark.mark.clone(),
-            });
-        }
-        if mark.end > end {
-            replacements.push(EngineMark {
-                start: end,
-                end: mark.end,
-                mark: mark.mark.clone(),
-            });
-        }
-        false
-    });
-    marks.extend(replacements);
-    normalize_marks(marks);
+    remove_marks_where(marks, start, end, |mark| mark == kind);
 }
 
 fn remove_links(marks: &mut Vec<EngineMark>, start: usize, end: usize) {
+    remove_marks_where(marks, start, end, |mark| {
+        matches!(mark, SemanticInlineMark::Link(_))
+    });
+}
+
+fn remove_marks_where(
+    marks: &mut Vec<EngineMark>,
+    start: usize,
+    end: usize,
+    matches: impl Fn(&SemanticInlineMark) -> bool,
+) {
     let mut replacements = Vec::new();
     marks.retain(|mark| {
-        if !matches!(mark.mark, SemanticInlineMark::Link(_))
-            || mark.end <= start
-            || mark.start >= end
-        {
+        if !matches(&mark.mark) || mark.end <= start || mark.start >= end {
             return true;
         }
         if mark.start < start {

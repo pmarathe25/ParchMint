@@ -57,6 +57,11 @@ against full repaints through edits, clipping, and fractional movement.
 Immutable text groups reuse their ink bounds; unused entries are dropped each
 paint pass, and loading fonts invalidates them. No rasterized-line images are kept.
 
+Shadow damage includes both the card and its shadow. Painting clips shadow buffers
+to dirty, on-screen pixels. Reused window buffers retain their own background and
+scale; resize and presentation failures invalidate their history.
+Antialiased vector edges use consistent blending in full and partial repaints.
+
 ## Verify the patch
 
 From the workspace root:
@@ -64,6 +69,19 @@ From the workspace root:
 ```console
 cargo test -p parchmint-ui-iced -p iced_tiny_skia --lib --locked -j 1
 ```
+
+To check every native frame against a full repaint, including during motion:
+
+```console
+cargo build --release --locked -j 1 -p parchmint-desktop --features renderer-verification
+```
+
+Run this binary on a disposable project using the
+[UI-review skill](../../.agents/skills/parchmint-ui-review/SKILL.md). Any pixel
+mismatch beyond one color level of antialias rounding stops the application;
+alpha must match exactly. Set `PARCHMINT_RENDER_FAILURE` to an existing temporary
+directory to save failure images. This diagnostic adds full-frame CPU and memory
+overhead: do not benchmark it. Rebuild without the feature for normal use.
 
 ## License and removal
 

@@ -14,6 +14,242 @@ fn capture(harness: &DesktopInteractionHarness, name: &str) {
     }
 }
 
+#[test]
+fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
+    use parchmint_desktop::{EditorPane, HarnessKey, LaunchRequest};
+    let run = IsolatedRun::new("inline-fonts").unwrap();
+    let project = run.root().join("fonts.parchmint");
+    let harness = create_project(&run, &project, "Font controls");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            format!(
+                "A larger word beside ordinary prose. {}",
+                "The harbor bells rang across the water. ".repeat(8)
+            ),
+        )
+        .unwrap();
+    harness
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "larger")
+        .unwrap();
+    for (target, index) in [
+        (HarnessTarget::FontFamily, 2),
+        (HarnessTarget::FontSize, 12),
+    ] {
+        harness
+            .click_target(HarnessWindow::Project, target)
+            .unwrap();
+        for _ in 0..=index {
+            harness
+                .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+                .unwrap();
+        }
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::Enter)
+            .unwrap();
+    }
+    let formatted = harness.active_editor_body().unwrap();
+    assert!(
+        formatted.contains("data-font-family=\"sans-serif\""),
+        "{formatted}"
+    );
+    assert!(
+        formatted.contains("data-font-size=\"32\">larger"),
+        "{formatted}"
+    );
+    capture(&harness, "font-mixed-light");
+    harness
+        .press_command_key(HarnessWindow::Project, 'z')
+        .unwrap();
+    assert!(
+        !harness
+            .active_editor_body()
+            .unwrap()
+            .contains("data-font-size")
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 'y')
+        .unwrap();
+    assert_eq!(harness.active_editor_body().unwrap(), formatted);
+
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Create custom style")
+            .unwrap()
+    );
+    capture(&harness, "styles-context-light");
+    harness
+        .click_text(HarnessWindow::Project, "Create custom style")
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    assert_eq!(harness.active_editor_body().unwrap(), formatted);
+
+    // Caret controls change future typing, not the paragraph's shared style.
+    harness
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "larger")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowRight)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::FontSize)
+        .unwrap();
+    for _ in 0..=10 {
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+            .unwrap();
+    }
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "typedmarker")
+        .unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("data-font-size=\"24\">typedmarker")
+    );
+    harness
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "typedmarker")
+        .unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 'c')
+        .unwrap();
+    assert_eq!(
+        harness.clipboard_contents().0.as_deref(),
+        Some("typedmarker")
+    );
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowRight)
+        .unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 'v')
+        .unwrap();
+    let pasted = harness.active_editor_body().unwrap();
+    // Native copy currently publishes plain text; it must not change its source.
+    assert!(
+        pasted.contains("data-font-size=\"24\">typedmarker</span></span>typedmarker"),
+        "{pasted}"
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 'z')
+        .unwrap();
+    harness.seed_clipboard(
+        Some("typedmarker"),
+        Some("<span data-font-family=\"sans-serif\"><span data-font-size=\"24\">typedmarker</span></span>"),
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 'v')
+        .unwrap();
+    let pasted = harness.active_editor_body().unwrap();
+    assert!(
+        pasted.contains("data-font-size=\"24\">typedmarkertypedmarker"),
+        "{pasted}"
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 'z')
+        .unwrap();
+
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+    harness
+        .select_editor_text(HarnessWindow::Project, EditorPane::Companion, "ordinary")
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::FontFamily)
+        .unwrap();
+    for _ in 0..=3 {
+        harness
+            .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
+            .unwrap();
+    }
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .unwrap();
+    let shared = harness.active_editor_body().unwrap();
+    assert!(shared.contains("data-font-family=\"monospace\">ordinary"));
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
+        .unwrap();
+    assert_eq!(harness.active_editor_body().unwrap(), shared);
+    capture(&harness, "font-two-panes-light");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .unwrap();
+
+    harness
+        .resize(HarnessWindow::Project, 1280.0, 720.0)
+        .unwrap();
+    route(&harness, RibbonDestination::Settings);
+    harness
+        .click_text(HarnessWindow::Project, "Appearance")
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Dark").unwrap();
+    route(&harness, RibbonDestination::Editor);
+    capture(&harness, "font-mixed-dark-compact");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
+        .unwrap();
+    capture(&harness, "styles-context-dark-compact");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Tab)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .unwrap();
+
+    route(&harness, RibbonDestination::Cards);
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "+ New field")
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::MetadataFieldName,
+            "Viewpoint",
+        )
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Add field")
+        .unwrap();
+    capture(&harness, "metadata-context-dark-compact");
+    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Viewpoint")
+            .unwrap()
+    );
+    route(&harness, RibbonDestination::Editor);
+    let saved = harness.active_editor_body().unwrap();
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert_eq!(reopened.active_editor_body().unwrap(), saved);
+    assert!(
+        std::fs::read_to_string(project.join("project.toml"))
+            .unwrap()
+            .contains("Viewpoint")
+    );
+    assert!(
+        std::fs::read_to_string(project.join("project.toml"))
+            .unwrap()
+            .contains("New style")
+    );
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
+
 fn route(harness: &DesktopInteractionHarness, destination: RibbonDestination) {
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::Ribbon(destination))
@@ -372,18 +608,25 @@ fn a_failed_history_action_is_reported_and_its_banner_expires() {
 }
 
 #[test]
-fn reduced_motion_choice_survives_reopening_the_application() {
+fn appearance_and_motion_choices_survive_reopening_the_application() {
     let run = IsolatedRun::new("motion-preference").unwrap();
     let project = run.root().join("novel.parchmint");
     let preferences = run.root().join("configuration/preferences.json");
     let harness = create_project(&run, &project, "Motion preference");
     route(&harness, RibbonDestination::Settings);
+    harness.click_text(HarnessWindow::Project, "Dark").unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Dark appearance")
+            .unwrap()
+    );
     harness
         .click_text(HarnessWindow::Project, "Reduce motion")
         .unwrap();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&preferences).unwrap()).unwrap();
     assert_eq!(saved["preferences"]["reduced_motion"], true);
+    assert_eq!(saved["preferences"]["appearance"], "Dark");
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
 
@@ -393,12 +636,24 @@ fn reduced_motion_choice_survives_reopening_the_application() {
     )
     .unwrap();
     route(&harness, RibbonDestination::Settings);
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Dark appearance")
+            .unwrap()
+    );
+    harness.click_text(HarnessWindow::Project, "Light").unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Light appearance")
+            .unwrap()
+    );
     harness
         .click_text(HarnessWindow::Project, "Reduce motion")
         .unwrap();
     let saved: serde_json::Value =
         serde_json::from_slice(&std::fs::read(preferences).unwrap()).unwrap();
     assert_eq!(saved["preferences"]["reduced_motion"], false);
+    assert_eq!(saved["preferences"]["appearance"], "Light");
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
 }

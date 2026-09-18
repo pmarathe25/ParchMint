@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::document_engine::{
     EngineMark, SemanticBlockData, SemanticBlockSnapshot, SemanticDocumentSnapshot,
 };
-use crate::{BlockId, SemanticBlockKind, SemanticInlineMark};
+use crate::{BlockId, InlineFontFamily, SemanticBlockKind, SemanticInlineMark};
 
 pub(super) fn parse(
     body: &str,
@@ -29,7 +29,7 @@ pub(super) fn parse(
 
     let mut blocks = Vec::new();
     let mut current: Option<SemanticBlockSnapshot> = None;
-    let mut open_marks: Vec<(String, usize, SemanticInlineMark)> = Vec::new();
+    let mut open_marks: Vec<(String, usize, Option<SemanticInlineMark>)> = Vec::new();
     let mut lists = Vec::new();
     let mut cursor = 0usize;
     while cursor < body.len() {
@@ -137,10 +137,7 @@ pub(super) fn parse(
                     SemanticBlockKind::Paragraph,
                     BTreeMap::new(),
                 );
-                let Some(mark) = inline_mark(&name, &attributes)? else {
-                    cursor = end + 1;
-                    continue;
-                };
+                let mark = inline_mark(&name, &attributes)?;
                 let start = current.as_ref().expect("block").text.chars().count();
                 open_marks.push((name, start, mark));
             }
@@ -154,12 +151,8 @@ pub(super) fn parse(
                     .ok_or("mismatched canonical inline element")?;
                 let (_, start, mark) = open_marks.remove(index);
                 let finish = block.text.chars().count();
-                if start < finish {
-                    block.marks.push(EngineMark {
-                        start,
-                        end: finish,
-                        mark,
-                    });
+                if let Some(mark) = mark {
+                    append_parsed_mark(&mut block.marks, start, finish, mark);
                 }
             }
             _ => return Err("unsupported canonical HTML element"),
@@ -424,6 +417,10 @@ fn open_tag(mark: &SemanticInlineMark) -> String {
         SemanticInlineMark::Superscript => "<sup>".into(),
         SemanticInlineMark::Subscript => "<sub>".into(),
         SemanticInlineMark::Link(href) => format!("<a href=\"{}\">", escape_attribute(href)),
+        SemanticInlineMark::FontFamily(family) => {
+            format!("<span data-font-family=\"{}\">", family.canonical_name())
+        }
+        SemanticInlineMark::FontSize(size) => format!("<span data-font-size=\"{size}\">"),
     }
 }
 
@@ -433,7 +430,9 @@ fn close_tag(mark: &SemanticInlineMark) -> &'static str {
         SemanticInlineMark::Italic => "</em>",
         SemanticInlineMark::Underline => "</u>",
         SemanticInlineMark::Strikethrough => "</s>",
-        SemanticInlineMark::SmallCaps => "</span>",
+        SemanticInlineMark::SmallCaps
+        | SemanticInlineMark::FontFamily(_)
+        | SemanticInlineMark::FontSize(_) => "</span>",
         SemanticInlineMark::Superscript => "</sup>",
         SemanticInlineMark::Subscript => "</sub>",
         SemanticInlineMark::Link(_) => "</a>",
@@ -452,7 +451,7 @@ fn block_kind(tag: &str, list: Option<&str>) -> SemanticBlockKind {
     }
 }
 
-fn inline_mark(
+pub(super) fn inline_mark(
     tag: &str,
     attributes: &BTreeMap<String, String>,
 ) -> Result<Option<SemanticInlineMark>, &'static str> {
@@ -472,6 +471,17 @@ fn inline_mark(
         "span" if attributes.get("data-semantic").map(String::as_str) == Some("small-caps") => {
             Some(SemanticInlineMark::SmallCaps)
         }
+        "span" if attributes.contains_key("data-font-family") => {
+            Some(SemanticInlineMark::FontFamily(
+                InlineFontFamily::from_canonical_name(&attributes["data-font-family"])
+                    .ok_or("unsupported font family")?,
+            ))
+        }
+        "span" if attributes.contains_key("data-font-size") => Some(SemanticInlineMark::FontSize(
+            attributes["data-font-size"]
+                .parse()
+                .map_err(|_| "invalid font size")?,
+        )),
         "span" => None,
         _ => None,
     })
@@ -506,18 +516,82 @@ fn ensure_block(
 
 fn finish_block(
     current: &mut Option<SemanticBlockSnapshot>,
-    open_marks: &mut Vec<(String, usize, SemanticInlineMark)>,
+    open_marks: &mut Vec<(String, usize, Option<SemanticInlineMark>)>,
     blocks: &mut Vec<SemanticBlockSnapshot>,
 ) {
     if let Some(mut block) = current.take() {
         let end = block.text.chars().count();
-        for (_, start, mark) in open_marks.drain(..) {
-            if start < end {
-                block.marks.push(EngineMark { start, end, mark });
+        for (_, start, mark) in open_marks.drain(..).rev() {
+            if let Some(mark) = mark {
+                append_parsed_mark(&mut block.marks, start, end, mark);
             }
         }
         blocks.push(block);
     }
+}
+
+/// Inner font spans close first and override their enclosing property.
+fn append_parsed_mark(
+    marks: &mut Vec<EngineMark>,
+    start: usize,
+    end: usize,
+    mark: SemanticInlineMark,
+) {
+    if start >= end {
+        return;
+    }
+    let property = match mark {
+        SemanticInlineMark::FontFamily(_) => Some(crate::InlineFont::Family(None)),
+        SemanticInlineMark::FontSize(_) => Some(crate::InlineFont::Size(None)),
+        _ => None,
+    };
+    let Some(property) = property else {
+        marks.push(EngineMark { start, end, mark });
+        return;
+    };
+    let ranges = uncovered_ranges(
+        start,
+        end,
+        marks
+            .iter()
+            .filter(|inner| property.matches(&inner.mark))
+            .map(|inner| (inner.start, inner.end)),
+    );
+    marks.extend(
+        ranges
+            .into_iter()
+            .filter(|(start, end)| start < end)
+            .map(|(start, end)| EngineMark {
+                start,
+                end,
+                mark: mark.clone(),
+            }),
+    );
+}
+
+pub(super) fn uncovered_ranges(
+    start: usize,
+    end: usize,
+    covered: impl Iterator<Item = (usize, usize)>,
+) -> Vec<(usize, usize)> {
+    let mut ranges = vec![(start, end)];
+    for (inner_start, inner_end) in covered.filter(|(from, to)| *from < end && start < *to) {
+        let mut next = Vec::with_capacity(ranges.len() + 1);
+        for (start, end) in ranges {
+            if inner_end <= start || inner_start >= end {
+                next.push((start, end));
+            } else {
+                if start < inner_start {
+                    next.push((start, inner_start));
+                }
+                if inner_end < end {
+                    next.push((inner_end, end));
+                }
+            }
+        }
+        ranges = next;
+    }
+    ranges
 }
 
 fn find_tag_end(html: &str, start: usize) -> Result<usize, &'static str> {
@@ -533,7 +607,10 @@ fn find_tag_end(html: &str, start: usize) -> Result<usize, &'static str> {
     Err("unterminated canonical HTML element")
 }
 
-fn parse_attributes(tag: &str, mut source: &str) -> Result<BTreeMap<String, String>, &'static str> {
+pub(super) fn parse_attributes(
+    tag: &str,
+    mut source: &str,
+) -> Result<BTreeMap<String, String>, &'static str> {
     let mut attributes = BTreeMap::new();
     while !source.trim_start().is_empty() {
         source = source.trim_start();
@@ -560,6 +637,10 @@ fn parse_attributes(tag: &str, mut source: &str) -> Result<BTreeMap<String, Stri
         let valid = match (tag, name.as_str()) {
             ("a", "href") => is_safe_href(&value),
             ("span", "data-semantic") => value == "small-caps",
+            ("span", "data-font-family") => InlineFontFamily::from_canonical_name(&value).is_some(),
+            ("span", "data-font-size") => value
+                .parse::<u16>()
+                .is_ok_and(|size| (1..=512).contains(&size)),
             ("hr", "data-kind") => matches!(value.as_str(), "scene-break" | "page-break"),
             (_, "data-block-id" | "data-style-id") => is_safe_identifier(&value),
             _ => false,
@@ -567,6 +648,14 @@ fn parse_attributes(tag: &str, mut source: &str) -> Result<BTreeMap<String, Stri
         if !valid || attributes.insert(name, value).is_some() {
             return Err("unsupported or duplicate canonical HTML attribute");
         }
+    }
+    if ["data-semantic", "data-font-family", "data-font-size"]
+        .iter()
+        .filter(|name| attributes.contains_key(**name))
+        .count()
+        > 1
+    {
+        return Err("use separate spans for inline font properties");
     }
     Ok(attributes)
 }

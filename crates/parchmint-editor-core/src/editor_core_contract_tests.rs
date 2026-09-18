@@ -2,6 +2,214 @@ use super::*;
 use crate::document_engine::SemanticBlockData;
 
 #[test]
+fn inline_fonts_replace_only_the_selected_property_and_round_trip_with_undo() {
+    let original = "<p><strong>éabcd</strong></p><p>second</p>";
+    let mut session = EditorCoreSession::open(load(original)).unwrap();
+    session.attach_view(view(1)).unwrap();
+    session.attach_view(view(2)).unwrap();
+    for (revision, range, font) in [
+        (
+            0,
+            selection(0, 12),
+            InlineFont::Family(Some(InlineFontFamily::Monospace)),
+        ),
+        (1, selection(0, 5), InlineFont::Size(Some(24))),
+        (2, selection(1, 4), InlineFont::Size(Some(12))),
+        (3, selection(2, 3), InlineFont::Family(None)),
+    ] {
+        session
+            .execute(
+                origin(view(1)),
+                command(revision, EditorCommandKind::SetInlineFont { range, font }),
+            )
+            .unwrap();
+    }
+    let projection = session.canonical_projection();
+    let block = &projection.semantic().blocks()[0];
+    for (mark, ranges) in [
+        (SemanticInlineMark::Bold, vec![selection(0, 5)]),
+        (
+            SemanticInlineMark::FontFamily(InlineFontFamily::Monospace),
+            vec![selection(0, 2), selection(3, 5)],
+        ),
+        (
+            SemanticInlineMark::FontSize(24),
+            vec![selection(0, 1), selection(4, 5)],
+        ),
+        (SemanticInlineMark::FontSize(12), vec![selection(1, 4)]),
+    ] {
+        assert_eq!(
+            block
+                .marks()
+                .iter()
+                .filter(|range| range.mark() == &mark)
+                .map(SemanticMarkRange::range)
+                .collect::<Vec<_>>(),
+            ranges
+        );
+    }
+    let reopened = EditorCoreSession::open(load(projection.body())).unwrap();
+    assert_eq!(reopened.canonical_projection().body(), projection.body());
+    let reopened_projection = reopened.canonical_projection();
+    for position in 0..5 {
+        let at = |block: &SemanticBlock| {
+            let mut marks = block
+                .marks()
+                .iter()
+                .filter(|range| {
+                    range.range().start().value() <= position
+                        && position < range.range().end().value()
+                })
+                .map(|range| range.mark().clone())
+                .collect::<Vec<_>>();
+            marks.sort();
+            marks.dedup();
+            marks
+        };
+        assert_eq!(at(&reopened_projection.semantic().blocks()[0]), at(block));
+    }
+    let unchanged = session
+        .execute(
+            origin(view(1)),
+            command(
+                4,
+                EditorCommandKind::SetInlineFont {
+                    range: selection(1, 4),
+                    font: InlineFont::Size(Some(12)),
+                },
+            ),
+        )
+        .unwrap();
+    assert!(!unchanged.document_changed());
+    for revision in 4..8 {
+        session
+            .execute(origin(view(2)), command(revision, EditorCommandKind::Undo))
+            .unwrap();
+    }
+    assert_eq!(session.canonical_projection().body(), original);
+    for revision in 8..12 {
+        session
+            .execute(origin(view(1)), command(revision, EditorCommandKind::Redo))
+            .unwrap();
+    }
+    assert_eq!(session.canonical_projection().body(), projection.body());
+}
+
+#[test]
+fn nested_font_spans_use_the_inner_property_and_preserve_plain_spans() {
+    let session = EditorCoreSession::open(load(r#"<p><span data-font-size="32">big<span data-font-size="12">small</span><span>big</span></span></p>"#)).unwrap();
+    let body = session.canonical_projection().body().to_owned();
+    assert_eq!(
+        body,
+        r#"<p><span data-font-size="32">big</span><span data-font-size="12">small</span><span data-font-size="32">big</span></p>"#
+    );
+    assert_eq!(
+        EditorCoreSession::open(load(&body))
+            .unwrap()
+            .canonical_projection()
+            .body(),
+        body
+    );
+}
+
+#[test]
+fn caret_font_defaults_are_view_local_and_reset_to_style_inheritance() {
+    let mut session = EditorCoreSession::open(load("<p>Start </p>")).unwrap();
+    session.attach_view(view(1)).unwrap();
+    session.attach_view(view(2)).unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::SetSelection {
+                    selection: selection(6, 6),
+                },
+            ),
+        )
+        .unwrap();
+    for font in [
+        InlineFont::Family(Some(InlineFontFamily::SansSerif)),
+        InlineFont::Size(Some(32)),
+    ] {
+        let change = session
+            .execute(
+                origin(view(1)),
+                command(
+                    0,
+                    EditorCommandKind::SetInlineFont {
+                        range: selection(6, 6),
+                        font,
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(!change.document_changed());
+    }
+    assert!(session.active_inline_marks(view(2)).unwrap().is_empty());
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::InsertText {
+                    at: position(6),
+                    text: "large".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let body = session.canonical_projection().body().to_owned();
+    assert!(body.contains("data-font-family=\"sans-serif\""), "{body}");
+    assert!(body.contains("data-font-size=\"32\">large"), "{body}");
+    for font in [InlineFont::Family(None), InlineFont::Size(None)] {
+        session
+            .execute(
+                origin(view(1)),
+                command(
+                    1,
+                    EditorCommandKind::SetInlineFont {
+                        range: selection(11, 11),
+                        font,
+                    },
+                ),
+            )
+            .unwrap();
+    }
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                1,
+                EditorCommandKind::InsertText {
+                    at: position(11),
+                    text: " plain".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let projection = session.canonical_projection();
+    assert!(projection.body().contains("</span> plain</p>"));
+    for size in [0, 513, u16::MAX] {
+        assert!(
+            session
+                .execute(
+                    origin(view(1)),
+                    command(
+                        2,
+                        EditorCommandKind::SetInlineFont {
+                            range: selection(0, 5),
+                            font: InlineFont::Size(Some(size))
+                        }
+                    )
+                )
+                .is_err()
+        );
+        assert_eq!(session.canonical_projection(), projection);
+    }
+}
+
+#[test]
 fn formatting_commands_after_atomic_blocks_target_the_selected_text() {
     for kind in ["scene-break", "page-break"] {
         let prefix = format!("<p>before</p><hr data-kind=\"{kind}\">");

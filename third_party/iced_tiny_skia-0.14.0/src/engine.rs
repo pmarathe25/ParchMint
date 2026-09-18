@@ -98,9 +98,9 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
-        let physical_bounds = quad.bounds * transformation;
-
-        if !clip_bounds.intersects(&physical_bounds) {
+        if !clip_bounds
+            .intersects(&(quad_visible_bounds(quad) * transformation))
+        {
             return;
         }
 
@@ -114,9 +114,6 @@ impl Engine {
         ) {
             return;
         }
-
-        let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-            .then_some(clip_mask as &_);
 
         let transform = into_transform(transformation);
 
@@ -137,85 +134,19 @@ impl Engine {
 
         let path = rounded_rectangle(quad.bounds, fill_border_radius);
 
-        let shadow = quad.shadow;
+        draw_shadow(
+            quad,
+            fill_border_radius,
+            transformation,
+            pixels,
+            clip_mask,
+            clip_bounds,
+        );
 
-        if shadow.color.a > 0.0 {
-            let shadow_bounds = Rectangle {
-                x: quad.bounds.x + shadow.offset.x - shadow.blur_radius,
-                y: quad.bounds.y + shadow.offset.y - shadow.blur_radius,
-                width: quad.bounds.width + shadow.blur_radius * 2.0,
-                height: quad.bounds.height + shadow.blur_radius * 2.0,
-            } * transformation;
-
-            let radii = fill_border_radius
-                .into_iter()
-                .map(|radius| radius * transformation.scale_factor())
-                .collect::<Vec<_>>();
-            let (x, y, width, height) = (
-                shadow_bounds.x as u32,
-                shadow_bounds.y as u32,
-                shadow_bounds.width as u32,
-                shadow_bounds.height as u32,
-            );
-            let half_width = physical_bounds.width / 2.0;
-            let half_height = physical_bounds.height / 2.0;
-
-            let colors = (y..y + height)
-                .flat_map(|y| (x..x + width).map(move |x| (x as f32, y as f32)))
-                .filter_map(|(x, y)| {
-                    tiny_skia::Size::from_wh(half_width, half_height).map(
-                        |size| {
-                            let shadow_distance = rounded_box_sdf(
-                                Vector::new(
-                                    x - physical_bounds.position().x
-                                        - (shadow.offset.x
-                                            * transformation.scale_factor())
-                                        - half_width,
-                                    y - physical_bounds.position().y
-                                        - (shadow.offset.y
-                                            * transformation.scale_factor())
-                                        - half_height,
-                                ),
-                                size,
-                                &radii,
-                            )
-                            .max(0.0);
-                            let shadow_alpha = 1.0
-                                - smoothstep(
-                                    -shadow.blur_radius
-                                        * transformation.scale_factor(),
-                                    shadow.blur_radius
-                                        * transformation.scale_factor(),
-                                    shadow_distance,
-                                );
-
-                            let mut color = into_color(shadow.color);
-                            color.apply_opacity(shadow_alpha);
-
-                            color.to_color_u8().premultiply()
-                        },
-                    )
-                })
-                .collect();
-
-            if let Some(pixmap) = tiny_skia::IntSize::from_wh(width, height)
-                .and_then(|size| {
-                    tiny_skia::Pixmap::from_vec(
-                        bytemuck::cast_vec(colors),
-                        size,
-                    )
-                })
-            {
-                pixels.draw_pixmap(
-                    x as i32,
-                    y as i32,
-                    pixmap.as_ref(),
-                    &tiny_skia::PixmapPaint::default(),
-                    tiny_skia::Transform::default(),
-                    None,
-                );
-            }
-        }
+        // Keep antialiased edges on the same blending path in full and partial
+        // repaints. Switching between masked and unmasked paths changes rounding
+        // at overlapping fills and borders.
+        let clip_mask = Some(clip_mask as &_);
 
         pixels.fill_path(
             &path,
@@ -607,15 +538,12 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
-
                 pixels.fill_path(
                     path,
                     paint,
                     *rule,
                     into_transform(transformation),
-                    clip_mask,
+                    Some(clip_mask),
                 );
             }
             Primitive::Stroke {
@@ -638,15 +566,12 @@ impl Engine {
                     return;
                 }
 
-                let clip_mask = (!physical_bounds.is_within(&clip_bounds))
-                    .then_some(clip_mask as &_);
-
                 pixels.stroke_path(
                     path,
                     paint,
                     stroke,
                     into_transform(transformation),
-                    clip_mask,
+                    Some(clip_mask),
                 );
             }
         }
@@ -937,13 +862,11 @@ fn draw_opaque_quad(
         }
         let rows =
             start as usize * width as usize..end as usize * width as usize;
-        let mask = (!bounds.is_within(&clip)).then(|| {
-            tiny_skia::Mask::from_vec(
-                clip_mask.data()[rows.clone()].to_vec(),
-                tiny_skia::IntSize::from_wh(width, end - start).unwrap(),
-            )
-            .unwrap()
-        });
+        let mask = tiny_skia::Mask::from_vec(
+            clip_mask.data()[rows.clone()].to_vec(),
+            tiny_skia::IntSize::from_wh(width, end - start).unwrap(),
+        )
+        .unwrap();
         let mut band = tiny_skia::PixmapMut::from_bytes(
             &mut pixels.data_mut()[rows.start * 4..rows.end * 4],
             width,
@@ -955,7 +878,7 @@ fn draw_opaque_quad(
             &paint,
             tiny_skia::FillRule::EvenOdd,
             tiny_skia::Transform::from_translate(0.0, -(start as f32)),
-            mask.as_ref(),
+            Some(&mask),
         );
     }
     true
@@ -1105,6 +1028,101 @@ fn arc_to(
     }
 }
 
+fn shadow_bounds(quad: &Quad) -> Rectangle {
+    let blur = quad.shadow.blur_radius.max(0.0);
+    Rectangle {
+        x: quad.bounds.x + quad.shadow.offset.x - blur,
+        y: quad.bounds.y + quad.shadow.offset.y - blur,
+        width: quad.bounds.width + 2.0 * blur,
+        height: quad.bounds.height + 2.0 * blur,
+    }
+}
+
+pub(crate) fn quad_visible_bounds(quad: &Quad) -> Rectangle {
+    if quad.shadow.color.a > 0.0 {
+        quad.bounds.union(&shadow_bounds(quad))
+    } else {
+        quad.bounds
+    }
+}
+
+fn draw_shadow(
+    quad: &Quad,
+    radii: [f32; 4],
+    transformation: Transformation,
+    pixels: &mut tiny_skia::PixmapMut<'_>,
+    clip_mask: &tiny_skia::Mask,
+    clip_bounds: Rectangle,
+) {
+    if quad.shadow.color.a <= 0.0 {
+        return;
+    }
+    let Some(visible) = (shadow_bounds(quad) * transformation)
+        .intersection(&clip_bounds)
+        .and_then(|bounds| {
+            bounds.intersection(&Rectangle::with_size(Size::new(
+                pixels.width() as f32,
+                pixels.height() as f32,
+            )))
+        })
+    else {
+        return;
+    };
+    // Allocate and shade only damaged, on-screen pixels. Rounding outward
+    // preserves fractional edges; the layer mask supplies the exact clip.
+    let x = visible.x.floor() as u32;
+    let y = visible.y.floor() as u32;
+    let width = (visible.x + visible.width).ceil() as u32 - x;
+    let height = (visible.y + visible.height).ceil() as u32 - y;
+    let bounds = quad.bounds * transformation;
+    let Some(half_size) =
+        tiny_skia::Size::from_wh(bounds.width / 2.0, bounds.height / 2.0)
+    else {
+        return;
+    };
+    let scale = transformation.scale_factor();
+    let radii = radii.map(|radius| radius * scale);
+    let blur = quad.shadow.blur_radius.max(0.0) * scale;
+    let center = Vector::new(
+        bounds.x + quad.shadow.offset.x * scale + half_size.width(),
+        bounds.y + quad.shadow.offset.y * scale + half_size.height(),
+    );
+    let colors: Vec<_> = (y..y + height)
+        .flat_map(|y| (x..x + width).map(move |x| (x as f32, y as f32)))
+        .map(|(x, y)| {
+            let distance = rounded_box_sdf(
+                Vector::new(x - center.x, y - center.y),
+                half_size,
+                &radii,
+            );
+            let alpha = if blur > 0.0 {
+                1.0 - smoothstep(-blur, blur, distance.max(0.0))
+            } else if distance <= 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let mut color = into_color(quad.shadow.color);
+            color.apply_opacity(alpha);
+            color.to_color_u8().premultiply()
+        })
+        .collect();
+    if let Some(pixmap) =
+        tiny_skia::IntSize::from_wh(width, height).and_then(|size| {
+            tiny_skia::Pixmap::from_vec(bytemuck::cast_vec(colors), size)
+        })
+    {
+        pixels.draw_pixmap(
+            x as i32,
+            y as i32,
+            pixmap.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            Some(clip_mask),
+        );
+    }
+}
+
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let x = ((x - a) / (b - a)).clamp(0.0, 1.0);
 
@@ -1199,6 +1217,223 @@ fn fill_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
 #[cfg(test)]
 mod clip_mask_tests {
     use super::*;
+
+    #[test]
+    fn partial_bordered_quad_repaints_are_stable() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for border_width in [0.0, 1.0] {
+                let quad = Quad {
+                    bounds: Rectangle {
+                        x: 15.0,
+                        y: 15.0,
+                        width: 140.0,
+                        height: 90.0,
+                    },
+                    border: crate::core::Border {
+                        color: Color::from_rgba(0.2, 0.3, 0.2, 0.6),
+                        width: border_width,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                };
+                let background = Color::from_rgb8(239, 242, 239).into();
+                let mut engine = Engine::new();
+                let mut full = tiny_skia::Pixmap::new(360, 240).unwrap();
+                full.fill(tiny_skia::Color::WHITE);
+                let mut mask = tiny_skia::Mask::new(360, 240).unwrap();
+                let viewport = Rectangle::with_size(Size::new(360.0, 240.0));
+                adjust_clip_mask(&mut mask, viewport);
+                let transform = Transformation::scale(scale);
+                engine.draw_quad(
+                    &quad,
+                    &background,
+                    transform,
+                    &mut full.as_mut(),
+                    &mut mask,
+                    viewport,
+                );
+                for clip in [
+                    Rectangle {
+                        x: 15.0,
+                        y: 15.0,
+                        width: 5.0,
+                        height: 90.0,
+                    },
+                    Rectangle {
+                        x: 150.0,
+                        y: 15.0,
+                        width: 5.0,
+                        height: 90.0,
+                    },
+                    Rectangle {
+                        x: 15.0,
+                        y: 15.0,
+                        width: 140.0,
+                        height: 5.0,
+                    },
+                    Rectangle {
+                        x: 15.0,
+                        y: 100.0,
+                        width: 140.0,
+                        height: 5.0,
+                    },
+                ] {
+                    let clip = clip * scale;
+                    let clip = Rectangle {
+                        x: clip.x.floor(),
+                        y: clip.y.floor(),
+                        width: (clip.x + clip.width).ceil() - clip.x.floor(),
+                        height: (clip.y + clip.height).ceil() - clip.y.floor(),
+                    };
+                    let mut partial = full.clone();
+                    partial.fill_path(
+                        &rounded_rectangle(clip, [0.0; 4]),
+                        &tiny_skia::Paint {
+                            shader: tiny_skia::Shader::SolidColor(
+                                tiny_skia::Color::WHITE,
+                            ),
+                            anti_alias: false,
+                            ..Default::default()
+                        },
+                        tiny_skia::FillRule::Winding,
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                    adjust_clip_mask(&mut mask, clip);
+                    engine.draw_quad(
+                        &quad,
+                        &background,
+                        transform,
+                        &mut partial.as_mut(),
+                        &mut mask,
+                        clip,
+                    );
+                    assert!(
+                        partial.data() == full.data(),
+                        "partial border: scale={scale}, width={border_width}, clip={clip:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fully_open_masks_only_change_antialias_rounding() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 52.0,
+            width: 280.0,
+            height: 636.0,
+        };
+        let mut full = tiny_skia::Pixmap::new(320, 720).unwrap();
+        full.fill(tiny_skia::Color::WHITE);
+        let mut masked = full.clone();
+        let mut mask = tiny_skia::Mask::new(320, 720).unwrap();
+        mask.data_mut().fill(255);
+        let path = rounded_rectangle(bounds, [4.0; 4]);
+        let paint = tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(into_color(
+                Color::from_rgb8(239, 242, 239),
+            )),
+            anti_alias: true,
+            ..Default::default()
+        };
+        for (pixels, clip) in [(&mut full, None), (&mut masked, Some(&mask))] {
+            pixels.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::EvenOdd,
+                tiny_skia::Transform::identity(),
+                clip,
+            );
+        }
+        let differences: Vec<_> = full
+            .data()
+            .iter()
+            .zip(masked.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .filter(|difference| *difference != 0)
+            .collect();
+        assert!(
+            !differences.is_empty(),
+            "the two rasterizer paths round differently"
+        );
+        assert!(differences.iter().all(|difference| *difference == 1));
+    }
+
+    #[test]
+    fn shadow_clipping_matches_a_crop_including_offscreen_and_hard_edges() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for blur_radius in [0.0, 12.0] {
+                let quad = Quad {
+                    bounds: Rectangle {
+                        x: -6.25,
+                        y: -3.5,
+                        width: 70.0,
+                        height: 55.0,
+                    },
+                    border: crate::core::border::rounded(8.0),
+                    shadow: crate::core::Shadow {
+                        color: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
+                        offset: Vector::new(-4.0, 6.0),
+                        blur_radius,
+                    },
+                    ..Default::default()
+                };
+                let mut engine = Engine::new();
+                let render = |engine: &mut Engine, transform, bounds| {
+                    let mut pixels = tiny_skia::Pixmap::new(320, 240).unwrap();
+                    pixels.fill(tiny_skia::Color::WHITE);
+                    let mut mask = tiny_skia::Mask::new(320, 240).unwrap();
+                    ensure_clip_mask(&mut mask, &mut None, bounds);
+                    engine.draw_quad(
+                        &quad,
+                        &Color::TRANSPARENT.into(),
+                        transform,
+                        &mut pixels.as_mut(),
+                        &mut mask,
+                        bounds,
+                    );
+                    pixels
+                };
+                let clip = Rectangle {
+                    x: 5.0,
+                    y: 7.0,
+                    width: 90.0,
+                    height: 75.0,
+                };
+                let clipped =
+                    render(&mut engine, Transformation::scale(scale), clip);
+                let full = render(
+                    &mut engine,
+                    Transformation::translate(100.0, 100.0)
+                        * Transformation::scale(scale),
+                    Rectangle::with_size(Size::new(320.0, 240.0)),
+                );
+                let mut ink = 0;
+                for y in 0..240 {
+                    for x in 0..320 {
+                        let actual = clipped.pixel(x, y).unwrap();
+                        if (5..95).contains(&x) && (7..82).contains(&y) {
+                            assert_eq!(
+                                actual,
+                                full.pixel(x + 100, y + 100).unwrap(),
+                                "shadow crop: scale={scale}, blur={blur_radius}, x={x}, y={y}"
+                            );
+                            ink += usize::from(actual.red() != 255);
+                        } else {
+                            assert_eq!(
+                                actual.red(),
+                                255,
+                                "shadow escaped the clip"
+                            );
+                        }
+                    }
+                }
+                assert!(ink > 0);
+            }
+        }
+    }
 
     #[test]
     fn cached_ink_bounds_follow_transforms_and_release_unused_groups() {
@@ -1418,8 +1653,7 @@ mod clip_mask_tests {
                                 },
                                 tiny_skia::FillRule::EvenOdd,
                                 into_transform(transform),
-                                (!(quad.bounds * transform).is_within(&clip))
-                                    .then_some(&mask),
+                                Some(&mask),
                             );
                             if draw_opaque_quad(
                                 &quad,

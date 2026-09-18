@@ -16,6 +16,7 @@ numbered `ThemeSnapshot` values. See [lib.rs](src/lib.rs).
 The coordinator checks the expected revision, applies one `PreferenceCommand`,
 and calls `compare_and_save` to reject stale file revisions. The store writes a
 versioned, deterministic temporary file, flushes it, and replaces the old file.
+The first write creates missing configuration directories; loading defaults does not.
 Only a durable replacement updates the in-memory snapshot and publishes
 `PreferenceChange`.
 

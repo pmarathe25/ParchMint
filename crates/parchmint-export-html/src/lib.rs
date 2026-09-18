@@ -333,7 +333,31 @@ fn sanitize_body(body: &str) -> String {
         }
         output.push('<');
         output.push_str(&token.name);
+        if token.name == "span" {
+            let mut font_style = String::new();
+            for (name, value) in &token.attributes {
+                match (name.as_str(), value.as_str()) {
+                    ("data-font-family", "serif" | "sans-serif" | "monospace") => {
+                        font_style.push_str(&format!("font-family:{value};"));
+                    }
+                    ("data-font-size", _) => {
+                        if let Ok(size @ 1..=512) = value.parse::<u16>() {
+                            font_style.push_str(&format!("font-size:{size}pt;"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !font_style.is_empty() {
+                output.push_str(" style=\"");
+                output.push_str(&font_style);
+                output.push('"');
+            }
+        }
         for (name, value) in token.attributes {
+            if matches!(name.as_str(), "data-font-family" | "data-font-size") {
+                continue; // Already translated to validated CSS above.
+            }
             if is_allowed_attribute(&token.name, &name, &value) {
                 output.push(' ');
                 output.push_str(&name);

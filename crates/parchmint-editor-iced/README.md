@@ -61,8 +61,9 @@ styles, ignoring shifted document positions; theme, size, and scroll changes
 invalidate affected drawings. Only visible lines are retained.
 
 Styles, font families, and layout hashes are resolved once per style per update.
-Widths use one-byte codes and a per-line scale, preserving exact floating-point
-values. Carets are built in document order; repeated boundaries replace the last
+Widths use one-byte codes and a per-line scale, with sparse inline size overrides.
+Mixed-size rows share heights and baselines across drawing and caret geometry.
+Carets are built in document order; repeated boundaries replace the last
 entry. Tests compare incremental and full layouts, including paragraph-backed
 and joined-text inputs.
 

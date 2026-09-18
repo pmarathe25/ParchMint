@@ -13,6 +13,7 @@ Replace the test name to run another workload:
 | `chapter_authoring_performance` | Eight 20,000-word chapters and 2,000 words of Research; 512 inserts, 100 selections, 100 scrolls, eight tab switches, and an exact projection |
 | `small_document_authoring_reference` | Same operations and sessions, with one 80-word paragraph per document |
 | `chapter_edit_stage_costs` | Adapter input, frame layout, host refresh, and style lookup measured separately |
+| `formatted_novel_edit_stage_costs` | Same stages for 80 and 50,000 words, with two emphasis ranges per paragraph |
 | `long_paragraph_formatting_performance` | Toggle bold 512 times in one 20,000-word paragraph; verify unchanged text and undo/redo |
 
 Build both versions first, preserve their executables, and alternate fresh-process
@@ -30,7 +31,8 @@ For complete 50K-word project operations, run:
 PARCHMINT_BENCH_LAYOUT=chapters cargo test --release --locked -j 1 -p parchmint-ui-driver --test novel_performance novel_application_performance -- --exact --ignored --nocapture --test-threads=1
 ```
 
-Layouts are `chapters` (10 × 5K words), `single` (1 × 50K), and `small` (10 × 80).
+Layouts are `chapters` (10 × 5K words), `single` (1 × 50K), `small` (10 × 80),
+and `formatted` (1 × 50K, with two emphasis ranges per paragraph).
 The harness waits for services and excludes native painting/presentation. Use
 `seed_novel_benchmark` with `PARCHMINT_BENCH_FIXTURE` set to a new directory to
 generate the same project for native checks. Sample native memory separately

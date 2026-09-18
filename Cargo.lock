@@ -2708,6 +2708,7 @@ dependencies = [
  "chrono",
  "iced",
  "iced_test",
+ "iced_tiny_skia",
  "parchmint-application",
  "parchmint-design-system",
  "parchmint-diagnostics",

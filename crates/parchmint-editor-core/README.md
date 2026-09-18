@@ -46,6 +46,8 @@ text, using cached scalar counts to skip preceding paragraphs.
 
 Formatting toggles at a collapsed caret affect subsequent typing. They create a
 document revision when text is entered.
+Inline font commands replace one property over a selection or set a view's typing
+font; clearing a property restores paragraph-style inheritance.
 
 Projection runs away from the UI loop. The pending queue has capacity two and
 coalesces consecutive incremental offers. Overflow makes the next drain return

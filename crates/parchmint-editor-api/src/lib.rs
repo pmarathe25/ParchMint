@@ -531,6 +531,60 @@ pub enum SemanticInlineMark {
     Superscript,
     Subscript,
     Link(String),
+    FontFamily(InlineFontFamily),
+    /// Font size in whole points, from 1 through 512.
+    FontSize(u16),
+}
+
+/// Font families supported by the manuscript renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InlineFontFamily {
+    Serif,
+    SansSerif,
+    Monospace,
+}
+
+impl InlineFontFamily {
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Serif => "serif",
+            Self::SansSerif => "sans-serif",
+            Self::Monospace => "monospace",
+        }
+    }
+
+    pub fn from_canonical_name(name: &str) -> Option<Self> {
+        match name {
+            "serif" => Some(Self::Serif),
+            "sans-serif" => Some(Self::SansSerif),
+            "monospace" => Some(Self::Monospace),
+            _ => None,
+        }
+    }
+}
+
+/// Sets one inline font property. `None` restores paragraph-style inheritance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InlineFont {
+    Family(Option<InlineFontFamily>),
+    Size(Option<u16>),
+}
+
+impl InlineFont {
+    pub fn mark(self) -> Option<SemanticInlineMark> {
+        match self {
+            Self::Family(family) => family.map(SemanticInlineMark::FontFamily),
+            Self::Size(points) => points.map(SemanticInlineMark::FontSize),
+        }
+    }
+
+    pub const fn matches(self, mark: &SemanticInlineMark) -> bool {
+        matches!(
+            (self, mark),
+            (Self::Family(_), SemanticInlineMark::FontFamily(_))
+                | (Self::Size(_), SemanticInlineMark::FontSize(_))
+        )
+    }
 }
 
 /// Inline marks that can be toggled without an associated value.
@@ -1044,6 +1098,10 @@ pub enum EditorCommandKind {
     ToggleInlineMark {
         range: EditorSelection,
         mark: InlineMarkKind,
+    },
+    SetInlineFont {
+        range: EditorSelection,
+        font: InlineFont,
     },
     /// Applies or updates a link over a non-empty range. `None` removes link
     /// formatting from the selected text.

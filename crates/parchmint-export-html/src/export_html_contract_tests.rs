@@ -96,6 +96,19 @@ fn render(plan: &ExportPlan) -> String {
 }
 
 #[test]
+fn inline_fonts_export_as_validated_offline_css() {
+    let (node, source) = document(
+        1,
+        "Fonts",
+        r#"<p><span data-font-family="monospace"><span data-font-size="24">large</span></span><span data-font-size="0">plain</span><span data-font-family="url(evil)">safe</span></p>"#,
+    );
+    let html = render(&plan(vec![node], BTreeMap::from([source]), ""));
+    assert!(html.contains(r#"<span style="font-family:monospace;"><span style="font-size:24pt;">large</span></span>"#), "{html}");
+    assert!(!html.contains("url(evil)"));
+    assert!(!html.contains("font-size:0"));
+}
+
+#[test]
 fn export_is_deterministic_golden_html_bytes_and_embeds_project_css() {
     let (first, first_source) = document(1, "Chapter & One", "Hello");
     let (second, second_source) = document(2, "Second", "World");

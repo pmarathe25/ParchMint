@@ -19,9 +19,66 @@ pub struct Surface {
         Box<dyn compositor::Window>,
     >,
     clip_mask: tiny_skia::Mask,
-    layer_stack: VecDeque<Vec<Layer>>,
-    background_color: Color,
+    history: FrameHistory,
+}
+
+#[derive(Default)]
+struct FrameHistory {
+    frames: VecDeque<Frame>,
     max_age: u8,
+}
+
+struct Frame {
+    layers: Vec<Layer>,
+    background: Color,
+    size: Size<u32>,
+    scale: f32,
+}
+
+impl FrameHistory {
+    fn damage(
+        &self,
+        renderer: &mut Renderer,
+        age: u8,
+        viewport: &Viewport,
+        background: Color,
+    ) -> Vec<Rectangle> {
+        age.checked_sub(1)
+            .and_then(|index| self.frames.get(index as usize))
+            .filter(|frame| {
+                frame.background == background
+                    && frame.size == viewport.physical_size()
+                    && frame.scale == viewport.scale_factor()
+            })
+            .map(|frame| {
+                renderer.damage(&frame.layers, viewport.scale_factor())
+            })
+            .unwrap_or_else(|| {
+                vec![Rectangle::with_size(viewport.logical_size())]
+            })
+    }
+
+    fn presented(
+        &mut self,
+        renderer: &mut Renderer,
+        age: u8,
+        viewport: &Viewport,
+        background: Color,
+    ) {
+        self.max_age = self.max_age.max(age).max(1);
+        self.frames.push_front(Frame {
+            layers: renderer.layers().to_vec(),
+            background,
+            size: viewport.physical_size(),
+            scale: viewport.scale_factor(),
+        });
+        self.frames.truncate(self.max_age as usize);
+    }
+
+    fn clear(&mut self) {
+        self.frames.clear();
+        self.max_age = 0;
+    }
 }
 
 impl crate::graphics::Compositor for Compositor {
@@ -70,9 +127,7 @@ impl crate::graphics::Compositor for Compositor {
         let mut surface = Surface {
             window,
             clip_mask: tiny_skia::Mask::new(1, 1).expect("Create clip mask"),
-            layer_stack: VecDeque::new(),
-            background_color: Color::BLACK,
-            max_age: 0,
+            history: FrameHistory::default(),
         };
 
         if width > 0 && height > 0 {
@@ -98,7 +153,7 @@ impl crate::graphics::Compositor for Compositor {
 
         surface.clip_mask =
             tiny_skia::Mask::new(width, height).expect("Create clip mask");
-        surface.layer_stack.clear();
+        surface.history.clear();
     }
 
     fn information(&self) -> Information {
@@ -155,39 +210,18 @@ pub fn present(
 ) -> Result<(), compositor::SurfaceError> {
     let physical_size = viewport.physical_size();
 
-    let mut buffer = surface
-        .window
-        .buffer_mut()
-        .map_err(|_| compositor::SurfaceError::Lost)?;
+    let mut buffer = surface.window.buffer_mut().map_err(|_| {
+        surface.history.clear();
+        compositor::SurfaceError::Lost
+    })?;
 
-    let last_layers = {
-        let age = buffer.age();
+    let age = buffer.age();
+    let damage =
+        surface
+            .history
+            .damage(renderer, age, viewport, background_color);
 
-        surface.max_age = surface.max_age.max(age);
-        surface.layer_stack.truncate(surface.max_age as usize);
-
-        if age > 0 {
-            surface.layer_stack.get(age as usize - 1)
-        } else {
-            None
-        }
-    };
-
-    let damage = last_layers
-        .and_then(|last_layers| {
-            (surface.background_color == background_color)
-                .then(|| renderer.damage(last_layers, viewport.scale_factor()))
-        })
-        .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
-
-    if damage.is_empty() {
-        if let Some(last_layers) = last_layers {
-            surface.layer_stack.push_front(last_layers.clone());
-        }
-    } else {
-        surface.layer_stack.push_front(renderer.layers().to_vec());
-        surface.background_color = background_color;
-
+    if !damage.is_empty() {
         let damage = damage::group(
             damage,
             Rectangle::with_size(viewport.logical_size()),
@@ -209,8 +243,77 @@ pub fn present(
         );
     }
 
+    #[cfg(feature = "damage-verification")]
+    verify_frame(renderer, &buffer, viewport, background_color);
+
     on_pre_present();
-    buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+    buffer.present().map_err(|_| {
+        // A failed presentation may have modified a reused buffer without
+        // advancing its age. Its pixels are no longer represented by history.
+        surface.history.clear();
+        compositor::SurfaceError::Lost
+    })?;
+    surface
+        .history
+        .presented(renderer, age, viewport, background_color);
+    Ok(())
+}
+
+// Opt-in native diagnostic: check every buffer before presentation, including
+// intermediate animation frames. Normal builds incur no allocation or work.
+#[cfg(feature = "damage-verification")]
+fn verify_frame(
+    renderer: &mut Renderer,
+    actual: &[u32],
+    viewport: &Viewport,
+    background: Color,
+) {
+    let size = viewport.physical_size();
+    let mut expected = tiny_skia::Pixmap::new(size.width, size.height)
+        .expect("Create verification pixels");
+    let mut mask = tiny_skia::Mask::new(size.width, size.height)
+        .expect("Create verification mask");
+    renderer.draw(
+        &mut expected.as_mut(),
+        &mut mask,
+        viewport,
+        &[Rectangle::with_size(viewport.logical_size())],
+        background,
+    );
+    let actual: &[u8] = bytemuck::cast_slice(actual);
+    assert_eq!(actual.len(), expected.data().len());
+    // Even a fully open mask can change tiny-skia's antialias rounding by
+    // one color level. Keep alpha exact and reject larger color differences.
+    if let Some(byte) =
+        actual.iter().zip(expected.data()).enumerate().position(
+            |(index, (a, b))| a.abs_diff(*b) > u8::from(index % 4 != 3),
+        )
+    {
+        let pixel = byte / 4;
+        if let Some(directory) = std::env::var_os("PARCHMINT_RENDER_FAILURE") {
+            let directory = std::path::PathBuf::from(directory);
+            for (name, data) in
+                [("actual.ppm", actual), ("expected.ppm", expected.data())]
+            {
+                let mut ppm =
+                    format!("P6\n{} {}\n255\n", size.width, size.height)
+                        .into_bytes();
+                for pixel in data.chunks_exact(4) {
+                    ppm.extend([pixel[2], pixel[1], pixel[0]]);
+                }
+                std::fs::write(directory.join(name), ppm)
+                    .expect("Write verification failure");
+            }
+        }
+        panic!(
+            "incremental frame differs from full repaint at ({}, {}), scale={}, actual={:?}, expected={:?}",
+            pixel % size.width as usize,
+            pixel / size.width as usize,
+            viewport.scale_factor(),
+            &actual[pixel * 4..pixel * 4 + 4],
+            &expected.data()[pixel * 4..pixel * 4 + 4],
+        );
+    }
 }
 
 pub fn screenshot(
@@ -259,4 +362,119 @@ pub fn screenshot(
             acc
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Font, Pixels, Renderer as _, renderer::Quad};
+
+    #[test]
+    #[cfg(feature = "damage-verification")]
+    #[should_panic(expected = "incremental frame differs from full repaint")]
+    fn verification_detects_corrupted_pixels() {
+        let viewport = Viewport::with_physical_size(Size::new(20, 20), 1.0);
+        let mut renderer = Renderer::new(Font::DEFAULT, Pixels(20.0));
+        renderer.reset(Rectangle::with_size(viewport.logical_size()));
+        verify_frame(&mut renderer, &[0; 400], &viewport, Color::WHITE);
+    }
+
+    #[test]
+    fn reused_buffers_match_full_frames_through_theme_and_scale_changes() {
+        let size = Size::new(240, 180);
+        let mut renderer = Renderer::new(Font::DEFAULT, Pixels(20.0));
+        let mut history = FrameHistory::default();
+        let mut buffers: Vec<_> = (0..3)
+            .map(|_| {
+                (
+                    tiny_skia::Pixmap::new(size.width, size.height).unwrap(),
+                    None,
+                )
+            })
+            .collect();
+        let mut mask = tiny_skia::Mask::new(size.width, size.height).unwrap();
+        for step in 0..24 {
+            let scale = if (12..18).contains(&step) { 1.5 } else { 1.0 };
+            let viewport = Viewport::with_physical_size(size, scale);
+            let bounds = Rectangle::with_size(viewport.logical_size());
+            let background = if (6..18).contains(&step) {
+                Color::BLACK
+            } else {
+                Color::WHITE
+            };
+            renderer.reset(bounds);
+            renderer.fill_quad(
+                Quad {
+                    bounds: Rectangle {
+                        x: 20.0,
+                        y: 20.0,
+                        width: 30.0,
+                        height: 30.0,
+                    },
+                    ..Default::default()
+                },
+                Color::from_rgb8(160, 100, 70),
+            );
+            let (pixels, last_step) = &mut buffers[step % 3];
+            let age = last_step.map_or(0, |last| (step - last) as u8);
+            let dirty =
+                history.damage(&mut renderer, age, &viewport, background);
+            renderer.draw(
+                &mut pixels.as_mut(),
+                &mut mask,
+                &viewport,
+                &dirty,
+                background,
+            );
+            let mut full =
+                tiny_skia::Pixmap::new(size.width, size.height).unwrap();
+            renderer.draw(
+                &mut full.as_mut(),
+                &mut mask,
+                &viewport,
+                &[bounds],
+                background,
+            );
+            assert!(
+                pixels.data() == full.data(),
+                "stale buffer: step={step}, age={age}"
+            );
+            #[cfg(feature = "damage-verification")]
+            verify_frame(
+                &mut renderer,
+                bytemuck::cast_slice(pixels.data()),
+                &viewport,
+                background,
+            );
+            history.presented(&mut renderer, age, &viewport, background);
+            *last_step = Some(step);
+            assert!(history.frames.len() <= 3);
+        }
+        // Unknown buffers and invalidation after resize or failed presentation
+        // must repaint fully, even when widget layers are unchanged.
+        let viewport = Viewport::with_physical_size(size, 1.0);
+        let full = vec![Rectangle::with_size(viewport.logical_size())];
+        assert_eq!(
+            history.damage(&mut renderer, 0, &viewport, Color::WHITE),
+            full
+        );
+        history.clear();
+        assert_eq!(
+            history.damage(&mut renderer, 1, &viewport, Color::WHITE),
+            full
+        );
+        for _ in 0..10 {
+            history.presented(&mut renderer, 1, &viewport, Color::WHITE);
+        }
+        assert_eq!(
+            history.frames.len(),
+            1,
+            "retain only the required buffer history"
+        );
+        assert!(
+            history
+                .damage(&mut renderer, 1, &viewport, Color::WHITE)
+                .is_empty()
+        );
+    }
 }

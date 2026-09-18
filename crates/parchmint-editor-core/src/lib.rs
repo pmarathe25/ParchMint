@@ -27,9 +27,10 @@ pub use parchmint_editor_api::{
     CanonicalComment, CanonicalCommentAnchor, CanonicalCommentMessage, CanonicalDocumentLoad,
     CanonicalProjection, CommentId, DocumentId, DocumentPosition, EditorClipboardContent,
     EditorCommand, EditorCommandKind, EditorCommandOrigin, EditorError, EditorRevision,
-    EditorSelection, EditorViewState, InlineMarkKind, ListDepthChange, SemanticBlock,
-    SemanticBlockKind, SemanticDocument, SemanticFragment, SemanticFragmentBlock,
-    SemanticInlineMark, SemanticMarkRange, StyleCatalog, StyleCatalogProjection, StyleId, ViewId,
+    EditorSelection, EditorViewState, InlineFont, InlineFontFamily, InlineMarkKind,
+    ListDepthChange, SemanticBlock, SemanticBlockKind, SemanticDocument, SemanticFragment,
+    SemanticFragmentBlock, SemanticInlineMark, SemanticMarkRange, StyleCatalog,
+    StyleCatalogProjection, StyleId, ViewId,
 };
 
 const DEFAULT_PROJECTION_CAPACITY: usize = 2;
@@ -351,15 +352,14 @@ impl<E: DocumentEngine> EditorSession<E> {
                     if start >= end || end > text_len {
                         return Err(invalid("pasted semantic mark is outside inserted text"));
                     }
-                    if let SemanticInlineMark::Link(target) = mark.mark() {
-                        validate_link_target(target)?;
-                    }
+                    validate_inline_mark(mark.mark())?;
                     engine_marks.push(document_engine::EngineMark {
                         start,
                         end,
                         mark: mark.mark().clone(),
                     });
                 }
+                validate_font_ranges(&engine_marks)?;
                 self.apply_new_semantic_edit(
                     EngineEdit::new(at, removed, text.clone()),
                     engine_marks,
@@ -400,6 +400,31 @@ impl<E: DocumentEngine> EditorSession<E> {
                     .ok_or_else(|| invalid("selection range overflows"))?;
                 self.apply_engine_change(|engine| {
                     engine.toggle_inline_mark(start, end, mark.semantic())
+                })
+            }
+            EditorCommandKind::SetInlineFont { range, font } => {
+                if let Some(mark) = font.mark() {
+                    validate_inline_mark(&mark)?;
+                }
+                let (start, length) = self.validated_range(*range)?;
+                if length == 0 {
+                    let mut marks = self
+                        .typing_marks
+                        .get(&view)
+                        .cloned()
+                        .unwrap_or_else(|| self.engine.inline_marks(*range));
+                    marks.retain(|mark| !font.matches(mark));
+                    marks.extend(font.mark());
+                    self.typing_marks.insert(view, marks);
+                    return Ok(AppliedEditorChange {
+                        revision: self.revision,
+                        transaction: None,
+                        changed_blocks: Vec::new(),
+                    });
+                }
+                self.typing_marks.remove(&view);
+                self.apply_optional_engine_change(|engine| {
+                    engine.set_inline_font(start, start + length, *font)
                 })
             }
             EditorCommandKind::SetLink { range, target } => {
@@ -1609,15 +1634,14 @@ fn validate_semantic_fragment(
             if start >= end || end > text_len {
                 return Err(invalid("semantic fragment mark is outside its block"));
             }
-            if let SemanticInlineMark::Link(target) = mark.mark() {
-                validate_link_target(target)?;
-            }
+            validate_inline_mark(mark.mark())?;
             marks.push(document_engine::EngineMark {
                 start,
                 end,
                 mark: mark.mark().clone(),
             });
         }
+        validate_font_ranges(&marks)?;
         output.push(document_engine::EngineFragmentBlock {
             kind: block.kind(),
             text: block.text().to_owned(),
@@ -1673,6 +1697,40 @@ fn derived_block_id(document: DocumentId, sequence: u64) -> BlockId {
         *slot ^= byte;
     }
     BlockId::from_bytes(bytes)
+}
+
+fn validate_font_ranges(marks: &[document_engine::EngineMark]) -> Result<(), EditorError> {
+    for property in [InlineFont::Family(None), InlineFont::Size(None)] {
+        let mut fonts = marks
+            .iter()
+            .filter(|mark| property.matches(&mark.mark))
+            .collect::<Vec<_>>();
+        fonts.sort_by_key(|mark| mark.start);
+        let mut previous: Option<(&SemanticInlineMark, usize)> = None;
+        for font in fonts {
+            if let Some((mark, end)) = previous
+                && font.start < end
+            {
+                if mark != &font.mark {
+                    return Err(invalid("overlapping inline font properties"));
+                }
+                previous = Some((mark, end.max(font.end)));
+            } else {
+                previous = Some((&font.mark, font.end));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_inline_mark(mark: &SemanticInlineMark) -> Result<(), EditorError> {
+    match mark {
+        SemanticInlineMark::Link(target) => validate_link_target(target),
+        SemanticInlineMark::FontSize(size) if !(1..=512).contains(size) => {
+            Err(invalid("font size must be between 1 and 512 points"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn validate_link_target(target: &str) -> Result<(), EditorError> {

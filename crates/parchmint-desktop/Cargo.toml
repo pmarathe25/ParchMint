@@ -11,6 +11,7 @@ publish.workspace = true
 default = ["diagnostics"]
 diagnostics = ["dep:parchmint-diagnostics", "parchmint-ui-iced/diagnostics"]
 interaction-harness = ["diagnostics", "parchmint-diagnostics/capture", "parchmint-platform-native/interaction-harness", "parchmint-ui-iced/interaction-harness"]
+renderer-verification = ["parchmint-ui-iced/renderer-verification"]
 
 [[bin]]
 name = "parchmint"

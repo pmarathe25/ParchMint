@@ -3045,9 +3045,27 @@ fn parse_start_tag(token: &str) -> Result<(String, BTreeMap<String, String>, boo
         remaining = &after_quote[value_end + quote.len_utf8()..];
         let name = canonical_attribute_name(name)?;
         validate_html_attribute(&tag, &name, &value)?;
+        let value = if name == "data-font-size" {
+            value
+                .parse::<u16>()
+                .expect("validated font size")
+                .to_string()
+        } else {
+            value
+        };
         if attributes.insert(name, value).is_some() {
             return Err(FormatError::InvalidDocument("duplicate attribute".into()));
         }
+    }
+    if ["data-semantic", "data-font-family", "data-font-size"]
+        .iter()
+        .filter(|name| attributes.contains_key(**name))
+        .count()
+        > 1
+    {
+        return Err(FormatError::InvalidDocument(
+            "use separate spans for inline font properties".into(),
+        ));
     }
     Ok((tag, attributes, self_closed))
 }
@@ -3105,6 +3123,10 @@ fn validate_html_attribute(tag: &str, name: &str, value: &str) -> Result<(), For
     let permitted = match (tag, name) {
         ("a", "href") => is_safe_href(value),
         ("span", "data-semantic") => matches!(value, "small-caps"),
+        ("span", "data-font-family") => matches!(value, "serif" | "sans-serif" | "monospace"),
+        ("span", "data-font-size") => value
+            .parse::<u16>()
+            .is_ok_and(|size| (1..=512).contains(&size)),
         ("hr", "data-kind") => matches!(value, "scene-break" | "page-break"),
         (_, "data-block-id" | "data-style-id") => is_safe_identifier(value),
         _ => false,
@@ -3321,6 +3343,30 @@ mod tests {
                 0x78, 0x52, 0xb8, 0x55,
             ])
         );
+    }
+
+    #[test]
+    fn inline_font_attributes_are_safe_and_round_trip() {
+        let html = r#"<p><span data-font-family="sans-serif"><span data-font-size="24">Text</span></span></p>"#;
+        let document = codec().decode_document(html.as_bytes()).unwrap();
+        let encoded = codec()
+            .encode(&CanonicalResource::Document(document.clone()))
+            .unwrap();
+        assert_eq!(codec().decode_document(&encoded.bytes).unwrap(), document);
+        for attribute in [
+            "data-font-size=\"0\"",
+            "data-font-size=\"513\"",
+            "data-font-size=\"12pt\"",
+            "data-font-size=\"24;color:red\"",
+            "data-font-family=\"url(evil)\"",
+            "data-font-size=\"12\" data-font-family=\"serif\"",
+        ] {
+            assert!(
+                codec()
+                    .decode_document(format!("<p><span {attribute}>x</span></p>").as_bytes())
+                    .is_err()
+            );
+        }
     }
 
     #[test]

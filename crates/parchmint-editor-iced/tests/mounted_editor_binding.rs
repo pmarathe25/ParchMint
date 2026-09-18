@@ -233,16 +233,30 @@ fn resident_kib() -> Option<usize> {
 #[test]
 #[ignore = "opt-in release measurement of editor stages and a small-document reference"]
 fn chapter_edit_stage_costs() {
+    let paragraph = format!(
+        "<p>{}</p>",
+        "The harbor lantern shines through the rain tonight. ".repeat(10)
+    );
+    edit_stage_costs(&paragraph, &[1, 250]);
+}
+
+#[test]
+#[ignore = "opt-in release measurement of a formatted 50K-word novel"]
+fn formatted_novel_edit_stage_costs() {
+    let paragraph = format!(
+        "<p><strong>The harbor</strong> <em>lantern shines</em> through the rain tonight. {}</p>",
+        "The harbor lantern shines through the rain tonight. ".repeat(9)
+    );
+    edit_stage_costs(&paragraph, &[1, 625]);
+}
+
+fn edit_stage_costs(paragraph: &str, paragraph_counts: &[usize]) {
     use std::time::Instant;
 
     require_release_build();
-    for paragraphs in [1, 250] {
+    for &paragraphs in paragraph_counts {
         let adapter = adapter();
-        let body = format!(
-            "<p>{}</p>",
-            "The harbor lantern shines through the rain tonight. ".repeat(10)
-        )
-        .repeat(paragraphs);
+        let body = paragraph.repeat(paragraphs);
         let binding = MountedEditorBinding::mount(
             &adapter,
             config(

@@ -367,6 +367,7 @@ pub enum FindDirection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormattingCommand {
     ParagraphStyle(String),
+    InlineFont(parchmint_editor_api::InlineFont),
     Bold,
     Italic,
     Underline,
@@ -386,6 +387,7 @@ pub enum FormattingCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorCommand {
     ApplyParagraphStyle(String),
+    SetInlineFont(parchmint_editor_api::InlineFont),
     ToggleBold,
     ToggleItalic,
     ToggleUnderline,
@@ -452,6 +454,7 @@ pub enum EditorCommand {
 impl FormattingCommand {
     fn editor_command(self) -> Option<EditorCommand> {
         match self {
+            FormattingCommand::InlineFont(font) => Some(EditorCommand::SetInlineFont(font)),
             FormattingCommand::ParagraphStyle(style) => {
                 Some(EditorCommand::ApplyParagraphStyle(style))
             }

@@ -69,6 +69,38 @@ impl Wake for ThreadParker {
 }
 
 #[test]
+fn first_appearance_save_creates_missing_configuration_directories() {
+    let root = TemporaryFile::new("first-run");
+    let directory = root.path().join("parchmint");
+    let path = directory.join("preferences.json");
+    let service: Arc<dyn PreferenceService> = Arc::new(PreferenceCoordinator::new(Arc::new(
+        FilePreferenceStore::new(&path),
+    )));
+    let controller = AppearanceController::new(Arc::clone(&service));
+    let initial = block_on(service.load()).unwrap();
+    controller
+        .initialize(&initial, ResolvedAppearance::Light)
+        .unwrap();
+    assert!(
+        !root.path().exists(),
+        "loading defaults must remain read-only"
+    );
+
+    let saved = block_on(controller.set_mode(initial.revision, AppearanceMode::Dark)).unwrap();
+    assert_eq!(saved.appearance, ResolvedAppearance::Dark);
+    assert_eq!(
+        block_on(FilePreferenceStore::new(&path).load())
+            .unwrap()
+            .values
+            .appearance,
+        AppearanceMode::Dark,
+    );
+    fs::remove_file(path).unwrap();
+    fs::remove_dir(directory).unwrap();
+    fs::remove_dir(root.path()).unwrap();
+}
+
+#[test]
 fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_appearance() {
     let file = TemporaryFile::new("versioned");
     let store = FilePreferenceStore::new(file.path());

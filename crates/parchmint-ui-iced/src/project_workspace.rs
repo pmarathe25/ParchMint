@@ -2185,6 +2185,7 @@ pub enum HistoryRestoreScope {
 /// A project modal with the context required by its controls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectModal {
+    ManageSettings(SettingsCategory),
     SaveBeforeClosing {
         pane: EditorPane,
         document_id: String,
@@ -3856,6 +3857,7 @@ pub enum ProjectMessage {
     SetAppearance(AppearanceMode),
     SetReducedMotion(bool),
     SelectSettingsCategory(SettingsCategory),
+    ManageSettings(SettingsCategory),
     SelectDictionaryScope(DictionaryScope),
     EditDictionaryWord(String),
     SetDictionaryQuery(String),
@@ -4053,6 +4055,7 @@ pub struct ProjectWorkspace {
     content_state: ContentState,
     recovery: RecoveryState,
     modal: Option<ProjectModal>,
+    settings_manager: Option<SettingsCategory>,
     close_after_filing: Option<(EditorPane, String)>,
     close_after_promotion: Option<(EditorPane, String)>,
     editor: EditorWorkspace,
@@ -4159,6 +4162,7 @@ impl ProjectWorkspace {
                 details_expanded: false,
             },
             modal: None,
+            settings_manager: None,
             close_after_filing: None,
             close_after_promotion: None,
             editor: EditorWorkspace::from_fixture(EditorFixture::DualPane),
@@ -4240,6 +4244,7 @@ impl ProjectWorkspace {
                 details_expanded: false,
             },
             modal: None,
+            settings_manager: None,
             close_after_filing: None,
             close_after_promotion: None,
             editor: EditorWorkspace::from_snapshot(snapshot),
@@ -4836,6 +4841,10 @@ impl ProjectWorkspace {
         &self.settings
     }
 
+    pub(crate) fn apply_appearance_mode(&mut self, appearance: AppearanceMode) {
+        self.settings.appearance = appearance;
+    }
+
     pub fn global_search(&self) -> &GlobalSearchState {
         &self.global_search
     }
@@ -5075,7 +5084,9 @@ impl ProjectWorkspace {
     }
 
     pub fn modal(&self) -> Option<ProjectModal> {
-        self.modal.clone()
+        self.modal
+            .clone()
+            .or_else(|| self.settings_manager.map(ProjectModal::ManageSettings))
     }
 
     pub fn editor(&self) -> &EditorWorkspace {
@@ -5809,7 +5820,7 @@ impl ProjectWorkspace {
                     applicability: MetadataFieldApplicability::Documents,
                     text_kind: MetadataFieldTextKind::SingleLine,
                     default_value: None,
-                    visible_on_cards: false,
+                    visible_on_cards: self.settings_manager == Some(SettingsCategory::Metadata),
                 });
                 self.settings.selected_detail = Some(SettingsDetail::NewMetadataField);
                 Vec::new()
@@ -6552,7 +6563,9 @@ impl ProjectWorkspace {
             }
             ProjectMessage::DismissModal => {
                 self.close_after_filing = None;
-                self.modal = None;
+                if self.modal.take().is_none() {
+                    self.settings_manager = None;
+                }
                 Vec::new()
             }
             ProjectMessage::SelectRecentlyDeleted(node_id) => {
@@ -6570,6 +6583,27 @@ impl ProjectWorkspace {
             ProjectMessage::SetAppearance(appearance) => {
                 self.settings.appearance = appearance;
                 vec![ProjectEffect::ApplyAppearanceToAllWindows(appearance)]
+            }
+            ProjectMessage::ManageSettings(category) => {
+                if matches!(
+                    category,
+                    SettingsCategory::Styles | SettingsCategory::Metadata
+                ) {
+                    self.settings_manager = Some(category);
+                    self.settings.selected_category = category;
+                    if category == SettingsCategory::Styles
+                        && let Some((id, _)) =
+                            self.settings
+                                .style_definitions
+                                .iter()
+                                .find(|(_, definition)| {
+                                    definition.display_name == self.editor.active_style()
+                                })
+                    {
+                        self.settings.selected_detail = Some(SettingsDetail::Style(id.clone()));
+                    }
+                }
+                Vec::new()
             }
             ProjectMessage::SelectSettingsCategory(category) => {
                 self.settings.selected_category = category;
@@ -7825,6 +7859,44 @@ mod tests {
             effects.as_slice(),
             [ProjectEffect::UpsertMetadataField(definition)] if definition.label == "Timeline"
         ));
+    }
+
+    #[test]
+    fn contextual_metadata_manager_survives_nested_confirmation_and_keeps_fields_visible() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
+        workspace.update(ProjectMessage::CreateMetadataField);
+        workspace.update(ProjectMessage::SetNewMetadataFieldLabel("Viewpoint".into()));
+        let effects = workspace.update(ProjectMessage::CommitNewMetadataField);
+        let [ProjectEffect::UpsertMetadataField(definition)] = effects.as_slice() else {
+            panic!("new metadata field");
+        };
+        assert!(definition.visible_on_cards);
+        let id = workspace.settings.metadata_order.last().unwrap().clone();
+        workspace.update(ProjectMessage::RequestDeleteMetadataField(id.clone()));
+        assert!(matches!(
+            workspace.modal(),
+            Some(ProjectModal::DeleteMetadataField { .. })
+        ));
+        workspace.update(ProjectMessage::DismissModal);
+        assert_eq!(
+            workspace.modal(),
+            Some(ProjectModal::ManageSettings(SettingsCategory::Metadata))
+        );
+        assert!(workspace.settings.metadata_definitions.contains_key(&id));
+        workspace.update(ProjectMessage::RequestDeleteMetadataField(id));
+        assert!(matches!(
+            workspace
+                .update(ProjectMessage::ConfirmDeleteMetadataField)
+                .as_slice(),
+            [ProjectEffect::DeleteMetadataField(_)]
+        ));
+        assert_eq!(
+            workspace.modal(),
+            Some(ProjectModal::ManageSettings(SettingsCategory::Metadata))
+        );
+        workspace.update(ProjectMessage::DismissModal);
+        assert_eq!(workspace.modal(), None);
     }
 
     #[test]

@@ -338,7 +338,7 @@ fn project_surface_with_layout<'a>(
         .into()
     } else if let Some(modal) = workspace.modal() {
         stack![
-            base,
+            focus::input_scope(base, false),
             opaque(
                 container(crate::motion::enter(
                     "dialog",
@@ -485,22 +485,22 @@ fn ribbon<'a>(
     let tools: Element<'a, ProjectSurfaceMessage> = if editing {
         focus::f6_region(
             F6Region::FormattingToolbar,
-            crate::iced_editor_surface::formatting_toolbar(workspace.editor(), theme)
-                .map(ProjectSurfaceMessage::EditorCenter),
+            scrollable(
+                crate::iced_editor_surface::formatting_toolbar(workspace.editor(), theme)
+                    .map(ProjectSurfaceMessage::EditorCenter),
+            )
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(3).scroller_width(3),
+            ))
+            .width(Length::Fill),
         )
     } else {
         Space::new().width(Length::Fill).into()
     };
     container(
-        row![
-            title,
-            mode_switch,
-            tools,
-            Space::new().width(Length::Fill),
-            utilities
-        ]
-        .spacing(8)
-        .align_y(iced::alignment::Vertical::Center),
+        row![title, mode_switch, tools, utilities]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
     )
     .padding([6, 18])
     .width(Length::Fill)
@@ -1523,6 +1523,18 @@ fn cards_grid<'a>(
         row![
             sections,
             Space::new().width(Length::Fill),
+            harness_target::target(
+                HarnessTarget::ManageMetadata,
+                button(text("Fields…").size(13))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ManageSettings(SettingsCategory::Metadata)
+                    ))
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        interaction(status, false)
+                    ))
+            ),
             harness_target::target(
                 HarnessTarget::OverviewAdd,
                 overview_add(cards.section_id(), theme)
@@ -2596,6 +2608,8 @@ fn semantic_preview_spans<'a>(
                 let mut small_caps = false;
                 let mut reduced_size = false;
                 let mut link = false;
+                let mut font = block_font;
+                let mut inline_size = None;
                 for mark in active {
                     match mark.mark() {
                         SemanticInlineMark::Bold => bold = true,
@@ -2610,9 +2624,24 @@ fn semantic_preview_spans<'a>(
                             link = true;
                             underline = true;
                         }
+                        SemanticInlineMark::FontFamily(family) => {
+                            font.family = match family {
+                                parchmint_editor_api::InlineFontFamily::Serif => {
+                                    font::Family::Name("Source Serif 4")
+                                }
+                                parchmint_editor_api::InlineFontFamily::SansSerif => {
+                                    font::Family::Name("Source Sans 3")
+                                }
+                                parchmint_editor_api::InlineFontFamily::Monospace => {
+                                    font::Family::Monospace
+                                }
+                            }
+                        }
+                        SemanticInlineMark::FontSize(points) => {
+                            inline_size = Some(f32::from(*points) * (4.0 / 3.0))
+                        }
                     }
                 }
-                let mut font = block_font;
                 if bold {
                     font.weight = font::Weight::Bold;
                 }
@@ -2627,12 +2656,13 @@ fn semantic_preview_spans<'a>(
                     .font(font)
                     .underline(underline)
                     .strikethrough(strikethrough);
+                if let Some(size) = inline_size {
+                    rendered = rendered.size(size);
+                }
                 if reduced_size || small_caps {
-                    rendered = rendered.size(if reduced_size {
-                        size.saturating_sub(3)
-                    } else {
-                        size.saturating_sub(1)
-                    });
+                    let base = inline_size.unwrap_or(size as f32);
+                    let reduction = if reduced_size { 3.0 } else { 1.0 };
+                    rendered = rendered.size((base - reduction).max(1.0));
                 }
                 if link {
                     rendered = rendered.color(theme.palette().accent);
@@ -2846,11 +2876,6 @@ fn settings_center<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let settings = workspace.settings();
     let category = settings.selected_category();
-    let appearance_heading = match settings.appearance() {
-        parchmint_preferences::AppearanceMode::System => "System appearance",
-        parchmint_preferences::AppearanceMode::Light => "Light appearance",
-        parchmint_preferences::AppearanceMode::Dark => "Dark appearance",
-    };
     let navigation =
         settings
             .categories()
@@ -2890,8 +2915,45 @@ fn settings_center<'a>(
                     }),
                 )
             });
-    let content: Element<'a, ProjectSurfaceMessage> = match category {
+    row![
+        container(column![text("Settings").size(12), navigation,].spacing(SPACING_12),)
+            .padding([SPACING_16, SPACING_12])
+            .width(280)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
+            .width(SIDEBAR_SPLITTER_WIDTH)
+            .height(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(Background::Color(theme.palette().divider)),
+                ..Default::default()
+            }),
+        container(crate::motion::enter(
+            format!("{category:?}"),
+            settings_content(workspace, category, theme)
+        ))
+        .padding([SPACING_24, SPACING_24])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+    ]
+    .height(Length::Fill)
+    .into()
+}
+
+fn settings_content<'a>(
+    workspace: &'a ProjectWorkspace,
+    category: SettingsCategory,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    let settings = workspace.settings();
+    match category {
         SettingsCategory::Appearance => {
+            let appearance_heading = match settings.appearance() {
+                parchmint_preferences::AppearanceMode::System => "System appearance",
+                parchmint_preferences::AppearanceMode::Light => "Light appearance",
+                parchmint_preferences::AppearanceMode::Dark => "Dark appearance",
+            };
             let choices = settings.appearance_choices().into_iter().fold(
                 column![].spacing(SPACING_8),
                 |column, mode| {
@@ -3279,28 +3341,7 @@ fn settings_center<'a>(
             .height(Length::Fill)
             .into()
         }
-    };
-    row![
-        container(column![text("Settings").size(12), navigation,].spacing(SPACING_12),)
-            .padding([SPACING_16, SPACING_12])
-            .width(280)
-            .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
-            .width(SIDEBAR_SPLITTER_WIDTH)
-            .height(Length::Fill)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Background::Color(theme.palette().divider)),
-                ..Default::default()
-            }),
-        container(crate::motion::enter(format!("{category:?}"), content))
-            .padding([SPACING_24, SPACING_24])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
-    ]
-    .height(Length::Fill)
-    .into()
+    }
 }
 
 fn metadata_applicability_label(value: MetadataFieldApplicability) -> &'static str {
@@ -4381,9 +4422,32 @@ fn status_pane_button<'a>(
 
 fn modal_view<'a>(
     modal: ProjectModal,
-    workspace: &ProjectWorkspace,
+    workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    if let ProjectModal::ManageSettings(category) = modal {
+        return container(
+            column![
+                settings_content(workspace, category, theme),
+                row![
+                    text("Changes apply throughout this project.").size(12),
+                    Space::new().width(Length::Fill),
+                    focus::region(
+                        focus::modal_cancel_id(),
+                        button(text("Done"))
+                            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
+                    )
+                ]
+                .align_y(iced::alignment::Vertical::Center),
+            ]
+            .spacing(16),
+        )
+        .padding(24)
+        .width(1000)
+        .height(600)
+        .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
+        .into();
+    }
     if let ProjectModal::SaveBeforeClosing { title, .. } = &modal {
         return container(
             column![
@@ -4566,7 +4630,7 @@ fn modal_view<'a>(
             "Reinitialize History",
             "Preserve the damaged History store when possible, then create a new empty History. Project documents are not changed.".to_owned(),
         ),
-        ProjectModal::SaveBeforeClosing { .. } | ProjectModal::FileDraft { .. } | ProjectModal::Error { .. } => unreachable!("error modals return above"),
+        ProjectModal::ManageSettings(_) | ProjectModal::SaveBeforeClosing { .. } | ProjectModal::FileDraft { .. } | ProjectModal::Error { .. } => unreachable!("special modals return above"),
     };
     container(
         column![
@@ -4592,6 +4656,7 @@ fn modal_view<'a>(
                         ProjectModal::DeleteStyle { .. } => "Delete style",
                         ProjectModal::ReinitializeHistory => "Reinitialize History",
                         ProjectModal::SaveBeforeClosing { .. }
+                        | ProjectModal::ManageSettings(_)
                         | ProjectModal::FileDraft { .. }
                         | ProjectModal::Error { .. } => "Dismiss",
                     }))
@@ -4604,6 +4669,7 @@ fn modal_view<'a>(
                         ProjectModal::ReinitializeHistory =>
                             ProjectMessage::ConfirmHistoryReinitialize,
                         ProjectModal::SaveBeforeClosing { .. }
+                        | ProjectModal::ManageSettings(_)
                         | ProjectModal::FileDraft { .. }
                         | ProjectModal::Error { .. } => ProjectMessage::DismissModal,
                     }))
@@ -4670,6 +4736,42 @@ mod tests {
 
     use super::*;
     use crate::EditorPane;
+
+    #[test]
+    fn previews_preserve_inline_fonts_when_combined_with_other_marks() {
+        use parchmint_editor_api::{DocumentPosition, InlineFontFamily, SemanticMarkRange};
+
+        for (mark, expected_size) in [
+            (SemanticInlineMark::Bold, 32.0),
+            (SemanticInlineMark::SmallCaps, 31.0),
+            (SemanticInlineMark::Superscript, 29.0),
+        ] {
+            let range = EditorSelection::new(DocumentPosition::from(0), DocumentPosition::from(4));
+            let block = SemanticBlock::new(
+                BlockId::from_bytes([1; 16]),
+                SemanticBlockKind::Paragraph,
+                None,
+                "text",
+                vec![
+                    SemanticMarkRange::new(range, SemanticInlineMark::FontSize(24)),
+                    SemanticMarkRange::new(
+                        range,
+                        SemanticInlineMark::FontFamily(InlineFontFamily::Monospace),
+                    ),
+                    SemanticMarkRange::new(range, mark),
+                ],
+            );
+            let spans = semantic_preview_spans(
+                &block,
+                Font::with_name("Source Serif 4"),
+                16,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+            );
+            assert_eq!(spans.len(), 1);
+            assert_eq!(spans[0].size, Some(iced::Pixels(expected_size)));
+            assert_eq!(spans[0].font.unwrap().family, font::Family::Monospace);
+        }
+    }
 
     #[test]
     fn cards_show_synopsis_and_labelled_metadata_without_requiring_selection() {

@@ -335,7 +335,13 @@ impl FilePreferenceStore {
     }
 
     fn replace_durably(&self, bytes: &[u8]) -> Result<(), PreferenceError> {
-        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let parent = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)
+            .map_err(|error| self.storage("create directory", error.to_string()))?;
         let temporary = self.temporary_path(parent)?;
         let result = (|| {
             let mut file = OpenOptions::new()
