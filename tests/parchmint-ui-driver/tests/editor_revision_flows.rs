@@ -60,12 +60,22 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
         .type_into_target(
             HarnessWindow::Project,
             HarnessTarget::EditorPrimary,
-            "The harbor lantern shines through the rain tonight. ".repeat(40),
+            // Explicit lines overflow every platform's viewport independently
+            // of font metrics and the resulting soft-wrap count.
+            "The harbor lantern shines through the rain tonight.\n".repeat(80),
         )
         .unwrap();
     harness
         .press_command_key(HarnessWindow::Project, 's')
         .unwrap();
+    harness
+        .scroll_target_by(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            100_000.0,
+        )
+        .unwrap();
+    harness.elapse_notifications().unwrap();
     let document = harness
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();

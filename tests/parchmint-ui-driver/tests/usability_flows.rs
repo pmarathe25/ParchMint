@@ -68,6 +68,11 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
             .unwrap()
             .contains("data-font-size")
     );
+    #[cfg(target_os = "macos")]
+    harness
+        .press_command_shift_key(HarnessWindow::Project, 'z')
+        .unwrap();
+    #[cfg(not(target_os = "macos"))]
     harness
         .press_command_key(HarnessWindow::Project, 'y')
         .unwrap();
