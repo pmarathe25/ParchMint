@@ -67,6 +67,25 @@ impl PartialEq for SemanticBlockSnapshot {
 impl Eq for SemanticBlockSnapshot {}
 
 impl SemanticBlockSnapshot {
+    pub(super) fn paragraph_format(&self) -> parchmint_editor_api::ParagraphFormat {
+        use parchmint_editor_api::{ParagraphFormat, TextAlignment};
+        ParagraphFormat {
+            alignment: self.attributes.get("data-alignment").and_then(|value| {
+                match value.as_str() {
+                    "left" => Some(TextAlignment::Start),
+                    "center" => Some(TextAlignment::Center),
+                    "right" => Some(TextAlignment::End),
+                    "justify" => Some(TextAlignment::Justify),
+                    _ => None,
+                }
+            }),
+            line_spacing_percent: self
+                .attributes
+                .get("data-line-spacing")
+                .and_then(|v| v.parse().ok()),
+        }
+    }
+
     fn marks_mut(&mut self) -> &mut Vec<EngineMark> {
         let shared = Arc::make_mut(&mut self.0);
         shared.semantic.take();
@@ -124,6 +143,7 @@ impl SemanticBlockSnapshot {
                     marks,
                 )
                 .with_list_depth(self.list_depth)
+                .with_paragraph_format(self.paragraph_format())
             })
             .clone()
     }
@@ -353,6 +373,12 @@ pub(super) trait DocumentEngine {
         start: usize,
         end: usize,
         style: String,
+    ) -> Result<EngineChange, EngineError>;
+    fn set_paragraph_format(
+        &mut self,
+        start: usize,
+        end: usize,
+        format: parchmint_editor_api::ParagraphFormatCommand,
     ) -> Result<EngineChange, EngineError>;
     fn snapshot(&self) -> SemanticDocumentSnapshot;
     fn inline_marks(&self, selection: EditorSelection) -> Vec<SemanticInlineMark>;
@@ -1008,6 +1034,52 @@ impl DocumentEngine for PrivateTextEngine {
                 changed.push(block.id);
             }
             offset = block_end.saturating_add(1);
+        }
+        if changed.is_empty() {
+            return Err(EngineError::InvalidEdit);
+        }
+        Ok(EngineChange {
+            mapping: PositionMapping::identity(),
+            changed_blocks: changed,
+        })
+    }
+
+    fn set_paragraph_format(
+        &mut self,
+        start: usize,
+        end: usize,
+        format: parchmint_editor_api::ParagraphFormatCommand,
+    ) -> Result<EngineChange, EngineError> {
+        use parchmint_editor_api::{ParagraphFormatCommand, TextAlignment};
+        let (key, value) = match format {
+            ParagraphFormatCommand::Alignment(alignment) => (
+                "data-alignment",
+                match alignment {
+                    TextAlignment::Start => "left",
+                    TextAlignment::Center => "center",
+                    TextAlignment::End => "right",
+                    TextAlignment::Justify => "justify",
+                }
+                .to_owned(),
+            ),
+            ParagraphFormatCommand::LineSpacing(percent) if (50..=400).contains(&percent) => {
+                ("data-line-spacing", percent.to_string())
+            }
+            _ => return Err(EngineError::InvalidEdit),
+        };
+        let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
+        let mut changed = Vec::new();
+        let mut offset = 0;
+        for block in &mut document.blocks {
+            let block_end = offset + block_scalar_len(block);
+            if !is_atomic(block.kind)
+                && ((start == end && start >= offset && start <= block_end)
+                    || (start < end && start <= block_end && offset < end))
+            {
+                block.attributes.insert(key.into(), value.clone());
+                changed.push(block.id);
+            }
+            offset = block_end + 1;
         }
         if changed.is_empty() {
             return Err(EngineError::InvalidEdit);

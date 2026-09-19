@@ -242,6 +242,33 @@ pub(crate) fn visual_settings() -> iced::Settings {
             Cow::Borrowed(include_bytes!(
                 "../assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
             )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-serif-4/SourceSerif4-Bold.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-serif-4/SourceSerif4-It.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-serif-4/SourceSerif4-BoldIt.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-serif-4/SourceSerif4-Semibold.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-serif-4/SourceSerif4-SemiboldIt.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-sans-3/SourceSans3-It.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-sans-3/SourceSans3-BoldIt.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-sans-3/SourceSans3-MediumIt.ttf"
+            )),
+            Cow::Borrowed(include_bytes!(
+                "../assets/fonts/source-sans-3/SourceSans3-SemiboldIt.ttf"
+            )),
         ],
         ..iced::Settings::default()
     }

@@ -35,7 +35,7 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .unwrap();
     for (target, index) in [
         (HarnessTarget::FontFamily, 2),
-        (HarnessTarget::FontSize, 12),
+        (HarnessTarget::FontSize, 13),
     ] {
         harness
             .click_target(HarnessWindow::Project, target)
@@ -74,6 +74,9 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
     assert_eq!(harness.active_editor_body().unwrap(), formatted);
 
     harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
+        .unwrap();
+    harness
         .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
         .unwrap();
     assert!(
@@ -98,7 +101,7 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::FontSize)
         .unwrap();
-    for _ in 0..=10 {
+    for _ in 0..=11 {
         harness
             .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
             .unwrap();
@@ -156,8 +159,12 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .press_command_key(HarnessWindow::Project, 'z')
         .unwrap();
 
+    let title = harness.active_editor_tab_title().unwrap();
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .right_click_text(HarnessWindow::Project, title)
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Open in companion")
         .unwrap();
     harness
         .select_editor_text(HarnessWindow::Project, EditorPane::Companion, "ordinary")
@@ -194,6 +201,9 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
     harness.click_text(HarnessWindow::Project, "Dark").unwrap();
     route(&harness, RibbonDestination::Editor);
     capture(&harness, "font-mixed-dark-compact");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
+        .unwrap();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
         .unwrap();
@@ -361,19 +371,25 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
     route(&harness, RibbonDestination::Settings);
     harness.click_text(HarnessWindow::Project, "Dark").unwrap();
     capture(&harness, "appearance-dark-compact");
-    for (category, name) in [
-        ("Styles", "styles-dark-compact"),
-        ("Metadata fields", "metadata-dark-compact"),
-        ("Dictionaries", "dictionary-dark-compact"),
-    ] {
-        harness
-            .click_text(HarnessWindow::Project, category)
-            .unwrap();
-        if category == "Styles" {
-            harness.click_text(HarnessWindow::Project, "Body").unwrap();
-        }
-        capture(&harness, name);
-    }
+    harness
+        .click_text(HarnessWindow::Project, "Dictionaries")
+        .unwrap();
+    capture(&harness, "dictionary-dark-compact");
+    route(&harness, RibbonDestination::Editor);
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
+        .unwrap();
+    capture(&harness, "styles-dark-compact");
+    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    route(&harness, RibbonDestination::Cards);
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
+        .unwrap();
+    capture(&harness, "metadata-dark-compact");
+    harness.click_text(HarnessWindow::Project, "Done").unwrap();
     route(&harness, RibbonDestination::Export);
     capture(&harness, "export-dark-compact");
     route(&harness, RibbonDestination::Cards);
@@ -749,7 +765,7 @@ fn launch_resumes_the_project_and_title_opens_a_safe_project_chooser() {
 }
 
 #[test]
-fn deleted_recent_project_is_pruned_and_startup_returns_to_the_chooser() {
+fn deleted_recent_project_is_pruned_and_startup_opens_the_workspace() {
     let run = IsolatedRun::new("missing-recent-project").unwrap();
     let project = run.root().join("novel.parchmint");
     create_project(&run, &project, "Missing novel")
@@ -759,15 +775,18 @@ fn deleted_recent_project_is_pruned_and_startup_returns_to_the_chooser() {
     let harness =
         DesktopInteractionHarness::launch(run.root(), parchmint_desktop::LaunchRequest::launcher())
             .unwrap();
-    assert!(harness.has_window(HarnessWindow::Launcher).unwrap());
+    assert!(!harness.has_window(HarnessWindow::Launcher).unwrap());
+    harness
+        .click_text(HarnessWindow::Project, "My Writing")
+        .unwrap();
     assert!(
         !harness
-            .contains_text(HarnessWindow::Launcher, "Missing novel")
+            .contains_text(HarnessWindow::Project, "Missing novel")
             .unwrap()
     );
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Launcher, "Create Project")
+            .text_is_visible(HarnessWindow::Project, "Create Project")
             .unwrap()
     );
     harness.shutdown().unwrap();

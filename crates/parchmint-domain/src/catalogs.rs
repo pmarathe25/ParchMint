@@ -45,6 +45,72 @@ pub struct StyleProperties {
     pub page_break_before: Option<bool>,
 }
 
+impl StyleProperties {
+    pub fn for_role(role: StyleRole) -> Self {
+        let mut value = Self {
+            font_family: Some("Source Serif 4".into()),
+            font_size_points: Some(15.0),
+            weight: Some(400),
+            italic: Some(false),
+            alignment: Some(TextAlignment::Start),
+            line_spacing: Some(1.0),
+            ..Self::default()
+        };
+        match role {
+            StyleRole::DocumentTitle => {
+                value.font_size_points = Some(28.0);
+                value.weight = Some(700);
+                value.space_after_points = Some(18.0);
+            }
+            StyleRole::Heading1 | StyleRole::Heading2 | StyleRole::Heading3 => {
+                value.font_size_points = Some(match role {
+                    StyleRole::Heading1 => 24.0,
+                    StyleRole::Heading2 => 20.0,
+                    _ => 17.0,
+                });
+                value.weight = Some(700);
+                value.line_spacing = Some(1.15);
+                value.space_before_points = Some(12.0);
+                value.space_after_points = Some(6.0);
+                value.keep_with_next = Some(true);
+            }
+            StyleRole::BlockQuote => {
+                value.italic = Some(true);
+                value.left_indent_points = Some(24.0);
+                value.right_indent_points = Some(24.0);
+            }
+            StyleRole::Verse => value.line_spacing = Some(1.0),
+            _ => {}
+        }
+        value
+    }
+
+    pub fn overlay(&mut self, source: &Self) {
+        macro_rules! merge {
+            ($($field:ident),*) => { $(if source.$field.is_some() {
+                self.$field = source.$field;
+            })* };
+        }
+        if let Some(family) = &source.font_family {
+            self.font_family = Some(family.clone());
+        }
+        merge!(
+            font_size_points,
+            weight,
+            italic,
+            alignment,
+            first_line_indent_points,
+            left_indent_points,
+            right_indent_points,
+            line_spacing,
+            space_before_points,
+            space_after_points,
+            keep_with_next,
+            page_break_before
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StyleDefinition {
     pub id: StyleId,
@@ -149,6 +215,28 @@ impl StyleCatalog {
 
     pub fn iter(&self) -> impl Iterator<Item = &StyleDefinition> {
         self.order.iter().filter_map(|id| self.definitions.get(id))
+    }
+
+    /// Effective paragraph formatting, including built-in defaults and inheritance.
+    pub fn resolved_properties(&self, id: StyleId) -> StyleProperties {
+        let mut chain = Vec::new();
+        let mut current = Some(id);
+        while let Some(id) = current {
+            let Some(style) = self.get(id) else { break };
+            if chain.len() >= self.order.len() {
+                break;
+            }
+            chain.push(style);
+            current = style.inherits;
+        }
+        let mut resolved = StyleProperties::default();
+        for style in chain.into_iter().rev() {
+            if style.inherits.is_none() {
+                resolved.overlay(&StyleProperties::for_role(style.role));
+            }
+            resolved.overlay(&style.properties);
+        }
+        resolved
     }
 
     /// Builds an explicitly ordered catalog, as stored by the canonical

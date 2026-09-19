@@ -11,24 +11,7 @@ fn user_can_create_edit_autosave_close_and_reopen_a_project() {
     let project = run.root().join("flow-novel.parchmint");
     let marker = "The harness wrote this sentence.";
 
-    let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
-        .expect("launch application");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
-        .expect("open create form");
-    harness
-        .type_into(HarnessWindow::Launcher, "Project title", "Flow Novel")
-        .expect("enter title");
-    harness
-        .type_into(
-            HarnessWindow::Launcher,
-            "Project destination",
-            project.to_string_lossy(),
-        )
-        .expect("enter destination");
-    harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
-        .expect("create project");
+    let harness = parchmint_ui_driver::create_project(&run, &project, "Flow Novel");
     assert!(
         harness
             .has_window(HarnessWindow::Project)

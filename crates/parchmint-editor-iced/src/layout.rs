@@ -354,14 +354,27 @@ impl VisibleEditorBlock {
                     let signature = style_layout_signature(&style);
                     (style, signature)
                 });
+            let mut style = Arc::clone(style);
+            let mut style_signature = *style_signature;
+            let format = semantic_block.paragraph_format();
+            if format != Default::default() {
+                let resolved = Arc::make_mut(&mut style);
+                if let Some(alignment) = format.alignment {
+                    resolved.alignment = Some(alignment);
+                }
+                if let Some(percent) = format.line_spacing_percent {
+                    resolved.line_spacing = Some(f32::from(percent) / 100.0);
+                }
+                style_signature = style_layout_signature(resolved);
+            }
             block_spans.push(VisibleBlockSpan {
                 start: DocumentPosition::from(block_start),
                 end: DocumentPosition::from(block_start + scalar_len),
                 kind: semantic_block.kind(),
                 list_depth: semantic_block.list_depth(),
                 list_ordinal,
-                style: Arc::clone(style),
-                style_signature: *style_signature,
+                style,
+                style_signature,
                 marks: mark_start..mark_ranges.len(),
                 font_signature: font_hash.finish(),
             });
@@ -696,6 +709,10 @@ struct LineMetrics {
     /// Only mixed-size lines need per-row vertical metrics.
     rows: Box<[RowMetrics]>,
     first_x: f32,
+    continuation_x: f32,
+    /// Alignment is resolved for each wrapped row, before caret construction.
+    row_origins: Box<[f32]>,
+    justified_spaces: BTreeMap<usize, f32>,
     chunk_rows: Box<[(usize, usize)]>,
 }
 
@@ -707,6 +724,20 @@ struct RowMetrics {
 }
 
 impl LineMetrics {
+    fn row_x(&self, row: usize) -> f32 {
+        self.row_origins.get(row).copied().unwrap_or(if row == 0 {
+            self.first_x
+        } else {
+            self.continuation_x
+        })
+    }
+
+    fn advance(&self, offset: usize, metrics: EditorLayoutMetrics) -> Option<f32> {
+        self.scalar_advances
+            .get(offset, metrics)
+            .map(|width| width + self.justified_spaces.get(&offset).copied().unwrap_or(0.0))
+    }
+
     fn row_top(&self, row: usize) -> f32 {
         self.rows.get(row).map_or_else(
             || {
@@ -866,6 +897,7 @@ impl ScalarAdvances {
             .map(|code| Self::width(*code, self.base_at(index), metrics))
     }
 
+    #[cfg(test)]
     fn iter(&self, metrics: EditorLayoutMetrics) -> impl ExactSizeIterator<Item = f32> + '_ {
         self.range(0..self.codes.len(), metrics)
     }
@@ -987,7 +1019,14 @@ impl BlockLayoutGeometry {
                 replace_or_push_caret(
                     &mut carets,
                     line.start,
-                    caret_rectangle(entry.first_x, entry.start_y - pixel_scroll_y, metrics),
+                    caret_rectangle(
+                        entry.first_x,
+                        entry.start_y - pixel_scroll_y,
+                        EditorLayoutMetrics {
+                            line_height: entry.row_height(0),
+                            ..metrics
+                        },
+                    ),
                 );
             }
             if let Some(position) = line.hard_break {
@@ -1365,10 +1404,10 @@ fn build_line_height(
             metrics,
         );
     }
-    let first_x = metrics.inset_x
-        + span.map_or(0.0, |span| {
-            block_indent(span, metrics)
-                + alignment_offset(span, viewport, metrics, scalar_advances.iter(metrics).sum())
+    let mut first_x = metrics.inset_x + span.map_or(0.0, |span| block_indent(span, metrics));
+    let continuation_x = first_x
+        - span.map_or(0.0, |span| {
+            points_to_pixels(span.style.first_line_indent_points.unwrap_or(0.0))
         });
     let right_indent = span
         .and_then(|span| span.style.right_indent_points)
@@ -1381,8 +1420,56 @@ fn build_line_height(
         });
     let right_edge = (viewport.width - metrics.inset_x - right_indent)
         .max(metrics.inset_x + metrics.scalar_width);
-    let wrap_before =
-        word_wrap_offsets(&characters, &scalar_advances, first_x, right_edge, metrics);
+    let wrap_before = word_wrap_offsets(
+        &characters,
+        &scalar_advances,
+        first_x,
+        continuation_x,
+        right_edge,
+        metrics,
+    );
+    let alignment = span
+        .and_then(|span| span.style.alignment)
+        .unwrap_or(TextAlignment::Start);
+    let mut row_origins = Vec::new();
+    let mut justified_spaces = BTreeMap::new();
+    if alignment != TextAlignment::Start {
+        let mut start = 0;
+        for (row, end) in wrap_before
+            .iter()
+            .copied()
+            .chain(std::iter::once(characters.len()))
+            .enumerate()
+        {
+            let left = if row == 0 { first_x } else { continuation_x };
+            let trimmed_end = characters[start..end]
+                .iter()
+                .rposition(|c| !c.is_whitespace())
+                .map_or(start, |index| start + index + 1);
+            let width = scalar_advances
+                .range(start..trimmed_end, metrics)
+                .sum::<f32>();
+            let remaining = (right_edge - left - width).max(0.0);
+            row_origins.push(
+                left + match alignment {
+                    TextAlignment::Center => remaining * 0.5,
+                    TextAlignment::End => remaining,
+                    _ => 0.0,
+                },
+            );
+            if alignment == TextAlignment::Justify && row < wrap_before.len() {
+                let spaces = (start..trimmed_end)
+                    .filter(|&index| characters[index] == ' ')
+                    .collect::<Vec<_>>();
+                if !spaces.is_empty() {
+                    let extra = remaining / spaces.len() as f32;
+                    justified_spaces.extend(spaces.into_iter().map(|index| (index, extra)));
+                }
+            }
+            start = end;
+        }
+        first_x = row_origins[0];
+    }
     let rows = if scalar_advances.sizes.is_empty() {
         Box::default()
     } else {
@@ -1429,10 +1516,13 @@ fn build_line_height(
             let scalar_offset = chunk.scalar_offset + offset;
             if wrap_before.get(wrap_index) == Some(&scalar_offset) {
                 cursor.row = cursor.row.saturating_add(1);
-                cursor.x = metrics.inset_x;
+                cursor.x = row_origins
+                    .get(cursor.row)
+                    .copied()
+                    .unwrap_or(continuation_x);
                 wrap_index += 1;
             }
-            cursor.x += advance;
+            cursor.x += advance + justified_spaces.get(&scalar_offset).copied().unwrap_or(0.0);
         }
         cursor.scalar_offset = end_offset;
         chunk_rows.push((start, cursor.row));
@@ -1453,6 +1543,9 @@ fn build_line_height(
             line_height,
             rows,
             first_x,
+            continuation_x,
+            row_origins: row_origins.into_boxed_slice(),
+            justified_spaces,
             chunk_rows: chunk_rows.into(),
         }),
     }
@@ -1484,8 +1577,7 @@ fn cursor_after_prefix(
             metrics,
         );
         x += entry
-            .scalar_advances
-            .get(scalar_offset, metrics)
+            .advance(scalar_offset, metrics)
             .expect("prefix advance");
     }
     (row, x)
@@ -1497,11 +1589,11 @@ fn apply_wrap_before(
     wrap_index: &mut usize,
     row: &mut usize,
     x: &mut f32,
-    metrics: EditorLayoutMetrics,
+    _metrics: EditorLayoutMetrics,
 ) {
     if entry.wrap_before.get(*wrap_index) == Some(&scalar_offset) {
         *row = row.saturating_add(1);
-        *x = metrics.inset_x;
+        *x = entry.row_x(*row);
         *wrap_index += 1;
     }
 }
@@ -1510,6 +1602,7 @@ fn word_wrap_offsets(
     characters: &[char],
     advances: &ScalarAdvances,
     first_x: f32,
+    continuation_x: f32,
     right_edge: f32,
     metrics: EditorLayoutMetrics,
 ) -> Vec<usize> {
@@ -1519,9 +1612,9 @@ fn word_wrap_offsets(
     while offset < characters.len() {
         if characters[offset].is_whitespace() {
             let advance = advances.get(offset, metrics).expect("whitespace advance");
-            if x > metrics.inset_x && x + advance > right_edge {
+            if x > continuation_x && x + advance > right_edge {
                 wraps.push(offset);
-                x = metrics.inset_x;
+                x = continuation_x;
             }
             x += advance;
             offset += 1;
@@ -1533,17 +1626,17 @@ fn word_wrap_offsets(
             offset += 1;
         }
         let word_width = advances.range(word_start..offset, metrics).sum::<f32>();
-        if x > metrics.inset_x && x + word_width > right_edge {
+        if x > continuation_x && x + word_width > right_edge {
             wraps.push(word_start);
-            x = metrics.inset_x;
+            x = continuation_x;
         }
         for (word_offset, advance) in advances.range(word_start..offset, metrics).enumerate() {
             let scalar_offset = word_start + word_offset;
             // Only an individual token wider than a row falls back to scalar
             // breaking. Ordinary words always move as a complete run.
-            if x > metrics.inset_x && x + advance > right_edge {
+            if x > continuation_x && x + advance > right_edge {
                 wraps.push(scalar_offset);
-                x = metrics.inset_x;
+                x = continuation_x;
             }
             x += advance;
         }
@@ -1591,8 +1684,7 @@ fn materialize_chunk(
             .checked_add(offset as u64)
             .ok_or("document position overflowed")?;
         let width = entry
-            .scalar_advances
-            .get(chunk.scalar_offset.saturating_add(offset), metrics)
+            .advance(chunk.scalar_offset.saturating_add(offset), metrics)
             .ok_or("layout chunk advance is missing")?;
         let scalar_offset = chunk.scalar_offset.saturating_add(offset);
         apply_wrap_before(
@@ -1752,22 +1844,6 @@ fn block_indent(span: &VisibleBlockSpan, metrics: EditorLayoutMetrics) -> f32 {
     }
 }
 
-fn alignment_offset(
-    span: &VisibleBlockSpan,
-    viewport: EditorViewport,
-    metrics: EditorLayoutMetrics,
-    content_width: f32,
-) -> f32 {
-    let indents = block_indent(span, metrics)
-        + points_to_pixels(span.style.right_indent_points.unwrap_or(0.0));
-    let remaining = (viewport.width - metrics.inset_x * 2.0 - indents - content_width).max(0.0);
-    match span.style.alignment.unwrap_or(TextAlignment::Start) {
-        TextAlignment::Start | TextAlignment::Justify => 0.0,
-        TextAlignment::Center => remaining * 0.5,
-        TextAlignment::End => remaining,
-    }
-}
-
 fn points_to_pixels(points: f32) -> f32 {
     points * (4.0 / 3.0)
 }
@@ -1792,16 +1868,8 @@ fn default_font_size(kind: Option<SemanticBlockKind>) -> f32 {
     }
 }
 
-fn default_font_weight(kind: Option<SemanticBlockKind>) -> u16 {
-    match kind.unwrap_or(SemanticBlockKind::Paragraph) {
-        // The bundled Source Serif face is regular-only. Keep reserved
-        // headings on that available face; an explicit catalog weight still
-        // takes precedence in `scalar_geometry`.
-        SemanticBlockKind::Heading1 | SemanticBlockKind::Heading2 | SemanticBlockKind::Heading3 => {
-            400
-        }
-        _ => 400,
-    }
+fn default_font_weight(_kind: Option<SemanticBlockKind>) -> u16 {
+    400
 }
 
 /// Encodes the bundled serif and sans proportions without rounding the model.
@@ -1866,21 +1934,8 @@ fn block_style_id(block: &parchmint_editor_api::SemanticBlock) -> StyleId {
 }
 
 fn resolve_block_style(style_id: StyleId, catalog: &StyleCatalog) -> ResolvedBlockStyle {
-    let mut chain = Vec::new();
-    let mut current = Some(style_id);
-    while let Some(id) = current
-        && chain.len() <= catalog.iter().count()
-    {
-        let Some(definition) = catalog.get(id) else {
-            break;
-        };
-        chain.push(definition);
-        current = definition.inherits;
-    }
     let mut resolved = ResolvedBlockStyle::default();
-    for definition in chain.into_iter().rev() {
-        merge_style(&mut resolved, &definition.properties);
-    }
+    merge_style(&mut resolved, &catalog.resolved_properties(style_id));
     resolved
 }
 
@@ -2528,7 +2583,14 @@ mod tests {
                 for scalar in geometry.draw_scalars() {
                     assert_eq!(
                         geometry.caret(scalar.position),
-                        Some(caret_rectangle(scalar.bounds.x, scalar.bounds.y, metrics)),
+                        Some(caret_rectangle(
+                            scalar.bounds.x,
+                            scalar.bounds.y,
+                            EditorLayoutMetrics {
+                                line_height: scalar.bounds.height,
+                                ..metrics
+                            }
+                        )),
                         "width {width}, scroll {scroll}, scalar {:?}",
                         scalar.position,
                     );
@@ -2651,7 +2713,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_lists_indent_while_quotes_remain_on_the_manuscript_margin() {
+    fn nested_lists_and_quote_styles_apply_their_indents() {
         let semantic = SemanticDocument::new(vec![
             SemanticBlock::new(
                 block(1),
@@ -2696,7 +2758,7 @@ mod tests {
         assert_eq!(starts[1].list_marker, Some(1));
         assert!(starts[1].bounds.x > starts[0].bounds.x);
         assert_eq!(starts[2].block_kind, SemanticBlockKind::BlockQuote);
-        assert_eq!(starts[2].bounds.x, regression_metrics().inset_x);
+        assert_eq!(starts[2].bounds.x, regression_metrics().inset_x + 32.0);
     }
 
     #[test]
@@ -2962,6 +3024,78 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_alignment_positions_every_wrapped_row_and_preserves_caret_geometry() {
+        let metrics = regression_metrics();
+        let viewport = EditorViewport::new(260.0, 800.0).unwrap();
+        for alignment in [
+            TextAlignment::Start,
+            TextAlignment::Center,
+            TextAlignment::End,
+            TextAlignment::Justify,
+        ] {
+            let semantic = SemanticDocument::new(vec![
+                SemanticBlock::new(
+                    block(1),
+                    SemanticBlockKind::Paragraph,
+                    None,
+                    "Several words form lines of different widths and the last line is short.",
+                    vec![],
+                )
+                .with_paragraph_format(parchmint_editor_api::ParagraphFormat {
+                    alignment: Some(alignment),
+                    line_spacing_percent: Some(200),
+                }),
+            ]);
+            let visible = VisibleEditorBlock::from_semantic(block(1), &semantic, 0.into());
+            let geometry =
+                BlockLayoutGeometry::build(&visible, viewport, 0.0, metrics, None).unwrap();
+            let mut rows: Vec<Vec<&EditorScalarGeometry>> = Vec::new();
+            for scalar in geometry.draw_scalars() {
+                if rows
+                    .last()
+                    .is_none_or(|row| row[0].bounds.y != scalar.bounds.y)
+                {
+                    rows.push(Vec::new());
+                }
+                rows.last_mut().unwrap().push(scalar);
+                let caret = geometry.caret(scalar.position).unwrap();
+                assert_eq!(caret.x, scalar.bounds.x);
+                assert_eq!(caret.height, 40.0);
+            }
+            assert!(rows.len() > 2);
+            for (index, row) in rows.iter().enumerate() {
+                let first = row[0].bounds;
+                let last = row
+                    .iter()
+                    .rev()
+                    .find(|s| !s.character.is_whitespace())
+                    .unwrap()
+                    .bounds;
+                let right = last.x + last.width;
+                match alignment {
+                    TextAlignment::Start => assert_eq!(first.x, metrics.inset_x),
+                    TextAlignment::Center => {
+                        assert!((first.x + right - viewport.width).abs() < 0.001)
+                    }
+                    TextAlignment::End => {
+                        assert!((right - (viewport.width - metrics.inset_x)).abs() < 0.001)
+                    }
+                    TextAlignment::Justify if index + 1 < rows.len() => {
+                        assert_eq!(first.x, metrics.inset_x);
+                        assert!((right - (viewport.width - metrics.inset_x)).abs() < 0.001);
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                geometry,
+                BlockLayoutGeometry::build(&visible, viewport, 0.0, metrics, Some(&geometry))
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn semantic_defaults_render_manuscript_serif_hierarchy() {
         let visible = VisibleEditorBlock::from_semantic(
             block(7),
@@ -2998,8 +3132,8 @@ mod tests {
             .find(|scalar| scalar.character == 'B')
             .expect("paragraph scalar");
         assert_eq!(heading.font_family, EditorFontFamily::Serif);
-        assert_eq!(heading.font_size, 24.0);
-        assert_eq!(heading.font_weight, 400);
+        assert_eq!(heading.font_size, 32.0);
+        assert_eq!(heading.font_weight, 700);
         assert_eq!(body.font_family, EditorFontFamily::Serif);
         assert_eq!(body.font_size, 20.0);
         assert_eq!(body.font_weight, 400);

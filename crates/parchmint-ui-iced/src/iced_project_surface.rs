@@ -268,7 +268,27 @@ fn project_surface_with_layout<'a>(
         .height(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Application, Interaction::Rest))
         .into();
-    let base = if destination == RibbonDestination::Cards {
+    let base = if let Some(source) = workspace.hierarchy_drag_source()
+        && !workspace.hierarchy_drag_is_card()
+        && let Some(item) = workspace.explorer().row(source)
+    {
+        let ghost = container(
+            row![
+                icon_sized(Icon::Project, 16),
+                text(item.title.to_owned()).size(13)
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .padding([9, 12])
+        .width(240)
+        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Focused));
+        stack![
+            base,
+            crate::drag_ghost::floating(ghost.into(), Point::new(-12.0, -12.0), 240.0)
+        ]
+        .into()
+    } else if destination == RibbonDestination::Cards {
         if let Some(source) = workspace.hierarchy_drag_source()
             && let Some(item) = workspace
                 .cards()
@@ -1596,22 +1616,6 @@ fn outline_card<'a>(
         .wrapping(text::Wrapping::WordOrGlyph)
         .width(Length::Fill);
     let mut heading = row![].spacing(6).align_y(iced::alignment::Vertical::Center);
-    if group {
-        heading = heading.push(harness_target::target_id(
-            harness_target::card_disclosure_id(&node_id),
-            container(icon_sized(
-                if item.expanded {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronRight
-                },
-                12,
-            ))
-            .width(24)
-            .height(24)
-            .center(24),
-        ));
-    }
     heading = heading.push(title);
     if group {
         heading = heading.push(
@@ -1644,9 +1648,35 @@ fn outline_card<'a>(
         },
     );
     let heading: Element<'a, ProjectSurfaceMessage> = if group {
-        row![heading, overview_add(&node_id, theme)]
-            .spacing(6)
-            .into()
+        row![
+            harness_target::target_id(
+                harness_target::card_disclosure_id(&node_id),
+                button(
+                    container(icon_sized(
+                        if item.expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        },
+                        12
+                    ))
+                    .center(24)
+                )
+                .padding(0)
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ToggleCardsExpanded(node_id.clone())
+                ))
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    interaction(status, false)
+                ))
+            ),
+            heading,
+            overview_add(&node_id, theme)
+        ]
+        .spacing(6)
+        .into()
     } else {
         heading
     };
@@ -3134,7 +3164,7 @@ fn settings_content<'a>(
                         .map(|field| metadata_field_detail(field, theme)),
                     Some(SettingsDetail::NewMetadataField) => settings
                         .new_metadata_field_label()
-                        .map(metadata_field_creation_detail),
+                        .map(|label| metadata_field_creation_detail(label, theme)),
                     _ => None,
                 }
                 .unwrap_or_else(|| {
@@ -3145,24 +3175,33 @@ fn settings_content<'a>(
                         .into()
                 });
             column![
-                page_title("Metadata fields"),
+                column![
+                    page_title("Metadata fields"),
+                    text("Organize the details you track across your writing.")
+                        .size(13)
+                        .color(theme.palette().secondary_text)
+                ]
+                .spacing(4),
                 row![
                     container(scrollable(metadata).height(Length::Fill))
-                        .width(264)
+                        .padding(12)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Sidebar,
+                            Interaction::Rest
+                        ))
+                        .width(256)
                         .height(Length::Fill),
-                    container(
-                        column![text("Metadata field details").size(16), scrollable(detail)]
-                            .spacing(10),
-                    )
-                    .padding(0)
-                    .width(Length::Fill)
-                    .max_width(720)
-                    .height(Length::Fill)
-                    .style(move |_| components::surface(
-                        theme,
-                        Surface::Panel,
-                        Interaction::Rest
-                    )),
+                    container(column![scrollable(detail).height(Length::Fill)].spacing(10),)
+                        .padding(0)
+                        .width(Length::Fill)
+                        .max_width(720)
+                        .height(Length::Fill)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Panel,
+                            Interaction::Rest
+                        )),
                 ]
                 .spacing(SPACING_24)
                 .height(Length::Fill),
@@ -3174,7 +3213,14 @@ fn settings_content<'a>(
         SettingsCategory::Styles => {
             let styles = settings.styles().into_iter().fold(
                 column![
-                    button(text("Create custom style"))
+                    button(text("Create custom style").size(13))
+                        .width(Length::Fill)
+                        .padding([8, 10])
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Secondary,
+                            interaction(status, false)
+                        ))
                         .on_press(ProjectSurfaceMessage::Project(ProjectMessage::CreateStyle))
                 ]
                 .spacing(6),
@@ -3182,19 +3228,31 @@ fn settings_content<'a>(
                     let selected = matches!(settings.selected_detail(),
                         Some(SettingsDetail::Style(id)) if id == style.id);
                     column.push(
-                        button(text(style.display_name).size(14))
-                            .width(Length::Fill)
-                            .padding(SPACING_8)
-                            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::SelectStyle(
-                                style.id.to_owned(),
-                            )))
-                            .style(move |_, status| {
-                                components::button_style(
-                                    theme,
-                                    ButtonKind::Quiet,
-                                    interaction(status, selected),
-                                )
-                            }),
+                        button(
+                            column![
+                                text(style.display_name).size(14),
+                                text(if style.role.is_reserved() {
+                                    "Built-in"
+                                } else {
+                                    "Custom"
+                                })
+                                .size(11)
+                                .color(theme.palette().secondary_text)
+                            ]
+                            .spacing(3),
+                        )
+                        .width(Length::Fill)
+                        .padding(SPACING_8)
+                        .on_press(ProjectSurfaceMessage::Project(ProjectMessage::SelectStyle(
+                            style.id.to_owned(),
+                        )))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, selected),
+                            )
+                        }),
                     )
                 },
             );
@@ -3206,23 +3264,33 @@ fn settings_content<'a>(
             }
             .unwrap_or_else(|| text("Select a style to edit its details.").size(12).into());
             column![
-                page_title("Styles"),
+                column![
+                    page_title("Styles"),
+                    text("Reusable typography for this project.")
+                        .size(13)
+                        .color(theme.palette().secondary_text)
+                ]
+                .spacing(4),
                 row![
                     container(scrollable(styles).height(Length::Fill))
-                        .width(216)
+                        .padding(12)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Sidebar,
+                            Interaction::Rest
+                        ))
+                        .width(232)
                         .height(Length::Fill),
-                    container(
-                        column![text("Style details").size(16), scrollable(detail)].spacing(10)
-                    )
-                    .padding(0)
-                    .width(Length::Fill)
-                    .max_width(720)
-                    .height(Length::Fill)
-                    .style(move |_| components::surface(
-                        theme,
-                        Surface::Panel,
-                        Interaction::Rest
-                    )),
+                    container(column![scrollable(detail).height(Length::Fill)].spacing(10))
+                        .padding(0)
+                        .width(Length::Fill)
+                        .max_width(720)
+                        .height(Length::Fill)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Panel,
+                            Interaction::Rest
+                        )),
                 ]
                 .spacing(SPACING_24)
                 .height(Length::Fill),
@@ -3352,9 +3420,15 @@ fn metadata_applicability_label(value: MetadataFieldApplicability) -> &'static s
     }
 }
 
-fn metadata_field_creation_detail<'a>(label: &'a str) -> Element<'a, ProjectSurfaceMessage> {
+fn metadata_field_creation_detail<'a>(
+    label: &'a str,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
     let name = sensor(
         text_input("Name this field", label)
+            .padding([8, 10])
+            .size(14)
+            .style(move |_, status| components::field_style(theme, field_interaction(status)))
             .id(metadata_field_name_input_id())
             .on_input(|value| {
                 ProjectSurfaceMessage::Project(ProjectMessage::SetNewMetadataFieldLabel(value))
@@ -3366,15 +3440,15 @@ fn metadata_field_creation_detail<'a>(label: &'a str) -> Element<'a, ProjectSurf
     .key("metadata-field-creation")
     .on_show(|_| ProjectSurfaceMessage::MetadataFieldCreationShown);
     column![
-        text("New metadata field").size(15),
+        text("New metadata field").size(18),
         text("Start with a clear name. You can choose where it appears and how it behaves after adding it.")
-            .size(12),
+            .size(13).color(theme.palette().secondary_text),
         name,
         row![
-            button(text("Cancel")).on_press(ProjectSurfaceMessage::Project(
+            button(text("Cancel")).padding([8, 14]).style(move |_, status| components::button_style(theme, ButtonKind::Quiet, interaction(status, false))).on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::CancelNewMetadataField
             )),
-            button(text("Add field")).on_press(ProjectSurfaceMessage::Project(
+            button(text("Add field")).padding([8, 14]).style(move |_, status| components::button_style(theme, ButtonKind::Primary, interaction(status, false))).on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::CommitNewMetadataField
             )),
         ]
@@ -3410,6 +3484,9 @@ fn metadata_field_detail<'a>(
     let label = field.label.to_owned();
     let label_input = text_input("Name", field.label)
         .id(metadata_field_name_input_id())
+        .padding([7, 10])
+        .size(14)
+        .style(move |_, status| components::field_style(theme, field_interaction(status)))
         .on_input({
             let id = id.clone();
             let description = description.clone();
@@ -3426,38 +3503,46 @@ fn metadata_field_detail<'a>(
                 })
             }
         });
-    let description_input = text_input("Description", &description).on_input({
-        let id = id.clone();
-        let label = label.clone();
-        let default_value = default_value.clone();
-        move |value| {
-            ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
-                field_id: id.clone(),
-                label: label.clone(),
-                description: (!value.is_empty()).then_some(value),
-                applicability: field.applicability,
-                text_kind: field.text_kind,
-                default_value: (!default_value.is_empty()).then_some(default_value.clone()),
-                visible_on_cards: field.visible_on_cards,
-            })
-        }
-    });
-    let default_input = text_input("Default value", &default_value).on_input({
-        let id = id.clone();
-        let label = label.clone();
-        let description = description.clone();
-        move |value| {
-            ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
-                field_id: id.clone(),
-                label: label.clone(),
-                description: (!description.is_empty()).then_some(description.clone()),
-                applicability: field.applicability,
-                text_kind: field.text_kind,
-                default_value: (!value.is_empty()).then_some(value),
-                visible_on_cards: field.visible_on_cards,
-            })
-        }
-    });
+    let description_input = text_input("Description", &description)
+        .padding([7, 10])
+        .size(14)
+        .style(move |_, status| components::field_style(theme, field_interaction(status)))
+        .on_input({
+            let id = id.clone();
+            let label = label.clone();
+            let default_value = default_value.clone();
+            move |value| {
+                ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
+                    field_id: id.clone(),
+                    label: label.clone(),
+                    description: (!value.is_empty()).then_some(value),
+                    applicability: field.applicability,
+                    text_kind: field.text_kind,
+                    default_value: (!default_value.is_empty()).then_some(default_value.clone()),
+                    visible_on_cards: field.visible_on_cards,
+                })
+            }
+        });
+    let default_input = text_input("Default value", &default_value)
+        .padding([7, 10])
+        .size(14)
+        .style(move |_, status| components::field_style(theme, field_interaction(status)))
+        .on_input({
+            let id = id.clone();
+            let label = label.clone();
+            let description = description.clone();
+            move |value| {
+                ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
+                    field_id: id.clone(),
+                    label: label.clone(),
+                    description: (!description.is_empty()).then_some(description.clone()),
+                    applicability: field.applicability,
+                    text_kind: field.text_kind,
+                    default_value: (!value.is_empty()).then_some(value),
+                    visible_on_cards: field.visible_on_cards,
+                })
+            }
+        });
     let applicability = [
         MetadataFieldApplicability::Groups,
         MetadataFieldApplicability::Documents,
@@ -3470,7 +3555,8 @@ fn metadata_field_detail<'a>(
         let default_value = default_value.clone();
         let selected = field.applicability == applicability;
         row.push(
-            button(text(metadata_applicability_label(applicability)))
+            button(text(metadata_applicability_label(applicability)).size(12))
+                .padding([7, 9])
                 .on_press(ProjectSurfaceMessage::Project(make_update(
                     label,
                     (!description.is_empty()).then_some(description),
@@ -3532,7 +3618,7 @@ fn metadata_field_detail<'a>(
         text("Text format").size(12),
         kind,
         checkbox(field.visible_on_cards)
-            .label("Show on outline rows")
+            .label("Show in Overview")
             .on_toggle({
                 let label = label.clone();
                 let description = description.clone();
@@ -3548,12 +3634,19 @@ fn metadata_field_detail<'a>(
                     ))
                 }
             }),
-        text("Shown beneath each document in Outline when a value is present.")
+        text("Display this field on document and group cards.")
             .size(12)
             .color(theme.palette().secondary_text),
-        button(text("Delete metadata field")).on_press(ProjectSurfaceMessage::Project(
-            ProjectMessage::RequestDeleteMetadataField(id)
-        )),
+        button(text("Delete metadata field").size(12))
+            .padding([7, 10])
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                interaction(status, false)
+            ))
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::RequestDeleteMetadataField(id)
+            )),
     ]
     .spacing(8)
     .into()
@@ -3577,6 +3670,7 @@ fn style_detail<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let style_id = style.id.to_owned();
+    let properties = settings.resolved_style_properties(style.id);
     let choices: Vec<_> = std::iter::once(StyleChoice {
         id: None,
         label: "No inheritance".into(),
@@ -3608,19 +3702,24 @@ fn style_detail<'a>(
             }
         })
         .width(Length::Fill)
-        .text_size(14),
+        .text_size(13)
+        .padding([7, 10]),
     );
     let mut content = column![
         text("Style name").size(12),
-        text_input("Display name", style.display_name).on_input({
-            let id = style_id.clone();
-            move |display_name| {
-                ProjectSurfaceMessage::Project(ProjectMessage::RenameStyle {
-                    style_id: id.clone(),
-                    display_name,
-                })
-            }
-        }),
+        text_input("Display name", style.display_name)
+            .padding([7, 10])
+            .size(14)
+            .style(move |_, status| components::field_style(theme, field_interaction(status)))
+            .on_input({
+                let id = style_id.clone();
+                move |display_name| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::RenameStyle {
+                        style_id: id.clone(),
+                        display_name,
+                    })
+                }
+            }),
         text(if style.role.is_reserved() {
             "Built-in style"
         } else {
@@ -3665,6 +3764,7 @@ fn style_detail<'a>(
         content = content
             .push(Space::new().height(8))
             .push(text(heading).size(16));
+        let mut fields = Vec::new();
         for &property in properties {
             let saved = style_property_value(style.properties, property);
             let draft = settings.style_property_draft(&style_id, property);
@@ -3693,7 +3793,8 @@ fn style_detail<'a>(
                         .into(),
                     })
                 })
-                .text_size(14)
+                .text_size(13)
+                .padding([7, 10])
                 .width(Length::Fill)
                 .into()
             } else if property == StyleProperty::Alignment {
@@ -3722,7 +3823,8 @@ fn style_detail<'a>(
                         })
                     },
                 )
-                .text_size(14)
+                .text_size(13)
+                .padding([7, 10])
                 .width(Length::Fill)
                 .into()
             } else {
@@ -3733,6 +3835,12 @@ fn style_detail<'a>(
                 });
                 let mut field = row![
                     text_input(&format!("Enter {}", property.label().to_lowercase()), value)
+                        .size(14)
+                        .padding([7, 10])
+                        .style(move |_, status| components::field_style(
+                            theme,
+                            field_interaction(status)
+                        ))
                         .on_input(move |value| ProjectSurfaceMessage::Project(
                             ProjectMessage::EditStyleProperty {
                                 style_id: id.clone(),
@@ -3745,57 +3853,92 @@ fn style_detail<'a>(
                 .spacing(8)
                 .align_y(iced::alignment::Vertical::Center);
                 if draft.is_some() {
-                    field = field.push(button(text("Apply").size(12)).on_press(commit));
+                    field = field.push(
+                        button(text("Apply").size(12))
+                            .padding([7, 9])
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Secondary,
+                                    interaction(status, false),
+                                )
+                            })
+                            .on_press(commit),
+                    );
                 }
                 field.into()
             };
-            content = content.push(
-                row![text(property.label()).size(12).width(140), control]
-                    .spacing(12)
-                    .align_y(iced::alignment::Vertical::Center),
+            fields.push(
+                container(
+                    column![
+                        text(property.label())
+                            .size(12)
+                            .color(theme.palette().secondary_text),
+                        control
+                    ]
+                    .spacing(5),
+                )
+                .width(Length::Fill),
             );
         }
+        let mut fields = fields.into_iter();
+        while let Some(left) = fields.next() {
+            let mut pair = row![left].spacing(16);
+            if let Some(right) = fields.next() {
+                pair = pair.push(right);
+            } else {
+                pair = pair.push(Space::new().width(Length::Fill));
+            }
+            content = content.push(pair);
+        }
     }
-    let family = match style.properties.font_family.as_deref() {
+    let family = match properties.font_family.as_deref() {
         Some("Source Sans 3") => "Source Sans 3",
+        Some("Monospace" | "monospace") => "monospace",
         _ => "Source Serif 4",
     };
-    content = content.push(
-        container(
-            column![
-                text(format!("Preview · {family}")).size(12),
-                text("The light reached the last page.")
-                    .font(Font {
-                        weight: if style.properties.weight.unwrap_or(400) >= 600 {
-                            font::Weight::Bold
-                        } else {
-                            font::Weight::Normal
-                        },
-                        style: if style.properties.italic.unwrap_or(false) {
-                            font::Style::Italic
-                        } else {
-                            font::Style::Normal
-                        },
-                        ..Font::with_name(family)
-                    })
-                    .size(
-                        style
-                            .properties
-                            .font_size_points
-                            .unwrap_or(18.0)
-                            .clamp(10.0, 36.0)
-                    ),
-            ]
-            .spacing(10),
-        )
-        .padding(16)
-        .width(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
-    );
+    let preview = container(
+        column![
+            text("Preview").size(12),
+            text("The light reached the last page.")
+                .font(Font {
+                    weight: if properties.weight.unwrap_or(400) >= 600 {
+                        font::Weight::Bold
+                    } else {
+                        font::Weight::Normal
+                    },
+                    style: if properties.italic.unwrap_or(false) {
+                        font::Style::Italic
+                    } else {
+                        font::Style::Normal
+                    },
+                    ..Font::with_name(family)
+                })
+                .size(
+                    properties
+                        .font_size_points
+                        .unwrap_or(18.0)
+                        .clamp(10.0, 36.0)
+                ),
+        ]
+        .spacing(10),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest));
+    let content = column![preview, content].spacing(18);
+    let mut content = content;
     if !style.role.is_reserved() {
-        content = content.push(button(text("Delete custom style")).on_press(
-            ProjectSurfaceMessage::Project(ProjectMessage::RequestDeleteStyle(style_id)),
-        ));
+        content = content.push(
+            button(text("Delete custom style").size(12))
+                .padding([7, 10])
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                })
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::RequestDeleteStyle(style_id),
+                )),
+        );
     }
     container(content)
         .padding(iced::Padding {
@@ -4012,7 +4155,7 @@ fn inline_outline_field<'a>(
         )
         .width(Length::Fill)
         .height(height)
-        .padding([7, 9])
+        .padding([2, 3])
         .on_press(ProjectSurfaceMessage::Project(
             ProjectMessage::BeginOutlineField { node_id, field_id },
         ))
@@ -4037,7 +4180,7 @@ fn outline_fields<'a>(
     let field_width = (width - 24.0 - 88.0 - 8.0).max(30.0);
     let metadata = metadata_items
         .into_iter()
-        .fold(column![].spacing(SPACING_8), |column, item| {
+        .fold(column![].spacing(4), |column, item| {
             let node_id = selected_id.clone();
             let field_id = item.field_id.to_owned();
             let value = item.effective_value.unwrap_or_default();
@@ -4075,7 +4218,7 @@ fn outline_fields<'a>(
                             }
                         })
                         .size(13)
-                        .padding([7, 9])
+                        .padding([2, 3])
                         .height(height)
                         .style(move |_, status| multiline_field_style(theme, status))
                         .into()
@@ -4100,7 +4243,7 @@ fn outline_fields<'a>(
                             .width(88)
                     )
                     .padding(iced::Padding {
-                        top: 9.0,
+                        top: 3.0,
                         ..iced::Padding::ZERO
                     }),
                     harness_target::target_id(
@@ -4164,7 +4307,7 @@ fn outline_fields<'a>(
             action,
         })
     })
-    .padding([7, 9])
+    .padding([2, 3])
     .size(14)
     .height(Length::Fixed(synopsis_height))
     .style(move |_, status| multiline_field_style(theme, status));
@@ -4184,7 +4327,7 @@ fn outline_fields<'a>(
     );
     let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
     if has_metadata {
-        column![synopsis, metadata].spacing(10).into()
+        column![synopsis, metadata].spacing(4).into()
     } else {
         synopsis
     }
@@ -4430,11 +4573,19 @@ fn modal_view<'a>(
             column![
                 settings_content(workspace, category, theme),
                 row![
-                    text("Changes apply throughout this project.").size(12),
+                    text("Saved automatically to this project")
+                        .size(12)
+                        .color(theme.palette().secondary_text),
                     Space::new().width(Length::Fill),
                     focus::region(
                         focus::modal_cancel_id(),
-                        button(text("Done"))
+                        button(text("Done").size(13))
+                            .padding([8, 20])
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Primary,
+                                interaction(status, false)
+                            ))
                             .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
                     )
                 ]
@@ -5172,8 +5323,8 @@ mod tests {
         assert_eq!(layout.ribbon().height(), 52);
         assert_eq!(layout.status_bar().height(), 32);
         assert_eq!(layout.explorer().width(), 280);
-        assert_eq!(layout.inspector().width(), 320);
-        assert_eq!(layout.center().width(), 840);
+        assert_eq!(layout.inspector().width(), 0);
+        assert_eq!(layout.center().width(), 1_160);
     }
 
     #[test]
@@ -5245,7 +5396,7 @@ mod tests {
         assert!(
             search_surface
                 .find(HarnessTarget::InspectorTitle.id())
-                .is_ok()
+                .is_err()
         );
         assert!(search_surface.find("1 match in 1 document").is_ok());
         assert!(search_surface.find("Chapter One").is_ok());
@@ -5418,14 +5569,18 @@ mod tests {
         );
 
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut layout = ShellLayout::for_window(1440, 900);
+        layout.set_inspector_visible(true);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
             Size::new(1_440.0, 900.0),
-            project_surface(
+            native_project_surface(
                 &workspace,
                 RibbonDestination::Editor,
                 theme,
                 text("Editor").into(),
+                &layout,
+                [true; 3],
             ),
         );
         let comment = simulator
@@ -6284,50 +6439,15 @@ mod tests {
     }
 
     #[test]
-    fn rendered_settings_keep_details_in_their_own_categories() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
-
-        let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
+    fn rendered_settings_keep_project_managers_out_of_navigation() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::SettingsAppearance);
+        interact(&workspace, RibbonDestination::Settings, |settings| {
             assert!(settings.find("Settings").is_ok());
-            settings
-                .click("Metadata fields")
-                .expect("metadata navigation");
+            assert!(settings.find("Appearance").is_ok());
+            assert!(settings.find("Dictionaries").is_ok());
+            assert!(settings.find("Styles").is_err());
+            assert!(settings.find("Metadata fields").is_err());
         });
-        assert!(apply_project_messages(&mut workspace, messages).is_empty());
-        assert_eq!(
-            workspace.settings().selected_category(),
-            SettingsCategory::Metadata
-        );
-
-        let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-            settings.click("Point of view").expect("metadata field");
-        });
-        assert!(apply_project_messages(&mut workspace, messages).is_empty());
-        let _metadata = interact(&workspace, RibbonDestination::Settings, |settings| {
-            assert!(settings.find("Metadata field details").is_ok());
-            assert!(settings.find("Settings").is_ok());
-        });
-
-        for category in [SettingsCategory::Dictionaries, SettingsCategory::Appearance] {
-            let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-                settings
-                    .click(category.label())
-                    .expect("rendered settings category");
-            });
-            assert_eq!(
-                apply_project_messages(&mut workspace, messages),
-                if category == SettingsCategory::Dictionaries {
-                    vec![crate::ProjectEffect::LoadGlobalDictionary]
-                } else {
-                    Vec::new()
-                }
-            );
-            let messages = interact(&workspace, RibbonDestination::Settings, |settings| {
-                assert!(settings.find("Settings").is_ok());
-                assert!(settings.find("Metadata field details").is_err());
-            });
-            assert!(messages.is_empty());
-        }
     }
 
     #[test]

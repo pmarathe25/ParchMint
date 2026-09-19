@@ -7,6 +7,11 @@ use parchmint_design_system::production_icon_svg;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
     Project,
+    AlignLeft,
+    AlignCenter,
+    AlignRight,
+    AlignJustify,
+    LineSpacing,
     History,
     RecentlyDeleted,
     Export,
@@ -29,6 +34,11 @@ pub(crate) enum Icon {
 impl Icon {
     const fn catalog_name(self) -> &'static str {
         match self {
+            Self::AlignLeft => "format-align-left",
+            Self::AlignCenter => "format-align-center",
+            Self::AlignRight => "format-align-right",
+            Self::AlignJustify => "format-align-justify",
+            Self::LineSpacing => "format-line-spacing",
             Self::Project => "workspace-project",
             Self::History => "workspace-history",
             Self::RecentlyDeleted => "workspace-deleted",

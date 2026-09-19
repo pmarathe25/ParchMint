@@ -1683,7 +1683,11 @@ fn draw_scalar_text(frame: &mut Frame, scalar: &EditorScalarGeometry, theme: Edi
             weight: if scalar.bold || scalar.font_weight >= 700 {
                 iced::font::Weight::Bold
             } else if scalar.font_weight >= 500 {
-                iced::font::Weight::Medium
+                if scalar.font_family == EditorFontFamily::Serif {
+                    iced::font::Weight::Semibold
+                } else {
+                    iced::font::Weight::Medium
+                }
             } else {
                 iced::font::Weight::Normal
             },
@@ -1848,6 +1852,33 @@ mod tests {
                 )),
                 Cow::Borrowed(include_bytes!(
                     "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-Bold.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-It.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-BoldIt.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-Semibold.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-serif-4/SourceSerif4-SemiboldIt.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-It.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-BoldIt.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-MediumIt.ttf"
+                )),
+                Cow::Borrowed(include_bytes!(
+                    "../../parchmint-ui-iced/assets/fonts/source-sans-3/SourceSans3-SemiboldIt.ttf"
                 )),
             ],
             ..Settings::default()

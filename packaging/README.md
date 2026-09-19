@@ -11,11 +11,11 @@ Use a numeric `major.minor.patch` version, with fields no greater than 255, 255,
 and 65535. The packager rejects prerelease and build suffixes to preserve the
 same version and upgrade ordering across platforms.
 
-Push an annotated tag matching that version. For version 0.1.0:
+Push an annotated tag matching that version. For version 0.1.1:
 
 ```console
-git tag -a v0.1.0 -m "ParchMint 0.1.0"
-git push origin main v0.1.0
+git tag -a v0.1.1 -m "ParchMint 0.1.1"
+git push origin main v0.1.1
 ```
 
 [CI](../.github/workflows/ci.yml) publishes after workspace checks and all three
@@ -24,9 +24,25 @@ creates a release with installers, SHA-256 files, generated notes, and an
 installation link. Branch, pull-request, and manual builds retain Actions
 artifacts. Existing releases are not overwritten.
 
-The publish job uses `GITHUB_TOKEN` with `contents: write`; no extra secret is
-needed. Packages are unsigned. Signing and macOS notarization need platform
-credentials and remain [future work](../plans/unimplemented/future-work.md).
+The publish job uses `GITHUB_TOKEN` with `contents: write`. macOS packages receive
+an ad hoc signature for bundle integrity. This does not establish publisher trust
+with Gatekeeper; first launch requires approval in macOS Privacy & Security.
+To enable Developer ID signing and notarization for tagged releases, configure these Actions
+secrets: `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`,
+`MACOS_SIGNING_IDENTITY`, `MACOS_APPLE_ID`, `MACOS_APP_PASSWORD` (an app-specific
+password), and `MACOS_TEAM_ID`. CI imports the certificate into a temporary
+keychain and removes it after packaging. No credentials selects ad hoc signing;
+an incomplete configuration stops publication.
+
+For a local notarized distribution build,
+set `PARCHMINT_MACOS_SIGNING_IDENTITY` to your installed Developer ID identity,
+`PARCHMINT_MACOS_NOTARY_PROFILE` to a `notarytool` keychain profile, and
+`PARCHMINT_REQUIRE_NOTARIZATION=1`. The packager signs the completed app bundle,
+verifies it, creates and verifies the DMG, signs and notarizes it, and staples the
+ticket before calculating its checksum. See [Apple's distribution guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+
+The Windows executable, application windows, and all native packages use the
+icons in `packaging/icons`, converted from the supplied ParchMint artwork.
 
 ## Prepare the host
 
@@ -92,5 +108,11 @@ Keep the MSI `UpgradeCode` in [package.wxs](windows/package.wxs) stable.
 `dpkg-shlibdeps` derives Linux linked dependencies; the packager adds windowing
 libraries loaded at runtime. CI builds Linux on Ubuntu 24.04.
 
-Each package has a SHA-256 sidecar. CI tests release log filtering, Linux and
-Windows installation/removal, and execution from a mounted macOS disk image.
+Each package has a SHA-256 sidecar. CI tests release log filtering and Linux and
+Windows installation/removal. On an Apple silicon macOS runner,
+`verify_macos.py` mounts the DMG, copies the app to a temporary Applications
+directory, and ejects the image. It verifies the installed signature, architecture,
+system-only dependencies, resources, and version, then captures the native editor
+in both themes and Overview. The dark editor launch uses LaunchServices, as Finder
+does. These captures are retained as Actions artifacts. This verifies the installed
+application; an ad hoc signature still requires the user's Gatekeeper approval.

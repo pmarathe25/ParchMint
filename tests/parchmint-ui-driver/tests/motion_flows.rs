@@ -55,7 +55,14 @@ fn reduced_motion_shows_the_final_panes_on_the_first_frame() {
     click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
     harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
     click(&harness, HarnessTarget::ToggleCompanion);
-    assert!(harness.editor_panes_share_session().unwrap());
+    assert_ne!(
+        harness
+            .active_editor_document_id(EditorPane::Primary)
+            .unwrap(),
+        harness
+            .active_editor_document_id(EditorPane::Companion)
+            .unwrap(),
+    );
     let output = capture_root("reduced-motion").unwrap_or_else(|| run.root().to_path_buf());
     harness
         .snapshot(WINDOW, output.join("reduced-motion-000"))
@@ -92,7 +99,14 @@ fn typing_and_undo_survive_interrupted_pane_motion() {
         harness
             .advance_motion(WINDOW, Duration::from_millis(48))
             .unwrap();
-        assert!(harness.editor_panes_share_session().unwrap());
+        assert_ne!(
+            harness
+                .active_editor_document_id(EditorPane::Primary)
+                .unwrap(),
+            harness
+                .active_editor_document_id(EditorPane::Companion)
+                .unwrap(),
+        );
         harness
             .type_into_target(WINDOW, HarnessTarget::EditorPrimary, " During motion.")
             .unwrap();
@@ -117,8 +131,16 @@ fn typing_and_undo_survive_interrupted_pane_motion() {
             .unwrap();
         click(&harness, HarnessTarget::ToggleCompanion);
         frames(&harness, &format!("typing-interrupted-{appearance}"));
+        click(&harness, HarnessTarget::EditorPrimary);
         assert_eq!(harness.active_editor_body().unwrap(), edited);
-        assert!(harness.editor_panes_share_session().unwrap());
+        assert_ne!(
+            harness
+                .active_editor_document_id(EditorPane::Primary)
+                .unwrap(),
+            harness
+                .active_editor_document_id(EditorPane::Companion)
+                .unwrap(),
+        );
         harness.elapse_autosave_idle().unwrap();
         harness.close(WINDOW).unwrap();
         harness.shutdown().unwrap();
@@ -223,7 +245,7 @@ fn workspace_transitions_keep_writing_and_controls_available() {
             frames(&harness, "history-comparison");
         }
     }
-    for category in ["Styles", "Metadata fields", "Dictionaries", "Appearance"] {
+    for category in ["Dictionaries", "Appearance"] {
         harness.click_text(WINDOW, category).unwrap();
         frames(&harness, &format!("settings-{category}"));
     }
@@ -232,6 +254,7 @@ fn workspace_transitions_keep_writing_and_controls_available() {
     frames(&harness, "dark-editor");
     click(&harness, HarnessTarget::ToggleCompanion);
     frames(&harness, "dark-split");
+    click(&harness, HarnessTarget::EditorPrimary);
     assert!(
         harness
             .active_editor_body()
@@ -290,6 +313,28 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
     let act_two = harness.hierarchy_node("Act Two").unwrap();
     harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
     frames(&harness, "overview");
+    let original = harness.hierarchy_titles().unwrap();
+    for attempt in 0..3 {
+        harness
+            .preview_hierarchy_move(
+                WINDOW,
+                HarnessHierarchySurface::Cards,
+                arrival.clone(),
+                arrival.clone(),
+                HarnessDropPosition::After,
+            )
+            .unwrap();
+        assert_eq!(
+            harness.preview_hierarchy_titles().unwrap(),
+            original,
+            "lifting a card inside its own slot must not move its siblings"
+        );
+        if attempt == 0 {
+            frames(&harness, "card-original-slot");
+        }
+        harness.release_hierarchy_drag(WINDOW).unwrap();
+        assert_eq!(harness.hierarchy_titles().unwrap(), original);
+    }
     for (name, destination, position) in [
         ("card-reorder", departure, HarnessDropPosition::After),
         ("card-move-group", act_two, HarnessDropPosition::Into),
@@ -391,8 +436,9 @@ fn project_creation_and_recovery_show_their_pending_states() {
     let run = IsolatedRun::new("startup-motion").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
-    let launcher = HarnessWindow::Launcher;
+    let launcher = HarnessWindow::Project;
     harness.advance_motion(launcher, Duration::ZERO).unwrap();
+    harness.click_text(launcher, "My Writing").unwrap();
     window_frames(&harness, launcher, "launcher");
     harness.click_text(launcher, "Create Project").unwrap();
     window_frames(&harness, launcher, "project-form");

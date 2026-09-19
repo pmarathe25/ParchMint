@@ -452,6 +452,14 @@ pub trait NativeDesktopCallbacks: Send + Sync {
         Ok(None)
     }
 
+    fn default_workspace(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn open_default_workspace(&self) -> Result<NativeProjectOpenResult, String> {
+        Err("default workspace is unavailable".into())
+    }
+
     fn resume_last_project(&self) -> bool {
         false
     }
@@ -573,6 +581,33 @@ pub fn run_native_desktop(startup: NativeDesktopStartup) -> Result<(), NativeDes
     ))
     .font(include_bytes!(
         "../assets/fonts/source-serif-4/SourceSerif4-Regular.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-serif-4/SourceSerif4-Bold.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-serif-4/SourceSerif4-It.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-serif-4/SourceSerif4-BoldIt.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-serif-4/SourceSerif4-Semibold.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-serif-4/SourceSerif4-SemiboldIt.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-sans-3/SourceSans3-It.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-sans-3/SourceSans3-BoldIt.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-sans-3/SourceSans3-MediumIt.ttf"
+    ))
+    .font(include_bytes!(
+        "../assets/fonts/source-sans-3/SourceSans3-SemiboldIt.ttf"
     ))
     .run()
     .map_err(|error| NativeDesktopError::new(error.to_string()))?;
@@ -2169,6 +2204,8 @@ impl NativeDesktop {
         let tasks = if resume && !desktop.launcher.recent_projects().is_empty() {
             let path = PathBuf::from(desktop.launcher.recent_projects()[0].path());
             vec![desktop.route_project_open(path)]
+        } else if resume && desktop.callbacks.default_workspace().is_some() {
+            vec![desktop.route_default_workspace()]
         } else if startup.projects.is_empty() {
             vec![desktop.open_launcher_window()]
         } else {
@@ -2201,9 +2238,15 @@ impl NativeDesktop {
                     self.status = Some(DesktopStatus::Error(error.to_string()));
                 }
             }
+            let scratch_focused = workspace
+                .editor()
+                .pane(workspace.editor().focused_pane())
+                .active_document()
+                .is_some_and(|id| workspace.editor().scratch(id).is_some());
             let marks = state
                 .editor_bindings
                 .get(&workspace.editor().focused_pane())
+                .filter(|_| !scratch_focused)
                 .and_then(|binding| {
                     state.project.editor_adapter().and_then(|adapter| {
                         adapter
@@ -2212,6 +2255,67 @@ impl NativeDesktop {
                     })
                 })
                 .unwrap_or_default();
+            if let Some(binding) = state
+                .editor_bindings
+                .get(&workspace.editor().focused_pane())
+                .filter(|_| !scratch_focused)
+                && let Some(adapter) = state.project.editor_adapter()
+                && let Ok(id) = adapter.active_style(binding.session(), binding.view())
+                && let Some(project) = &state.project.project_ui
+            {
+                let mut properties = project.snapshot.project.styles.resolved_properties(id);
+                if let Ok(format) =
+                    adapter.active_paragraph_format(binding.session(), binding.view())
+                {
+                    if let Some(alignment) = format.alignment {
+                        properties.alignment = Some(alignment);
+                    }
+                    if let Some(percent) = format.line_spacing_percent {
+                        properties.line_spacing = Some(f32::from(percent) / 100.0);
+                    }
+                }
+                if let Ok(marks) = adapter.caret_inline_marks(binding.session(), binding.view()) {
+                    use parchmint_editor_api::{InlineFontFamily, SemanticInlineMark};
+                    for mark in marks {
+                        match mark {
+                            SemanticInlineMark::FontFamily(family) => {
+                                properties.font_family = Some(
+                                    match family {
+                                        InlineFontFamily::Serif => "Source Serif 4",
+                                        InlineFontFamily::SansSerif => "Source Sans 3",
+                                        InlineFontFamily::Monospace => "Monospace",
+                                    }
+                                    .into(),
+                                )
+                            }
+                            SemanticInlineMark::FontSize(size) => {
+                                properties.font_size_points = Some(f32::from(size))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                workspace.editor_mut().set_effective_style(properties);
+                if let Some(style) = project.snapshot.project.styles.get(id) {
+                    workspace
+                        .editor_mut()
+                        .update(crate::EditorMessage::SetActiveParagraphStyle(
+                            style.display_name.clone(),
+                        ));
+                }
+            } else if scratch_focused && let Some(project) = &state.project.project_ui {
+                let id = parchmint_domain::StyleCatalog::body_id();
+                workspace
+                    .editor_mut()
+                    .set_effective_style(project.snapshot.project.styles.resolved_properties(id));
+                if let Some(style) = project.snapshot.project.styles.get(id) {
+                    workspace
+                        .editor_mut()
+                        .update(crate::EditorMessage::SetActiveParagraphStyle(
+                            style.display_name.clone(),
+                        ));
+                }
+            }
             workspace.editor_mut().set_active_inline_marks(marks);
             for (&pane, &document) in &state.mounted_documents {
                 let document_id = stable_id_string(document.as_bytes());
@@ -2300,11 +2404,31 @@ impl NativeDesktop {
                 mount_generation,
                 text,
             } => {
-                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                let formats = if let Some(NativeWindow::Project(state)) =
+                    self.windows.get_mut(&window)
                     && let Some(workspace) = state.workspace.as_mut()
                 {
                     workspace.editor_mut().finish_initial_prose(&document);
-                }
+                    let mut effects = Vec::new();
+                    for command in workspace.editor_mut().take_scratch_formats(&document) {
+                        if let Some(command) = command.editor_command() {
+                            effects.push(EditorEffect::Command { view, command });
+                        } else if workspace.editor().focused_pane() == pane
+                            && workspace.editor().pane(pane).active_document() == Some(&document)
+                        {
+                            // Link opens a popover instead of producing an editor
+                            // command. Keep it when promoting an empty scratch tab.
+                            effects.extend(
+                                workspace
+                                    .editor_mut()
+                                    .update(crate::EditorMessage::OpenLinkEditor),
+                            );
+                        }
+                    }
+                    Self::editor_effect_tasks(window, state, effects)
+                } else {
+                    Task::none()
+                };
                 let input = if text.is_empty() {
                     Task::none()
                 } else {
@@ -2340,7 +2464,7 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
-                Task::batch([input, close])
+                Task::batch([formats, input, close])
             }
             Message::WorkspaceLoaded { window, result } => {
                 if let Some(capture) = self
@@ -5053,6 +5177,23 @@ impl NativeDesktop {
         };
 
         let message = match message {
+            ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                crate::EditorMessage::Format(command),
+            )) if workspace
+                .editor()
+                .pane(workspace.editor().focused_pane())
+                .active_document()
+                .is_some_and(|id| workspace.editor().scratch(id).is_some()) =>
+            {
+                let pane = workspace.editor().focused_pane();
+                let id = workspace
+                    .editor()
+                    .pane(pane)
+                    .active_document()
+                    .expect("scratch tab")
+                    .to_owned();
+                ProjectSurfaceMessage::Project(ProjectMessage::FormatScratch { pane, id, command })
+            }
             ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::ManageStyles) => {
                 ProjectSurfaceMessage::Project(ProjectMessage::ManageSettings(
                     crate::SettingsCategory::Styles,
@@ -5321,7 +5462,8 @@ impl NativeDesktop {
                     workspace.modal(),
                     Some(crate::ProjectModal::FileDraft { .. })
                 );
-                let modal_before = workspace.modal().is_some();
+                let modal_before_kind = workspace.modal().as_ref().map(std::mem::discriminant);
+                let modal_before = modal_before_kind.is_some();
                 let opens_hierarchy_context =
                     matches!(&message, ProjectMessage::OpenHierarchyContextMenu { .. });
                 let hierarchy_rename_target = match &message {
@@ -5385,14 +5527,15 @@ impl NativeDesktop {
                 if opens_hierarchy_context {
                     state.suppress_next_context_menu_dismissal = true;
                 }
-                let modal_after = workspace.modal().is_some();
+                let modal_after_kind = workspace.modal().as_ref().map(std::mem::discriminant);
+                let modal_after = modal_after_kind.is_some();
                 let focus_draft_title = !filing_draft
                     && matches!(
                         workspace.modal(),
                         Some(crate::ProjectModal::FileDraft { .. })
                     );
-                let focus_modal_initial = !modal_before && modal_after;
-                if !modal_before && modal_after {
+                let focus_modal_initial = modal_after && modal_before_kind != modal_after_kind;
+                if focus_modal_initial {
                     state
                         .shell
                         .open_dialog(crate::DialogKind::RestoreConfirmation);
@@ -9137,6 +9280,12 @@ impl NativeDesktop {
                     font,
                 })?;
             }
+            crate::EditorCommand::SetParagraphFormat(format) => {
+                execute(EditorCommandKind::SetParagraphFormat {
+                    range: selection,
+                    format,
+                })?;
+            }
             crate::EditorCommand::ApplyParagraphStyle(style) => {
                 let style = state
                     .project
@@ -10606,6 +10755,26 @@ impl NativeDesktop {
         self.route_project_open(project)
     }
 
+    fn route_default_workspace(&mut self) -> Task<Message> {
+        let project = self
+            .callbacks
+            .default_workspace()
+            .expect("default workspace path");
+        let callbacks = Arc::clone(&self.callbacks);
+        self.opening_project = true;
+        Task::perform(
+            Self::run_native_blocking_operation("open workspace", move || {
+                callbacks
+                    .open_default_workspace()
+                    .map_err(|error| NativeTaskOutcome::failed("open workspace", "callback", error))
+            }),
+            move |result| Message::ProjectOpenFinished {
+                project: project.clone(),
+                result,
+            },
+        )
+    }
+
     fn route_project_open(&mut self, project: PathBuf) -> Task<Message> {
         if self.opening_project {
             return Task::none();
@@ -10688,6 +10857,30 @@ impl NativeDesktop {
                     window.project.display().to_string(),
                     "just now",
                 );
+                // Replace the untouched first-launch workspace when the writer
+                // chooses a project, retaining it whenever it contains authored data.
+                let blank_workspace = self.callbacks.default_workspace().and_then(|path| {
+                    self.windows.iter().find_map(|(id, native)| match native {
+                        NativeWindow::Project(state)
+                            if state.project.project == path
+                                && state.autosave.is_clean()
+                                && state.project.project_ui.as_ref().is_some_and(|ui| {
+                                    ui.snapshot.project.revision.value() == 0
+                                        && ui.snapshot.documents.len() == 1
+                                        && ui
+                                            .snapshot
+                                            .documents
+                                            .iter()
+                                            .all(|doc| doc.body == "<p></p>")
+                                }) =>
+                        {
+                            Some(*id)
+                        }
+                        _ => None,
+                    })
+                });
+                let close_blank =
+                    blank_workspace.map_or_else(Task::none, |id| self.close_window(id));
                 let open_project = self.open_project_window(window);
                 let close_launcher = self
                     .windows
@@ -10696,7 +10889,7 @@ impl NativeDesktop {
                         matches!(window, NativeWindow::Launcher).then_some(*id)
                     })
                     .map_or_else(Task::none, |id| self.finish_close(id));
-                Task::batch([open_project, close_launcher])
+                Task::batch([open_project, close_launcher, close_blank])
             }
             Ok(NativeProjectOpenResult::Focused(capability)) => {
                 self.status = None;
@@ -10726,6 +10919,13 @@ impl NativeDesktop {
             }
         };
         if self.windows.is_empty() {
+            if self
+                .callbacks
+                .default_workspace()
+                .is_some_and(|path| path != project)
+            {
+                return Task::batch([task, self.route_default_workspace()]);
+            }
             Task::batch([task, self.open_launcher_window()])
         } else {
             task
@@ -11869,12 +12069,26 @@ fn destination_button(
     })
 }
 
+fn application_icon() -> Option<window::Icon> {
+    static ICON: std::sync::OnceLock<Option<window::Icon>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon.png")));
+        let mut reader = decoder.read_info().ok()?;
+        let mut rgba = vec![0; reader.output_buffer_size()?];
+        let info = reader.next_frame(&mut rgba).ok()?;
+        rgba.truncate(info.buffer_size());
+        window::icon::from_rgba(rgba, info.width, info.height).ok()
+    })
+    .clone()
+}
+
 fn window_settings(size: (f32, f32), minimum: (u32, u32)) -> window::Settings {
     window::Settings {
         size: iced::Size::new(size.0, size.1),
         min_size: Some(iced::Size::new(minimum.0 as f32, minimum.1 as f32)),
         position: window::Position::Centered,
         exit_on_close_request: false,
+        icon: application_icon(),
         ..window::Settings::default()
     }
 }
@@ -11888,6 +12102,7 @@ fn capture_window_settings(capture: &NativeCaptureRequest) -> window::Settings {
         position: window::Position::Centered,
         resizable: false,
         exit_on_close_request: false,
+        icon: application_icon(),
         ..window::Settings::default()
     }
 }

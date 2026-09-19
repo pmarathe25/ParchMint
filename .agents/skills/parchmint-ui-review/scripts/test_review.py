@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -44,6 +45,18 @@ class ReviewTests(unittest.TestCase):
             self.assertTrue(output.is_dir())
             with self.assertRaises(FileExistsError):
                 review.new_output(output, repo)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows symlinks require privileges")
+    def test_repository_alias_cannot_bypass_output_isolation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            repo = root / "repository"
+            repo.mkdir()
+            alias = root / "alias"
+            alias.symlink_to(repo, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                review.new_output(alias / "artifacts", alias)
+            self.assertFalse((repo / "artifacts").exists())
 
     def test_gallery_preserves_times_and_escapes_names_and_urls(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -112,7 +125,7 @@ assert.equal(controls.img.src,'c');assert.equal(controls.button.textContent,'Pla
 
     def test_native_isolates_paths_and_copies_the_fixture(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             repo = root / "repo"
             source = repo / "tests/parchmint-test-support/fixtures/canonical/minimal-project"
             source.mkdir(parents=True)

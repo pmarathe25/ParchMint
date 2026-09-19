@@ -43,20 +43,23 @@ pub fn create_project(run: &IsolatedRun, project: &Path, title: &str) -> Desktop
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("launch application");
     harness
-        .click_text(HarnessWindow::Launcher, "Create Project")
+        .click_text(HarnessWindow::Project, "My Writing")
+        .expect("open project menu");
+    harness
+        .click_text(HarnessWindow::Project, "Create Project")
         .expect("open project form");
     harness
-        .type_into(HarnessWindow::Launcher, "Project title", title)
+        .type_into(HarnessWindow::Project, "Project title", title)
         .expect("enter title");
     harness
         .type_into(
-            HarnessWindow::Launcher,
+            HarnessWindow::Project,
             "Project destination",
             project.to_string_lossy(),
         )
         .expect("enter destination");
     harness
-        .click_text(HarnessWindow::Launcher, "Create and Open")
+        .click_text(HarnessWindow::Project, "Create and Open")
         .expect("create project");
     harness
 }

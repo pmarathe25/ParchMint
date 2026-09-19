@@ -812,7 +812,11 @@ fn export_snapshot(
     let manuscript = export_nodes(&snapshot.project, NodeId::manuscript_root())?;
     let research = export_nodes(&snapshot.project, NodeId::research_root())?;
     let mut project = ExportProjectSnapshot::new(
-        ExportStyleCatalog::new(snapshot.styles_css.clone()),
+        ExportStyleCatalog::new(
+            ProjectFormatCodec::default()
+                .export_styles(&snapshot.project.styles, &snapshot.styles_css)
+                .map_err(|error| ProjectQueryError::new(error.to_string()))?,
+        ),
         ExportDefaults {
             emit_titles: snapshot.project.export_settings.emit_titles
                 != ProjectExportSetting::Disabled,

@@ -9,10 +9,56 @@ import tempfile
 import unittest
 from unittest import mock
 
-from package import build_package, cargo_metadata, dependency_notices, native_version, stage
+from package import macos_package, build_package, cargo_metadata, dependency_notices, native_version, stage
+from macos_signing import configure
 
 
 class PackageTests(unittest.TestCase):
+    def test_missing_apple_account_uses_ad_hoc_signing_but_partial_config_fails(self):
+        with mock.patch.dict("os.environ", {}, clear=True), mock.patch("macos_signing.subprocess.run") as run:
+            configure()
+            run.assert_not_called()
+            with mock.patch.dict("os.environ", {"SIGNING_IDENTITY": "Developer ID: Test"}):
+                with self.assertRaises(SystemExit):
+                    configure()
+            run.assert_not_called()
+
+    def test_macos_seals_the_completed_bundle_before_building_the_image(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict("os.environ", {}, clear=True):
+            staged = Path(temporary) / "payload"
+            staged.mkdir()
+            output = Path(temporary) / "release.dmg"
+            with mock.patch("package.subprocess.run") as run:
+                macos_package(staged, output)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0][:2], ["xattr", "-cr"])
+            self.assertEqual(commands[1][:4], ["codesign", "--force", "--sign", "-"])
+            self.assertEqual(commands[2][:4], ["codesign", "--verify", "--deep", "--strict"])
+            self.assertEqual(commands[3][:2], ["hdiutil", "create"])
+            self.assertEqual(commands[4][:2], ["hdiutil", "verify"])
+
+    def test_distribution_requires_signing_and_staples_only_after_notarization(self):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict("os.environ", {
+            "PARCHMINT_REQUIRE_NOTARIZATION": "1",
+        }, clear=True):
+            staged = Path(temporary) / "payload"
+            staged.mkdir()
+            output = Path(temporary) / "release.dmg"
+            with mock.patch("package.subprocess.run") as run:
+                with self.assertRaises(ValueError):
+                    macos_package(staged, output)
+                run.assert_not_called()
+            with mock.patch.dict("os.environ", {
+                "PARCHMINT_MACOS_SIGNING_IDENTITY": "Developer ID Application: Test",
+                "PARCHMINT_MACOS_NOTARY_PROFILE": "test-profile",
+            }), mock.patch("package.subprocess.run") as run:
+                macos_package(staged, output)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertIn("--options", commands[1])
+            self.assertEqual(commands[-3][:3], ["xcrun", "notarytool", "submit"])
+            self.assertEqual(commands[-2][:3], ["xcrun", "stapler", "staple"])
+            self.assertEqual(commands[-1][:3], ["xcrun", "stapler", "validate"])
+
     def test_cargo_metadata_uses_utf8_even_with_a_windows_code_page(self):
         metadata = {"packages": [{"description": "はと — a writing tool"}], "workspace_members": []}
         payload = json.dumps(metadata, ensure_ascii=False).encode("utf-8")

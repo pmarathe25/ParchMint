@@ -160,10 +160,10 @@ fn novel_application_performance() {
         .unwrap();
     harness.press_key(WINDOW, HarnessKey::ArrowLeft).unwrap();
     let typing_one = samples(256, || harness.type_focused(WINDOW, "x").unwrap());
+    let title = harness.active_editor_tab_title().unwrap();
+    harness.right_click_text(WINDOW, title).unwrap();
     let start = Instant::now();
-    harness
-        .click_target(WINDOW, HarnessTarget::ToggleCompanion)
-        .unwrap();
+    harness.click_text(WINDOW, "Open in companion").unwrap();
     let split_ms = ms(start);
     assert!(harness.editor_panes_share_session().unwrap());
     harness

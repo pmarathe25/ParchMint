@@ -474,6 +474,47 @@ impl ProjectFormatCodec {
         parse_css(text).map(|rules| CanonicalStyles { rules })
     }
 
+    /// Resolved CSS for export. Stored rules retain authored inheritance;
+    /// exported rules materialize it and support both reserved names and IDs.
+    pub fn export_styles(&self, catalog: &StyleCatalog, css: &str) -> Result<String, FormatError> {
+        let existing = self.decode_styles(css.as_bytes())?;
+        let mut rules = existing
+            .rules
+            .into_iter()
+            .filter(|rule| managed_style_id(&rule.selector).is_none())
+            .collect::<Vec<_>>();
+        for style in catalog.iter() {
+            let declarations = encode_style_properties(&catalog.resolved_properties(style.id));
+            rules.push(CssRule {
+                selector: managed_style_selector(style.id),
+                declarations: declarations.clone(),
+            });
+            let alias = match style.role {
+                StyleRole::Body => Some(("body", "p")),
+                StyleRole::DocumentTitle => Some(("document-title", "")),
+                StyleRole::Heading1 => Some(("heading-1", "h1")),
+                StyleRole::Heading2 => Some(("heading-2", "h2")),
+                StyleRole::Heading3 => Some(("heading-3", "h3")),
+                StyleRole::BlockQuote => Some(("block-quote", "blockquote")),
+                StyleRole::Verse => Some(("verse", "")),
+                StyleRole::Custom => None,
+            };
+            if let Some((name, tag)) = alias {
+                if !tag.is_empty() {
+                    rules.push(CssRule {
+                        selector: tag.into(),
+                        declarations: declarations.clone(),
+                    });
+                }
+                rules.push(CssRule {
+                    selector: format!("[data-style-id=\"{name}\"]"),
+                    declarations,
+                });
+            }
+        }
+        Ok(render_css(&rules))
+    }
+
     pub fn decode_dictionary(&self, bytes: &[u8]) -> Result<CanonicalDictionary, FormatError> {
         let text = utf8(bytes, "dictionary")?;
         if text.contains('\r') {
@@ -3045,7 +3086,7 @@ fn parse_start_tag(token: &str) -> Result<(String, BTreeMap<String, String>, boo
         remaining = &after_quote[value_end + quote.len_utf8()..];
         let name = canonical_attribute_name(name)?;
         validate_html_attribute(&tag, &name, &value)?;
-        let value = if name == "data-font-size" {
+        let value = if matches!(name.as_str(), "data-font-size" | "data-line-spacing") {
             value
                 .parse::<u16>()
                 .expect("validated font size")
@@ -3128,6 +3169,12 @@ fn validate_html_attribute(tag: &str, name: &str, value: &str) -> Result<(), For
             .parse::<u16>()
             .is_ok_and(|size| (1..=512).contains(&size)),
         ("hr", "data-kind") => matches!(value, "scene-break" | "page-break"),
+        ("p" | "h1" | "h2" | "h3" | "blockquote" | "li", "data-alignment") => {
+            matches!(value, "left" | "center" | "right" | "justify")
+        }
+        ("p" | "h1" | "h2" | "h3" | "blockquote" | "li", "data-line-spacing") => value
+            .parse::<u16>()
+            .is_ok_and(|value| (50..=400).contains(&value)),
         (_, "data-block-id" | "data-style-id") => is_safe_identifier(value),
         _ => false,
     };

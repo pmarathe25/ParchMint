@@ -66,12 +66,30 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
     harness
         .press_command_key(HarnessWindow::Project, 's')
         .unwrap();
+    let document = harness
+        .active_editor_document_id(EditorPane::Primary)
+        .unwrap();
+    let manifest = parchmint_project_format::ProjectFormatCodec::default()
+        .decode_manifest(&std::fs::read(project.join("project.toml")).unwrap())
+        .unwrap();
+    let active_node = manifest.value()["parchmint-structure"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node.get("document-id").and_then(|id| id.as_str()) == Some(&document))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
     let workspace_path = std::fs::read_dir(run.root().join("data/workspaces"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .find(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "json")
+                && serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap())
+                    .unwrap()["views"]
+                    .as_array()
+                    .is_some_and(|views| views.iter().any(|view| view["node"] == active_node))
         })
         .unwrap();
     let before = std::fs::read(&workspace_path).unwrap();
@@ -367,9 +385,7 @@ fn changed_drafts_remain_recoverable_without_exposing_an_unfiled_section() {
             .contains_text(HarnessWindow::Project, "Manuscript · 0 words")
             .unwrap()
     );
-    harness
-        .close_editor_tab(HarnessWindow::Project, EditorPane::Primary, primary)
-        .unwrap();
+    // Closing the workspace preserves both drafts without filing either one.
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
         .unwrap();
@@ -832,7 +848,10 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
         .expect("read primary document identity");
 
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
+        .right_click_text(HarnessWindow::Project, "Tide Journal")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Open in companion")
         .expect("open the same source beside the primary pane");
     assert_eq!(
         document_id,
@@ -1097,7 +1116,7 @@ fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
         .click_target(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
         .unwrap();
     harness
-        .drag_text_to_text(HarnessWindow::Project, "Opening", "Untitled Document")
+        .drag_text_to_text(HarnessWindow::Project, "Opening", "Untitled")
         .unwrap();
     assert!(
         !harness

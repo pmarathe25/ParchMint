@@ -333,6 +333,28 @@ fn sanitize_body(body: &str) -> String {
         }
         output.push('<');
         output.push_str(&token.name);
+        if is_block_tag(&token.name) {
+            let mut paragraph_style = String::new();
+            for (name, value) in &token.attributes {
+                match (name.as_str(), value.as_str()) {
+                    ("data-alignment", "left" | "center" | "right" | "justify") => {
+                        paragraph_style.push_str(&format!("text-align:{value};"))
+                    }
+                    ("data-line-spacing", _) => {
+                        if let Ok(percent @ 50..=400) = value.parse::<u16>() {
+                            paragraph_style
+                                .push_str(&format!("line-height:{};", f32::from(percent) / 100.0));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !paragraph_style.is_empty() {
+                output.push_str(" style=\"");
+                output.push_str(&paragraph_style);
+                output.push('"');
+            }
+        }
         if token.name == "span" {
             let mut font_style = String::new();
             for (name, value) in &token.attributes {

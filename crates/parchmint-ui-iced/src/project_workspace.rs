@@ -110,6 +110,7 @@ struct HierarchyPointerDrag {
     anchor_before: Option<String>,
     grab_offset: Point,
     card_width: f32,
+    from_card: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,6 +900,7 @@ impl<'a> CardsState<'a> {
     pub(crate) fn motion_generation(&self) -> u64 {
         let mut hash = DefaultHasher::new();
         self.section_id.hash(&mut hash);
+        self.expanded.hash(&mut hash);
         for id in self.explorer.preorder_ids() {
             id.hash(&mut hash);
             self.explorer.nodes[id].parent.hash(&mut hash);
@@ -1584,17 +1586,13 @@ impl SettingsState {
         true
     }
 
-    pub fn categories(&self) -> [SettingsCategoryItem; 4] {
-        [
-            SettingsCategory::Appearance,
-            SettingsCategory::Styles,
-            SettingsCategory::Metadata,
-            SettingsCategory::Dictionaries,
-        ]
-        .map(|category| SettingsCategoryItem {
-            category,
-            label: category.label(),
-            selected: self.selected_category == category,
+    pub fn categories(&self) -> [SettingsCategoryItem; 2] {
+        [SettingsCategory::Appearance, SettingsCategory::Dictionaries].map(|category| {
+            SettingsCategoryItem {
+                category,
+                label: category.label(),
+                selected: self.selected_category == category,
+            }
         })
     }
 
@@ -1619,6 +1617,19 @@ impl SettingsState {
                     })
             })
             .collect()
+    }
+
+    pub(crate) fn resolved_style_properties(&self, id: &str) -> parchmint_domain::StyleProperties {
+        let catalog = parchmint_domain::StyleCatalog::from_definitions(
+            self.style_definitions.values().cloned(),
+        );
+        catalog
+            .ok()
+            .and_then(|catalog| {
+                parchmint_editor_api::style_id_from_canonical(id)
+                    .map(|id| catalog.resolved_properties(id))
+            })
+            .unwrap_or_default()
     }
 
     pub fn styles(&self) -> Vec<StyleSummary<'_>> {
@@ -3667,6 +3678,11 @@ impl ProjectTaskCompletion {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectMessage {
     NewDraft(EditorPane),
+    FormatScratch {
+        pane: EditorPane,
+        id: String,
+        command: crate::FormattingCommand,
+    },
     EditScratch {
         pane: EditorPane,
         id: String,
@@ -4437,6 +4453,12 @@ impl ProjectWorkspace {
                 .is_some_and(|(id, key)| id == node && key.as_deref() == field)
     }
 
+    pub(crate) fn hierarchy_drag_is_card(&self) -> bool {
+        self.pointer_drag
+            .as_ref()
+            .is_some_and(|drag| drag.from_card)
+    }
+
     pub(crate) fn card_drag_geometry(&self) -> (Point, f32) {
         self.pointer_drag
             .as_ref()
@@ -4461,7 +4483,11 @@ impl ProjectWorkspace {
     ) -> Option<DragDestination> {
         let drag = self.pointer_drag.as_ref()?;
         if self.dragged_subtree_contains(id) {
-            return drag.destination.clone();
+            return Some(
+                drag.destination
+                    .clone()
+                    .unwrap_or_else(|| DragDestination::BeforeSibling(drag.source_id.clone())),
+            );
         }
         self.explorer
             .normalized_selected_ids()
@@ -5456,6 +5482,15 @@ impl ProjectWorkspace {
                 self.editor.new_scratch(pane);
                 Vec::new()
             }
+            ProjectMessage::FormatScratch { pane, id, command } => self
+                .editor
+                .format_scratch(&id, command)
+                .then_some(ProjectEffect::CreateDraft {
+                    pane,
+                    scratch_id: id,
+                })
+                .into_iter()
+                .collect(),
             ProjectMessage::EditScratch { pane, id, action } => self
                 .editor
                 .edit_scratch(&id, action)
@@ -5807,13 +5842,11 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SelectMetadataField(field_id) => {
                 if self.settings.metadata_definitions.contains_key(&field_id) {
-                    self.settings.selected_category = SettingsCategory::Metadata;
                     self.settings.selected_detail = Some(SettingsDetail::MetadataField(field_id));
                 }
                 Vec::new()
             }
             ProjectMessage::CreateMetadataField => {
-                self.settings.selected_category = SettingsCategory::Metadata;
                 self.settings.new_metadata_field = Some(MetadataDefinition {
                     label: String::new(),
                     description: None,
@@ -5964,7 +5997,6 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SelectStyle(style_id) => {
                 if self.settings.style_definitions.contains_key(&style_id) {
-                    self.settings.selected_category = SettingsCategory::Styles;
                     self.settings.selected_detail = Some(SettingsDetail::Style(style_id));
                 }
                 Vec::new()
@@ -6119,6 +6151,7 @@ impl ProjectWorkspace {
                 if let Some(drag) = self.pointer_drag.as_mut() {
                     drag.grab_offset = grab_offset;
                     drag.card_width = width;
+                    drag.from_card = true;
                 }
                 effects
             }
@@ -6150,6 +6183,7 @@ impl ProjectWorkspace {
                         anchor_before,
                         grab_offset: Point::new(20.0, 20.0),
                         card_width: 320.0,
+                        from_card: false,
                     });
                     self.cards_drag_destination = None;
                     self.hierarchy_context_menu = None;
@@ -6590,7 +6624,6 @@ impl ProjectWorkspace {
                     SettingsCategory::Styles | SettingsCategory::Metadata
                 ) {
                     self.settings_manager = Some(category);
-                    self.settings.selected_category = category;
                     if category == SettingsCategory::Styles
                         && let Some((id, _)) =
                             self.settings
@@ -6606,6 +6639,12 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::SelectSettingsCategory(category) => {
+                if matches!(
+                    category,
+                    SettingsCategory::Styles | SettingsCategory::Metadata
+                ) {
+                    return self.update(ProjectMessage::ManageSettings(category));
+                }
                 self.settings.selected_category = category;
                 if category == SettingsCategory::Dictionaries {
                     vec![ProjectEffect::LoadGlobalDictionary]
@@ -8353,7 +8392,7 @@ mod tests {
                 .settings()
                 .categories()
                 .map(|category| category.label),
-            ["Appearance", "Styles", "Metadata fields", "Dictionaries",]
+            ["Appearance", "Dictionaries"]
         );
 
         workspace.update(ProjectMessage::SelectSettingsCategory(

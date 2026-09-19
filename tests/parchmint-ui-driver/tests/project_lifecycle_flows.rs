@@ -13,13 +13,17 @@ fn style_fields_keep_multicharacter_values_until_submitted() {
         .resize(HarnessWindow::Project, 1440.0, 900.0)
         .unwrap();
     harness
-        .click_target(
+        .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Settings),
+            HarnessTarget::EditorPrimary,
+            "Style sample",
         )
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Styles")
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
         .unwrap();
     harness.click_text(HarnessWindow::Project, "Body").unwrap();
     let before = std::fs::read(project.join("styles.css")).ok();
@@ -114,15 +118,18 @@ fn opening_a_project_reports_errors_and_allows_retry() {
         LaunchRequest::launcher(),
     )
     .unwrap();
+    reopened
+        .click_text(HarnessWindow::Project, "My Writing")
+        .unwrap();
     reopened.fail_next(ProductionFaultPoint::ProjectOpen, ProductionFaultKind::Io);
     reopened.set_next_path_selection(&project);
     let error = reopened
-        .click_text(HarnessWindow::Launcher, "Open Project")
+        .click_text(HarnessWindow::Project, "Open Project")
         .expect_err("an open failure must be reported");
     assert!(error.to_string().contains("application reported an error"));
     reopened.set_next_path_selection(&project);
     reopened
-        .click_text(HarnessWindow::Launcher, "Open Project")
+        .click_text(HarnessWindow::Project, "Open Project")
         .unwrap();
     assert!(!reopened.hierarchy_titles().unwrap().is_empty());
     reopened.close(HarnessWindow::Project).unwrap();

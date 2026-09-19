@@ -147,6 +147,16 @@ jobs:
         run: python -m unittest discover -s packaging -p 'test_*.py'
       - name: Fetch locked sources for dependency notices
         run: cargo +$RUST_TOOLCHAIN fetch --locked
+      - name: Configure macOS distribution signing
+        if: matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MACOS_APP_PASSWORD }}
+          TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+        run: python packaging/macos_signing.py
       - name: Create native package
         run: python packaging/package.py --binary "target/${{ matrix.target }}/release/parchmint${{ matrix.suffix }}" --platform "${{ matrix.platform }}" --output release
       - name: Verify Linux installation
@@ -155,14 +165,19 @@ jobs:
           sudo apt-get install -y ./release/*.deb
           parchmint --version
           sudo apt-get remove -y parchmint
-      - name: Verify macOS disk image
+      - name: Verify installed macOS application and native UI
         if: matrix.platform == 'macos'
         run: |
-          mountpoint=$(mktemp -d)
-          hdiutil attach release/*.dmg -mountpoint "$mountpoint" -readonly -nobrowse
-          trap 'hdiutil detach "$mountpoint"' EXIT
-          "$mountpoint/ParchMint.app/Contents/MacOS/parchmint" --version
-          test -f "$mountpoint/ParchMint.app/Contents/Resources/licenses/dependencies/packages.json"
+          version=$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          python packaging/verify_macos.py --image release/*.dmg --version "$version" \
+            --architecture "$(uname -m)" --output "$RUNNER_TEMP/macos-verification"
+      - name: Retain macOS verification captures
+        if: always() && matrix.platform == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-verification-${{ matrix.target }}
+          path: ${{ runner.temp }}/macos-verification
+          if-no-files-found: warn
       - name: Verify Windows installation
         if: matrix.platform == 'windows'
         shell: pwsh
@@ -181,9 +196,12 @@ jobs:
             $uninstall = Start-Process msiexec.exe -ArgumentList "/x `"$package`" /qn /norestart" -Wait -PassThru
             if ($uninstall.ExitCode -notin @(0, 3010)) { throw "MSI removal failed: $($uninstall.ExitCode)" }
           }
+      - name: Remove temporary macOS signing keychain
+        if: always() && matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/v')
+        run: security delete-keychain "$RUNNER_TEMP/parchmint-signing.keychain-db" || true
       - uses: actions/upload-artifact@v4
         with:
-          name: ParchMint-${{ matrix.platform }}
+          name: ParchMint-${{ matrix.target }}
           path: |
             release/*.deb
             release/*.dmg

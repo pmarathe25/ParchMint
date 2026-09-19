@@ -4,4 +4,5 @@ Name=ParchMint
 Comment=Plan and write novels locally
 Exec=parchmint %f
 Terminal=false
+Icon=parchmint
 Categories=Office;WordProcessor;

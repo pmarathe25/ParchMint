@@ -402,7 +402,7 @@ impl ShellLayout {
             explorer_width: Self::scale_dimension(Self::DEFAULT_EXPLORER_WIDTH, scale),
             inspector_width: Self::scale_dimension(Self::DEFAULT_INSPECTOR_WIDTH, scale),
             explorer_visible: true,
-            inspector_visible: true,
+            inspector_visible: false,
         }
     }
 

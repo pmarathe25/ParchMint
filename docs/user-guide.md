@@ -7,10 +7,16 @@ See [installation](install.md) for release downloads and setup.
 Shortcuts use **Ctrl** on Windows and Linux or **Command** on macOS, called the
 *primary modifier* below.
 
+ParchMint opens your most recent project directly. On first launch it opens
+**My Writing**, a local workspace in the application-data directory. Use the
+project title menu to create or open another project. The comments sidebar starts
+hidden; the comments button in the status bar reveals it. Opening the companion pane for the first
+time creates an empty tab.
+
 ## Create or open a project
 
-ParchMint reopens your most recently opened project. On first launch, or when
-that project cannot open, it shows the project chooser.
+ParchMint reopens your most recently opened project. If it cannot open, the app
+opens the local **My Writing** workspace.
 
 Click the project title at the top left to create or open another project, or
 choose a recent project. Narrow windows show the project icon instead. Deleted
@@ -97,7 +103,7 @@ with the shared Explorer selection.
 
 ## Write and format
 
-The formatting controls in the top bar act on the focused editor pane. They provide paragraph styles, font family and size, bold,
+The formatting controls in the top bar act on the focused editor pane. They provide paragraph styles, font family and size, paragraph alignment, line spacing, bold,
 italic, underline, strikethrough, lists, block quotes, links, and comments.
 The list button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
 Hover a link to see its destination, Ctrl+click (Command+click on macOS) to open it,
@@ -107,9 +113,8 @@ and scene breaks. Hover over an icon to see its action. **B/I/U/S** shows
 active formatting. With no selection, a formatting toggle applies to subsequent
 typing.
 
-Font family and size apply to selected text or subsequent typing. Choose
+Font family and size apply to selected text or subsequent typing. Their controls show the effective font at the cursor, including inherited style values. Choose
 **Style default** for family or **Auto** for size to inherit the paragraph style.
-The **Font** and **Size** placeholders indicate inherited or mixed formatting.
 Copy and cut currently place plain text on the system clipboard. Rich-text paste
 retains supported formatting, including ParchMint's font attributes.
 
@@ -118,9 +123,9 @@ Document or text Selection count. In Overview, Selected totals the selected
 chapters and groups without counting overlapping selections twice. Manuscript
 shows all manuscript document text; Research is excluded. Synopsis and metadata never contribute to word counts.
 
-Create and edit paragraph styles using the settings icon beside the style picker.
+Create and edit paragraph styles from **Manage Styles** at the bottom of the style dropdown.
 Manage metadata with **Fields…** in Overview; new fields appear on outline rows.
-Both editors are also available in **Settings**. Style changes apply throughout
+Settings contains appearance and dictionary controls. Style changes apply throughout
 the project. Typography, spacing, and
 pagination have separate groups. Press **Enter** or **Apply** to save a property;
 leave it blank to inherit. Dropdowns control inheritance, alignment, and on/off
@@ -204,7 +209,7 @@ are excluded. Use **Open** or **Reveal** after completion to inspect the file.
 
 Close the project and copy its complete folder, including hidden files. This
 preserves current writing, saved History, and recovery data. Open the copied
-folder from the launcher on the destination computer.
+folder from the project title menu on the destination computer.
 
 The `.parchmint/cache/` directory can be rebuilt. Window and tab layout lives in
 the device's application-data directory and does not travel with the project.

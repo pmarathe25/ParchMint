@@ -53,12 +53,12 @@ impl CardItem<'_> {
     pub(crate) fn synopsis_height(&self, width: f32) -> f32 {
         (text_height(
             self.synopsis,
-            (self.text_width(width) - 18.0).max(1.0),
+            (self.text_width(width) - 6.0).max(1.0),
             14,
             20.0,
             CARD_FONT,
-        ) + 18.0)
-            .max(38.0)
+        ) + 4.0)
+            .max(24.0)
     }
 
     pub(crate) fn row_height(&self, width: f32) -> f32 {
@@ -88,17 +88,17 @@ impl CardItem<'_> {
         if !group || self.expanded {
             height += 6.0 + self.synopsis_height(width);
             if !self.editable_metadata.is_empty() {
-                height += 10.0
+                height += 4.0
                     + self
                         .editable_metadata
                         .iter()
                         .map(|(label, value)| {
                             metadata_height(value, (text_width - 96.0).max(30.0))
-                                .max(text_height(label, 88.0, 12, 15.6, CARD_FONT) + 9.0)
-                                + 8.0
+                                .max(text_height(label, 88.0, 12, 15.6, CARD_FONT) + 3.0)
+                                + 4.0
                         })
                         .sum::<f32>()
-                    - 8.0;
+                    - 4.0;
             }
         }
         if !group {
@@ -134,5 +134,5 @@ fn measured_text(content: &str, width: f32, size: u32, line_height: f32, font: F
 }
 
 pub(crate) fn metadata_height(value: &str, width: f32) -> f32 {
-    (text_height(value, (width - 18.0).max(1.0), 13, 18.0, CARD_FONT) + 18.0).max(36.0)
+    (text_height(value, (width - 6.0).max(1.0), 13, 18.0, CARD_FONT) + 4.0).max(22.0)
 }

@@ -642,6 +642,12 @@ pub(super) fn parse_attributes(
                 .parse::<u16>()
                 .is_ok_and(|size| (1..=512).contains(&size)),
             ("hr", "data-kind") => matches!(value.as_str(), "scene-break" | "page-break"),
+            ("p" | "h1" | "h2" | "h3" | "blockquote" | "li", "data-alignment") => {
+                matches!(value.as_str(), "left" | "center" | "right" | "justify")
+            }
+            ("p" | "h1" | "h2" | "h3" | "blockquote" | "li", "data-line-spacing") => value
+                .parse::<u16>()
+                .is_ok_and(|value| (50..=400).contains(&value)),
             (_, "data-block-id" | "data-style-id") => is_safe_identifier(&value),
             _ => false,
         };

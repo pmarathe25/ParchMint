@@ -368,6 +368,7 @@ pub enum FindDirection {
 pub enum FormattingCommand {
     ParagraphStyle(String),
     InlineFont(parchmint_editor_api::InlineFont),
+    ParagraphFormat(parchmint_editor_api::ParagraphFormatCommand),
     Bold,
     Italic,
     Underline,
@@ -388,6 +389,7 @@ pub enum FormattingCommand {
 pub enum EditorCommand {
     ApplyParagraphStyle(String),
     SetInlineFont(parchmint_editor_api::InlineFont),
+    SetParagraphFormat(parchmint_editor_api::ParagraphFormatCommand),
     ToggleBold,
     ToggleItalic,
     ToggleUnderline,
@@ -452,9 +454,12 @@ pub enum EditorCommand {
 }
 
 impl FormattingCommand {
-    fn editor_command(self) -> Option<EditorCommand> {
+    pub(crate) fn editor_command(self) -> Option<EditorCommand> {
         match self {
             FormattingCommand::InlineFont(font) => Some(EditorCommand::SetInlineFont(font)),
+            FormattingCommand::ParagraphFormat(format) => {
+                Some(EditorCommand::SetParagraphFormat(format))
+            }
             FormattingCommand::ParagraphStyle(style) => {
                 Some(EditorCommand::ApplyParagraphStyle(style))
             }
@@ -1455,6 +1460,7 @@ pub struct EditorWorkspace {
     toolbar_focused: bool,
     style_names: Vec<String>,
     active_style: String,
+    effective_style: parchmint_domain::StyleProperties,
     active_inline_marks: Vec<parchmint_editor_api::SemanticInlineMark>,
     link_editor: LinkEditorState,
     local_search: BTreeMap<ViewId, LocalSearchState>,
@@ -1483,6 +1489,7 @@ pub struct EditorWorkspace {
     split_ratio: f64,
     tab_drag: Option<TabPointerDrag>,
     scratch_tabs: BTreeMap<String, text_editor::Content>,
+    scratch_formats: BTreeMap<String, Vec<FormattingCommand>>,
     promoting_scratch: BTreeSet<String>,
     next_scratch: u64,
     initial_prose: BTreeSet<String>,
@@ -1526,7 +1533,22 @@ impl EditorWorkspace {
         self.scratch_tabs
             .insert(id.clone(), text_editor::Content::new());
         self.open_tab(pane, TabSpec::new(&id, "Untitled"));
+        self.active_style = "Body".into();
+        self.effective_style =
+            parchmint_domain::StyleProperties::for_role(parchmint_domain::StyleRole::Body);
         id
+    }
+
+    pub(crate) fn format_scratch(&mut self, id: &str, command: FormattingCommand) -> bool {
+        self.scratch_formats
+            .entry(id.to_owned())
+            .or_default()
+            .push(command);
+        id.starts_with("scratch-") && self.promoting_scratch.insert(id.to_owned())
+    }
+
+    pub(crate) fn take_scratch_formats(&mut self, document: &str) -> Vec<FormattingCommand> {
+        self.scratch_formats.remove(document).unwrap_or_default()
     }
 
     pub(crate) fn scratch(&self, id: &str) -> Option<&text_editor::Content> {
@@ -1550,6 +1572,9 @@ impl EditorWorkspace {
         title: &str,
     ) -> Option<String> {
         let content = self.scratch_tabs.remove(id)?;
+        if let Some(formats) = self.scratch_formats.remove(id) {
+            self.scratch_formats.insert(document.to_owned(), formats);
+        }
         self.promoting_scratch.remove(id);
         for pane in [&mut self.primary, &mut self.companion] {
             for tab in &mut pane.tabs {
@@ -1650,6 +1675,9 @@ impl EditorWorkspace {
                 "Verse".into(),
             ],
             active_style: "Body".into(),
+            effective_style: parchmint_domain::StyleProperties::for_role(
+                parchmint_domain::StyleRole::Body,
+            ),
             active_inline_marks: Vec::new(),
             link_editor: LinkEditorState::default(),
             local_search,
@@ -1678,6 +1706,7 @@ impl EditorWorkspace {
             split_ratio: 0.5,
             tab_drag: None,
             scratch_tabs: BTreeMap::new(),
+            scratch_formats: BTreeMap::new(),
             promoting_scratch: BTreeSet::new(),
             next_scratch: 0,
             initial_prose: BTreeSet::new(),
@@ -1755,6 +1784,9 @@ impl EditorWorkspace {
                 .map(|style| style.display_name.clone())
                 .collect(),
             active_style: "Body".into(),
+            effective_style: parchmint_domain::StyleProperties::for_role(
+                parchmint_domain::StyleRole::Body,
+            ),
             active_inline_marks: Vec::new(),
             link_editor: LinkEditorState::default(),
             local_search,
@@ -1783,6 +1815,7 @@ impl EditorWorkspace {
             split_ratio: 0.5,
             tab_drag: None,
             scratch_tabs: BTreeMap::new(),
+            scratch_formats: BTreeMap::new(),
             promoting_scratch: BTreeSet::new(),
             next_scratch: 0,
             initial_prose: BTreeSet::new(),
@@ -2311,6 +2344,14 @@ impl EditorWorkspace {
         &self.style_names
     }
 
+    pub(crate) fn set_effective_style(&mut self, style: parchmint_domain::StyleProperties) {
+        self.effective_style = style;
+    }
+
+    pub(crate) fn effective_style(&self) -> &parchmint_domain::StyleProperties {
+        &self.effective_style
+    }
+
     pub fn active_style(&self) -> &str {
         &self.active_style
     }
@@ -2562,9 +2603,14 @@ impl EditorWorkspace {
                 let expanded = self.expanded_pane() != Some(pane);
                 self.focus_pane(pane);
                 self.expanded_pane = expanded.then_some(pane);
-                vec![EditorEffect::RestoreEditorFocus {
-                    view: self.pane(pane).view,
-                }]
+                self.pane(pane)
+                    .active_document()
+                    .is_some_and(|id| self.scratch(id).is_none())
+                    .then_some(EditorEffect::RestoreEditorFocus {
+                        view: self.pane(pane).view,
+                    })
+                    .into_iter()
+                    .collect()
             }
             EditorMessage::ToggleCompanion => {
                 let companion_visible = self.companion_is_visible()
@@ -2574,17 +2620,13 @@ impl EditorWorkspace {
                     self.set_companion_visible(false);
                 } else if self.companion.is_populated() {
                     self.focus_pane(EditorPane::Companion);
-                } else if let Some(tab) = self
-                    .primary
-                    .tabs
-                    .iter()
-                    .find(|tab| Some(tab.id()) == self.primary.active_document())
-                    .cloned()
-                {
-                    return self.open_tab(EditorPane::Companion, tab);
+                } else {
+                    self.new_scratch(EditorPane::Companion);
+                    return Vec::new();
                 }
                 self.pane(self.focused_pane)
-                    .is_populated()
+                    .active_document()
+                    .is_some_and(|id| self.scratch(id).is_none())
                     .then_some(EditorEffect::RestoreEditorFocus {
                         view: self.pane(self.focused_pane).view,
                     })

@@ -12,8 +12,8 @@ building from source.
 | Ubuntu 24.04 or compatible Debian-based Linux, Intel or AMD 64-bit | `linux-x86_64.deb` |
 
 The filename includes the version, for example
-`ParchMint-0.1.0-windows-x86_64.msi`. Other Linux distributions and architectures,
-including Intel Macs, can [build from source](https://github.com/pmarathe25/ParchMint#run-from-source).
+`ParchMint-0.1.1-windows-x86_64.msi`. Other Linux distributions and architectures,
+can [build from source](https://github.com/pmarathe25/ParchMint#run-from-source).
 
 ## Windows
 
@@ -30,8 +30,11 @@ and choose **Uninstall**.
 Open the `.dmg` file and drag **ParchMint.app** to **Applications**. Eject the disk
 image, then open ParchMint from Applications.
 
-Packages are currently unsigned and not notarized. If macOS blocks the app,
-follow Apple's [instructions for opening an app from an unidentified developer](https://support.apple.com/en-ie/102445).
+Packages built from this version use an ad hoc signature and are not Apple notarized. If macOS blocks
+first launch because it cannot verify the developer, open **System Settings →
+Privacy & Security**, find the ParchMint notice, and choose **Open Anyway** after
+checking that the download came from the project's releases. For a damaged-app message, verify the download checksum and use a package built
+with the updated signing checks.
 To remove ParchMint, move it from Applications to the Trash.
 
 ## Linux
@@ -40,7 +43,7 @@ From the download folder, use `apt` to install the package and its dependencies.
 Substitute your downloaded filename:
 
 ```sh
-sudo apt install ./ParchMint-0.1.0-linux-x86_64.deb
+sudo apt install ./ParchMint-0.1.1-linux-x86_64.deb
 ```
 
 Open **ParchMint** from the application menu, or run `parchmint` in a terminal.
@@ -54,7 +57,7 @@ from source on that distribution.
 Close ParchMint and install the newer package using the same steps. On macOS,
 choose **Replace** when copying the new app to Applications. Keep projects in
 your own folders; updating or uninstalling the app leaves them in place. Open
-an existing project folder from the launcher after updating.
+an existing project folder from the project title menu after updating.
 
 ## Check a download
 

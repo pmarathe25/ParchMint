@@ -509,6 +509,12 @@ impl<E: DocumentEngine> EditorSession<E> {
             }
             EditorCommandKind::Undo => self.apply_undo(),
             EditorCommandKind::Redo => self.apply_redo(),
+            EditorCommandKind::SetParagraphFormat { range, format } => {
+                let (start, length) = self.validated_range(*range)?;
+                self.apply_engine_change(|engine| {
+                    engine.set_paragraph_format(start, start + length, *format)
+                })
+            }
             EditorCommandKind::ApplyParagraphStyle { range, style } => {
                 let (start, length) = self.validated_range(*range)?;
                 let end = start
@@ -1264,6 +1270,31 @@ impl EditorCoreSession {
         Err(invalid("selection is outside semantic blocks"))
     }
 
+    pub fn active_paragraph_format(
+        &self,
+        view: ViewId,
+    ) -> Result<parchmint_editor_api::ParagraphFormat, EditorError> {
+        let head = position(self.selection(view)?.head())?;
+        let snapshot = self.inner.engine.snapshot();
+        let mut offset = 0;
+        for block in &snapshot.blocks {
+            let end = offset
+                + if matches!(
+                    block.kind,
+                    SemanticBlockKind::SceneBreak | SemanticBlockKind::PageBreak
+                ) {
+                    1
+                } else {
+                    block.text.chars().count()
+                };
+            if head <= end {
+                return Ok(block.paragraph_format());
+            }
+            offset = end + 1;
+        }
+        Ok(Default::default())
+    }
+
     pub fn selection_word_count(&self, view: ViewId) -> Result<Option<usize>, EditorError> {
         let selection = self.selection(view)?;
         if selection.is_collapsed() {
@@ -1276,6 +1307,20 @@ impl EditorCoreSession {
                 .filter(|word| *word != "\u{fffc}")
                 .count(),
         ))
+    }
+
+    pub fn caret_inline_marks(&self, view: ViewId) -> Result<Vec<SemanticInlineMark>, EditorError> {
+        let head = self.selection(view)?.head();
+        Ok(self
+            .inner
+            .typing_marks
+            .get(&view)
+            .cloned()
+            .unwrap_or_else(|| {
+                self.inner
+                    .engine
+                    .inline_marks(EditorSelection::new(head, head))
+            }))
     }
 
     pub fn active_inline_marks(

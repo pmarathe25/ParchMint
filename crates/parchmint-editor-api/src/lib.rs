@@ -670,6 +670,19 @@ pub enum ListDepthChange {
     Outdent,
 }
 
+/// Direct paragraph formatting; absent properties inherit from the style.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParagraphFormat {
+    pub alignment: Option<TextAlignment>,
+    pub line_spacing_percent: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphFormatCommand {
+    Alignment(TextAlignment),
+    LineSpacing(u16),
+}
+
 /// One WYSIWYG block projected independently from canonical HTML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticBlock {
@@ -677,6 +690,7 @@ pub struct SemanticBlock {
     kind: SemanticBlockKind,
     content: Arc<SemanticBlockContent>,
     list_depth: usize,
+    paragraph_format: ParagraphFormat,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -721,7 +735,17 @@ impl SemanticBlock {
                 scalar_len,
             }),
             list_depth: 0,
+            paragraph_format: ParagraphFormat::default(),
         }
+    }
+
+    pub fn with_paragraph_format(mut self, format: ParagraphFormat) -> Self {
+        self.paragraph_format = format;
+        self
+    }
+
+    pub const fn paragraph_format(&self) -> ParagraphFormat {
+        self.paragraph_format
     }
 
     pub const fn id(&self) -> BlockId {
@@ -1094,6 +1118,10 @@ pub enum EditorCommandKind {
     ApplyParagraphStyle {
         range: EditorSelection,
         style: StyleId,
+    },
+    SetParagraphFormat {
+        range: EditorSelection,
+        format: ParagraphFormatCommand,
     },
     ToggleInlineMark {
         range: EditorSelection,

@@ -30,6 +30,12 @@ macOS, and Linux. The [UI crate](../../README.md) registers them with Iced.
 | --- | --- | --- | ---: | ---: |
 | `source-serif-4/SourceSerif4-Regular.ttf` | `TTF/SourceSerif4-Regular.ttf` | Source Serif 4 / Regular | 400 | 80 |
 
+Additional static faces from the same release archives are bundled for formatting:
+Source Serif 4 Bold, Italic (`It`), Bold Italic (`BoldIt`), Semibold, and
+Semibold Italic; Source Sans 3 Italic, Bold Italic, Medium Italic, and Semibold
+Italic. They use the same family licenses and upstream `TTF/` filenames.
+The archive Regular faces were compared byte-for-byte with the existing assets.
+
 ## Verification
 
 [SHA256SUMS](SHA256SUMS) records every vendored file, including both upstream license

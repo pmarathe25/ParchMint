@@ -655,6 +655,22 @@ impl EditorIcedAdapter {
         })
     }
 
+    pub fn active_paragraph_format(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<parchmint_editor_api::ParagraphFormat, EditorError> {
+        self.with_session(session, |state| state.core.active_paragraph_format(view))
+    }
+
+    pub fn caret_inline_marks(
+        &self,
+        session: SharedEditorSession,
+        view: ViewId,
+    ) -> Result<Vec<parchmint_editor_api::SemanticInlineMark>, EditorError> {
+        self.with_session(session, |state| state.core.caret_inline_marks(view))
+    }
+
     pub fn active_style(
         &self,
         session: SharedEditorSession,

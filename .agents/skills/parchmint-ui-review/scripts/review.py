@@ -31,7 +31,7 @@ def repository(explicit=None):
 
 def new_output(path, repo):
     path = Path(path).resolve()
-    if path.is_relative_to(repo):
+    if path.is_relative_to(Path(repo).resolve()):
         raise ValueError("Keep review artifacts outside the repository.")
     path.mkdir(parents=True, exist_ok=False)
     return path

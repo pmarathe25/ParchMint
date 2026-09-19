@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-application"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-contracts",
  "parchmint-domain",
@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-contracts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2424,11 +2424,11 @@ dependencies = [
 
 [[package]]
 name = "parchmint-design-system"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "parchmint-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-application",
  "parchmint-diagnostics",
@@ -2462,7 +2462,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-diagnostics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -2470,11 +2470,11 @@ dependencies = [
 
 [[package]]
 name = "parchmint-domain"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "parchmint-editor-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-contracts",
  "parchmint-domain",
@@ -2484,14 +2484,14 @@ dependencies = [
 
 [[package]]
 name = "parchmint-editor-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-editor-api",
 ]
 
 [[package]]
 name = "parchmint-editor-iced"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "iced",
  "iced_test",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-export-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
  "parchmint-project-format",
@@ -2519,14 +2519,14 @@ dependencies = [
 
 [[package]]
 name = "parchmint-export-html"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-export-api",
 ]
 
 [[package]]
 name = "parchmint-history-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
  "parchmint-project-format",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-history-git2"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "git2",
  "libz-sys",
@@ -2547,11 +2547,11 @@ dependencies = [
 
 [[package]]
 name = "parchmint-platform-api"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "parchmint-platform-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "muda",
  "parchmint-platform-api",
@@ -2560,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-preferences"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-editor-api",
  "serde",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-project-format"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-contracts",
  "parchmint-domain",
@@ -2580,7 +2580,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-project-fs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-project-format",
  "parchmint-project-repository",
@@ -2589,11 +2589,11 @@ dependencies = [
 
 [[package]]
 name = "parchmint-project-repository"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "parchmint-recovery-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-contracts",
  "parchmint-domain",
@@ -2604,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-recovery-fs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-contracts",
  "parchmint-domain",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-save"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
  "parchmint-history-api",
@@ -2632,14 +2632,14 @@ dependencies = [
 
 [[package]]
 name = "parchmint-search-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
 ]
 
 [[package]]
 name = "parchmint-search-sqlite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-search-api",
  "rusqlite",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-spellcheck-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
  "parchmint-editor-api",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-spellcheck-en-us"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fst",
  "harper-core",
@@ -2666,14 +2666,14 @@ dependencies = [
 
 [[package]]
 name = "parchmint-test-support"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-project-format",
 ]
 
 [[package]]
 name = "parchmint-ui-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-application",
  "parchmint-domain",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-ui-driver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-desktop",
  "parchmint-domain",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-ui-iced"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ashpd",
  "chrono",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-ui-verification"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-ui-iced",
  "png 0.18.1",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "parchmint-workspace-state"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "parchmint-domain",
  "serde",

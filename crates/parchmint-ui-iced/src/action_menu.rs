@@ -21,14 +21,14 @@ pub(crate) fn action_menu<'a, Message: Clone + 'a>(
     let trigger = components::semantic_button(
         container(
             row![icon_sized(icon, 16), icon_sized(Icon::ChevronDown, 10)]
-                .spacing(4)
+                .spacing(2)
                 .align_y(iced::alignment::Vertical::Center),
         )
         .center(Length::Fill),
     )
-    .width(44)
+    .width(36)
     .height(32)
-    .padding([0, 7])
+    .padding([0, 4])
     .on_press_maybe(enabled.then_some(()))
     .style(move |_, status| {
         components::button_style(
@@ -64,8 +64,43 @@ pub(crate) fn anchored_menu<'a, Message: Clone + 'a>(
                 message,
                 icon: None,
                 target: None,
+                divider_before: false,
             })
             .collect(),
+        theme,
+        width,
+        menu_style: Box::new(move |_| components::menu_style(theme)),
+    })
+}
+
+pub(crate) fn menu_with_footer<'a, Message: Clone + 'a>(
+    trigger: Element<'a, ()>,
+    options: Vec<(String, Message)>,
+    footer: (String, Message, crate::HarnessTarget),
+    theme: ParchMintTheme,
+    width: f32,
+) -> Element<'a, Message> {
+    let mut options: Vec<_> = options
+        .into_iter()
+        .map(|(label, message)| Choice {
+            label,
+            message,
+            icon: None,
+            target: None,
+            divider_before: false,
+        })
+        .collect();
+    options.push(Choice {
+        label: footer.0,
+        message: footer.1,
+        icon: None,
+        target: Some(footer.2),
+        divider_before: true,
+    });
+    Element::new(ActionMenu {
+        trigger,
+        options,
+        enabled: true,
         theme,
         width,
         menu_style: Box::new(move |_| components::menu_style(theme)),
@@ -282,7 +317,11 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
             ),
             bounds.y + translation.y,
         );
-        if self.options.iter().all(|choice| choice.icon.is_none()) {
+        if self
+            .options
+            .iter()
+            .all(|choice| choice.icon.is_none() && !choice.divider_before)
+        {
             return Some(
                 state.motion.overlay(
                     iced::widget::overlay::menu::Menu::new(
@@ -315,6 +354,11 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                 .iter()
                 .enumerate()
                 .fold(column![].spacing(2), |items, (index, choice)| {
+                    let items = if choice.divider_before {
+                        items.push(container(iced::widget::rule::horizontal(1)).padding([4, 6]))
+                    } else {
+                        items
+                    };
                     let mut label = row![]
                         .spacing(10)
                         .align_y(iced::alignment::Vertical::Center);
@@ -340,11 +384,13 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                         button.into()
                     })
                 });
-        let content: Element<'_, Message> = container(options)
-            .width(width)
-            .padding(4)
-            .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-            .into();
+        let content: Element<'_, Message> =
+            container(iced::widget::scrollable(options).height(Length::Shrink))
+                .max_height(440)
+                .width(width)
+                .padding(4)
+                .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+                .into();
         state.menu.diff(&content);
         Some(
             state
@@ -365,6 +411,7 @@ struct Choice<Message> {
     message: Message,
     icon: Option<Icon>,
     target: Option<crate::HarnessTarget>,
+    divider_before: bool,
 }
 impl<Message> std::fmt::Display for Choice<Message> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -390,6 +437,7 @@ pub(crate) fn icon_menu<'a, Message: Clone + 'a>(
                 message,
                 icon: Some(icon),
                 target: Some(target),
+                divider_before: false,
             })
             .collect(),
     })

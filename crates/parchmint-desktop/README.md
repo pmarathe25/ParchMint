@@ -6,9 +6,8 @@ and platform services into one production application.
 ## Interface and lifecycle
 
 `DesktopBootstrap::production` assembles services. `run` loads preferences,
-opens the requested or most recent project, and enters the UI driver. First launch
-and failed reopening show the project chooser; the project title opens it in an
-existing workspace. The executable
+opens the requested or most recent project, and enters the UI driver. First launch opens **My Writing** in the application-data directory. Failed
+reopening falls back to that workspace; the project title opens the project menu. The executable
 accepts a project path, `--help`, `--version`, and `capture` for native screenshots.
 See [main.rs](src/main.rs) for arguments.
 

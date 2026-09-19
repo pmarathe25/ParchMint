@@ -4,12 +4,14 @@
            UpgradeCode="7C3C9E58-CC4B-4BC6-A859-EE2E09C83B21">
     <MajorUpgrade DowngradeErrorMessage="A newer version of ParchMint is already installed." />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="ParchMintIcon" SourceFile="!(bindpath.payload)\parchmint.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ParchMintIcon" />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="ParchMint">
         <Component Id="Application" Guid="*">
           <File Id="Executable" Source="!(bindpath.payload)\parchmint.exe" KeyPath="yes">
             <Shortcut Id="StartMenuShortcut" Name="ParchMint" Directory="ProgramMenuFolder"
-                      Advertise="yes" WorkingDirectory="INSTALLFOLDER" />
+                      Advertise="yes" Icon="ParchMintIcon" WorkingDirectory="INSTALLFOLDER" />
           </File>
         </Component>
       </Directory>

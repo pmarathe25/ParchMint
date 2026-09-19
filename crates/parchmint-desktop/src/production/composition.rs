@@ -316,6 +316,7 @@ fn assemble_with_platform(
         shared: Arc::clone(&shared),
     });
     let ui = Arc::new(ProductionDesktopUi {
+        default_workspace: paths.data().join("My Writing.parchmint"),
         state: Mutex::new(ProductionUiState::default()),
         registry: platform.iced_window_registry(),
         editor: shared.editor.clone(),

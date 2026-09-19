@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import plistlib
 import platform as host_platform
@@ -29,6 +30,7 @@ def stage(binary, destination, platform, version):
                 "CFBundleDisplayName": "ParchMint",
                 "CFBundleExecutable": "parchmint",
                 "CFBundlePackageType": "APPL",
+                "CFBundleIconFile": "parchmint.icns",
                 "CFBundleShortVersionString": version,
                 "CFBundleVersion": version,
                 "NSHighResolutionCapable": True,
@@ -45,6 +47,14 @@ def stage(binary, destination, platform, version):
         documentation = destination
     executable.parent.mkdir(parents=True, exist_ok=True)
     documentation.mkdir(parents=True, exist_ok=True)
+    if platform == "macos":
+        shutil.copy2(ROOT / "packaging/icons/parchmint.icns", documentation / "parchmint.icns")
+    elif platform == "linux":
+        icons = destination / "usr/share/icons/hicolor/1024x1024/apps"
+        icons.mkdir(parents=True)
+        shutil.copy2(ROOT / "packaging/icons/parchmint.png", icons / "parchmint.png")
+    else:
+        shutil.copy2(ROOT / "packaging/icons/parchmint.ico", destination / "parchmint.ico")
     shutil.copy2(binary, executable)
     executable.chmod(0o755)
     shutil.copy2(ROOT / "LICENSE", documentation / "LICENSE")
@@ -123,6 +133,32 @@ def debian_package(staged, output, version, architecture):
                     str(staged), str(output)], check=True)
 
 
+def macos_package(staged, output):
+    """Seal the final bundle before imaging; optionally notarize the distribution."""
+    bundle = staged / "ParchMint.app"
+    identity = os.environ.get("PARCHMINT_MACOS_SIGNING_IDENTITY", "-")
+    profile = os.environ.get("PARCHMINT_MACOS_NOTARY_PROFILE")
+    required = os.environ.get("PARCHMINT_REQUIRE_NOTARIZATION") == "1"
+    if (required or profile) and (identity == "-" or not profile):
+        raise ValueError("macOS distribution requires a Developer ID identity and notary keychain profile")
+    subprocess.run(["xattr", "-cr", str(bundle)], check=True)
+    signing = ["codesign", "--force", "--sign", identity]
+    if identity != "-":
+        signing += ["--options", "runtime", "--timestamp"]
+    subprocess.run([*signing, str(bundle)], check=True)
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(bundle)], check=True)
+    (staged / "Applications").symlink_to("/Applications", target_is_directory=True)
+    subprocess.run(["hdiutil", "create", "-volname", "ParchMint", "-srcfolder", str(staged),
+                    "-format", "UDZO", str(output)], check=True)
+    subprocess.run(["hdiutil", "verify", str(output)], check=True)
+    if profile:
+        subprocess.run(["codesign", "--sign", identity, "--timestamp", str(output)], check=True)
+        subprocess.run(["xcrun", "notarytool", "submit", str(output), "--keychain-profile", profile,
+                        "--wait"], check=True)
+        subprocess.run(["xcrun", "stapler", "staple", str(output)], check=True)
+        subprocess.run(["xcrun", "stapler", "validate", str(output)], check=True)
+
+
 def build_package(staged, output, platform, version, architecture):
     """Build with the host's native tools and hash the finished package."""
     native_version(version)
@@ -135,9 +171,7 @@ def build_package(staged, output, platform, version, architecture):
     if platform == "linux":
         debian_package(staged, output, version, {"x86_64": "amd64", "aarch64": "arm64"}[architecture])
     elif platform == "macos":
-        (staged / "Applications").symlink_to("/Applications", target_is_directory=True)
-        subprocess.run(["hdiutil", "create", "-volname", "ParchMint", "-srcfolder", str(staged),
-                        "-format", "UDZO", str(output)], check=True)
+        macos_package(staged, output)
     elif platform == "windows":
         subprocess.run(["wix", "build", str(ROOT / "packaging/windows/package.wxs"),
                         "-arch", {"x86_64": "x64", "aarch64": "arm64"}[architecture],

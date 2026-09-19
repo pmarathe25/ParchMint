@@ -56,6 +56,8 @@ fn geometry_clamps_sidebars_and_scales_without_clipping() {
     assert_eq!(ShellLayout::MIN_WINDOW_SIZE, (1280, 720));
 
     let mut layout = ShellLayout::for_window(1920, 1080);
+    assert!(!layout.inspector_is_visible());
+    layout.set_inspector_visible(true);
     layout.resize_explorer(400);
     layout.resize_inspector(500);
     assert_eq!(layout.ribbon().height(), ShellLayout::RIBBON_HEIGHT);

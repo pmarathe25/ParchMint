@@ -16,6 +16,21 @@ pub fn production_token(name: &str) -> Option<&'static DesignToken> {
 /// appearance-specific assets.
 pub fn production_icon_svg(name: &str) -> Option<&'static str> {
     match name {
+        "format-align-left" => Some(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4h18M3 8h11M3 12h18M3 16h11M3 20h18"/></svg>"#,
+        ),
+        "format-align-center" => Some(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4h18M7 8h10M3 12h18M7 16h10M3 20h18"/></svg>"#,
+        ),
+        "format-align-right" => Some(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4h18M10 8h11M3 12h18M10 16h11M3 20h18"/></svg>"#,
+        ),
+        "format-align-justify" => Some(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M3 4h18M3 8h18M3 12h18M3 16h18M3 20h18"/></svg>"#,
+        ),
+        "format-line-spacing" => Some(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v18M2 6l3-3 3 3M2 18l3 3 3-3M12 5h10M12 12h10M12 19h10"/></svg>"#,
+        ),
         "launcher-project" => Some(LAUNCHER_PROJECT_ICON_SVG),
         "launcher-last-opened" => Some(LAUNCHER_LAST_OPENED_ICON_SVG),
         "workspace-project" => Some(WORKSPACE_PROJECT_ICON_SVG),
@@ -72,6 +87,11 @@ pub const PRODUCTION_ICON_NAMES: &[&str] = &[
     "format-block-quote",
     "format-link",
     "format-page-break",
+    "format-align-left",
+    "format-align-center",
+    "format-align-right",
+    "format-align-justify",
+    "format-line-spacing",
 ];
 
 /// The 20 px project-folder vector used by launcher recent-project cards.

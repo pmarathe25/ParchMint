@@ -11,7 +11,8 @@ revisions, and undo. Both panes share that session. Each view has its own cursor
 selection, local search, scroll, viewport, and focus; the concrete adapters divide
 logical selection from mounted-widget geometry.
 
-Commands include the revision they observed. A valid command applies once, maps
+Paragraph alignment and line spacing are direct per-block overrides layered on
+the paragraph style. Commands include the revision they observed. A valid command applies once, maps
 view positions and anchors, and advances the revision. Undo from either pane uses
 the shared document history.
 

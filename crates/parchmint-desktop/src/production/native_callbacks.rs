@@ -29,6 +29,7 @@ pub(super) struct ProductionDesktopUi {
     pub(super) platform: UiPlatformServices,
     pub(super) controls: ProductionControls,
     pub(super) driver: Arc<dyn NativeDesktopDriver>,
+    pub(super) default_workspace: PathBuf,
 }
 
 impl DesktopUi for ProductionDesktopUi {
@@ -216,6 +217,7 @@ impl ProductionDesktopUi {
                 capture,
                 callbacks: Arc::new(ProductionUiCallbacks {
                     runtime,
+                    default_workspace: self.default_workspace.clone(),
                     registry: self.registry.clone(),
                     editor: self.editor.clone(),
                     preferences: self.preferences.clone(),
@@ -232,6 +234,7 @@ struct ProductionUiCallbacks {
     runtime: DesktopRuntime,
     pub(super) registry: IcedWindowRegistry,
     pub(super) editor: Arc<EditorIcedAdapter>,
+    default_workspace: PathBuf,
     pub(super) preferences: Arc<dyn PreferenceService>,
     pub(super) appearance: Arc<dyn AppearanceService>,
     pub(super) platform: UiPlatformServices,
@@ -342,6 +345,22 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
                 .into_value()
                 .map(|selection| selection.as_path().to_path_buf())
         })
+    }
+
+    fn default_workspace(&self) -> Option<PathBuf> {
+        Some(self.default_workspace.clone())
+    }
+
+    fn open_default_workspace(&self) -> Result<NativeProjectOpenResult, String> {
+        if self.default_workspace.exists() {
+            self.open_project(self.default_workspace.clone())
+        } else {
+            self.create_project(NativeNewProjectRequest {
+                title: "My Writing".into(),
+                destination: self.default_workspace.clone(),
+                author: None,
+            })
+        }
     }
 
     fn resume_last_project(&self) -> bool {

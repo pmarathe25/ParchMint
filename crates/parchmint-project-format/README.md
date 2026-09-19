@@ -45,7 +45,8 @@ encoding, and hashing.
   dictionary ordering is stable.
 - Equivalent values encode identically. Re-encoding canonical content leaves its
   bytes unchanged.
-- HTML accepts supported semantic blocks and marks. Scripts, event handlers,
+- HTML accepts supported semantic blocks and marks, including validated
+  `data-alignment` and `data-line-spacing` paragraph overrides. Scripts, event handlers,
   remote embeds, arbitrary inline styles, and unsafe links are rejected.
 - Resource paths are relative; traversal, case collisions, and
   Unicode-normalization collisions are rejected.

@@ -137,12 +137,12 @@ fn author_can_configure_metadata_to_appear_on_cards() {
     harness
         .click_target(
             HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Settings),
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
-        .expect("open project settings");
+        .expect("open Overview");
     harness
-        .click_text(HarnessWindow::Project, "Metadata fields")
-        .expect("open metadata settings");
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
+        .expect("open metadata manager");
     harness
         .click_text(HarnessWindow::Project, "+ New field")
         .expect("start metadata field creation");
@@ -162,9 +162,12 @@ fn author_can_configure_metadata_to_appear_on_cards() {
         .click_text(HarnessWindow::Project, "Add field")
         .expect("persist the named metadata field");
     assert!(visible(&harness, "Point of view"));
-    harness
-        .click_text(HarnessWindow::Project, "Show on outline rows")
-        .expect("show the metadata field on cards");
+    for _ in 0..2 {
+        harness
+            .click_text(HarnessWindow::Project, "Show in Overview")
+            .expect("toggle card visibility off and back on");
+    }
+    harness.click_text(HarnessWindow::Project, "Done").unwrap();
     harness
         .click_target(
             HarnessWindow::Project,
@@ -446,12 +449,12 @@ fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
     harness
         .click_target(
             HarnessWindow::Project,
-            HarnessTarget::Ribbon(RibbonDestination::Settings),
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
-        .expect("open project settings");
+        .expect("open Overview");
     harness
-        .click_text(HarnessWindow::Project, "Metadata fields")
-        .expect("open metadata settings");
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
+        .expect("open metadata manager");
     harness
         .click_text(HarnessWindow::Project, "+ New field")
         .expect("start metadata field creation");
@@ -909,6 +912,9 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_text(HarnessWindow::Project, "Add comment")
         .expect("attach the comment to the selection");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
+        .unwrap();
     assert!(visible(&harness, "Unresolved"));
     assert!(
         visible(&harness, "Verify the weather detail."),

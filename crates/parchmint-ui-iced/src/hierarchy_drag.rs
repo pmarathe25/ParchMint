@@ -412,7 +412,7 @@ where
                     .position_over(layout.bounds())
                     .filter(|position| viewport.contains(*position));
                 if let Some(position) = position {
-                    state.press_origin = Some(state.last_pointer.unwrap_or(position));
+                    state.press_origin = Some(position);
                     state.grab_offset = position - layout.position();
                     state.dragging = false;
                 }

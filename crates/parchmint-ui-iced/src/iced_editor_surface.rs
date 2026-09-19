@@ -453,39 +453,44 @@ pub(crate) fn formatting_toolbar(
     let enabled = workspace
         .pane(workspace.focused_pane())
         .active_document()
-        .is_some_and(|id| workspace.scratch(id).is_none());
+        .is_some();
     if !enabled {
         return Space::new().height(0).into();
     }
     let style_selector = harness_target::target(
         HarnessTarget::ParagraphStyle,
-        pick_list(
-            workspace.style_names().to_vec(),
-            Some(workspace.active_style().to_owned()),
-            |style| format_message(FormattingCommand::ParagraphStyle(style)),
-        )
-        .placeholder("Paragraph style")
-        .width(100)
-        .padding([7, 8])
-        .text_line_height(iced::Pixels(18.0)),
+        crate::action_menu::menu_with_footer(
+            menu_trigger(workspace.active_style().to_owned(), 104.0, theme),
+            workspace
+                .style_names()
+                .iter()
+                .map(|style| {
+                    (
+                        style.clone(),
+                        format_message(FormattingCommand::ParagraphStyle(style.clone())),
+                    )
+                })
+                .collect(),
+            (
+                "Manage Styles".into(),
+                EditorCenterMessage::ManageStyles,
+                HarnessTarget::ManageStyles,
+            ),
+            theme,
+            190.0,
+        ),
     );
     use parchmint_editor_api::{InlineFont, InlineFontFamily, SemanticInlineMark};
-    let active_family = workspace
-        .active_inline_marks()
-        .iter()
-        .find_map(|mark| match mark {
-            SemanticInlineMark::FontFamily(family) => Some(match family {
-                InlineFontFamily::Serif => "Serif",
-                InlineFontFamily::SansSerif => "Sans serif",
-                InlineFontFamily::Monospace => "Monospace",
-            }),
-            _ => None,
-        });
     let family = harness_target::target(
         HarnessTarget::FontFamily,
         toolbar_tooltip(
             font_menu(
-                active_family.unwrap_or("Font").to_owned(),
+                workspace
+                    .effective_style()
+                    .font_family
+                    .as_deref()
+                    .unwrap_or("Source Serif 4")
+                    .to_owned(),
                 ["Style default", "Serif", "Sans serif", "Monospace"]
                     .into_iter()
                     .map(|label| {
@@ -506,7 +511,7 @@ pub(crate) fn formatting_toolbar(
                 110.0,
                 theme,
             ),
-            "Font family for selected text or subsequent typing; Font means inherited or mixed",
+            "Font family",
             theme,
         ),
     );
@@ -519,7 +524,7 @@ pub(crate) fn formatting_toolbar(
         });
     let mut sizes = vec!["Auto".to_owned()];
     sizes.extend(
-        [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72].map(|size| size.to_string()),
+        [8, 9, 10, 11, 12, 14, 15, 16, 18, 20, 24, 28, 32, 36, 48, 72].map(|size| size.to_string()),
     );
     if let Some(size) = &active_size
         && !sizes.contains(size)
@@ -530,7 +535,13 @@ pub(crate) fn formatting_toolbar(
         HarnessTarget::FontSize,
         toolbar_tooltip(
             font_menu(
-                active_size.unwrap_or_else(|| "Size".into()),
+                active_size.unwrap_or_else(|| {
+                    workspace
+                        .effective_style()
+                        .font_size_points
+                        .unwrap_or(15.0)
+                        .to_string()
+                }),
                 sizes
                     .into_iter()
                     .map(|size| {
@@ -540,7 +551,7 @@ pub(crate) fn formatting_toolbar(
                         (size, command)
                     })
                     .collect(),
-                68.0,
+                52.0,
                 theme,
             ),
             "Font size in points; Auto restores the paragraph style",
@@ -684,7 +695,10 @@ pub(crate) fn formatting_toolbar(
     .spacing(2)
     .align_y(Vertical::Center);
     let insertions = row![
-        formatting_icon_button(Icon::Link, "Link", FormattingCommand::Link, theme),
+        harness_target::target(
+            HarnessTarget::Link,
+            formatting_icon_button(Icon::Link, "Link", FormattingCommand::Link, theme),
+        ),
         harness_target::target(
             HarnessTarget::AddComment,
             toolbar_tooltip(
@@ -704,30 +718,15 @@ pub(crate) fn formatting_toolbar(
     .align_y(Vertical::Center);
     container(
         row![
-            row![
-                style_selector,
-                harness_target::target(
-                    HarnessTarget::ManageStyles,
-                    toolbar_tooltip(
-                        toolbar_button(
-                            icon_sized(Icon::Settings, 14),
-                            EditorCenterMessage::ManageStyles,
-                            false,
-                            theme
-                        ),
-                        "Create and edit paragraph styles",
-                        theme
-                    )
-                )
-            ]
-            .spacing(2),
+            style_selector,
             family,
             size,
             marks,
             paragraphs,
+            paragraph_options(workspace, theme),
             insertions
         ]
-        .spacing(8)
+        .spacing(3)
         .align_y(Vertical::Center),
     )
     .padding(0)
@@ -740,6 +739,109 @@ fn format_message(command: FormattingCommand) -> EditorCenterMessage {
     EditorCenterMessage::Workspace(EditorMessage::Format(command))
 }
 
+fn menu_trigger(label: String, width: f32, theme: ParchMintTheme) -> Element<'static, ()> {
+    components::semantic_button(
+        row![
+            text(label).size(13),
+            Space::new().width(Length::Fill),
+            icon_sized(Icon::ChevronDown, 10)
+        ]
+        .align_y(Vertical::Center),
+    )
+    .width(width)
+    .height(32)
+    .padding([7, 8])
+    .on_press(())
+    .style(move |_, status| {
+        components::button_style(
+            theme,
+            ButtonKind::Secondary,
+            button_interaction(status, false),
+        )
+    })
+    .into()
+}
+
+fn paragraph_options(
+    workspace: &EditorWorkspace,
+    theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    use parchmint_editor_api::{ParagraphFormatCommand as Format, TextAlignment};
+    let alignment = workspace
+        .effective_style()
+        .alignment
+        .unwrap_or(TextAlignment::Start);
+    let align_icon = match alignment {
+        TextAlignment::Start => Icon::AlignLeft,
+        TextAlignment::Center => Icon::AlignCenter,
+        TextAlignment::End => Icon::AlignRight,
+        TextAlignment::Justify => Icon::AlignJustify,
+    };
+    let align = crate::action_menu::action_menu(
+        align_icon,
+        vec![
+            (
+                "Align left",
+                format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
+                    TextAlignment::Start,
+                ))),
+            ),
+            (
+                "Center",
+                format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
+                    TextAlignment::Center,
+                ))),
+            ),
+            (
+                "Align right",
+                format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
+                    TextAlignment::End,
+                ))),
+            ),
+            (
+                "Justify",
+                format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
+                    TextAlignment::Justify,
+                ))),
+            ),
+        ],
+        true,
+        theme,
+    );
+    let spacing = crate::action_menu::action_menu(
+        Icon::LineSpacing,
+        [
+            ("Single", 100),
+            ("1.15", 115),
+            ("1.5", 150),
+            ("Double", 200),
+        ]
+        .map(|(label, percent)| {
+            (
+                label,
+                format_message(FormattingCommand::ParagraphFormat(Format::LineSpacing(
+                    percent,
+                ))),
+            )
+        })
+        .to_vec(),
+        true,
+        theme,
+    );
+    row![
+        harness_target::target(
+            HarnessTarget::Alignment,
+            toolbar_tooltip(align, "Alignment", theme)
+        ),
+        harness_target::target(
+            HarnessTarget::LineSpacing,
+            toolbar_tooltip(spacing, "Line spacing", theme)
+        ),
+    ]
+    .spacing(2)
+    .into()
+}
+
 fn font_menu(
     label: String,
     options: Vec<(String, EditorCenterMessage)>,
@@ -747,26 +849,7 @@ fn font_menu(
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
     crate::action_menu::anchored_menu(
-        components::semantic_button(
-            row![
-                text(label).size(13),
-                Space::new().width(Length::Fill),
-                icon_sized(Icon::ChevronDown, 10)
-            ]
-            .align_y(Vertical::Center),
-        )
-        .width(width)
-        .height(32)
-        .padding([7, 8])
-        .on_press(())
-        .style(move |_, status| {
-            components::button_style(
-                theme,
-                ButtonKind::Secondary,
-                button_interaction(status, false),
-            )
-        })
-        .into(),
+        menu_trigger(label, width, theme),
         options,
         theme,
         width.max(120.0),

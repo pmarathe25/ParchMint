@@ -80,7 +80,7 @@ impl Default for PaneLayout {
             inspector_width: 360,
             split_ratio: 0.5,
             explorer_collapsed: false,
-            inspector_collapsed: false,
+            inspector_collapsed: true,
             companion_open: false,
         }
     }

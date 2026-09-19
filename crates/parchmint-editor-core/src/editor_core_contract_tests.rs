@@ -2197,3 +2197,77 @@ fn collapsed_and_document_comment_anchors_are_supported_but_empty_reattach_is_no
     );
     assert_eq!(session.revision(), before);
 }
+
+#[test]
+fn paragraph_alignment_and_spacing_survive_typing_undo_and_reload() {
+    use parchmint_editor_api::{ParagraphFormatCommand, TextAlignment};
+    let mounted = view(1);
+    let mut session = EditorCoreSession::open(load("<p>First</p><p>Second</p>")).unwrap();
+    session.attach_view(mounted).unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SetParagraphFormat {
+                    range: selection(1, 10),
+                    format: ParagraphFormatCommand::Alignment(TextAlignment::Center),
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(mounted),
+            command(
+                1,
+                EditorCommandKind::SetParagraphFormat {
+                    range: selection(6, 6),
+                    format: ParagraphFormatCommand::LineSpacing(200),
+                },
+            ),
+        )
+        .unwrap();
+    let body = session.canonical_projection().body().to_owned();
+    assert_eq!(body.matches("data-alignment=\"center\"").count(), 2);
+    assert_eq!(body.matches("data-line-spacing=\"200\"").count(), 1);
+    let mut reopened = EditorCoreSession::open(load(&body)).unwrap();
+    reopened.attach_view(mounted).unwrap();
+    reopened
+        .execute(
+            origin(mounted),
+            command(
+                0,
+                EditorCommandKind::SetSelection {
+                    selection: selection(6, 6),
+                },
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .active_paragraph_format(mounted)
+            .unwrap()
+            .line_spacing_percent,
+        Some(200)
+    );
+    session
+        .execute(origin(mounted), command(2, EditorCommandKind::Undo))
+        .unwrap();
+    assert!(
+        !session
+            .canonical_projection()
+            .body()
+            .contains("data-line-spacing")
+    );
+    assert!(
+        session
+            .canonical_projection()
+            .body()
+            .contains("data-alignment")
+    );
+    session
+        .execute(origin(mounted), command(3, EditorCommandKind::Redo))
+        .unwrap();
+    assert_eq!(session.canonical_projection().body(), body);
+}
