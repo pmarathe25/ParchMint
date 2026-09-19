@@ -56,6 +56,9 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
     let run = IsolatedRun::new("deferred-scroll-layout").unwrap();
     let project = run.root().join("scroll.parchmint");
     let harness = create_project(&run, &project, "Scroll layout");
+    // The default My Writing workspace has the same reserved initial node IDs.
+    // A newly created document identifies this project's workspace uniquely.
+    create_document(&harness, "Manuscript", "Scroll document");
     harness
         .type_into_target(
             HarnessWindow::Project,
@@ -90,10 +93,10 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
         .unwrap()["id"]
         .as_str()
         .unwrap();
-    let workspace_path = std::fs::read_dir(run.root().join("data/workspaces"))
+    let workspace_paths = std::fs::read_dir(run.root().join("data/workspaces"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| {
+        .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "json")
                 && serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap())
@@ -101,7 +104,13 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
                     .as_array()
                     .is_some_and(|views| views.iter().any(|view| view["node"] == active_node))
         })
-        .unwrap();
+        .collect::<Vec<_>>();
+    assert_eq!(
+        workspace_paths.len(),
+        1,
+        "identify this project's workspace"
+    );
+    let workspace_path = workspace_paths.into_iter().next().unwrap();
     let before = std::fs::read(&workspace_path).unwrap();
     for _ in 0..5 {
         harness
