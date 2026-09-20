@@ -53,9 +53,9 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -122,11 +122,11 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         if: matrix.platform == 'windows'
         with:
           dotnet-version: '8.0.x'
@@ -172,7 +172,7 @@ jobs:
             --architecture "$(uname -m)" --output "$RUNNER_TEMP/macos-verification"
       - name: Retain macOS verification captures
         if: always() && matrix.platform == 'macos'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macOS-verification-${{ matrix.target }}
           path: ${{ runner.temp }}/macos-verification
@@ -198,7 +198,7 @@ jobs:
       - name: Remove temporary macOS signing keychain
         if: always() && matrix.platform == 'macos' && startsWith(github.ref, 'refs/tags/v')
         run: security delete-keychain "$RUNNER_TEMP/parchmint-signing.keychain-db" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ParchMint-${{ matrix.target }}
           path: |
@@ -218,8 +218,8 @@ jobs:
     env:
       RELEASE_TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Check release tag matches the package version
@@ -233,7 +233,7 @@ jobs:
           if os.environ["RELEASE_TAG"] != f"v{version}":
               raise SystemExit(f"Release tag must be v{version} to match Cargo.toml")
           PY
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: ParchMint-*
           merge-multiple: true
@@ -245,6 +245,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice title=Release already published::$RELEASE_TAG already exists; leaving it unchanged."
+            exit 0
+          fi
           gh release create "$RELEASE_TAG" release/*.deb release/*.dmg release/*.msi release/*.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
