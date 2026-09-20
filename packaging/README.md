@@ -22,7 +22,10 @@ git push origin main v0.1.1
 packages pass. It checks the tag against Cargo.toml, verifies checksums, and
 creates a release with installers, SHA-256 files, generated notes, and an
 installation link. Branch, pull-request, and manual builds retain Actions
-artifacts. Existing releases are not overwritten.
+artifacts. Existing releases are not overwritten. On a rerun, CI accepts an
+existing release only when it targets the same commit and contains every
+expected installer and SHA-256 file; an incomplete or inconsistent release
+fails validation.
 
 The publish job uses `GITHUB_TOKEN` with `contents: write`. macOS packages receive
 an ad hoc signature for bundle integrity. This does not establish publisher trust
