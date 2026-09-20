@@ -19,9 +19,29 @@ from package import (
     stage,
 )
 from macos_signing import configure
+from verify_release import expected_assets, verify_existing_release
 
 
 class PackageTests(unittest.TestCase):
+    def test_existing_release_must_match_commit_and_contain_every_asset(self):
+        tag = "v1.2.3"
+        commit = "0123456789abcdef"
+        release = {
+            "tagName": tag,
+            "targetCommitish": commit,
+            "assets": [{"name": name} for name in expected_assets(tag)],
+        }
+        verify_existing_release(release, tag, commit)
+
+        invalid_releases = {
+            "tag": {**release, "tagName": "v1.2.2"},
+            "target commit": {**release, "targetCommitish": "fedcba9876543210"},
+            "missing assets": {**release, "assets": release["assets"][:-1]},
+        }
+        for diagnostic, invalid in invalid_releases.items():
+            with self.subTest(diagnostic=diagnostic), self.assertRaisesRegex(ValueError, diagnostic):
+                verify_existing_release(invalid, tag, commit)
+
     def test_only_merged_usr_libc6_diversion_diagnostics_are_suppressed(self):
         diagnostics = "\n".join((
             "dpkg-shlibdeps: warning: diversions involved - output may be incorrect",
