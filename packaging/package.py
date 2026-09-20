@@ -10,6 +10,7 @@ import platform as host_platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 
@@ -103,6 +104,8 @@ def native_version(version):
 
 
 def debian_package(staged, output, version, architecture):
+    control = staged / "DEBIAN"
+    control.mkdir()
     # dpkg-shlibdeps needs source metadata, kept outside the installed payload.
     with tempfile.TemporaryDirectory(prefix="parchmint-shlibs-") as temporary:
         source = Path(temporary) / "debian"
@@ -110,14 +113,13 @@ def debian_package(staged, output, version, architecture):
         (source / "control").write_text("Source: parchmint\n\nPackage: parchmint\nArchitecture: any\n", encoding="utf-8")
         result = subprocess.run(
             ["dpkg-shlibdeps", "-O", "-e" + str(staged / "usr/bin/parchmint")],
-            cwd=temporary, check=True, stdout=subprocess.PIPE, encoding="utf-8",
+            cwd=temporary, check=True, capture_output=True, encoding="utf-8",
         )
+    report_dpkg_shlibdeps_diagnostics(result.stderr)
     linked = next(line.removeprefix("shlibs:Depends=") for line in result.stdout.splitlines()
                   if line.startswith("shlibs:Depends="))
     # Winit loads these at runtime, so they do not appear in ELF dependencies.
     dependencies = linked + ", libx11-6, libx11-xcb1, libxcursor1, libxi6, libxkbcommon-x11-0, libwayland-client0"
-    control = staged / "DEBIAN"
-    control.mkdir()
     size = sum(path.stat().st_size for path in staged.rglob("*") if path.is_file())
     (control / "control").write_text(
         f"Package: parchmint\nVersion: {version}\nArchitecture: {architecture}\n"
@@ -131,6 +133,25 @@ def debian_package(staged, output, version, architecture):
     )
     subprocess.run(["dpkg-deb", "--build", "--root-owner-group", "-Zxz", "--threads-max=1",
                     str(staged), str(output)], check=True)
+
+
+def report_dpkg_shlibdeps_diagnostics(diagnostics):
+    """Hide only Ubuntu's harmless merged-/usr libc6 diversion diagnostic."""
+    lines = diagnostics.splitlines()
+    retained = []
+    index = 0
+    diversion = "dpkg-shlibdeps: warning: diversions involved - output may be incorrect"
+    merged_usr = re.compile(
+        r"^ diversion by libc6 (?:from|to): /lib64/ld-linux-[^ ]+(?:\.usr-is-merged)?$"
+    )
+    while index < len(lines):
+        if lines[index] == diversion and index + 1 < len(lines) and merged_usr.fullmatch(lines[index + 1]):
+            index += 2
+            continue
+        retained.append(lines[index])
+        index += 1
+    if retained:
+        print(*retained, sep="\n", file=sys.stderr)
 
 
 def macos_package(staged, output):
