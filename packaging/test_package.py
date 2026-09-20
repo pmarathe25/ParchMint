@@ -9,11 +9,34 @@ import tempfile
 import unittest
 from unittest import mock
 
-from package import macos_package, build_package, cargo_metadata, dependency_notices, native_version, stage
+from package import (
+    build_package,
+    cargo_metadata,
+    dependency_notices,
+    macos_package,
+    native_version,
+    report_dpkg_shlibdeps_diagnostics,
+    stage,
+)
 from macos_signing import configure
 
 
 class PackageTests(unittest.TestCase):
+    def test_only_merged_usr_libc6_diversion_diagnostics_are_suppressed(self):
+        diagnostics = "\n".join((
+            "dpkg-shlibdeps: warning: diversions involved - output may be incorrect",
+            " diversion by libc6 from: /lib64/ld-linux-x86-64.so.2",
+            "dpkg-shlibdeps: warning: diversions involved - output may be incorrect",
+            " diversion by libc6 to: /lib64/ld-linux-x86-64.so.2.usr-is-merged",
+            "dpkg-shlibdeps: warning: an unexpected diagnostic",
+        ))
+        with mock.patch("sys.stderr") as stderr:
+            report_dpkg_shlibdeps_diagnostics(diagnostics)
+        stderr.write.assert_has_calls([
+            mock.call("dpkg-shlibdeps: warning: an unexpected diagnostic"),
+            mock.call("\n"),
+        ])
+
     def test_missing_apple_account_uses_ad_hoc_signing_but_partial_config_fails(self):
         with mock.patch.dict("os.environ", {}, clear=True), mock.patch("macos_signing.subprocess.run") as run:
             configure()
