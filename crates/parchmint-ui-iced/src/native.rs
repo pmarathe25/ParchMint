@@ -105,6 +105,19 @@ const INSPECTOR_COMMIT_DELAY: Duration = Duration::from_millis(700);
 /// current work as soon as History opens.
 const HISTORY_PAGE_SIZE: usize = 20;
 
+fn restore_search_scroll(workspace: &ProjectWorkspace) -> Task<Message> {
+    if workspace.sidebar_surface() != crate::SidebarSurface::GlobalSearch {
+        return Task::none();
+    }
+    iced::widget::operation::scroll_to(
+        crate::HarnessTarget::GlobalSearchResults.id(),
+        iced::widget::scrollable::AbsoluteOffset {
+            x: 0.0,
+            y: workspace.global_search().scroll_offset(),
+        },
+    )
+}
+
 fn reveal_outline_card(
     workspace: &mut ProjectWorkspace,
     layout: &ShellLayout,
@@ -5342,7 +5355,15 @@ impl NativeDesktop {
                         ),
                     ));
                 }
-                Self::workspace_persist_task(id, state)
+                let restore = if matches!(
+                    destination,
+                    RibbonDestination::Editor | RibbonDestination::GlobalSearch
+                ) {
+                    restore_search_scroll(workspace)
+                } else {
+                    Task::none()
+                };
+                Task::batch([restore, Self::workspace_persist_task(id, state)])
             }
             ProjectSurfaceMessage::ShowProjectChooser => unreachable!(),
             ProjectSurfaceMessage::ToggleExplorer => {
@@ -5350,7 +5371,12 @@ impl NativeDesktop {
                     || !state.shell.layout().explorer_is_visible();
                 state.shell.layout_mut().set_explorer_visible(visible);
                 workspace.editor_mut().exit_pane_focus();
-                Self::workspace_persist_task(id, state)
+                let restore = if visible {
+                    restore_search_scroll(workspace)
+                } else {
+                    Task::none()
+                };
+                Task::batch([restore, Self::workspace_persist_task(id, state)])
             }
             ProjectSurfaceMessage::ToggleInspector => {
                 let visible = workspace.editor().expanded_pane().is_some()
@@ -5418,6 +5444,12 @@ impl NativeDesktop {
             }
             ProjectSurfaceMessage::Project(mut message) => {
                 apply_hierarchy_pointer_modifiers(&mut message, state.modifiers);
+                let restores_search_scroll = matches!(message, ProjectMessage::ShowGlobalSearch);
+                let resets_search_scroll = matches!(
+                    message,
+                    ProjectMessage::SetGlobalSearchQuery(_)
+                        | ProjectMessage::SetGlobalSearchOptions { .. }
+                );
                 let new_scratch_pane = match &message {
                     ProjectMessage::NewDraft(pane) => Some(*pane),
                     _ => None,
@@ -5583,6 +5615,14 @@ impl NativeDesktop {
                         crate::HarnessTarget::CardsList.id(),
                         iced::widget::scrollable::RelativeOffset::START,
                     ));
+                }
+                if resets_search_scroll {
+                    tasks.push(iced::widget::operation::snap_to(
+                        crate::HarnessTarget::GlobalSearchResults.id(),
+                        iced::widget::scrollable::RelativeOffset::START,
+                    ));
+                } else if restores_search_scroll {
+                    tasks.push(restore_search_scroll(workspace));
                 }
                 if keep_explorer_focus {
                     for binding in state.editor_bindings.values() {

@@ -2,9 +2,10 @@
 
 use crate::components::{
     button_interaction as interaction, field_interaction, multiline_field_style, page_title,
-    semantic_pick_list as pick_list,
+    semantic_pick_list as pick_list, word_count_label,
 };
 
+use crate::project_workspace::{GlobalSearchRow, SEARCH_ROW_HEIGHT};
 use iced::widget::{
     Space, checkbox, column, container, mouse_area, opaque, responsive, rich_text, row, scrollable,
     sensor, span, stack, text, text_editor,
@@ -12,7 +13,6 @@ use iced::widget::{
 use iced::{Background, Border, Color, Element, Font, Length, font};
 use parchmint_editor_api::{SemanticBlock, SemanticBlockKind, SemanticInlineMark};
 use parchmint_ui_api::HistoryMaintenanceStatus;
-use std::collections::BTreeMap;
 
 use crate::components::{semantic_button as button, semantic_text_input as text_input};
 
@@ -1157,59 +1157,75 @@ fn global_search_rail<'a>(
     ]
     .align_y(iced::alignment::Vertical::Center)
     .spacing(SPACING_8);
-    let mut grouped = BTreeMap::<&str, Vec<&crate::GlobalSearchResult>>::new();
-    for result in search.windowed_results() {
-        grouped
-            .entry(result.document_id.as_str())
-            .or_default()
-            .push(result);
-    }
-    let document_count = grouped.len();
-    let results = grouped.into_iter().fold(
-        column![].spacing(SPACING_8),
-        |column, (document_id, matches)| {
-            let title = workspace
-                .explorer()
-                .title_for_document(document_id)
-                .unwrap_or("Unavailable document");
-            let match_count = matches.len();
-            let rows = matches
-                .into_iter()
-                .take(2)
-                .fold(column![].spacing(3), |rows, result| {
-                    let active = search.active_match_id() == Some(result.match_id.as_str());
-                    let highlight = if active {
-                        theme.palette().search_match_active
+    let document_count = search.document_count();
+    let results = search.windowed_rows().fold(column![], |column, row| {
+        let content: Element<'a, ProjectSurfaceMessage> = match row {
+            GlobalSearchRow::Document {
+                document_id,
+                matches,
+            } => {
+                let title = workspace
+                    .explorer()
+                    .title_for_document(document_id)
+                    .unwrap_or("Unavailable document");
+                container(
+                    row![
+                        text(title)
+                            .size(u32::from(UI_LABEL.size))
+                            .width(Length::Fill),
+                        text(search_match_count_label(matches))
+                            .size(u32::from(UI_COMPACT.size))
+                            .color(theme.palette().secondary_text),
+                    ]
+                    .align_y(iced::alignment::Vertical::Center),
+                )
+                .padding([5, 3])
+                .center_y(Length::Fill)
+                .into()
+            }
+            GlobalSearchRow::Match(index) => {
+                let result = &search.results()[index];
+                let active = search.active_match_id() == Some(result.match_id.as_str());
+                let highlight = if active {
+                    theme.palette().search_match_active
+                } else {
+                    theme.palette().search_match
+                };
+                let snippet_spans: Vec<iced::widget::text::Span<'a>> = vec![
+                    span(result.prefix.replace(['\r', '\n'], " ")),
+                    span(result.matching_text.replace(['\r', '\n'], " "))
+                        .font(Font {
+                            weight: font::Weight::Bold,
+                            ..Font::default()
+                        })
+                        .background(highlight),
+                    span(result.suffix.replace(['\r', '\n'], " ")),
+                ];
+                let snippet = container(
+                    rich_text(snippet_spans)
+                        .size(12)
+                        .line_height(iced::widget::text::LineHeight::Absolute(14.0.into()))
+                        .height(28),
+                )
+                .padding([2, 3])
+                .clip(true)
+                .style(move |_| iced::widget::container::Style {
+                    border: if active {
+                        Border {
+                            color: theme.palette().search_match_active,
+                            width: 1.0,
+                            radius: 2.0.into(),
+                        }
                     } else {
-                        theme.palette().search_match
-                    };
-                    let snippet_spans: Vec<iced::widget::text::Span<'a>> = vec![
-                        span(result.prefix.as_str()),
-                        span(result.matching_text.as_str())
-                            .font(Font {
-                                weight: font::Weight::Bold,
-                                ..Font::default()
-                            })
-                            .background(highlight),
-                        span(result.suffix.as_str()),
-                    ];
-                    let snippet = container(rich_text(snippet_spans).size(12))
-                        .padding([2, 3])
-                        .style(move |_| iced::widget::container::Style {
-                            border: if active {
-                                Border {
-                                    color: theme.palette().search_match_active,
-                                    width: 1.0,
-                                    radius: 2.0.into(),
-                                }
-                            } else {
-                                Border::default()
-                            },
-                            ..Default::default()
-                        });
-                    rows.push(
+                        Border::default()
+                    },
+                    ..Default::default()
+                });
+                stationary_tooltip::tooltip(
+                    container(
                         button(snippet)
                             .padding([5, 6])
+                            .height(Length::Fill)
                             .width(Length::Fill)
                             .on_press(ProjectSurfaceMessage::Project(
                                 ProjectMessage::NavigateGlobalSearchResult(result.match_id.clone()),
@@ -1222,30 +1238,33 @@ fn global_search_rail<'a>(
                                 )
                             }),
                     )
-                });
-            column.push(
-                column![
-                    row![
-                        text(title)
-                            .size(u32::from(UI_LABEL.size))
-                            .width(Length::Fill),
-                        text(search_match_count_label(match_count))
-                            .size(u32::from(UI_COMPACT.size))
-                            .color(theme.palette().secondary_text),
-                    ]
-                    .align_y(iced::alignment::Vertical::Center),
-                    rows,
-                ]
-                .spacing(3),
-            )
-        },
-    );
+                    .id(HarnessTarget::GlobalSearchMatch(index).id()),
+                    container(
+                        text(format!(
+                            "{}{}{}",
+                            result.prefix, result.matching_text, result.suffix
+                        ))
+                        .size(12),
+                    )
+                    .max_width(360)
+                    .padding([5, 8]),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
+                )
+            }
+        };
+        column.push(
+            container(content)
+                .height(SEARCH_ROW_HEIGHT)
+                .width(Length::Fill)
+                .clip(true),
+        )
+    });
     let result_count = search.results().len();
     let results = if search.query().is_empty() {
         results.push(text("Search text, titles, synopsis, and metadata.").size(12))
     } else {
         column![
-            Space::new().height(search.result_window_start() as f32 * 44.0),
+            Space::new().height(search.result_window_start() as f32 * SEARCH_ROW_HEIGHT),
             results,
             Space::new().height(search.result_window_bottom_padding()),
         ]
@@ -1314,6 +1333,8 @@ fn global_search_rail<'a>(
             column![
                 active_trail,
                 scrollable(results)
+                    .id(HarnessTarget::GlobalSearchResults.id())
+                    .spacing(SPACING_4)
                     .on_scroll(|viewport| ProjectSurfaceMessage::Project(
                         ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
                     ))
@@ -1619,7 +1640,7 @@ fn outline_card<'a>(
     heading = heading.push(title);
     if group {
         heading = heading.push(
-            text(format!("{} words", item.words))
+            text(word_count_label(item.words))
                 .font(crate::cards_layout::CARD_FONT)
                 .size(12)
                 .color(theme.palette().secondary_text),
@@ -1720,7 +1741,7 @@ fn outline_card<'a>(
     }
     if !group {
         details = details.push(
-            text(format!("{} words", item.words))
+            text(word_count_label(item.words))
                 .font(crate::cards_layout::CARD_FONT)
                 .size(12)
                 .color(theme.palette().secondary_text),
@@ -2099,7 +2120,17 @@ fn history_center<'a>(
             let word_delta = history
                 .comparison()
                 .filter(|comparison| comparison.checkpoint_id == checkpoint_id)
-                .map(|comparison| format!(" · {:+} words", comparison.word_count_delta()))
+                .map(|comparison| {
+                    let delta = comparison.word_count_delta();
+                    format!(
+                        " · {delta:+} {}",
+                        if delta == 1 || delta == -1 {
+                            "word"
+                        } else {
+                            "words"
+                        }
+                    )
+                })
                 .unwrap_or_default();
             let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
                 column.push(
@@ -2443,7 +2474,15 @@ fn deleted_center<'a>(
         )
     });
     let list = if items.is_empty() {
-        rows.push(text("No deleted content is available.").size(13))
+        rows.push(
+            column![
+                text("No deleted items").size(14),
+                text("Documents and groups you delete appear here so you can preview and restore them.")
+                    .size(13)
+                    .color(theme.palette().secondary_text),
+            ]
+            .spacing(SPACING_8),
+        )
     } else {
         rows
     };
@@ -4459,11 +4498,14 @@ fn status_bar<'a>(
     let editor_status = workspace.editor().status_bar();
     let active_count = if show_companion {
         match editor_status.current_count() {
-            StatusCount::Selection(words) => format!("Selection · {words} words"),
-            StatusCount::ActiveDocument(words) => format!("Document · {words} words"),
+            StatusCount::Selection(words) => format!("Selection · {}", word_count_label(words)),
+            StatusCount::ActiveDocument(words) => format!("Document · {}", word_count_label(words)),
         }
     } else {
-        format!("Selected · {} words", workspace.selected_outline_words())
+        format!(
+            "Selected · {}",
+            word_count_label(workspace.selected_outline_words())
+        )
     };
     let explorer_control: Element<'a, ProjectSurfaceMessage> = if show_companion {
         status_pane_button(
@@ -4511,8 +4553,8 @@ fn status_bar<'a>(
         ))
         .push(
             text(format!(
-                "Manuscript · {} words",
-                editor_status.manuscript_total()
+                "Manuscript · {}",
+                word_count_label(editor_status.manuscript_total())
             ))
             .size(12),
         )
@@ -6645,6 +6687,80 @@ mod tests {
                 .active_document(),
             Some("chapter-one")
         );
+    }
+
+    #[test]
+    fn global_search_exposes_every_match_and_counts_documents_outside_the_window() {
+        let _motion = crate::motion::SettledMotion::new();
+        crate::visual_verification::load_test_fonts();
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ShowGlobalSearch);
+        workspace.update(ProjectMessage::SetGlobalSearchQuery("river".to_owned()));
+        let ticket = workspace.begin_task(crate::ProjectTask::GlobalSearch {
+            generation: workspace.global_search().query_generation(),
+        });
+        let results = (0..120)
+            .map(|index| crate::GlobalSearchResult {
+                document_id: if index < 100 {
+                    "chapter-one"
+                } else {
+                    "chapter-two"
+                }
+                .to_owned(),
+                match_id: format!("river-{index}"),
+                prefix: format!("Passage {index}: the harbor bells rang beside the "),
+                matching_text: "river".to_owned(),
+                suffix: "\nA path led toward the old lighthouse and the sea.".to_owned(),
+                indexed_revision: workspace.project_revision(),
+            })
+            .collect();
+        assert!(
+            workspace.accept_completion(crate::ProjectTaskCompletion::for_ticket(
+                ticket,
+                crate::ProjectTaskPayload::SearchBatch {
+                    results,
+                    finished: true
+                },
+            ))
+        );
+        let messages = interact(&workspace, RibbonDestination::GlobalSearch, |search| {
+            assert!(search.find("120 matches in 2 documents").is_ok());
+            search
+                .click(HarnessTarget::GlobalSearchMatch(2).id())
+                .expect("the third match must be clickable");
+        });
+        assert!(
+            matches!(apply_project_messages(&mut workspace, messages).as_slice(),
+            [crate::ProjectEffect::NavigateSearchResult { match_id, .. }] if match_id == "river-2")
+        );
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+                Settings::default(),
+                Size::new(1_280.0, 720.0),
+                project_surface(
+                    &workspace,
+                    RibbonDestination::GlobalSearch,
+                    theme,
+                    text("Mounted editor child").into(),
+                ),
+            );
+            simulator
+                .click(HarnessTarget::GlobalSearchMatch(2).id())
+                .unwrap();
+            if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+                assert!(
+                    simulator
+                        .snapshot(&theme.iced_theme())
+                        .unwrap()
+                        .matches_image(
+                            std::path::PathBuf::from(root)
+                                .join(format!("search-results-{appearance:?}"))
+                        )
+                        .unwrap()
+                );
+            }
+        }
     }
 
     #[test]

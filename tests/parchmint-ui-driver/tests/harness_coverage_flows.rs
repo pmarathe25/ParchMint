@@ -8,6 +8,106 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_project};
 
 #[test]
+fn global_search_keeps_later_matches_reachable_and_resets_scroll_for_a_new_query() {
+    let run = IsolatedRun::new("search-result-scrolling").unwrap();
+    let project = run.root().join("search-result-scrolling.parchmint");
+    let harness = create_project(&run, &project, "Search navigation");
+    let window = HarnessWindow::Project;
+    let prose = format!("{}A unique ending.", "river ".repeat(140));
+    harness
+        .type_into_target(window, HarnessTarget::EditorPrimary, &prose)
+        .unwrap();
+    harness
+        .click_target(window, HarnessTarget::ExplorerSearch)
+        .unwrap();
+    harness
+        .type_into_target(window, HarnessTarget::GlobalSearchQuery, "river")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(window, "140 matches in 1 document")
+            .unwrap()
+    );
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(2))
+        .unwrap();
+    assert!(harness.text_is_visible(window, "Match 3 of 140").unwrap());
+    harness
+        .scroll_target_by(window, HarnessTarget::GlobalSearchResults, -4_000.0)
+        .unwrap();
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(92))
+        .unwrap();
+    assert!(harness.text_is_visible(window, "Match 93 of 140").unwrap());
+    harness.click_text(window, "←  Search").unwrap();
+    harness
+        .click_target(window, HarnessTarget::ExplorerSearch)
+        .unwrap();
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(92))
+        .unwrap();
+    for destination in [RibbonDestination::Settings, RibbonDestination::Editor] {
+        harness
+            .click_target(window, HarnessTarget::Ribbon(destination))
+            .unwrap();
+    }
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(92))
+        .unwrap();
+    for _ in 0..2 {
+        harness
+            .click_target(window, HarnessTarget::ToggleExplorer)
+            .unwrap();
+    }
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(92))
+        .unwrap();
+    if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+        harness
+            .snapshot(
+                window,
+                std::path::PathBuf::from(root).join("search-scrolled"),
+            )
+            .unwrap();
+    }
+    harness
+        .replace_target(window, HarnessTarget::GlobalSearchQuery, "unique")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(window, "1 match in 1 document")
+            .unwrap()
+    );
+    harness
+        .click_target(window, HarnessTarget::GlobalSearchMatch(0))
+        .unwrap();
+    assert!(harness.text_is_visible(window, "Match 1 of 1").unwrap());
+    assert!(
+        harness
+            .text_is_visible(window, "Selection · 1 word")
+            .unwrap()
+    );
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A unique ending.")
+    );
+    harness.close(window).unwrap();
+    harness.shutdown().unwrap();
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
+    assert!(
+        reopened
+            .active_editor_body()
+            .unwrap()
+            .contains(prose.as_str())
+    );
+    reopened.close(window).unwrap();
+    reopened.shutdown().unwrap();
+}
+
+#[test]
 fn explorer_opening_keeps_editor_shortcuts_and_reselecting_keeps_the_selection() {
     let run = IsolatedRun::new("explorer-open-editor-focus").expect("isolated run");
     let project = run.root().join("explorer-open-editor-focus.parchmint");

@@ -66,7 +66,7 @@ impl CardItem<'_> {
         let text_width = self.text_width(width);
         let controls_width = if group {
             74.0 + measured_text(
-                &format!("{} words", self.words),
+                &crate::components::word_count_label(self.words),
                 f32::INFINITY,
                 12,
                 15.6,

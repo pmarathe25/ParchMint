@@ -1530,12 +1530,13 @@ impl NativeDesktopHarness {
                     .map(|result| result.document_id.as_str())
                     .collect::<std::collections::BTreeSet<_>>();
                 format!(
-                    "query={:?}, results={}, documents={}, complete={}, error={:?}",
+                    "query={:?}, results={}, documents={}, complete={}, error={:?}, scroll={}",
                     search.query(),
                     search.results().len(),
                     documents.len(),
                     search.is_complete(),
                     search.error(),
+                    search.scroll_offset(),
                 )
             })
             .ok_or_else(|| HarnessError::new("project workspace has not loaded"))

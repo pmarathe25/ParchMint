@@ -64,7 +64,7 @@ tab leaves its document in the project.
 
 Use the split button at the right end of the tab bar to open the companion pane.
 The button stays at the right edge and is highlighted while the companion is open.
-It keeps its tabs when hidden; the first opening shows the current document beside itself.
+It keeps its tabs when hidden; the first opening creates an empty tab.
 Drag tabs between panes, or drop an Explorer document into either pane to open it.
 Tabs fit their titles; the overflow button lists documents that do not fit.
 Each pane’s upper-right button expands that pane into a temporary focus view.

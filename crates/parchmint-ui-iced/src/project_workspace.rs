@@ -1717,6 +1717,20 @@ pub struct GlobalSearchResult {
     pub indexed_revision: u64,
 }
 
+/// Fixed-height rows keep search virtualization aligned with the rendered list,
+/// including document headings. Match indices refer to the complete result set.
+#[derive(Debug, Clone)]
+pub(crate) enum GlobalSearchRow<'a> {
+    Document {
+        document_id: &'a str,
+        matches: usize,
+    },
+    Match(usize),
+}
+
+pub(crate) const SEARCH_ROW_HEIGHT: f32 = 44.0;
+const SEARCH_WINDOW_ROWS: usize = 80;
+
 /// Global Search sidebar state.
 #[derive(Debug, Clone, Default)]
 pub struct GlobalSearchState {
@@ -1725,6 +1739,7 @@ pub struct GlobalSearchState {
     case_sensitive: bool,
     whole_word: bool,
     results: Vec<GlobalSearchResult>,
+    groups: BTreeMap<String, Vec<usize>>,
     query_generation: u64,
     complete: bool,
     error: Option<String>,
@@ -1777,25 +1792,86 @@ impl GlobalSearchState {
         &self.results
     }
 
+    pub fn document_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    pub(crate) const fn scroll_offset(&self) -> f32 {
+        self.scroll_offset
+    }
+
+    fn begin_query(&mut self) {
+        self.query_generation = self.query_generation.saturating_add(1);
+        self.results.clear();
+        self.groups.clear();
+        self.scroll_offset = 0.0;
+        self.complete = false;
+        self.error = None;
+        self.active_match_id = None;
+    }
+
+    fn append_results(&mut self, results: Vec<GlobalSearchResult>) {
+        for result in results {
+            let index = self.results.len();
+            if let Some(matches) = self.groups.get_mut(&result.document_id) {
+                matches.push(index);
+            } else {
+                self.groups.insert(result.document_id.clone(), vec![index]);
+            }
+            self.results.push(result);
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        self.results.len() + self.groups.len()
+    }
+
+    pub(crate) fn windowed_rows(&self) -> impl Iterator<Item = GlobalSearchRow<'_>> {
+        let mut skip = self.result_window_start();
+        self.groups
+            .iter()
+            .flat_map(move |(document_id, matches)| {
+                // Skip whole groups by size, then slice directly to the first
+                // match. Scrolling never walks all preceding matches.
+                let start = skip.min(matches.len() + 1);
+                skip = skip.saturating_sub(matches.len() + 1);
+                let heading = (start == 0).then_some(GlobalSearchRow::Document {
+                    document_id,
+                    matches: matches.len(),
+                });
+                heading.into_iter().chain(
+                    matches[start.saturating_sub(1)..]
+                        .iter()
+                        .copied()
+                        .map(GlobalSearchRow::Match),
+                )
+            })
+            .take(SEARCH_WINDOW_ROWS)
+    }
+
     /// The result most recently routed into the focused authoring view.
     pub fn active_match_id(&self) -> Option<&str> {
         self.active_match_id.as_deref()
     }
 
     pub fn windowed_results(&self) -> impl Iterator<Item = &GlobalSearchResult> {
-        let start = self.result_window_start();
-        self.results.iter().skip(start).take(80)
+        self.windowed_rows().filter_map(|row| match row {
+            GlobalSearchRow::Match(index) => Some(&self.results[index]),
+            GlobalSearchRow::Document { .. } => None,
+        })
     }
 
     pub fn result_window_start(&self) -> usize {
-        (self.scroll_offset.max(0.0) / 44.0) as usize
+        ((self.scroll_offset.max(0.0) / SEARCH_ROW_HEIGHT) as usize)
+            .min(self.row_count().saturating_sub(1))
     }
 
     pub fn result_window_bottom_padding(&self) -> f32 {
-        self.results
-            .len()
-            .saturating_sub(self.result_window_start().saturating_add(80)) as f32
-            * 44.0
+        self.row_count().saturating_sub(
+            self.result_window_start()
+                .saturating_add(SEARCH_WINDOW_ROWS),
+        ) as f32
+            * SEARCH_ROW_HEIGHT
     }
 
     pub const fn query_generation(&self) -> u64 {
@@ -4094,14 +4170,14 @@ impl ProjectWorkspace {
         let mut global_search = GlobalSearchState::default();
         if fixture == ProjectFixture::GlobalSearch {
             global_search.query = "river".to_owned();
-            global_search.results = vec![GlobalSearchResult {
+            global_search.append_results(vec![GlobalSearchResult {
                 document_id: "chapter-one".to_owned(),
                 match_id: "chapter-one-match-1".to_owned(),
                 prefix: "beside the ".to_owned(),
                 matching_text: "river".to_owned(),
                 suffix: ", the path".to_owned(),
                 indexed_revision: 1,
-            }];
+            }]);
             global_search.complete = true;
         }
         let history = HistoryState {
@@ -6380,13 +6456,7 @@ impl ProjectWorkspace {
             }
             ProjectMessage::SetGlobalSearchQuery(query) => {
                 self.global_search.query = query;
-                self.global_search.query_generation =
-                    self.global_search.query_generation.saturating_add(1);
-                self.global_search.results.clear();
-                self.global_search.scroll_offset = 0.0;
-                self.global_search.complete = false;
-                self.global_search.error = None;
-                self.global_search.active_match_id = None;
+                self.global_search.begin_query();
                 self.replacement_preview.close();
                 vec![self.search_effect()]
             }
@@ -6409,13 +6479,7 @@ impl ProjectWorkspace {
             } => {
                 self.global_search.case_sensitive = case_sensitive;
                 self.global_search.whole_word = whole_word;
-                self.global_search.query_generation =
-                    self.global_search.query_generation.saturating_add(1);
-                self.global_search.results.clear();
-                self.global_search.scroll_offset = 0.0;
-                self.global_search.complete = false;
-                self.global_search.error = None;
-                self.global_search.active_match_id = None;
+                self.global_search.begin_query();
                 self.replacement_preview.close();
                 vec![self.search_effect()]
             }
@@ -7167,7 +7231,7 @@ impl ProjectWorkspace {
     fn apply_completion(&mut self, completion: ProjectTaskCompletion) -> bool {
         match completion.payload {
             ProjectTaskPayload::SearchBatch { results, finished } => {
-                self.global_search.results.extend(results);
+                self.global_search.append_results(results);
                 self.global_search.complete = finished;
                 self.global_search.error = None;
                 true
@@ -9206,18 +9270,65 @@ mod tests {
     }
 
     #[test]
-    fn search_and_history_windows_follow_scroll_offsets_without_folding_all_rows() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
-        workspace.global_search.results = (0..200)
+    fn search_rows_preserve_all_matches_and_global_counts_across_windows() {
+        let mut search = GlobalSearchState::default();
+        let results: Vec<_> = (0..200)
             .map(|index| GlobalSearchResult {
-                document_id: "chapter-one".to_owned(),
+                document_id: format!("document-{}", index % 2),
                 match_id: format!("match-{index}"),
                 prefix: String::new(),
-                matching_text: "x".to_owned(),
+                matching_text: "river".to_owned(),
                 suffix: String::new(),
                 indexed_revision: 1,
             })
             .collect();
+        for batch in results.chunks(64) {
+            search.append_results(batch.to_vec());
+        }
+        assert_eq!(search.document_count(), 2);
+        let mut seen = BTreeSet::new();
+        let mut headings = 0;
+        for start in [0, 80, 160, 201] {
+            search.scroll_offset = start as f32 * SEARCH_ROW_HEIGHT;
+            assert_eq!(search.result_window_start(), start);
+            assert_eq!(search.windowed_rows().count(), (202 - start).min(80));
+            let total_height = start as f32 * SEARCH_ROW_HEIGHT
+                + search.windowed_rows().count() as f32 * SEARCH_ROW_HEIGHT
+                + search.result_window_bottom_padding();
+            assert_eq!(total_height, 202.0 * SEARCH_ROW_HEIGHT);
+            assert_eq!(search.document_count(), 2);
+            if start != 201 {
+                for row in search.windowed_rows() {
+                    match row {
+                        GlobalSearchRow::Document { matches, .. } => {
+                            assert_eq!(matches, 100);
+                            headings += 1;
+                        }
+                        GlobalSearchRow::Match(index) => assert!(seen.insert(index)),
+                    }
+                }
+            }
+        }
+        assert_eq!(headings, 2);
+        assert_eq!(seen, (0..200).collect());
+    }
+
+    #[test]
+    fn search_and_history_windows_follow_scroll_offsets_without_folding_all_rows() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+        workspace.global_search.begin_query();
+        workspace.global_search.append_results(
+            (0..200)
+                .map(|index| GlobalSearchResult {
+                    document_id: "chapter-one".to_owned(),
+                    match_id: format!("match-{index}"),
+                    prefix: String::new(),
+                    matching_text: "x".to_owned(),
+                    suffix: String::new(),
+                    indexed_revision: 1,
+                })
+                .collect(),
+        );
         workspace.update(ProjectMessage::SetGlobalSearchScroll(4_400.0));
         assert_eq!(workspace.global_search().result_window_start(), 100);
         assert_eq!(workspace.global_search().windowed_results().count(), 80);

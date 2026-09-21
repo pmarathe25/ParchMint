@@ -9,6 +9,10 @@ use crate::design_tokens::{
     DEFAULT_RADIUS, FOCUS_BORDER_WIDTH, ParchMintTheme, UI_LABEL, UI_PAGE_TITLE,
 };
 
+pub(crate) fn word_count_label(words: usize) -> String {
+    format!("{words} {}", if words == 1 { "word" } else { "words" })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Surface {
     Application,
