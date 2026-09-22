@@ -261,6 +261,83 @@ impl AsyncServiceFeeds {
         })
     }
 
+    /// Compare one explicitly selected document, including its live editor draft.
+    pub fn history_document_preview(
+        &self,
+        checkpoint_id: String,
+        document_id: String,
+        drafts: Vec<parchmint_editor_api::CanonicalProjection>,
+    ) -> BlockingServiceJob<HistoryPreviewResult> {
+        let ports = self.ports.clone();
+        BlockingServiceJob::new("compare document History", move || {
+            let checkpoint =
+                CheckpointId::from_bytes(parse_stable_id(&checkpoint_id, "History checkpoint")?);
+            let document =
+                DocumentId::from_bytes(parse_stable_id(&document_id, "History document")?);
+            let preview = ports.history_preview(checkpoint)?;
+            let current = ports.snapshot_with_documents()?;
+            let title = current
+                .project
+                .nodes
+                .iter()
+                .find_map(|(_, node)| {
+                    (node.kind == parchmint_domain::NodeKind::Document(document))
+                        .then(|| node.title.clone())
+                })
+                .ok_or_else(|| ServiceFeedError::InvalidServiceData {
+                    service: ServiceKind::ProjectQuery,
+                    reason: "The selected document is no longer in this project.".to_owned(),
+                })?;
+            let draft = drafts.iter().find(|draft| draft.document_id() == document);
+            let body = draft
+                .map(|draft| draft.body().to_owned())
+                .or_else(|| {
+                    current
+                        .documents
+                        .iter()
+                        .find(|loaded| loaded.document_id == document)
+                        .map(|loaded| loaded.body.clone())
+                })
+                .ok_or_else(|| ServiceFeedError::InvalidServiceData {
+                    service: ServiceKind::ProjectQuery,
+                    reason: "The selected document could not be loaded.".to_owned(),
+                })?;
+            let semantic =
+                EditorCoreSession::open(CanonicalDocumentLoad::new(document, body.clone()))
+                    .map_err(|error| service_error(ServiceKind::ProjectQuery, error))?
+                    .canonical_projection()
+                    .semantic()
+                    .clone();
+            let before = load_checkpoint_document(ports.as_ref(), checkpoint, &preview, document)?;
+            let changes = before
+                .as_ref()
+                .map(|_| {
+                    history_project::compare_document(
+                        ports.as_ref(),
+                        checkpoint,
+                        &preview,
+                        current,
+                        drafts,
+                        document,
+                    )
+                })
+                .transpose()?;
+            let mut result = HistoryPreviewResult::from_preview(
+                preview,
+                before,
+                Some(HistoryCurrentDocument {
+                    document_id,
+                    title,
+                    body,
+                    semantic,
+                }),
+                None,
+            );
+            result.project_changes = changes;
+            Ok(result)
+        })
+    }
+
     pub fn deleted_preview(
         &self,
         node_id: impl Into<String>,

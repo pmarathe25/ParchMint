@@ -31,6 +31,9 @@ Output is `target/release/parchmint` on macOS and Linux or
 
 ## Development
 
+For UI reviews, [launch and use the native application with a disposable project](tests/parchmint-ui-driver/USABILITY.md#launch-and-use-the-native-application).
+The guide covers interactive review, screenshots, and reopening saved work.
+
 Run compilation commands one at a time with one job on memory-limited machines:
 
 ```console

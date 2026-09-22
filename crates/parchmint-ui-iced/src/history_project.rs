@@ -9,8 +9,30 @@ pub(super) fn compare(
     ports: &dyn ServiceFeedPorts,
     checkpoint: CheckpointId,
     preview: &SnapshotResourcePaths,
+    current: ProjectSnapshot,
+    drafts: Vec<CanonicalProjection>,
+) -> Result<Vec<HistoryComparison>, ServiceFeedError> {
+    compare_scope(ports, checkpoint, preview, current, drafts, None)
+}
+
+pub(super) fn compare_document(
+    ports: &dyn ServiceFeedPorts,
+    checkpoint: CheckpointId,
+    preview: &SnapshotResourcePaths,
+    current: ProjectSnapshot,
+    drafts: Vec<CanonicalProjection>,
+    document: DocumentId,
+) -> Result<Vec<HistoryComparison>, ServiceFeedError> {
+    compare_scope(ports, checkpoint, preview, current, drafts, Some(document))
+}
+
+fn compare_scope(
+    ports: &dyn ServiceFeedPorts,
+    checkpoint: CheckpointId,
+    preview: &SnapshotResourcePaths,
     mut current: ProjectSnapshot,
     drafts: Vec<CanonicalProjection>,
+    document_scope: Option<DocumentId>,
 ) -> Result<Vec<HistoryComparison>, ServiceFeedError> {
     let codec = ProjectFormatCodec::default();
     let checkpoint_id = encode_hex(checkpoint.as_bytes());
@@ -64,6 +86,9 @@ pub(super) fn compare(
         .copied()
         .collect();
     for id in documents {
+        if document_scope.is_some_and(|selected| selected != id) {
+            continue;
+        }
         let before = load_checkpoint_document(ports, checkpoint, preview, id)?;
         let after = current
             .documents
@@ -139,28 +164,30 @@ pub(super) fn compare(
             ),
         );
     }
-    if let Some((before, _)) = &before_project {
+    if document_scope.is_none() {
+        if let Some((before, _)) = &before_project {
+            add(
+                "Project outline and settings",
+                &outline(before),
+                &outline(&current.project),
+            );
+        }
         add(
-            "Project outline and settings",
-            &outline(before),
-            &outline(&current.project),
+            "Project dictionary",
+            &resource_text(ports, checkpoint, preview, "dictionary.txt")?,
+            &current
+                .project
+                .dictionary
+                .iter()
+                .map(|word| format!("{word}\n"))
+                .collect::<String>(),
+        );
+        add(
+            "Project styles (CSS)",
+            &resource_text(ports, checkpoint, preview, "styles.css")?,
+            &current.styles_css,
         );
     }
-    add(
-        "Project dictionary",
-        &resource_text(ports, checkpoint, preview, "dictionary.txt")?,
-        &current
-            .project
-            .dictionary
-            .iter()
-            .map(|word| format!("{word}\n"))
-            .collect::<String>(),
-    );
-    add(
-        "Project styles (CSS)",
-        &resource_text(ports, checkpoint, preview, "styles.css")?,
-        &current.styles_css,
-    );
     changes.sort_by(|left, right| left.document_title.cmp(&right.document_title));
     Ok(changes)
 }

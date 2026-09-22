@@ -35,18 +35,20 @@ Each project has one writable session; opening it again focuses its existing win
 | Overview | Create the project structure, edit planning details, and rearrange cards |
 | Comments | Find and navigate document comments |
 
-The top bar switches between **Editor** and **Overview**. Icons at the top right
-open History, Recently Deleted, Export, and Settings. Hover to see their names;
-the active screen has an underline. The status bar shows word counts, save state,
-and sidebar controls.
+The icon rail on the left opens **Editor**, **Overview**, **History**,
+**Recently Deleted**, **Export**, and **Settings**. Hover an icon for its label.
+The project name at the top of Explorer opens project creation, opening, and
+recent projects. It hides with Explorer. The status bar shows
+counts, save state, and sidebar controls.
 
 Drag dividers to resize sidebars and panes. Press **F6** to move focus between
 workspace regions.
 
 ## Organize documents
 
-In Overview, use **+** beside Manuscript, Research, or a group to create a document
-or group there. Enter a name, then write its synopsis. Click any synopsis or
+In Overview, use the **+** placeholder after a group’s documents or at the end
+of the section to create a document or group there. Enter confirms its name;
+Escape discards the new item before it is created. Then write its synopsis. Click any synopsis or
 metadata value to edit it; click elsewhere or press Escape to finish. Right-click a group’s header or the space around its cards to create items
 inside it; right-click the Overview background to create at the section root.
 Explorer’s right-click menu also supports creation. Groups can contain groups
@@ -60,7 +62,8 @@ Copy and paste duplicates selected documents. Cut and paste moves them.
 A single click opens a document as a replaceable preview tab. Double-click,
 press **Enter**, edit, or deliberately open it to keep the tab. Manuscript opens
 in the primary pane; Research normally opens in the companion pane. Closing a
-tab leaves its document in the project.
+tab leaves its document in the project. Right-click a tab to close it or move it
+to the other pane. Use Explorer to rename, copy, move, or delete documents.
 
 Use the split button at the right end of the tab bar to open the companion pane.
 The button stays at the right edge and is highlighted while the companion is open.
@@ -68,7 +71,10 @@ It keeps its tabs when hidden; the first opening creates an empty tab.
 Drag tabs between panes, or drop an Explorer document into either pane to open it.
 Tabs fit their titles; the overflow button lists documents that do not fit.
 Each pane’s upper-right button expands that pane into a temporary focus view.
-Click it again to restore the split and sidebars. When both panes show the same document, edits,
+Focus view hides the window titlebar, navigation rail, tabs, second-pane control,
+sidebars, and status bar. **F11** also toggles focus view.
+Choose **Exit focus** in the top bar or press **Escape** to restore the layout.
+When both panes show the same document, edits,
 comments, undo, saves, and word counts are shared; cursors, selections, scrolling,
 and local searches remain independent.
 
@@ -80,10 +86,11 @@ project documents. Drafts receive autosave and recovery protection; their words
 are excluded from manuscript totals and export until filed in Manuscript.
 
 Overview has its own Manuscript/Research switch and group disclosures. Collapsing
-Explorer groups does not hide cards. Sibling documents share a grid row; groups
-remain separate headings. Click synopsis or metadata text to edit it, drag a title
+Explorer groups does not hide cards. Documents use wide rows; indentation shows their parent group. Group headings
+remain separate from their documents. Click synopsis or metadata text to edit it, drag a title
 to reorganize, or double-click a document title to open Editor.
-Cards show the full synopsis and configured metadata. Their word counts come
+Cards show the full synopsis with all applicable metadata beside it when space
+permits. Narrow layouts stack the fields. Their word counts come
 from document text; groups total their descendants, including collapsed groups.
 
 After naming a new card, focus moves to its synopsis. While writing a synopsis,
@@ -103,15 +110,17 @@ with the shared Explorer selection.
 
 ## Write and format
 
-The formatting controls in the top bar act on the focused editor pane. They provide paragraph styles, font family and size, paragraph alignment, line spacing, bold,
-italic, underline, strikethrough, lists, block quotes, links, and comments.
-The list button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
+The formatting controls in the top bar act on the focused editor pane. Paragraph
+styles, bold, italic, lists, links, and comments stay directly accessible. The list
+button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
+When space permits, font family and size, underline, strikethrough, block quotes,
+alignment, line spacing, and breaks also appear in the toolbar. In narrower
+layouts, **Format** holds these controls. Click outside the panel or
+press Escape to dismiss it. Hover over an icon to see its action. Formatting
+toggles show their active state and apply to subsequent typing when no text is selected.
+
 Hover a link to see its destination, Ctrl+click (Command+click on macOS) to open it,
 or choose **Copy link address** from its context menu.
-List icons apply bulleted or numbered lists; the break menu contains page
-and scene breaks. Hover over an icon to see its action. **B/I/U/S** shows
-active formatting. With no selection, a formatting toggle applies to subsequent
-typing.
 
 Font family and size apply to selected text or subsequent typing. Their controls show the effective font at the cursor, including inherited style values. Choose
 **Style default** for family or **Auto** for size to inherit the paragraph style.
@@ -127,7 +136,7 @@ Create and edit paragraph styles from **Manage Styles** at the bottom of the sty
 Manage metadata with **Fields…** in Overview; new fields appear on outline rows.
 Settings contains appearance and dictionary controls. Style changes apply throughout
 the project. Typography, spacing, and
-pagination have separate groups. Press **Enter** or **Apply** to save a property;
+pagination have separate groups. Click outside a field or press **Enter** to save its value;
 leave it blank to inherit. Dropdowns control inheritance, alignment, and on/off
 properties. The metadata editor also controls field display order and applicability.
 
@@ -137,6 +146,8 @@ Select text or place the cursor, then click the speech-bubble icon (**Add commen
 **Add Comment** in the editor context menu. The card beside the text supports
 replies, message edits and deletion, resolving or reopening, and thread deletion.
 The Comments panel lists document comments; select one to reveal its location.
+Right-click a thread for Reply, Resolve/Reopen, or Delete thread. Reply opens
+the thread's editing card; deleting a thread asks for confirmation there.
 Comments stay in the project and are excluded from export.
 
 A draft stays attached to its original document and selection while you consult
@@ -151,8 +162,10 @@ Press the primary modifier plus **F** for Find in the focused pane. **Enter** an
 
 Open **Global Search** in the Explorer header or press the primary modifier plus
 **Shift+F**. Results are grouped by document; select a result to reveal its match.
-Enter replacement text to preview changes and include or exclude matches before
-applying one project-wide replacement.
+Expand **Replace** to replace document text. Enter replacement text, review the
+eligible matches, and include or exclude matches before applying the replacement.
+An empty replacement deletes the matched text. Title, synopsis, and metadata
+matches remain searchable but are excluded from replacement.
 
 ## Save and review History
 
@@ -161,15 +174,20 @@ Structural changes request a save immediately. The status bar shows unsaved,
 saving, saved, or failed state. Choose **Save** or press the primary modifier
 plus **S** to request a save now.
 
-Completed saves appear in **History**. Select a checkpoint to compare it with the
-current project, or create a named snapshot for a milestone. Comparisons include
-unsaved drafts, added and deleted documents, outline changes, comments, and
-project settings. Opening History does not save a draft.
+Choose **Project history** in the project title menu to open project history.
+For one document, right-click its Explorer entry or Overview card and choose **History**. The page names the
+document and its location; switching panes does not change that target.
+Document timelines include project milestones. Use **Project history** to return
+to the project timeline and create milestones. Opening History does not save a draft.
 
 Comparisons show the saved version on the left and current writing on the right,
 with matching paragraphs aligned as you scroll. Changed words are highlighted.
-Formatting-only changes show HTML differences; style changes show CSS. Restoring a checkpoint replaces the
-whole project and creates a new History entry, preserving the earlier timeline.
+Formatting-only changes show HTML differences; project style changes show CSS.
+**Restore project** replaces the whole project. **Restore document** replaces
+only the selected document's text, formatting, and comments; its name, location,
+planning details, other documents, and project settings stay unchanged. Both
+actions ask for confirmation and create a new History entry. A document cannot
+be restored from a version that predates it.
 
 Notification banners can be dismissed and expire after five seconds. Errors stay
 available in **Notifications** until dismissed or cleared.
@@ -195,12 +213,16 @@ all projects on this device.
 
 **Settings → Appearance** offers System, Light, and Dark. System follows the OS
 appearance. This choice applies to every window without changing manuscript
-formatting or export. Enable **Reduce motion** here to make pane, card, tab, and
+formatting or export. **Application zoom** adjusts the size of the interface and
+editor display from 75% to 150%; **Reset** returns it to 100%. Zoom is saved for
+all windows and does not change manuscript formatting or export. At larger zoom
+levels, opening one sidebar closes the other when space is limited.
+Enable **Reduce motion** here to make pane, card, tab, and
 menu transitions immediate. This setting is saved for all windows.
 
 ## Export a manuscript
 
-Open **Export**, choose an output HTML file, review title, page-break, and
+Choose **Export** from the application menu, select an output HTML file, review title, page-break, and
 numbering options, then select **Export**. The result is one self-contained HTML
 file containing the whole Manuscript. Research, Synopsis, metadata, and comments
 are excluded. Use **Open** or **Reveal** after completion to inspect the file.
@@ -215,6 +237,15 @@ The `.parchmint/cache/` directory can be rebuilt. Window and tab layout lives in
 the device's application-data directory and does not travel with the project.
 
 ## Keyboard shortcuts
+
+Open **Settings → Keyboard shortcuts** to search commands and change a binding.
+Click a binding and press the desired combination; Escape cancels recording.
+**Clear** disables a shortcut, **Reset** restores one default, and **Reset all**
+restores the shipped keymap. Conflicting combinations show the command already
+using them. Editor and Overview commands can reuse a combination because they
+operate on different pages. Changes apply to all windows and persist across restarts.
+Use Control, Alt, or Command with a key, or a function key; ordinary typing and
+standard field navigation remain available. The table below lists common defaults.
 
 | Action | Windows and Linux | macOS |
 | --- | --- | --- |

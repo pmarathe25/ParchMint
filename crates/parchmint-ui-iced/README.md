@@ -16,6 +16,7 @@ builds enable neither feature.
 
 | File | Responsibility |
 | --- | --- |
+| [shortcut_router.rs](src/shortcut_router.rs) | Resolve every shipped or reassigned shortcut from the shared command catalog; adapt text editing commands to the focused widget |
 | [native.rs](src/native.rs) | Route input and completions to the owning window; apply editor commands against the originating view and selection |
 | [project_workspace.rs](src/project_workspace.rs) | Explorer, Overview, comments, History, search, settings, export, and recovery presentation; shared tree selection and move validation |
 | [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and comment drafts |
@@ -31,6 +32,11 @@ Export and restore use desktop-supplied workflow ports. Services with their own
 workers retain their own queue limits.
 
 ## Drafts and delayed results
+
+New Explorer and Overview items stay as local name placeholders until Enter.
+Escape removes the placeholder without a project mutation. Confirming submits
+one creation command with its final title; snapshot reconciliation selects the
+created node. Unrelated snapshots preserve an unconfirmed name.
 
 Empty tabs remain local UI state. First edits promote them to protected drafts,
 retaining input until the editor mounts. Explicit Save chooses a name and location;
@@ -55,7 +61,10 @@ Recovery recording can advance document state independently of outline changes.
 Project mutations and saves serialize. Save results acknowledge captured revisions
 and leave later edits dirty. Stale native completions cannot update closed windows;
 close waits for the final save. History resolves IDs from the selected manifest
-and compares live drafts, structure, comments, dictionary, and styles.
+and compares live drafts, structure, comments, dictionary, and styles. Document
+History opens from the clicked tab or outline entry, independently of editor
+focus. Document restores replace that document's sessions while retaining other
+documents' undo.
 
 Overview has independent section and disclosure state. Group headings toggle their
 contents; synopsis and metadata become editable when clicked. While dragging, a
@@ -85,3 +94,20 @@ frame-level tests cover intermediate geometry and input. The interaction harness
 can also advance a controlled frame clock for full-workspace motion captures.
 Incoming panes retain readable text widths; moving cards draw as complete layers,
 and drop placeholders stay at their destinations.
+
+## Keyboard commands and branding
+
+`parchmint-preferences::shortcut_commands` defines command IDs, labels, and
+platform defaults and contexts. Editor and Overview commands may share a binding;
+global commands conflict with both. Persisted overrides replace or disable entries in that catalog.
+`shortcut_router` resolves both defaults and overrides before child widgets handle
+keys, then publishes the same semantic command to `NativeDesktop`. Editing
+commands use one focused-widget adapter for text fields, scratch editors, and
+mounted documents; unconsumed commands fall back to the current project surface.
+Disabled defaults are consumed so a widget cannot accidentally execute the old
+binding. Settings records combinations, validates conflicts, and applies changes
+only after durable preference storage succeeds. Context menus use the effective
+bindings for their labels.
+
+`assets/parchmint-brand.svg` embeds the supplied ParchMint JPEG unchanged. The
+navigation rail and launcher render the same artwork without an external path.

@@ -349,6 +349,45 @@ fn newest_first_order_and_cursor_continuation_stay_stable_after_an_append() {
 }
 
 #[test]
+fn document_history_keeps_named_milestones_with_stable_pagination() {
+    use parchmint_history_api::{CheckpointInput, CheckpointIntentHash, SnapshotName};
+
+    let project = LockedProject::new("document-milestone");
+    let version = ProjectVersion::named("Draft");
+    project.write(&version);
+    let store = project.initialize();
+    let first = checkpoint(&store, 1, &version, CheckpointCategory::ExplicitSave).unwrap();
+    let milestone = store
+        .checkpoint(CheckpointInput {
+            intent_hash: CheckpointIntentHash::from_bytes([2; 32]),
+            resources: version.hashes(),
+            category: CheckpointCategory::NamedSnapshot,
+            affected_documents: Vec::new(),
+            name: Some(SnapshotName::new("Milestone").unwrap()),
+            recorded_at_unix_millis: Some(2),
+        })
+        .unwrap();
+    let page = store
+        .list(HistoryPageQuery {
+            cursor: None,
+            limit: 1,
+            affected_document: Some(TEST_DOCUMENT),
+        })
+        .unwrap();
+    assert_eq!(page.checkpoints[0].id, milestone);
+    assert!(page.checkpoints[0].affected_documents.is_empty());
+    let next = store
+        .list(HistoryPageQuery {
+            cursor: page.next_cursor,
+            limit: 1,
+            affected_document: Some(TEST_DOCUMENT),
+        })
+        .unwrap();
+    assert_eq!(next.checkpoints[0].id, first);
+    assert!(next.next_cursor.is_none());
+}
+
+#[test]
 fn restore_returns_a_complete_plan_without_mutating_files_or_rewinding_history() {
     let project = LockedProject::new("restore");
     let first_version = ProjectVersion::named("First draft");

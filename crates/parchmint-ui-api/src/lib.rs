@@ -322,6 +322,14 @@ pub trait ProjectWorkflowPort: Send + Sync {
         checkpoint: CheckpointId,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
 
+    /// Restores one live document's writing and comments while preserving the
+    /// current outline, project settings, and every other document.
+    fn restore_document_checkpoint(
+        &self,
+        checkpoint: CheckpointId,
+        document: parchmint_domain::DocumentId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
     fn create_named_snapshot(
         &self,
         name: String,

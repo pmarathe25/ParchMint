@@ -49,3 +49,9 @@ all in-memory changes succeed, and saves affected files in one transaction.
 A save failure leaves accepted edits dirty and available to recovery. Failures
 in rebuildable services, such as search, mark their results outdated without
 changing authored data.
+
+Document History restores replace only the selected live document's writing and
+comments. They preserve current structure, settings, and other documents,
+including unsaved edits. The restoration checkpoint is durable before the
+replacement is published. Project undo and the restored document's undo reset;
+other documents keep their undo.

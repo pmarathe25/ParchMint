@@ -20,6 +20,10 @@ for behavior; contract modules use the `*_contract_tests.rs` suffix.
 
 - Before changing headless flows, read the
   [UI driver guide](tests/parchmint-ui-driver/README.md).
+- For application polish and UI reviews, follow the
+  [native interactive review procedure](tests/parchmint-ui-driver/USABILITY.md#launch-and-use-the-native-application).
+  Exercise the real app as well as automated tests; report specific native-check
+  blockers instead of silently skipping them.
 - Before changing captures, comparisons, or references, read
   [visual verification](tests/parchmint-ui-verification/README.md).
 - For shared fixtures and native test controls, read

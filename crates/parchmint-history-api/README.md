@@ -21,8 +21,9 @@ Checkpoints contain the manifest, documents, styles, project dictionary,
 annotations, deletion tombstones, and format control. Recovery, caches, workspace
 layout, appearance, and the global dictionary stay outside History.
 
-Lists are paginated, with a continuation cursor and optional affected-document
-filter. Preview and restore read complete project snapshots. A `RestorePlan`
+Lists are paginated, with a continuation cursor and optional document filter.
+Document timelines include that document's changes and all named snapshots.
+Preview and restore read complete project snapshots. A `RestorePlan`
 describes writes through the normal save path, creating a new restoration
 checkpoint without rewriting the timeline.
 

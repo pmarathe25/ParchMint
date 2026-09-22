@@ -215,14 +215,18 @@ impl NativeProjectEffectExecutor {
                 ])
                 .await
             }
-            ProjectEffect::CreateHierarchy { parent_id, kind } => {
+            ProjectEffect::CreateHierarchy {
+                parent_id,
+                kind,
+                title,
+            } => {
                 let parent = resolvers.node(&parent_id)?;
                 let index = current.project.nodes.children(parent).len();
                 let operation = self.operation_sequence.fetch_add(1, Ordering::Relaxed);
                 let id = generated_node_id(&current, operation);
                 let command = match kind {
                     HierarchyItemKind::Group => {
-                        ProjectCommand::create_group(id, parent, index, "New Group")
+                        ProjectCommand::create_group(id, parent, index, title)
                     }
                     HierarchyItemKind::Document => {
                         let document = generated_document_id(&current, operation);
@@ -233,7 +237,7 @@ impl NativeProjectEffectExecutor {
                                 document,
                                 parent,
                                 index,
-                                title: "Untitled".to_owned(),
+                                title,
                             })
                             .await?;
                         return Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
@@ -427,13 +431,26 @@ impl NativeProjectEffectExecutor {
             }
             ProjectEffect::RestoreHistory {
                 checkpoint_id,
-                scope: HistoryRestoreScope::EntireProject,
+                scope,
             } => {
                 let checkpoint = parchmint_domain::CheckpointId::from_bytes(parse_stable_hex(
                     &checkpoint_id,
                     "History checkpoint",
                 )?);
-                let snapshot = self.ports.restore_checkpoint(checkpoint).await?;
+                let snapshot = match scope {
+                    HistoryRestoreScope::EntireProject => {
+                        self.ports.restore_checkpoint(checkpoint).await?
+                    }
+                    HistoryRestoreScope::Document { document_id } => {
+                        let document = DocumentId::from_bytes(parse_stable_hex(
+                            &document_id,
+                            "History document",
+                        )?);
+                        self.ports
+                            .restore_document_checkpoint(checkpoint, document)
+                            .await?
+                    }
+                };
                 Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
                     snapshot,
                 )))
@@ -1160,6 +1177,19 @@ trait RuntimeProjectPorts: Send + Sync {
             })
         })
     }
+
+    fn restore_document_checkpoint(
+        &self,
+        _checkpoint: parchmint_domain::CheckpointId,
+        _document: DocumentId,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::restore_document_checkpoint",
+                message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
 }
 
 impl From<parchmint_ui_api::StaleProjectSession> for PortError {
@@ -1489,6 +1519,25 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 .map(|result| result.snapshot)
                 .map_err(|error| PortError::Failed {
                     service: "ProjectWorkflowPort::restore_checkpoint",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn restore_document_checkpoint(
+        &self,
+        checkpoint: parchmint_domain::CheckpointId,
+        document: DocumentId,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(PortError::from)?;
+            access
+                .workflows(|workflows| workflows.restore_document_checkpoint(checkpoint, document))
+                .map_err(PortError::from)?
+                .map(|result| result.snapshot)
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::restore_document_checkpoint",
                     message: error.to_string(),
                 })
         })
@@ -2857,6 +2906,7 @@ mod tests {
             executor.execute_project_effect(ProjectEffect::CreateHierarchy {
                 parent_id: stable_id_string(NodeId::manuscript_root().as_bytes()),
                 kind: HierarchyItemKind::Group,
+                title: "New Group".into(),
             }),
         );
 
@@ -2916,6 +2966,7 @@ mod tests {
             executor.execute_project_effect(ProjectEffect::CreateHierarchy {
                 parent_id: stable_id_string(NodeId::manuscript_root().as_bytes()),
                 kind: HierarchyItemKind::Document,
+                title: "Untitled".into(),
             }),
         );
 

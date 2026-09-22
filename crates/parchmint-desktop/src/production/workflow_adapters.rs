@@ -443,6 +443,26 @@ impl ProjectWorkflowPort for ProductionProjectWorkflows {
         })
     }
 
+    fn restore_document_checkpoint(
+        &self,
+        checkpoint: parchmint_domain::CheckpointId,
+        document: parchmint_domain::DocumentId,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let plan = self
+            .history
+            .restore(checkpoint)
+            .map_err(|error| ProjectQueryError::new(error.to_string()))?;
+        let restored = self
+            .persistence
+            .restore_document_history(document, plan)
+            .map_err(map_project_workflow_error)?;
+        self.refresh_search();
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: restored.revision.checkpoint,
+        })
+    }
+
     fn delete_subtrees(
         &self,
         request: parchmint_ui_api::DeleteSubtreesWorkflow,

@@ -1362,6 +1362,19 @@ fn application_state(
                 .map(str::to_owned);
         }
     }
+    if let Some(bytes) = resources
+        .metadata
+        .get(&CanonicalRelativePath::parse("dictionary.txt").expect("static path"))
+    {
+        let dictionary = codec.decode_dictionary(bytes).map_err(|error| {
+            ProjectFilesystemError::failed("decode project dictionary", error.to_string())
+        })?;
+        for entry in dictionary.entries() {
+            project.dictionary.insert(entry).map_err(|error| {
+                ProjectFilesystemError::failed("hydrate project dictionary", error.to_string())
+            })?;
+        }
+    }
     let discovered = resources
         .document_paths
         .iter()

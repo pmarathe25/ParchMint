@@ -5,7 +5,7 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_project};
 
 #[test]
-fn style_fields_keep_multicharacter_values_until_submitted() {
+fn style_fields_commit_on_enter_and_leaving_the_form() {
     let run = IsolatedRun::new("style-field-editing").unwrap();
     let project = run.root().join("styles.parchmint");
     let harness = create_project(&run, &project, "Style editing");
@@ -28,18 +28,22 @@ fn style_fields_keep_multicharacter_values_until_submitted() {
     harness.click_text(HarnessWindow::Project, "Body").unwrap();
     let before = std::fs::read(project.join("styles.css")).ok();
     for (field, value) in [
-        ("Enter font family", "Source Serif 4"),
-        ("Enter font size (pt)", "12.5"),
+        (HarnessTarget::StyleFontFamily, "Source Serif 4"),
+        (HarnessTarget::StyleFontSize, "12.5"),
     ] {
         harness
-            .type_into(HarnessWindow::Project, field, value)
+            .type_into_target(HarnessWindow::Project, field, value)
             .unwrap();
-        if field == "Enter font family" {
+        if field == HarnessTarget::StyleFontFamily {
             assert_eq!(std::fs::read(project.join("styles.css")).ok(), before);
         }
-        harness
-            .press_key(HarnessWindow::Project, parchmint_desktop::HarnessKey::Enter)
-            .unwrap();
+        if field == HarnessTarget::StyleFontFamily {
+            harness
+                .press_key(HarnessWindow::Project, parchmint_desktop::HarnessKey::Enter)
+                .unwrap();
+        } else {
+            harness.click_text(HarnessWindow::Project, "Done").unwrap();
+        }
     }
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();

@@ -49,6 +49,8 @@ PARCHMINT_MOTION_FRAMES=/tmp/parchmint-motion cargo test --locked -j 1 -p parchm
 
 The [UI-review skill](../../.agents/skills/parchmint-ui-review/SKILL.md) provides
 capture, frame playback, comparison, and isolated native-review scripts.
+For real desktop input on GNOME Wayland, use the
+[remote-desktop helper](USABILITY.md#gnome-remote-desktop-input-and-screenshots).
 
 ## Use the command driver
 
@@ -113,3 +115,8 @@ reopen for a 20,000-word chapter in an optimized build. The editor binding's
 `chapter_authoring_performance` measures typing, selection, scrolling, chapter
 switching, projection, and Linux process memory for eight chapters plus Research.
 These report measurements, not machine-independent latency thresholds.
+
+Stable-target clicks reveal the project menu for its destinations and the Replace
+disclosure for replacement controls before clicking the requested target. These
+are real pointer actions and both steps appear in the trace. Direct text and
+visibility queries do not open hidden controls.

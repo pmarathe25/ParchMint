@@ -405,6 +405,25 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
             HarnessTarget::PaneFocus(EditorPane::Primary),
         )
         .unwrap();
+    for target in [
+        HarnessTarget::NewTab(EditorPane::Primary),
+        HarnessTarget::ToggleCompanion,
+        HarnessTarget::ToggleExplorer,
+        HarnessTarget::ToggleInspector,
+        HarnessTarget::Ribbon(RibbonDestination::Cards),
+    ] {
+        assert!(
+            !harness
+                .target_is_visible(HarnessWindow::Project, target)
+                .unwrap(),
+            "{target:?} must be hidden in focus mode"
+        );
+    }
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Exit focus")
+            .unwrap()
+    );
     harness
         .type_focused(HarnessWindow::Project, "Writing without sidebars.")
         .unwrap();
@@ -428,6 +447,18 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
         harness
             .target_is_visible(HarnessWindow::Project, HarnessTarget::EditorPrimary)
             .unwrap()
+    );
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::FormattingMenu)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Exit focus")
+            .unwrap(),
+        "Escape closes Format before leaving focus mode"
     );
     harness
         .click_target(
@@ -483,7 +514,10 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
             .unwrap();
         assert!(!matches!(
             harness.focus_target(HarnessWindow::Project).unwrap(),
-            parchmint_desktop::FocusTarget::Explorer | parchmint_desktop::FocusTarget::Inspector
+            parchmint_desktop::FocusTarget::Explorer
+                | parchmint_desktop::FocusTarget::Inspector
+                | parchmint_desktop::FocusTarget::ActiveTab
+                | parchmint_desktop::FocusTarget::StatusBar
         ));
     }
     if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
@@ -532,11 +566,21 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
             .unwrap()
     );
     harness
-        .click_target(
-            HarnessWindow::Project,
-            HarnessTarget::PaneFocus(EditorPane::Primary),
-        )
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
         .unwrap();
+    assert!(
+        harness
+            .target_is_visible(
+                HarnessWindow::Project,
+                HarnessTarget::NewTab(EditorPane::Primary)
+            )
+            .unwrap()
+    );
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
+            .unwrap()
+    );
     let companion = harness
         .active_editor_document_id(EditorPane::Companion)
         .unwrap();
@@ -769,7 +813,7 @@ fn history_flow_preserves_meaningful_checkpoints_and_records_restoration() {
         .click_history_checkpoint_by_id(HarnessWindow::Project, first.id.clone())
         .expect("select the exact first checkpoint");
     harness
-        .click_text(HarnessWindow::Project, "Restore project to this version…")
+        .click_text(HarnessWindow::Project, "Restore project…")
         .expect("request restoration");
     harness
         .click_text(HarnessWindow::Project, "Restore project")
@@ -997,7 +1041,7 @@ fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) 
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent context menu");
     harness
-        .click_text(HarnessWindow::Project, "Create group")
+        .click_text(HarnessWindow::Project, "New group")
         .expect("create group");
     harness
         .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
@@ -1012,7 +1056,7 @@ fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &st
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent context menu");
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .expect("create document");
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)

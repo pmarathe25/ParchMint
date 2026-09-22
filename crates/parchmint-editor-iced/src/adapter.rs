@@ -1205,6 +1205,11 @@ fn layout_block(
     metrics: EditorLayoutMetrics,
     previous: Option<&BlockLayoutGeometry>,
 ) -> Result<BlockLayoutGeometry, EditorError> {
+    let mut metrics = metrics;
+    // Keep prose usable in split panes without changing document typography.
+    metrics.inset_x = metrics
+        .inset_x
+        .min((presentation.viewport.width * 0.06).max(16.0));
     BlockLayoutGeometry::build(
         input,
         presentation.viewport,

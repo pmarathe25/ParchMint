@@ -1175,12 +1175,13 @@ fn list_history(
             .find_commit(oid)
             .map_err(|error| corrupt_git("load listed checkpoint", error))?;
         let metadata = decode_metadata(commit.message_bytes())?;
+        let belongs_to_filter = query.affected_document.is_none_or(|document| {
+            metadata.category == CheckpointCategory::NamedSnapshot
+                || metadata.affected_documents.contains(&document)
+        });
         next = parent_oid(&commit)?;
         if !anchor_found {
             if Some(oid) == anchor {
-                let belongs_to_filter = query
-                    .affected_document
-                    .is_none_or(|document| metadata.affected_documents.contains(&document));
                 if !belongs_to_filter {
                     return Err(HistoryError::InvalidCursor);
                 }
@@ -1188,10 +1189,7 @@ fn list_history(
             }
             continue;
         }
-        if query
-            .affected_document
-            .is_none_or(|document| metadata.affected_documents.contains(&document))
-        {
+        if belongs_to_filter {
             matches.push(HistoryRecord {
                 oid,
                 tree_id: commit.tree_id(),

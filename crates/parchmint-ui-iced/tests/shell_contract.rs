@@ -184,3 +184,15 @@ fn issuing_a_task_does_not_wait_and_only_the_latest_completion_applies() {
     assert!(!shell.accept_completion(TaskCompletion::for_ticket(first, Ok(()))));
     assert!(shell.accept_completion(TaskCompletion::for_ticket(second, Ok(()))));
 }
+
+#[test]
+fn enlarged_interface_uses_real_logical_size_and_one_sidebar_in_compact_windows() {
+    let mut layout = ShellLayout::for_window(853, 480);
+    layout.set_inspector_visible(true);
+    assert!(!layout.explorer_is_visible());
+    assert_eq!(layout.ribbon().width(), 853);
+    assert_eq!(layout.status_bar().y() + layout.status_bar().height(), 480);
+    layout.set_explorer_visible(true);
+    assert!(!layout.inspector_is_visible());
+    assert!(layout.center().width() >= 500);
+}

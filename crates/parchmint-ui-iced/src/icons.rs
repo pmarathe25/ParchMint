@@ -7,6 +7,8 @@ use parchmint_design_system::production_icon_svg;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Icon {
     Project,
+    Editor,
+    Overview,
     AlignLeft,
     AlignCenter,
     AlignRight,
@@ -39,6 +41,8 @@ impl Icon {
             Self::AlignRight => "format-align-right",
             Self::AlignJustify => "format-align-justify",
             Self::LineSpacing => "format-line-spacing",
+            Self::Editor => "workspace-editor",
+            Self::Overview => "workspace-cards",
             Self::Project => "workspace-project",
             Self::History => "workspace-history",
             Self::RecentlyDeleted => "workspace-deleted",
@@ -77,6 +81,15 @@ pub(crate) fn icon_sized(icon: Icon, size: u16) -> Svg<'static> {
         .style(|theme: &iced::Theme, _| iced::widget::svg::Style {
             color: Some(theme.palette().text),
         })
+}
+
+/// User-supplied ParchMint artwork, embedded unchanged for offline installations.
+pub(crate) fn brand<'a>(size: u16) -> Svg<'a> {
+    svg(Handle::from_memory(
+        include_bytes!("../assets/parchmint-brand.svg").as_slice(),
+    ))
+    .width(u32::from(size))
+    .height(u32::from(size))
 }
 
 #[cfg(test)]

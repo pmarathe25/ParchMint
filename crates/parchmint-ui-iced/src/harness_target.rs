@@ -18,6 +18,8 @@ use crate::{EditorPane, RibbonDestination};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessTarget {
     Ribbon(RibbonDestination),
+    ProjectMenu,
+    GlobalReplaceToggle,
     ExplorerSearch,
     ExplorerRename,
     CardsList,
@@ -42,6 +44,7 @@ pub enum HarnessTarget {
     Bold,
     Link,
     ParagraphStyle,
+    FormattingMenu,
     FontFamily,
     Alignment,
     LineSpacing,
@@ -62,6 +65,8 @@ pub enum HarnessTarget {
     ExportStart,
     ExportTitles,
     StyleInheritance,
+    StyleFontFamily,
+    StyleFontSize,
     ToggleCompanion,
     PaneFocus(EditorPane),
     ToggleExplorer,
@@ -72,6 +77,8 @@ pub enum HarnessTarget {
 impl HarnessTarget {
     pub(crate) fn id(self) -> Id {
         Id::new(match self {
+            Self::ProjectMenu => "harness.project-menu",
+            Self::GlobalReplaceToggle => "harness.global-search.replace-toggle",
             Self::Ribbon(RibbonDestination::Editor) => "harness.ribbon.editor",
             Self::Ribbon(RibbonDestination::Cards) => "harness.ribbon.cards",
             Self::Ribbon(RibbonDestination::History) => "harness.ribbon.history",
@@ -105,6 +112,7 @@ impl HarnessTarget {
             Self::ParagraphStyle => "harness.editor.paragraph-style",
             Self::Alignment => "harness.alignment",
             Self::LineSpacing => "harness.line-spacing",
+            Self::FormattingMenu => "harness.editor.formatting-menu",
             Self::FontFamily => "harness.editor.font-family",
             Self::FontSize => "harness.editor.font-size",
             Self::ManageStyles => "harness.editor.manage-styles",
@@ -126,6 +134,8 @@ impl HarnessTarget {
             Self::ExportBrowse => "harness.export.browse",
             Self::ExportStart => "harness.export.start",
             Self::ExportTitles => "harness.export.titles",
+            Self::StyleFontFamily => "style-property-FontFamily",
+            Self::StyleFontSize => "style-property-FontSizePoints",
             Self::StyleInheritance => "harness.settings.style-inheritance",
             Self::ToggleCompanion => "harness.toggle-companion",
             Self::PaneFocus(EditorPane::Primary) => "harness.pane-focus.primary",

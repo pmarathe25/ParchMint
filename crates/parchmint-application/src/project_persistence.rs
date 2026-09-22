@@ -925,7 +925,7 @@ impl ProjectPersistenceCoordinator {
             let command = ProjectCommand::move_node(movement.node, movement.parent, movement.index);
             simulated = apply_project_command(&simulated, simulated.revision, command)?.project;
         }
-        self.persist_prepared_state(simulated, current.documents)
+        self.persist_prepared_state(simulated, current.documents, None)
     }
 
     /// Clones one group or document subtree with fresh identities. The entire
@@ -950,8 +950,11 @@ impl ProjectPersistenceCoordinator {
 
         let current = self.commands.complete_authored_snapshot()?;
         let prepared = prepare_duplicates(&current.project, &current.documents, &request)?;
-        let revision =
-            self.persist_prepared_state(prepared.project.clone(), prepared.documents.clone())?;
+        let revision = self.persist_prepared_state(
+            prepared.project.clone(),
+            prepared.documents.clone(),
+            None,
+        )?;
 
         Ok(DuplicatedSubtreesRevision {
             created_roots: prepared.created_roots,
@@ -965,6 +968,7 @@ impl ProjectPersistenceCoordinator {
         &self,
         project: Project,
         documents: Vec<DocumentSnapshot>,
+        restored_document: Option<DocumentId>,
     ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
         let recovery_project_revision = self
             .editor
@@ -984,11 +988,25 @@ impl ProjectPersistenceCoordinator {
             .canonical
             .lock()
             .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
-        let encoding = ProjectFormatCodec::default().encode_domain_project_with_frontier(
+        let encoding = ProjectFormatCodec::default().encode_domain_project_with_annotations(
             &project,
             &documents
                 .iter()
                 .map(|document| (document.document_id, document.body.clone()))
+                .collect(),
+            &documents
+                .iter()
+                .filter(|_| restored_document.is_some())
+                .map(|document| {
+                    (
+                        document.document_id,
+                        document
+                            .comments
+                            .iter()
+                            .map(AnnotationThread::from)
+                            .collect(),
+                    )
+                })
                 .collect(),
             &canonical.resources,
             &canonical.paths,
@@ -1024,13 +1042,29 @@ impl ProjectPersistenceCoordinator {
                 }
             }
         }
-        let request = materialize_save_request(
-            PersistenceSaveKind::Structural,
+        let mut request = materialize_save_request(
+            if restored_document.is_some() {
+                PersistenceSaveKind::Restoration
+            } else {
+                PersistenceSaveKind::Structural
+            },
             None,
             &capture,
             revisions,
             &encoding,
         );
+        if let Some(document) = restored_document {
+            let mut affected = capture
+                .dirty_resources
+                .iter()
+                .filter_map(|resource| match resource {
+                    Resource::Document(document) => Some(*document),
+                    Resource::Manifest | Resource::Styles | Resource::Dictionary => None,
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            affected.insert(document);
+            request.checkpoint.affected_documents = affected.into_iter().collect();
+        }
         let projection = documents.first().ok_or_else(|| {
             ProjectPersistenceError::Application("project has no documents".into())
         })?;
@@ -1085,7 +1119,16 @@ impl ProjectPersistenceCoordinator {
             .recovery_base
             .lock()
             .map_err(|_| ProjectPersistenceError::StateUnavailable)? = recovery_base;
-        self.commands.publish_restored_state(project, documents)?;
+        if let Some(document) = restored_document {
+            let document = documents
+                .into_iter()
+                .find(|snapshot| snapshot.document_id == document)
+                .expect("restored document was validated before persistence");
+            self.commands
+                .publish_restored_document(document, &capture)?;
+        } else {
+            self.commands.publish_restored_state(project, documents)?;
+        }
 
         Ok(PersistenceSavedRevision {
             requested: persistence_revision(&acknowledgement.requested_revisions),
@@ -1107,6 +1150,65 @@ impl ProjectPersistenceCoordinator {
         let (handle, _) =
             self.request_save_inner(PersistenceSaveKind::NamedSnapshot, Some(name))?;
         self.await_save(handle)
+    }
+
+    /// Restores only a live document's body and annotations. The current
+    /// authored snapshot supplies every other saved resource, including
+    /// unsaved writing and comments, and is published only after durability.
+    pub fn restore_document_history(
+        &self,
+        document: DocumentId,
+        plan: RestorePlan,
+    ) -> Result<RestoredProjectRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        if !self
+            .pending_saves
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+            .is_empty()
+        {
+            return Err(ProjectPersistenceError::OperationInProgress);
+        }
+
+        let mut current = self.commands.complete_authored_snapshot()?;
+        let target = current
+            .documents
+            .iter_mut()
+            .find(|snapshot| snapshot.document_id == document)
+            .ok_or_else(|| {
+                ProjectPersistenceError::History("the document is no longer in this project".into())
+            })?;
+        let resources = validated_restore_resources(&plan)?;
+        let (_, _, frontier, bodies, comments) =
+            decode_restored_project(current.project.id, &resources)?;
+        target.body = bodies.get(&document).cloned().ok_or_else(|| {
+            ProjectPersistenceError::History(
+                "the document does not exist in this checkpoint".into(),
+            )
+        })?;
+        target.comments = comments.get(&document).cloned().unwrap_or_default();
+        target.revision = EditorRevision::from(
+            target
+                .revision
+                .value()
+                .max(
+                    frontier
+                        .document_revisions
+                        .get(&document)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+                .saturating_add(1),
+        );
+        let revision =
+            self.persist_prepared_state(current.project, current.documents, Some(document))?;
+        Ok(RestoredProjectRevision {
+            source: plan.source(),
+            revision,
+        })
     }
 
     /// Applies a whole-project History plan through the ordinary atomic save

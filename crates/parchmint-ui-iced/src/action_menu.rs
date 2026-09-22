@@ -56,6 +56,7 @@ pub(crate) fn anchored_menu<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     Element::new(ActionMenu {
         trigger,
+        panel: None,
         enabled: !options.is_empty(),
         options: options
             .into_iter()
@@ -99,6 +100,7 @@ pub(crate) fn menu_with_footer<'a, Message: Clone + 'a>(
     });
     Element::new(ActionMenu {
         trigger,
+        panel: None,
         options,
         enabled: true,
         theme,
@@ -109,6 +111,7 @@ pub(crate) fn menu_with_footer<'a, Message: Clone + 'a>(
 
 struct ActionMenu<'a, Message> {
     trigger: Element<'a, ()>,
+    panel: Option<Element<'a, Message>>,
     options: Vec<Choice<Message>>,
     enabled: bool,
     theme: ParchMintTheme,
@@ -182,6 +185,14 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                 ..
             }) = event
             {
+                if self.panel.is_some()
+                    && !matches!(
+                        key,
+                        keyboard::key::Named::Escape | keyboard::key::Named::Tab
+                    )
+                {
+                    return;
+                }
                 match key {
                     keyboard::key::Named::Escape | keyboard::key::Named::Tab => state.open = false,
                     keyboard::key::Named::ArrowDown => {
@@ -212,7 +223,9 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                 ))
             ) {
                 state.open = false;
-                shell.capture_event();
+                if self.panel.is_none() {
+                    shell.capture_event();
+                }
                 shell.request_redraw();
                 return;
             }
@@ -236,6 +249,9 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
         if !messages.is_empty() {
             state.open = !state.open;
             if state.open {
+                if self.panel.is_some() {
+                    state.menu = Tree::empty();
+                }
                 state.motion.start();
             }
             state.selected = None;
@@ -317,6 +333,19 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
             ),
             bounds.y + translation.y,
         );
+        if let Some(content) = self.panel.as_mut() {
+            state.menu.diff(&*content);
+            return Some(
+                state
+                    .motion
+                    .overlay(overlay::Element::new(Box::new(PanelOverlay {
+                        content,
+                        tree: &mut state.menu,
+                        point: Point::new(point.x, point.y + bounds.height + 4.0),
+                        viewport: *viewport,
+                    }))),
+            );
+        }
         if self
             .options
             .iter()
@@ -365,7 +394,11 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                     if let Some(icon) = choice.icon {
                         label = label.push(icon_sized(icon, 18));
                     }
-                    label = label.push(text(choice.label.clone()).size(13));
+                    label = label.push(
+                        text(choice.label.clone())
+                            .size(13)
+                            .color(theme.palette().primary_text),
+                    );
                     let selected = state.selected == Some(index);
                     let button = components::semantic_button(label)
                         .width(Length::Fill)
@@ -426,6 +459,7 @@ pub(crate) fn icon_menu<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     Element::new(ActionMenu {
         trigger,
+        panel: None,
         enabled: true,
         theme,
         width: 184.0,
@@ -541,6 +575,132 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
             cursor,
             &layout.bounds(),
             renderer,
+        )
+    }
+}
+
+/// An anchored formatting panel. Child menus retain their own keyboard handling.
+pub(crate) fn panel<'a, Message: Clone + 'a>(
+    trigger: Element<'a, ()>,
+    content: Element<'a, Message>,
+    theme: ParchMintTheme,
+    width: f32,
+) -> Element<'a, Message> {
+    Element::new(ActionMenu {
+        trigger,
+        panel: Some(
+            container(content)
+                .padding(12)
+                .width(width)
+                .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+                .into(),
+        ),
+        options: Vec::new(),
+        enabled: true,
+        theme,
+        width,
+        menu_style: Box::new(move |_| components::menu_style(theme)),
+    })
+}
+
+struct PanelOverlay<'a, 'b, Message> {
+    viewport: Rectangle,
+    content: &'a mut Element<'b, Message>,
+    tree: &'a mut Tree,
+    point: Point,
+}
+impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer>
+    for PanelOverlay<'_, '_, Message>
+{
+    fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
+        let node = self.content.as_widget_mut().layout(
+            self.tree,
+            renderer,
+            &layout::Limits::new(Size::ZERO, bounds),
+        );
+        let point = Point::new(
+            self.point
+                .x
+                .min((bounds.width - node.size().width).max(0.0)),
+            self.point
+                .y
+                .min((bounds.height - node.size().height).max(0.0)),
+        );
+        node.move_to(point)
+    }
+    fn update(
+        &mut self,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        self.content.as_widget_mut().update(
+            self.tree,
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            &layout.bounds(),
+        );
+    }
+    fn draw(
+        &self,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+    ) {
+        self.content.as_widget().draw(
+            self.tree,
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            &layout.bounds(),
+        );
+    }
+    fn operate(
+        &mut self,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content
+            .as_widget_mut()
+            .operate(self.tree, layout, renderer, operation);
+    }
+    fn mouse_interaction(
+        &self,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(
+            self.tree,
+            layout,
+            cursor,
+            &layout.bounds(),
+            renderer,
+        )
+    }
+    fn overlay<'c>(
+        &'c mut self,
+        layout: Layout<'c>,
+        renderer: &iced::Renderer,
+    ) -> Option<overlay::Element<'c, Message, iced::Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            self.tree,
+            layout,
+            renderer,
+            &self.viewport,
+            Vector::ZERO,
         )
     }
 }

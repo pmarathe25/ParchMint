@@ -18,7 +18,6 @@ const TAB_OVERFLOW_WIDTH: f32 = 44.0;
 const TAB_TITLE_INSET: f32 = 16.0;
 
 const SPELLING_MENU_WIDTH: f32 = 180.0;
-const SPELLING_MENU_MIN_HEIGHT: f32 = 128.0;
 
 /// The two editor hosts available in the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -670,6 +669,7 @@ pub enum SpellingDictionaryScope {
 /// One applicable action in the word-anchored spelling menu.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpellingMenuAction {
+    Edit(&'static str),
     AddComment,
     CopyLink(String),
     Replace(String),
@@ -696,9 +696,6 @@ impl SpellingMenu {
             .invocation_point
             .unwrap_or_else(|| request.word_bounds.center());
         let width = SPELLING_MENU_WIDTH.min(request.pane_bounds.width.max(0.0));
-        let requested_height = SPELLING_MENU_MIN_HEIGHT
-            + request.suggestions.len().saturating_sub(1) as f32 * TAB_HEIGHT;
-        let height = requested_height.min(request.pane_bounds.height.max(0.0));
         let preferred_x = if invocation_point.x + width <= request.pane_bounds.right() {
             invocation_point.x
         } else {
@@ -707,9 +704,10 @@ impl SpellingMenu {
         let maximum_x = (request.pane_bounds.right() - width).max(request.pane_bounds.left());
         let x = preferred_x.clamp(request.pane_bounds.left(), maximum_x);
         let preferred_y = invocation_point.y;
-        let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
-        let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
-        let mut actions = Vec::new();
+        let mut actions = ["Undo", "Redo", "Cut", "Copy", "Paste", "Select all"]
+            .into_iter()
+            .map(SpellingMenuAction::Edit)
+            .collect::<Vec<_>>();
         if let Some(url) = request.link_target {
             actions.push(SpellingMenuAction::CopyLink(url));
         }
@@ -734,6 +732,9 @@ impl SpellingMenu {
             actions.push(SpellingMenuAction::Ignore);
         }
         actions.push(SpellingMenuAction::AddComment);
+        let height = (actions.len() as f32 * 34.0 + 12.0).min(request.pane_bounds.height.max(0.0));
+        let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
+        let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
         Self {
             pane: request.pane,
             word: request.word,
@@ -1270,6 +1271,10 @@ pub enum EditorMessage {
         document_id: String,
     },
     CloseTab {
+        pane: EditorPane,
+        document_id: String,
+    },
+    MoveTabToOtherPane {
         pane: EditorPane,
         document_id: String,
     },
@@ -2666,6 +2671,18 @@ impl EditorWorkspace {
                 }
                 effects
             }
+            EditorMessage::MoveTabToOtherPane { pane, document_id } => {
+                let target = match pane {
+                    EditorPane::Primary => EditorPane::Companion,
+                    EditorPane::Companion => EditorPane::Primary,
+                };
+                self.update(EditorMessage::BeginTabDrag { pane, document_id });
+                self.update(EditorMessage::SetTabDragTarget {
+                    pane: target,
+                    target_index: self.pane(target).tabs().len(),
+                });
+                self.update(EditorMessage::CommitTabDrag)
+            }
             EditorMessage::MoveTab {
                 pane,
                 document_id,
@@ -2949,10 +2966,11 @@ impl EditorWorkspace {
                 resolved,
             }),
             EditorMessage::RequestDeleteCommentThread(thread) => {
+                let effects = self.select_comment(thread.clone());
                 self.comment_actions_open = false;
                 self.pending_delete_comment = Some(thread);
-                self.comment_feedback = Some("Confirm thread deletion.".into());
-                Vec::new()
+                self.comment_feedback = None;
+                effects
             }
             EditorMessage::ConfirmDeleteCommentThread => {
                 let Some(thread_id) = self.pending_delete_comment.take() else {
@@ -3324,7 +3342,9 @@ impl EditorWorkspace {
     ) -> Vec<EditorEffect> {
         let view = self.pane(pane).view;
         match action {
-            SpellingMenuAction::AddComment | SpellingMenuAction::CopyLink(_) => Vec::new(),
+            SpellingMenuAction::Edit(_)
+            | SpellingMenuAction::AddComment
+            | SpellingMenuAction::CopyLink(_) => Vec::new(),
             SpellingMenuAction::Replace(replacement) => vec![EditorEffect::Command {
                 view,
                 command: EditorCommand::ReplaceSpelling {
@@ -4107,7 +4127,7 @@ mod tests {
         };
 
         assert_eq!(
-            menu.actions(),
+            &menu.actions()[6..],
             [
                 SpellingMenuAction::Replace("the".to_owned()),
                 SpellingMenuAction::Replace("tech".to_owned()),
@@ -4133,7 +4153,7 @@ mod tests {
         let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
             panic!("expected the spelling menu")
         };
-        assert_eq!(menu.bounds(), Rect::new(140.0, 120.0, 180.0, 128.0));
+        assert_eq!(menu.bounds(), Rect::new(140.0, 48.0, 180.0, 352.0));
 
         let request = SpellingMenuRequest::new(
             EditorPane::Primary,
@@ -4148,7 +4168,7 @@ mod tests {
         };
 
         assert_eq!(menu.invocation_point(), Point::new(420.0, 140.0));
-        assert_eq!(menu.bounds(), Rect::new(240.0, 140.0, 180.0, 128.0));
+        assert_eq!(menu.bounds(), Rect::new(240.0, 48.0, 180.0, 352.0));
     }
 
     #[test]
@@ -4165,7 +4185,18 @@ mod tests {
         let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
             panic!("expected comment context menu")
         };
-        assert_eq!(menu.actions(), [SpellingMenuAction::AddComment]);
+        assert_eq!(
+            menu.actions(),
+            [
+                SpellingMenuAction::Edit("Undo"),
+                SpellingMenuAction::Edit("Redo"),
+                SpellingMenuAction::Edit("Cut"),
+                SpellingMenuAction::Edit("Copy"),
+                SpellingMenuAction::Edit("Paste"),
+                SpellingMenuAction::Edit("Select all"),
+                SpellingMenuAction::AddComment
+            ]
+        );
     }
 
     #[test]
@@ -4346,9 +4377,8 @@ mod tests {
             }] if thread_id == "thread"
         ));
         assert!(
-            workspace
-                .update(EditorMessage::RequestDeleteCommentThread("thread".into()))
-                .is_empty()
+            matches!(workspace.update(EditorMessage::RequestDeleteCommentThread("thread".into())).as_slice(),
+            [EditorEffect::NavigateCommentAnchor { comment_id, .. }] if comment_id == "thread")
         );
         assert_eq!(workspace.pending_delete_comment(), Some("thread"));
         assert!(matches!(

@@ -99,7 +99,11 @@ where
                 placeholder_color: field.value,
                 handle_color: field.icon,
                 background: field.background,
-                border: field.border,
+                border: if interaction == Interaction::Focused {
+                    field.border
+                } else {
+                    borderless()
+                },
             }
         })
         .menu_style(|theme| menu_style(presentation(theme)))
@@ -373,6 +377,49 @@ fn outlined(color: Color, width: f32) -> iced::Border {
 fn borderless() -> iced::Border {
     outlined(Color::TRANSPARENT, 0.0)
 }
+// Shared context-menu metrics across project, tab, editor, and comment menus.
+pub(crate) fn context_action<'a, Message: Clone + 'a>(
+    label: impl Into<String>,
+    message: Message,
+    theme: crate::design_tokens::ParchMintTheme,
+) -> iced::widget::Button<'a, Message> {
+    let label = label.into();
+    let destructive = label.starts_with("Delete");
+    let shortcut = crate::shortcut_router::label(match label.as_str() {
+        "Undo" => "edit.undo",
+        "Redo" => "edit.redo",
+        "Cut" => "edit.cut",
+        "Copy" => "edit.copy",
+        "Paste" => "edit.paste",
+        "Paste without formatting" => "edit.paste-plain",
+        "Select all" => "edit.select-all",
+        "Rename" => "outline.rename",
+        _ => "",
+    });
+    semantic_button(
+        iced::widget::row![
+            iced::widget::text(label).size(13),
+            iced::widget::Space::new().width(iced::Length::Fill),
+            iced::widget::text(shortcut)
+                .size(11)
+                .color(theme.palette().secondary_text),
+        ]
+        .spacing(12)
+        .align_y(iced::alignment::Vertical::Center),
+    )
+    .padding([6, 10])
+    .height(32)
+    .width(iced::Length::Fill)
+    .on_press(message)
+    .style(move |_, status| {
+        let mut style = button_style(theme, ButtonKind::Quiet, button_interaction(status, false));
+        if destructive {
+            style.text_color = theme.palette().error;
+        }
+        style
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

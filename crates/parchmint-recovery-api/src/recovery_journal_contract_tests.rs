@@ -255,3 +255,42 @@ fn flush_and_cleanup_helpers_require_exact_or_fully_covered_revisions() {
         )),
     ));
 }
+
+#[test]
+fn revision_only_document_record_replays_and_keeps_following_revisions_consecutive() {
+    let document = DocumentId::from_bytes([9; 16]);
+    let resource = ResourceId::DocumentById {
+        document_id: "09090909090909090909090909090909".into(),
+    };
+    let initial = RecoveryBaseSnapshot {
+        revisions: RecoveryRevisionVector::new(
+            ProjectRevision::from(0),
+            BTreeMap::from([(document, DocumentRevision::from(1))]),
+        ),
+        hashes: BTreeMap::from([(resource.clone(), hash(4))]),
+    };
+    let mut same = batch(1, 4, 4);
+    same.base_hashes = initial.hashes.clone();
+    same.result_hashes = initial.hashes.clone();
+    same.documents.insert(
+        document,
+        EditorRevisionRange::new(2.into(), 3.into()).unwrap(),
+    );
+    assert_eq!(same.validate(), Ok(()));
+    let mut next = same.clone();
+    next.project_revision = 2.into();
+    next.documents.insert(
+        document,
+        EditorRevisionRange::new(4.into(), 4.into()).unwrap(),
+    );
+    next.result_hashes.insert(resource, hash(5));
+    let replay = replay_records(
+        &initial,
+        vec![
+            RecoveryRecord::Complete(same),
+            RecoveryRecord::Complete(next),
+        ],
+    );
+    assert_eq!(replay.accepted.len(), 2);
+    assert!(replay.isolation.is_none());
+}

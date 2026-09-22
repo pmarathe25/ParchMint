@@ -371,6 +371,39 @@ impl NativeDesktopCallbacks for ProductionUiCallbacks {
         refresh_recent_projects(self.preferences.as_ref()).map(Some)
     }
 
+    fn keybindings(&self) -> parchmint_preferences::Keybindings {
+        block_on(self.preferences.load()).map_or_else(
+            |_| Default::default(),
+            |snapshot| snapshot.values.keybindings,
+        )
+    }
+    fn set_keybindings(&self, bindings: parchmint_preferences::Keybindings) -> Result<(), String> {
+        parchmint_preferences::validate_keybindings(&bindings)?;
+        let current = block_on(self.preferences.load()).map_err(|error| error.to_string())?;
+        block_on(self.preferences.update(
+            current.revision,
+            parchmint_preferences::PreferenceCommand::SetKeybindings(bindings),
+        ))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    fn ui_zoom_percent(&self) -> u16 {
+        block_on(self.preferences.load()).map_or(100, |snapshot| {
+            snapshot.values.ui_zoom_percent.clamp(75, 150)
+        })
+    }
+
+    fn set_ui_zoom(&self, value: u16) -> Result<(), String> {
+        let current = block_on(self.preferences.load()).map_err(|error| error.to_string())?;
+        block_on(self.preferences.update(
+            current.revision,
+            parchmint_preferences::PreferenceCommand::SetUiZoom(value),
+        ))
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
     fn reduced_motion(&self) -> bool {
         block_on(self.preferences.load()).is_ok_and(|snapshot| snapshot.values.reduced_motion)
     }

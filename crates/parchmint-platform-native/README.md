@@ -25,3 +25,7 @@ Unsupported or failed operations return explicit errors. Callers validate paths
 from dialogs and clipboard content. External opening accepts a validated HTTPS
 URL; the platform API has no file-action intent. Window placement, shortcuts,
 and decorations follow the host platform.
+
+Linux appearance reads the desktop portal first, then falls back to GNOME's
+explicit color preference or GTK theme. The portal reflects the running session
+even when application data uses an isolated XDG directory.

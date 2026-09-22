@@ -667,14 +667,13 @@ fn verification_semantic_body(
     .clone()
 }
 
-/// Builds the selected History document exactly as native integration does:
-/// from the active document in the loaded project snapshot.
+/// Resolves the explicitly selected History document from the fixture snapshot.
 #[cfg(feature = "visual-verification")]
 fn verification_history_current_document(
     snapshot: &parchmint_ui_api::ProjectSnapshot,
     workspace: &crate::ProjectWorkspace,
 ) -> Option<crate::HistoryCurrentDocument> {
-    let document_id = workspace.focused_history_document()?.to_owned();
+    let document_id = workspace.history().active_document_filter()?.to_owned();
     let document = snapshot
         .documents
         .iter()
@@ -832,6 +831,9 @@ fn verification_workspace(
             );
         }
         VisualTarget::History => {
+            workspace.update(ProjectMessage::SetHistoryDocumentFilter(Some(
+                chapter_one_document.clone(),
+            )));
             let history_checkpoint_body = "<p>Chapter One</p><p>The harbor held the last of the evening light.</p><p>Mara turned the unopened letter in her fingers.</p><p>By morning, the tide had erased every footprint.</p>".to_owned();
             let checkpoints = vec![
                 HistoryCheckpointRow {

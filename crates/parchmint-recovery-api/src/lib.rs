@@ -150,11 +150,15 @@ impl RecoveryBatch {
                 reason: "base and result hashes must cover the same resources",
             });
         }
+        // Coalesced edits followed by undo can return to the same bytes at a
+        // newer document revision. Journal that revision frontier too: later
+        // records and save acknowledgements must remain consecutive.
         if self.base_hashes.is_empty()
-            || self
-                .base_hashes
-                .iter()
-                .all(|(resource, base)| self.result_hashes[resource] == *base)
+            || (self.documents.is_empty()
+                && self
+                    .base_hashes
+                    .iter()
+                    .all(|(resource, base)| self.result_hashes[resource] == *base))
         {
             return Err(RecoveryError::InvalidBatch {
                 field: "resource hashes",

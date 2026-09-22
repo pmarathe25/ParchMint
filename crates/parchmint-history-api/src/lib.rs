@@ -122,6 +122,7 @@ impl HistoryCursor {
 pub struct HistoryPageQuery {
     pub cursor: Option<HistoryCursor>,
     pub limit: usize,
+    /// Includes changes affecting this document and all named milestones.
     pub affected_document: Option<DocumentId>,
 }
 

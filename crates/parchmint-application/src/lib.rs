@@ -1371,6 +1371,32 @@ impl NativeProjectCommandDispatcher {
         Ok(())
     }
 
+    /// Publishes one durable document restore without replacing unrelated
+    /// document sessions or their undo. Project undo is retired because its
+    /// composite edits may refer to the replaced document state.
+    pub(crate) fn publish_restored_document(
+        &self,
+        document: DocumentSnapshot,
+        saved: &RevisionedSaveRequest,
+    ) -> Result<(), ApplicationError> {
+        let mut state = lock(&self.state)?;
+        if state.captured_saves.get(&saved.generation) != Some(saved) {
+            return Err(ApplicationError::StaleSaveAcknowledgement);
+        }
+        self.documents.restore_documents(vec![document])?;
+        state.captured_saves.remove(&saved.generation);
+        state.dirty.retain(|resource, generation| {
+            !saved.dirty_resources.contains(*resource) || *generation > saved.mutation_generation
+        });
+        state
+            .pending_checkpoints
+            .retain(|(_, generation)| *generation > saved.mutation_generation);
+        state.undo.clear();
+        state.redo.clear();
+        state.undo_bytes = 0;
+        Ok(())
+    }
+
     /// Restores document state and its tombstoned hierarchy at one dispatcher
     /// boundary. The document snapshots must come from the tombstone's
     /// immutable pre-delete checkpoint, not from the current project files.

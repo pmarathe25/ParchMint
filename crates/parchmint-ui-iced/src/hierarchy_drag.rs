@@ -60,6 +60,17 @@ pub(crate) fn commit_on_click_away<'a, Message>(
 where
     Message: Clone + 'a,
 {
+    commit_on_click_away_maybe(content, Some(on_click_away))
+}
+
+/// Keeps a field's widget tree stable as its pending edit changes.
+pub(crate) fn commit_on_click_away_maybe<'a, Message>(
+    content: impl Into<Element<'a, Message>>,
+    on_click_away: Option<Message>,
+) -> Element<'a, Message>
+where
+    Message: Clone + 'a,
+{
     CommitOnClickAway {
         content: content.into(),
         on_click_away,
@@ -150,7 +161,7 @@ struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Re
 
 struct CommitOnClickAway<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
-    on_click_away: Message,
+    on_click_away: Option<Message>,
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -215,8 +226,9 @@ where
             event,
             Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
         ) && !cursor.is_over(layout.bounds())
+            && let Some(message) = &self.on_click_away
         {
-            shell.publish(self.on_click_away.clone());
+            shell.publish(message.clone());
         }
     }
 

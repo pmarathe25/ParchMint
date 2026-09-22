@@ -159,7 +159,8 @@ impl TestHistoryFixture {
             .rev()
             .filter(|checkpoint| {
                 affected_document.is_none_or(|document| {
-                    checkpoint.snapshot.affected_documents.contains(&document)
+                    checkpoint.snapshot.category == CheckpointCategoryFixture::NamedSnapshot
+                        || checkpoint.snapshot.affected_documents.contains(&document)
                 })
             })
             .collect();
@@ -290,10 +291,16 @@ fn document_filtered_history_preserves_global_order() {
         &["manuscript/first.html"],
         &["first"],
     );
+    let milestone = fixture
+        .checkpoint(
+            "milestone",
+            SnapshotFixture::named_empty_snapshot("Milestone"),
+        )
+        .unwrap();
 
     assert_eq!(
         fixture.list(None, 10, Some("first")).unwrap().checkpoints,
-        vec![latest_first, first]
+        vec![milestone, latest_first, first]
     );
 }
 

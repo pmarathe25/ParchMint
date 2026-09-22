@@ -13,6 +13,7 @@ use parchmint_editor_api::{
     BlockId, CanonicalComment, CanonicalProjection, CommentId, DocumentId, DurableProjectionBatch,
     EditorPersistenceError, EditorRevision, EditorSelection,
 };
+use parchmint_project_format::CanonicalCodec;
 use parchmint_project_repository::AtomicWritePlan;
 use parchmint_recovery_api::{
     CompactionReport, ContentHash, DiscardReport, RecoveryBaseSnapshot, RecoveryBatch,
@@ -1949,6 +1950,230 @@ fn history_restore_save_failure_keeps_current_in_memory_project_open() {
     assert_eq!(documents.snapshots().unwrap()[0].body, "<p>current</p>");
 }
 
+type DocumentRestoreFixture = (
+    ProjectPersistenceCoordinator,
+    Arc<NativeProjectCommandDispatcher>,
+    Arc<NativeDocumentStateOwner>,
+    parchmint_project_format::CanonicalProjectEncoding,
+);
+
+fn document_restore_fixture(save: Arc<dyn SaveCoordinator>) -> DocumentRestoreFixture {
+    use parchmint_project_format::{CanonicalPersistenceFrontier, ProjectFormatCodec};
+
+    let (historical, mut snapshots, initial) = persisted_project("Current", "<p>historical</p>");
+    let target = snapshots[0].document_id;
+    let comment = CanonicalComment::new(
+        CommentId::from_bytes([91; 16]),
+        EditorSelection::new(0.into(), 3.into()),
+        "Historical comment",
+        BlockId::from_bytes(*target.as_bytes()),
+    );
+    let history = ProjectFormatCodec::default()
+        .encode_domain_project_with_annotations(
+            &historical,
+            &BTreeMap::from([(target, snapshots[0].body.clone())]),
+            &BTreeMap::from([(target, vec![(&comment).into()])]),
+            &BTreeMap::new(),
+            &initial.paths,
+            &initial.persistence_frontier,
+        )
+        .unwrap();
+    let other = DocumentId::from_bytes([43; 16]);
+    let project = parchmint_domain::apply_project_command(
+        &historical,
+        historical.revision,
+        ProjectCommand::create_document(
+            parchmint_domain::NodeId::from_bytes([44; 16]),
+            other,
+            parchmint_domain::NodeId::research_root(),
+            0,
+            "Research",
+        ),
+    )
+    .unwrap()
+    .project;
+    snapshots[0].body = "<p>current target</p>".into();
+    snapshots.push(DocumentSnapshot {
+        document_id: other,
+        body: "<p>saved research</p>".into(),
+        comments: Vec::new(),
+        revision: EditorRevision::from(1),
+        visibility: DocumentVisibility::Open,
+    });
+    let encoding = ProjectFormatCodec::default()
+        .encode_domain_project_with_frontier(
+            &project,
+            &snapshots
+                .iter()
+                .map(|s| (s.document_id, s.body.clone()))
+                .collect(),
+            &BTreeMap::new(),
+            &initial.paths,
+            &CanonicalPersistenceFrontier {
+                recovery_project_revision: 2,
+                document_revisions: snapshots.iter().map(|s| (s.document_id, 1)).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let documents = Arc::new(NativeDocumentStateOwner::new(snapshots));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        project,
+        documents.clone(),
+    ));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save,
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(p, r)| (p.clone(), r.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    (coordinator, commands, documents, history)
+}
+
+#[test]
+fn document_history_restore_preserves_current_structure_and_unrelated_unsaved_work() {
+    let save = Arc::new(CompletedSave::default());
+    let (coordinator, commands, documents, history) = document_restore_fixture(save.clone());
+    let target = DocumentId::from_bytes([42; 16]);
+    let other = DocumentId::from_bytes([43; 16]);
+    let target_node = parchmint_domain::NodeId::from_bytes([41; 16]);
+    for command in [
+        ProjectCommand::rename_node(target_node, "Renamed chapter"),
+        ProjectCommand::set_synopsis(target_node, "Current synopsis"),
+    ] {
+        commands.execute_now(command).unwrap();
+    }
+    let project_before = commands.project().unwrap();
+    let changed = commands
+        .execute_document(DocumentCommand {
+            document_id: other,
+            observed_revision: EditorRevision::from(1),
+            body: "<p>unsaved research</p>".into(),
+        })
+        .unwrap();
+    let comment = CanonicalComment::new(
+        CommentId::from_bytes([92; 16]),
+        EditorSelection::new(0.into(), 3.into()),
+        "Unsaved research comment",
+        BlockId::from_bytes(*other.as_bytes()),
+    );
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            other,
+            changed.revision.next(),
+            "<p>unsaved research</p>",
+            vec![comment.clone()],
+            Vec::new(),
+            0,
+        ))
+        .unwrap();
+    let other_before = documents.snapshot(other).unwrap();
+
+    coordinator
+        .restore_document_history(target, restore_plan(&history))
+        .unwrap();
+
+    assert_eq!(commands.project().unwrap(), project_before);
+    let restored = documents.snapshot(target).unwrap();
+    assert_eq!(restored.body, "<p>historical</p>");
+    assert_eq!(restored.comments[0].messages[0].body, "Historical comment");
+    assert_eq!(restored.revision, EditorRevision::from(2));
+    assert_eq!(restored.visibility, DocumentVisibility::Open);
+    assert_eq!(documents.snapshot(other).unwrap(), other_before);
+    assert!(!commands.has_unsaved_changes().unwrap());
+    assert!(!commands.undo_state().can_undo);
+    documents
+        .undo(other)
+        .expect("unrelated document undo survives");
+
+    let requests = save.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].checkpoint.category,
+        CheckpointCategory::Restoration
+    );
+    assert_eq!(
+        requests[0].checkpoint.affected_documents,
+        vec![target, other]
+    );
+    let other_annotations = format!(
+        "annotations/{}.json",
+        parchmint_domain::encode_stable_id(other.as_bytes())
+    );
+    let bytes = &requests[0]
+        .writes
+        .writes
+        .iter()
+        .find(|w| w.path == other_annotations)
+        .unwrap()
+        .bytes;
+    let annotations = parchmint_project_format::ProjectFormatCodec::default()
+        .decode_annotations(bytes)
+        .unwrap();
+    let saved_comments: Vec<CanonicalComment> = annotations
+        .typed_threads()
+        .unwrap()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    assert_eq!(saved_comments, vec![comment]);
+}
+
+#[test]
+fn document_history_restore_rejects_missing_document_without_saving() {
+    let save = Arc::new(CompletedSave::default());
+    let (coordinator, commands, documents, history) = document_restore_fixture(save.clone());
+    let before = commands.complete_authored_snapshot().unwrap();
+    for document in [
+        DocumentId::from_bytes([43; 16]),
+        DocumentId::from_bytes([99; 16]),
+    ] {
+        assert!(
+            coordinator
+                .restore_document_history(document, restore_plan(&history))
+                .is_err()
+        );
+        assert_eq!(commands.complete_authored_snapshot().unwrap(), before);
+    }
+    assert_eq!(documents.snapshots().unwrap(), before.documents);
+    commands
+        .execute_now(ProjectCommand::delete_node(
+            parchmint_domain::NodeId::from_bytes([41; 16]),
+        ))
+        .unwrap();
+    let deleted = commands.complete_authored_snapshot().unwrap();
+    assert!(
+        coordinator
+            .restore_document_history(DocumentId::from_bytes([42; 16]), restore_plan(&history))
+            .is_err()
+    );
+    assert_eq!(commands.complete_authored_snapshot().unwrap(), deleted);
+    assert!(save.requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn document_history_restore_save_failure_keeps_live_state_unchanged() {
+    let (coordinator, commands, _, history) = document_restore_fixture(Arc::new(FailingSave));
+    let before = commands.complete_authored_snapshot().unwrap();
+    assert!(
+        coordinator
+            .restore_document_history(DocumentId::from_bytes([42; 16]), restore_plan(&history))
+            .is_err()
+    );
+    assert_eq!(commands.complete_authored_snapshot().unwrap(), before);
+}
+
 #[test]
 fn prepared_mixed_forest_normalizes_descendants_and_preserves_order_and_authored_state() {
     use parchmint_domain::{
@@ -2580,4 +2805,34 @@ fn recovery_migration_restore_and_close_reset_both_undo_owners() {
             Err(ApplicationError::DocumentRedoEmpty { .. })
         ));
     }
+}
+
+#[test]
+fn coalesced_undo_to_the_recovered_content_can_advance_and_save() {
+    let (_, owner, coordinator, document, _) = project_with_recoverable_comment();
+    let recovery = coordinator.reconcile_recovery().unwrap();
+    coordinator
+        .accept_recovery(recovery.acceptance.unwrap())
+        .unwrap();
+    let snapshot = owner.snapshot(document).unwrap();
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            document,
+            snapshot.revision.next(),
+            snapshot.body.clone(),
+            snapshot.comments.clone(),
+            Vec::new(),
+            0,
+        ))
+        .expect("same bytes at a newer editor revision remain recoverable");
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator
+        .await_save(handle)
+        .expect("save after coalesced undo");
+    assert_eq!(
+        owner.snapshot(document).unwrap().comments,
+        snapshot.comments
+    );
 }

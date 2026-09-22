@@ -513,7 +513,7 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
             .right_click_text(HarnessWindow::Project, "Manuscript")
             .unwrap();
         harness
-            .click_text(HarnessWindow::Project, "Create document")
+            .click_text(HarnessWindow::Project, "New document")
             .unwrap();
         harness
             .type_into_target(
@@ -584,7 +584,7 @@ fn finishing_research_creation_by_clicking_the_editor_never_duplicates_input() {
         .right_click_text(HarnessWindow::Project, "Research")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .unwrap();
     // The Research tab is opened by committing the name on blur. This click
     // initially lands in the still-full-width manuscript editor.
@@ -1120,7 +1120,7 @@ fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
         .unwrap();
     assert!(
         harness
-            .contains_text(HarnessWindow::Project, "Create group")
+            .contains_text(HarnessWindow::Project, "New group")
             .unwrap()
     );
     harness
@@ -1128,7 +1128,7 @@ fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
         .unwrap();
     assert!(
         !harness
-            .contains_text(HarnessWindow::Project, "Create group")
+            .contains_text(HarnessWindow::Project, "New group")
             .unwrap()
     );
     harness

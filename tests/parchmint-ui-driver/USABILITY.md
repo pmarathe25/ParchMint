@@ -29,6 +29,139 @@ PARCHMINT_REVIEW_ARTIFACTS=/tmp/parchmint-review cargo test --locked -j 1 -p par
 These cover creation, compact dark appearance, notification expiry and retry,
 and project-wide History comparison. Open the PNGs and assess the layout.
 
+## Launch and use the native application
+
+Run these commands from the repository root on Linux with Python 3.11+ and a
+graphical desktop session. Request GUI permission if your agent sandbox requires
+it. Build commands must run one at a time.
+
+```console
+cargo build --release --locked -j 1 -p parchmint-desktop
+review_root=$(mktemp -d /tmp/parchmint-native.XXXXXX)
+python3 .agents/skills/parchmint-ui-review/scripts/review.py native --desktop target/release/parchmint --output "$review_root/interactive" --interactive
+```
+
+This opens the normal, resizable app with a copied fixture. The helper isolates
+configuration, data, and cache under the output directory, records the commit and
+binary hash in `run.json`, and writes application output to `native.log`. The
+output directory must not exist yet. Close the window normally to finish the
+command; agents should keep the command session running while interacting.
+
+Click a document, type a distinctive sentence, select text, copy/paste, undo,
+switch panes, resize, and save. Test the workflow changed by the patch. Choose
+appearance and reduced motion in Settings; interactive mode does not apply the
+helper's capture-only appearance, scale, size, or target options. Take screenshots
+with an available desktop capture tool and inspect them at full size.
+
+In **Settings → Appearance**, check that **System** matches the desktop, then
+try **Application zoom** at 100%, 125%, and 150%. Check menus, split editors,
+and both sidebars at the smallest window size. Reopen with the same isolated
+settings to verify the zoom persists; **Reset** returns it to 100%.
+
+Check that the compact formatting toolbar fits without horizontal scrolling at
+100% and 150% zoom. Select text and use **Format** to change its font and paragraph
+alignment. Check nested menus, Escape, and clicking back into the document; save
+and reopen to confirm the formatting persists.
+
+Check **Focus document** in each pane: tabs, the companion control, sidebars, and
+the status bar, navigation rail, and native window titlebar should disappear. Type and undo, then use **Exit focus** and
+**Escape** to restore the prior layout. F6 should skip the hidden controls.
+Check that Export opens from the navigation rail and that style choices have
+the same readable contrast as other enabled menu items.
+
+In **Settings → Keyboard shortcuts**, reassign Save and a formatting action.
+Check the new binding, the disabled old binding, conflict feedback, Clear, Reset,
+and persistence after reopening. Try copy/paste and select-all in both the document
+and a Settings text field. The same resolver must handle defaults and overrides.
+Create a document and a group from Explorer and Overview; Escape during naming
+must remove the placeholder without creating a Recently Deleted entry. Enter
+must create exactly one item with its final name.
+Repeat creation with its keyboard shortcut while the document has focus; typing
+the name must not change the document body, whether confirmed or cancelled.
+
+To check persistence, close the app and reopen the same copied project with the
+same isolated settings (do not rerun the helper, which creates a fresh fixture):
+
+```console
+env XDG_CONFIG_HOME="$review_root/interactive/config" XDG_DATA_HOME="$review_root/interactive/data" XDG_CACHE_HOME="$review_root/interactive/cache" target/release/parchmint "$review_root/interactive/project"
+```
+
+Confirm the sentence remains in the editor and the project's saved document.
+Keep artifacts under `review_root`, and close only the window launched for the
+review. For other platforms, use a disposable OS profile and the
+[native capture instructions](../parchmint-ui-verification/README.md#capture-a-native-window).
+
+### Static captures and automation limits
+
+For an automatically saved native screenshot, use a separate output directory:
+
+```console
+python3 .agents/skills/parchmint-ui-review/scripts/review.py native --desktop target/release/parchmint --output "$review_root/capture" --appearance dark
+```
+
+This writes `native.png` and exits after capture. It verifies rendering, not
+typing, focus, clipboard behavior, or animation pacing.
+
+### GNOME remote-desktop input and screenshots
+
+On GNOME Wayland, use [gnome_remote.py](scripts/gnome_remote.py) to drive the real
+app through Mutter's local RemoteDesktop API and capture the visible desktop
+through ScreenCast/PipeWire. Keep the normal Wayland environment when launching
+ParchMint. No RDP server, network sharing, or desktop security setting is enabled.
+
+The helper needs `dbus-python`, PyGObject with GStreamer, and the `pipewiresrc`,
+`videoconvert`, `pngenc`, and `appsink` elements. Run it in the logged-in desktop
+session with any required sandbox approval. Probe support with:
+
+```console
+gdbus introspect --session --dest org.gnome.Mutter.RemoteDesktop --object-path /org/gnome/Mutter/RemoteDesktop
+python3 tests/parchmint-ui-driver/scripts/gnome_remote.py --help
+```
+
+First capture the display without input. Replace the sample dimensions with the
+display's logical dimensions, then inspect the image to locate the review app:
+
+```console
+python3 tests/parchmint-ui-driver/scripts/gnome_remote.py --area 0 0 1920 1080 --output "$review_root/desktop.png"
+```
+
+Restrict subsequent captures to its visible area. `--area` is desktop logical
+`X Y WIDTH HEIGHT`; click coordinates are relative to that area. For example,
+after verifying a 1280×720 editor at (320, 214):
+
+```console
+python3 tests/parchmint-ui-driver/scripts/gnome_remote.py --area 320 214 1280 720 --actions '[{"click":[500,162]},{"key":"Ctrl+End"},{"key":"Return"},{"text":"remote desktop input works."},{"key":"Ctrl+s"}]' --output "$review_root/typed.png"
+```
+
+Actions run in order. `text` supports printable ASCII; `key` supports single
+characters and the names in the script's `KEYS` table. `right_click` takes the
+same coordinates as `click` and opens document/tab menus. The helper paces key
+presses/releases, releases modifiers, stops its temporary session, and refuses
+existing output files. Inspect each screenshot and saved data before continuing.
+These sampled screenshots do not measure frame pacing.
+
+Permission prompts can cover the app and take focus. Capture again after an
+approval; use the window switcher and verify the app is visible before typing.
+Do not send a long action sequence to an unverified foreground window. A direct
+X11 window capture can show a hidden window and does not establish desktop focus.
+
+The [RemoteDesktop](https://github.com/GNOME/mutter/blob/main/data/dbus-interfaces/org.gnome.Mutter.RemoteDesktop.xml)
+and [ScreenCast](https://github.com/GNOME/mutter/blob/main/data/dbus-interfaces/org.gnome.Mutter.ScreenCast.xml)
+interfaces are private, version-dependent Mutter APIs. If access is denied or an
+interface is missing, use the desktop's supported remote-control tooling or
+report the blocker; do not disable security checks.
+
+### X11 fallback
+
+On X11, `xdotool` can target the review window for input and resizing. On Wayland,
+it cannot control native Wayland windows. If XWayland is available, launching
+with `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET` before the helper command selects
+the X11 backend through `DISPLAY`; record that backend in the review. It does not
+verify native Wayland behavior. Identify the window by the launched process and
+inspect its screenshot before sending input; do not reuse coordinates from a
+different window size. If input or capture tools are unavailable, report the
+specific blocker rather than treating a static capture as an interactive pass.
+
 ## Exercise complete tasks
 
 Capture before and after, perform the task, and assert its data outcome. Use
@@ -47,7 +180,8 @@ inspection. Click controls that might be obstructed by overlays.
 - **Compare History:** Change several documents and the outline, then select an
   earlier checkpoint. Identify old and new text, additions, deletions, unsaved
   drafts, comments, and an unchanged checkpoint. Opening History must not save
-  drafts.
+  drafts. Open History from a document's tab or outline menu, then switch editor
+  panes; its target must stay unchanged. Check project milestones in this scope.
 - **Use notifications:** Trigger a notification, operate the workspace beneath it,
   and dismiss it. Repeat with expiry. Inject a recoverable failure, dismiss its
   dialog, wait, and retrieve it from Notifications. Check that controls remain
@@ -58,8 +192,9 @@ inspection. Click controls that might be obstructed by overlays.
 - **Change settings:** Edit styles and dictionaries in their available scopes.
   Check draft retention, validation, previews, and saved values after reopening.
 - **Export and restore:** Export a manuscript and inspect the file. Preview and
-  restore deleted items, a History checkpoint, and interrupted-session edits.
-  Check that destinations and consequences are clear before confirming.
+  restore deleted items, project and document History, and interrupted-session
+  edits. Check the named target before confirming. A document restore must keep
+  other documents' latest text on disk and their undo usable.
 
 Use project windows at 1280 × 720 and 1440 × 900, and the launcher at 900 × 620,
 in both appearances. In the native app, check normal and larger display scales.

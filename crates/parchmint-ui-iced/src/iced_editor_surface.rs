@@ -28,7 +28,7 @@ use crate::{
     design_tokens::{COMPACT_CONTROL_HEIGHT, ParchMintTheme},
     focus, harness_target, hierarchy_drag,
     icons::{Icon, icon_sized},
-    stationary_tooltip,
+    right_click, stationary_tooltip,
 };
 
 const EDITOR_TOOLBAR_CONTROL_HEIGHT: u16 = COMPACT_CONTROL_HEIGHT + 4;
@@ -139,6 +139,11 @@ impl EditorHostSlots {
 pub(crate) enum EditorCenterMessage {
     ManageStyles,
     NewTab(EditorPane),
+    OpenDocumentContext {
+        pane: EditorPane,
+        document_id: String,
+        point: crate::Point,
+    },
     Scratch {
         pane: EditorPane,
         id: String,
@@ -176,6 +181,7 @@ impl EditorCenterMessage {
             Self::Scratch { .. }
             | Self::ManageStyles
             | Self::NewTab(_)
+            | Self::OpenDocumentContext { .. }
             | Self::BeginComment
             | Self::BeginSplitResize
             | Self::HierarchyDropTarget(_)
@@ -340,22 +346,22 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
         .padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     );
-    let mut layers = stack![
-        center,
-        container(companion_toggle)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Right)
-            .align_y(Vertical::Top)
-            .padding(iced::Padding {
-                top: 2.0,
-                right: 32.0,
-                bottom: 0.0,
-                left: 0.0
-            })
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill);
+    let mut layers = stack![center].width(Length::Fill).height(Length::Fill);
+    if expanded.is_none() {
+        layers = layers.push(
+            container(companion_toggle)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Horizontal::Right)
+                .align_y(Vertical::Top)
+                .padding(iced::Padding {
+                    top: 2.0,
+                    right: 32.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+        );
+    }
     if workspace.link_editor().is_open() {
         layers = layers.push(
             container(crate::motion::enter(
@@ -402,10 +408,13 @@ fn spelling_menu_popover(
     menu: &SpellingMenu,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
-    let actions = menu.actions().iter().cloned().fold(
-        column![text(menu.word().to_owned()).size(13)],
-        |column, action| {
+    let actions = menu
+        .actions()
+        .iter()
+        .cloned()
+        .fold(column![], |column, action| {
             let label = match &action {
+                SpellingMenuAction::Edit(label) => (*label).to_owned(),
                 SpellingMenuAction::AddComment => "Add Comment".to_owned(),
                 SpellingMenuAction::CopyLink(_) => "Copy link address".to_owned(),
                 SpellingMenuAction::Replace(value) => value.clone(),
@@ -425,30 +434,34 @@ fn spelling_menu_popover(
                 },
                 SpellingMenuAction::Ignore => "Ignore".to_owned(),
             };
-            column.push(
-                button(text(label).size(12))
-                    .padding([5, 8])
-                    .on_press(EditorCenterMessage::ChooseSpellingAction(action))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            button_interaction(status, false),
-                        )
-                    }),
-            )
-        },
-    );
-    container(actions.spacing(3))
-        .padding(6)
-        .width(menu.bounds().width())
-        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-        .into()
+            column.push(components::context_action(
+                label,
+                EditorCenterMessage::ChooseSpellingAction(action),
+                theme,
+            ))
+        });
+    container(
+        iced::widget::scrollable(actions.spacing(2))
+            .height((menu.bounds().height() - 12.0).max(0.0)),
+    )
+    .padding(6)
+    .width(menu.bounds().width())
+    .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+    .into()
 }
 
+#[cfg(test)]
 pub(crate) fn formatting_toolbar(
     workspace: &EditorWorkspace,
     theme: ParchMintTheme,
+) -> Element<'static, EditorCenterMessage> {
+    formatting_toolbar_for_width(workspace, theme, false)
+}
+
+pub(crate) fn formatting_toolbar_for_width(
+    workspace: &EditorWorkspace,
+    theme: ParchMintTheme,
+    wide: bool,
 ) -> Element<'static, EditorCenterMessage> {
     let enabled = workspace
         .pane(workspace.focused_pane())
@@ -554,11 +567,12 @@ pub(crate) fn formatting_toolbar(
                 52.0,
                 theme,
             ),
-            "Font size in points; Auto restores the paragraph style",
+            "Font size",
             theme,
         ),
     );
     let mut marks = row![].spacing(2).align_y(Vertical::Center);
+    let mut extra_marks = row![].spacing(2).align_y(Vertical::Center);
     for (label, command, mark) in [
         (
             "B",
@@ -618,7 +632,11 @@ pub(crate) fn formatting_toolbar(
         } else {
             control
         };
-        marks = marks.push(toolbar_tooltip(control, name, theme));
+        if matches!(label, "B" | "I") {
+            marks = marks.push(toolbar_tooltip(control, name, theme));
+        } else {
+            extra_marks = extra_marks.push(toolbar_tooltip(control, name, theme));
+        }
     }
     let lists = row![
         harness_target::target(
@@ -683,15 +701,12 @@ pub(crate) fn formatting_toolbar(
             theme,
         ),
     );
-    let paragraphs = row![
-        lists,
-        formatting_icon_button(
-            Icon::BlockQuote,
-            "Block quote",
-            FormattingCommand::BlockQuote,
-            theme
-        )
-    ]
+    let paragraphs = row![formatting_icon_button(
+        Icon::BlockQuote,
+        "Block quote",
+        FormattingCommand::BlockQuote,
+        theme
+    )]
     .spacing(2)
     .align_y(Vertical::Center);
     let insertions = row![
@@ -712,26 +727,75 @@ pub(crate) fn formatting_toolbar(
                 theme
             )
         ),
-        breaks,
     ]
     .spacing(2)
     .align_y(Vertical::Center);
-    container(
-        row![
+    if wide {
+        return row![
             style_selector,
             family,
             size,
+            container(iced::widget::rule::vertical(1)).height(20),
             marks,
+            extra_marks,
+            lists,
             paragraphs,
             paragraph_options(workspace, theme),
-            insertions
+            container(iced::widget::rule::vertical(1)).height(20),
+            insertions,
+            breaks
         ]
-        .spacing(3)
+        .spacing(6)
+        .align_y(Vertical::Center)
+        .into();
+    }
+    let more = harness_target::target(
+        HarnessTarget::FormattingMenu,
+        crate::action_menu::panel(
+            components::semantic_button(
+                text("Format").size(13).color(theme.palette().primary_text),
+            )
+            .height(32)
+            .padding([7, 10])
+            .on_press(())
+            .style(move |_, status| {
+                components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )
+            })
+            .into(),
+            column![
+                text("Font").size(12),
+                row![family, size, extra_marks]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                iced::widget::rule::horizontal(1),
+                text("Paragraph").size(12),
+                row![paragraphs, paragraph_options(workspace, theme), breaks].spacing(12),
+            ]
+            .spacing(10)
+            .into(),
+            theme,
+            340.0,
+        ),
+    );
+    container(
+        row![
+            style_selector,
+            container(iced::widget::rule::vertical(1)).height(20),
+            marks,
+            lists,
+            container(iced::widget::rule::vertical(1)).height(20),
+            insertions,
+            more,
+        ]
+        .spacing(10)
         .align_y(Vertical::Center),
     )
     .padding(0)
     .width(Length::Shrink)
-    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
     .into()
 }
 
@@ -742,7 +806,7 @@ fn format_message(command: FormattingCommand) -> EditorCenterMessage {
 fn menu_trigger(label: String, width: f32, theme: ParchMintTheme) -> Element<'static, ()> {
     components::semantic_button(
         row![
-            text(label).size(13),
+            text(label).size(13).color(theme.palette().primary_text),
             Space::new().width(Length::Fill),
             icon_sized(Icon::ChevronDown, 10)
         ]
@@ -753,11 +817,7 @@ fn menu_trigger(label: String, width: f32, theme: ParchMintTheme) -> Element<'st
     .padding([7, 8])
     .on_press(())
     .style(move |_, status| {
-        components::button_style(
-            theme,
-            ButtonKind::Secondary,
-            button_interaction(status, false),
-        )
+        components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
     })
     .into()
 }
@@ -1067,7 +1127,7 @@ fn editor_pane_surface<'a>(
         body
     };
     let content = column![
-        tabs,
+        crate::motion::reveal(workspace.expanded_pane().is_none(), tabs),
         crate::motion::reveal(
             search.is_open(),
             container(local_search_bar(search, pane, theme, slots)).padding([6, 0])
@@ -1131,9 +1191,6 @@ fn comment_composer_overlay<'a>(
 ) -> Element<'a, EditorCenterMessage> {
     let mut card = column![
         text("New comment").size(12),
-        text("Attached to the selected text")
-            .size(11)
-            .color(theme.palette().secondary_text),
         text_editor(workspace.comment_draft())
             .id(HarnessTarget::CommentDraft.id())
             .placeholder("Write a comment")
@@ -1169,7 +1226,7 @@ fn comment_composer_overlay<'a>(
     anchored_comment_overlay(content, composer.anchor_bounds(), card.into(), theme)
 }
 
-fn comment_thread_card<'a>(
+pub(crate) fn comment_thread_card<'a>(
     status: &str,
     quote: String,
     thread: &crate::CommentThreadView,
@@ -1529,7 +1586,7 @@ fn tab_strip_for_width(
                     280.0,
                 ),
             ),
-            container(text("More open documents").size(12)).padding([4, 6]),
+            container(text("More tabs").size(12)).padding([4, 6]),
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         ))
     };
@@ -1551,10 +1608,13 @@ fn tab_strip_for_width(
                     }),
             ),
             container(
-                text(if cfg!(target_os = "macos") {
-                    "New draft (⌘T)"
-                } else {
-                    "New draft (Ctrl+T)"
+                text({
+                    let binding = crate::shortcut_router::label("file.new-tab");
+                    if binding.is_empty() {
+                        "New draft".into()
+                    } else {
+                        format!("New draft ({binding})")
+                    }
                 })
                 .size(12),
             )
@@ -1595,9 +1655,9 @@ fn tab_strip_for_width(
             ),
             container(
                 text(if expanded {
-                    "Restore pane layout"
+                    "Exit focus"
                 } else {
-                    "Focus this pane"
+                    "Focus document"
                 })
                 .size(12),
             )
@@ -1705,35 +1765,43 @@ fn tab_button(
         container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     );
+    let context_document = id.clone();
     harness_target::target_id(
         harness_target::editor_tab_id(pane, &id),
-        mouse_area(
-            container(
-                column![
-                    row![activate, close]
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                    container(Space::new())
-                        .height(2)
-                        .width(Length::Fill)
-                        .style(move |_| tab_underline_style(theme, active, focused)),
-                ]
-                .spacing(0),
+        right_click::right_click_area(
+            mouse_area(
+                container(
+                    column![
+                        row![activate, close]
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                        container(Space::new())
+                            .height(2)
+                            .width(Length::Fill)
+                            .style(move |_| tab_underline_style(theme, active, focused)),
+                    ]
+                    .spacing(0),
+                )
+                .width(presentation.bounds().width())
+                .style(move |_| tab_container_style(theme, drag_source, drag_target)),
             )
-            .width(presentation.bounds().width())
-            .style(move |_| tab_container_style(theme, drag_source, drag_target)),
-        )
-        .on_enter(EditorCenterMessage::Workspace(
-            EditorMessage::SetTabDragTarget {
+            .on_enter(EditorCenterMessage::Workspace(
+                EditorMessage::SetTabDragTarget {
+                    pane,
+                    target_index: index,
+                },
+            ))
+            .interaction(if drag_source {
+                iced::mouse::Interaction::Grabbing
+            } else {
+                iced::mouse::Interaction::Pointer
+            }),
+            move |point| EditorCenterMessage::OpenDocumentContext {
                 pane,
-                target_index: index,
+                document_id: context_document.clone(),
+                point: crate::Point::new(point.x, point.y),
             },
-        ))
-        .interaction(if drag_source {
-            iced::mouse::Interaction::Grabbing
-        } else {
-            iced::mouse::Interaction::Pointer
-        }),
+        ),
     )
 }
 
@@ -2108,6 +2176,7 @@ mod tests {
                 unsupported @ (EditorCenterMessage::Scratch { .. }
                 | EditorCenterMessage::ManageStyles
                 | EditorCenterMessage::NewTab(_)
+                | EditorCenterMessage::OpenDocumentContext { .. }
                 | EditorCenterMessage::BeginComment
                 | EditorCenterMessage::BeginSplitResize
                 | EditorCenterMessage::ChooseSpellingAction(_)
@@ -2168,6 +2237,32 @@ mod tests {
     }
 
     #[test]
+    fn expanded_formatting_toolbar_fits_without_an_overflow_panel() {
+        let workspace = EditorWorkspace::from_fixture(crate::EditorFixture::DualPane);
+        let mut simulator = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            iced::Size::new(740.0, 52.0),
+            formatting_toolbar_for_width(
+                &workspace,
+                ParchMintTheme::new(parchmint_preferences::ResolvedAppearance::Light),
+                true,
+            ),
+        );
+        assert!(simulator.find(HarnessTarget::FormattingMenu.id()).is_err());
+        for target in [
+            HarnessTarget::ParagraphStyle,
+            HarnessTarget::FontFamily,
+            HarnessTarget::FontSize,
+            HarnessTarget::Bold,
+            HarnessTarget::BreakMenu,
+        ] {
+            let bounds = simulator.find(target.id()).unwrap().bounds();
+            assert!(bounds.x + bounds.width <= 740.0, "{target:?}: {bounds:?}");
+            assert!(bounds.y + bounds.height <= 52.0);
+        }
+    }
+
+    #[test]
     fn pane_local_messages_focus_before_reaching_workspace_reducer() {
         let message = EditorCenterMessage::PaneWorkspace {
             pane: EditorPane::Companion,
@@ -2201,7 +2296,7 @@ mod tests {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::with_size(
             Settings::default(),
-            Size::new(680.0, 64.0),
+            Size::new(480.0, 64.0),
             formatting_toolbar(&workspace, theme),
         );
 
@@ -2215,7 +2310,7 @@ mod tests {
             .unwrap()
             .bounds();
         let breaks = simulator
-            .find(HarnessTarget::BreakMenu.id())
+            .find(HarnessTarget::FormattingMenu.id())
             .unwrap()
             .bounds();
         for bounds in [bold, lists, breaks, comment] {
@@ -2225,7 +2320,7 @@ mod tests {
             comment.y < bold.y + bold.height,
             "toolbar must fit one line"
         );
-        assert!(comment.x + comment.width <= 680.0);
+        assert!(comment.x + comment.width <= 480.0);
 
         simulator.click(HarnessTarget::AddComment.id()).unwrap();
         assert_eq!(
@@ -2235,15 +2330,13 @@ mod tests {
     }
 
     #[test]
-    fn companion_control_stays_in_place_when_opening_closing_or_focusing_a_pane() {
+    fn companion_control_stays_in_place_when_opening_or_closing_a_pane() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let mut positions = Vec::new();
         for action in [
             None,
             Some(EditorMessage::ToggleCompanion),
             Some(EditorMessage::ToggleCompanion),
-            Some(EditorMessage::TogglePaneFocus(EditorPane::Primary)),
-            Some(EditorMessage::TogglePaneFocus(EditorPane::Primary)),
         ] {
             if let Some(action) = action {
                 workspace.update(action);
@@ -2269,6 +2362,61 @@ mod tests {
     }
 
     #[test]
+    fn format_panel_keeps_settings_accessible_and_dismisses_cleanly() {
+        let _motion = crate::motion::SettledMotion::new();
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
+            let theme = ParchMintTheme::new(appearance);
+            let mut simulator = Simulator::with_size(
+                Settings::default(),
+                Size::new(480.0, 360.0),
+                formatting_toolbar(&workspace, theme),
+            );
+            assert!(simulator.find(HarnessTarget::FontFamily.id()).is_err());
+            simulator.click(HarnessTarget::FormattingMenu.id()).unwrap();
+            simulator.click(HarnessTarget::FontFamily.id()).unwrap();
+            simulator.tap_key(iced::keyboard::key::Named::ArrowDown);
+            simulator.tap_key(iced::keyboard::key::Named::ArrowDown);
+            simulator.tap_key(iced::keyboard::key::Named::Enter);
+            simulator.click(HarnessTarget::LineSpacing.id()).unwrap();
+            simulator.tap_key(iced::keyboard::key::Named::ArrowUp);
+            simulator.tap_key(iced::keyboard::key::Named::Enter);
+            assert!(simulator.find(HarnessTarget::FontSize.id()).is_ok());
+            if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
+                assert!(
+                    simulator
+                        .snapshot(&theme.iced_theme())
+                        .unwrap()
+                        .matches_image(
+                            std::path::PathBuf::from(root)
+                                .join(format!("format-panel-{appearance:?}")),
+                        )
+                        .unwrap()
+                );
+            }
+            simulator.tap_key(iced::keyboard::key::Named::Escape);
+            assert!(simulator.find(HarnessTarget::FontSize.id()).is_err());
+            simulator.click(HarnessTarget::FormattingMenu.id()).unwrap();
+            simulator.point_at(Point::new(20.0, 320.0));
+            simulator.simulate(iced_test::simulator::click());
+            assert!(simulator.find(HarnessTarget::FontSize.id()).is_err());
+            assert_eq!(
+                simulator.into_messages().collect::<Vec<_>>(),
+                [
+                    format_message(FormattingCommand::InlineFont(
+                        parchmint_editor_api::InlineFont::Family(Some(
+                            parchmint_editor_api::InlineFontFamily::Serif
+                        ))
+                    )),
+                    format_message(FormattingCommand::ParagraphFormat(
+                        parchmint_editor_api::ParagraphFormatCommand::LineSpacing(200)
+                    )),
+                ]
+            );
+        }
+    }
+
+    #[test]
     fn toolbar_menus_select_actions_and_dismiss_without_editing() {
         let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
@@ -2280,6 +2428,7 @@ mod tests {
         simulator.click(HarnessTarget::ListBulleted.id()).unwrap();
         simulator.click(HarnessTarget::ListMenu.id()).unwrap();
         simulator.click(HarnessTarget::ListNumbered.id()).unwrap();
+        simulator.click(HarnessTarget::FormattingMenu.id()).unwrap();
         simulator.click(HarnessTarget::BreakMenu.id()).unwrap();
         simulator.tap_key(iced::keyboard::key::Named::ArrowUp);
         simulator.tap_key(iced::keyboard::key::Named::Enter);
@@ -2736,6 +2885,48 @@ mod tests {
         );
 
         assert!(simulator.click("⠿").is_err());
+    }
+
+    #[test]
+    fn secondary_click_on_either_panes_tab_targets_its_document_without_activation() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let mut slots = EditorHostSlots::default();
+        for pane in [EditorPane::Primary, EditorPane::Companion] {
+            slots.insert(pane, EditorPaneSlot::state(EditorCenterPaneState::Loading));
+        }
+        for pane in [EditorPane::Primary, EditorPane::Companion] {
+            let document = workspace.pane(pane).tabs()[0].id();
+            let mut simulator = Simulator::with_size(
+                Settings::default(),
+                Size::new(960.0, 600.0),
+                editor_center_surface(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    &slots,
+                    None,
+                ),
+            );
+            let bounds = simulator
+                .find(harness_target::editor_tab_id(pane, document))
+                .unwrap()
+                .visible_bounds()
+                .unwrap();
+            simulator.point_at(bounds.center());
+            simulator.simulate([iced::Event::Mouse(iced::mouse::Event::ButtonPressed(
+                iced::mouse::Button::Right,
+            ))]);
+            let messages = simulator.into_messages().collect::<Vec<_>>();
+            assert!(messages.iter().any(|message| matches!(message,
+                EditorCenterMessage::OpenDocumentContext { document_id, point, .. }
+                    if document_id == document && point.x() == bounds.center_x() && point.y() == bounds.center_y()
+            )));
+            assert!(!messages.iter().any(|message| matches!(
+                message,
+                EditorCenterMessage::Workspace(
+                    EditorMessage::ActivateTab { .. } | EditorMessage::BeginTabPointerDrag { .. }
+                )
+            )));
+        }
     }
 
     #[test]

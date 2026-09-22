@@ -69,7 +69,7 @@ pub fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &s
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent menu");
     harness
-        .click_text(HarnessWindow::Project, "Create group")
+        .click_text(HarnessWindow::Project, "New group")
         .expect("create group");
     harness
         .replace_text_and_submit(HarnessWindow::Project, "New Group", title)
@@ -81,7 +81,7 @@ pub fn create_document(harness: &DesktopInteractionHarness, parent: &str, title:
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent menu");
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .expect("create document");
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", title)

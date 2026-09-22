@@ -105,6 +105,8 @@ fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_a
     let file = TemporaryFile::new("versioned");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        keybindings: Default::default(),
+        ui_zoom_percent: 125,
         reduced_motion: true,
         appearance: AppearanceMode::Dark,
         recent_projects: vec![
@@ -382,6 +384,8 @@ fn application_preferences_do_not_modify_project_state() {
     fs::write(project.path(), project_state).expect("project fixture should be written");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        keybindings: Default::default(),
+        ui_zoom_percent: 100,
         reduced_motion: true,
         appearance: AppearanceMode::Dark,
         recent_projects: vec![RecentProject::new(
@@ -415,4 +419,38 @@ fn reduced_motion_defaults_for_existing_files_and_persists_through_the_service()
     let reopened = block_on(FilePreferenceStore::new(file.path()).load()).unwrap();
     assert_eq!(reopened, saved);
     assert_eq!(reopened.values.appearance, AppearanceMode::Dark);
+}
+
+#[test]
+fn custom_keybindings_round_trip_and_conflicts_do_not_replace_the_saved_map() {
+    use parchmint_preferences::{Keybindings, Shortcut};
+    let file = TemporaryFile::new("keybindings");
+    let service = PreferenceCoordinator::new(Arc::new(FilePreferenceStore::new(file.path())));
+    let current = block_on(service.load()).unwrap();
+    assert!(current.values.keybindings.is_empty());
+    let primary = if cfg!(target_os = "macos") { 8 } else { 1 };
+    let bindings = Keybindings::from([
+        ("file.save".into(), Some(Shortcut::new("S", primary | 2))),
+        ("format.bold".into(), None),
+    ]);
+    let saved = block_on(service.update(
+        current.revision,
+        PreferenceCommand::SetKeybindings(bindings.clone()),
+    ))
+    .unwrap();
+    let reopened = block_on(FilePreferenceStore::new(file.path()).load()).unwrap();
+    assert_eq!(reopened.values.keybindings, bindings);
+    let mut conflicting = bindings;
+    conflicting.insert("file.open".into(), Some(Shortcut::new("S", primary | 2)));
+    assert!(matches!(
+        block_on(service.update(
+            saved.revision,
+            PreferenceCommand::SetKeybindings(conflicting)
+        )),
+        Err(PreferenceError::InvalidKeybindings(_))
+    ));
+    assert_eq!(
+        block_on(FilePreferenceStore::new(file.path()).load()).unwrap(),
+        saved
+    );
 }

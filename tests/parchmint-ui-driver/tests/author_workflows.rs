@@ -48,7 +48,11 @@ fn novelist_can_plan_draft_and_autosave_a_chaptered_manuscript() {
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("switch to Cards");
-    assert!(visible(&harness, "Overview"));
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::OverviewAdd)
+            .unwrap()
+    );
     assert!(visible(&harness, "Part One"));
     assert!(visible(&harness, "Chapter One"));
 
@@ -113,7 +117,11 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher())
         .expect("relaunch application");
-    assert!(visible(&reopened, "Overview"));
+    assert!(
+        reopened
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::OverviewAdd)
+            .unwrap()
+    );
     assert!(visible(&reopened, "Harbor Notes"));
     assert!(
         reopened
@@ -129,7 +137,7 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
 }
 
 #[test]
-fn author_can_configure_metadata_to_appear_on_cards() {
+fn every_applicable_metadata_field_is_available_on_cards() {
     let run = IsolatedRun::new("settings-metadata").expect("isolated run");
     let project = run.root().join("settings-metadata.parchmint");
     let harness = create_project(&run, &project, "Metadata Settings");
@@ -162,11 +170,7 @@ fn author_can_configure_metadata_to_appear_on_cards() {
         .click_text(HarnessWindow::Project, "Add field")
         .expect("persist the named metadata field");
     assert!(visible(&harness, "Point of view"));
-    for _ in 0..2 {
-        harness
-            .click_text(HarnessWindow::Project, "Show in Overview")
-            .expect("toggle card visibility off and back on");
-    }
+    assert!(!visible(&harness, "Show in Overview"));
     harness.click_text(HarnessWindow::Project, "Done").unwrap();
     harness
         .click_target(
@@ -274,7 +278,7 @@ fn explorer_creation_replaces_the_selected_default_title() {
         .right_click_text(HarnessWindow::Project, "Manuscript")
         .expect("open Manuscript context menu");
     harness
-        .click_text(HarnessWindow::Project, "Create group")
+        .click_text(HarnessWindow::Project, "New group")
         .expect("create a group");
     harness
         .redraw(HarnessWindow::Project)
@@ -360,7 +364,7 @@ fn overview_creates_a_group_and_document_without_explorer() {
         .right_click_text(HarnessWindow::Project, "Part One")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .unwrap();
     harness
         .redraw(HarnessWindow::Project)
@@ -532,7 +536,7 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
             HarnessTarget::Ribbon(RibbonDestination::History),
         )
         .expect("open project history");
-    assert!(visible(&harness, "Writing timeline"));
+    assert!(visible(&harness, "Project history"));
     harness
         .click_history_checkpoint(HarnessWindow::Project, 1)
         .expect("compare the earlier automatic checkpoint");
@@ -542,13 +546,13 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         harness.history_status().expect("read history status")
     );
     harness
-        .click_text(HarnessWindow::Project, "Restore project to this version…")
+        .click_text(HarnessWindow::Project, "Restore project…")
         .expect("request checkpoint restoration");
-    assert!(visible(&harness, "Restore project history"));
+    assert!(visible(&harness, "Restore project?"));
     harness
         .click_text(HarnessWindow::Project, "Restore project")
         .expect("restore the selected checkpoint");
-    assert!(visible(&harness, "Writing timeline"));
+    assert!(visible(&harness, "Project history"));
     harness
         .click_target(
             HarnessWindow::Project,
@@ -1359,7 +1363,7 @@ fn create_outline_document(
         .right_click_text(HarnessWindow::Project, parent)
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .unwrap();
     harness.type_focused(HarnessWindow::Project, title).unwrap();
     harness

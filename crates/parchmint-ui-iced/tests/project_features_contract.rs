@@ -367,16 +367,11 @@ fn production_replacement_preview_uses_streamed_matches_and_requires_revalidatio
     let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
     let manuscript = id_string(fixture.manuscript_document.as_bytes());
     let research = id_string(fixture.research_document.as_bytes());
+    let opening_match = format!("{manuscript}:0:Body:0:5:4");
+    let research_match = format!("{research}:0:Body:0:5:5");
     let results = vec![
-        streamed_result(
-            &manuscript,
-            "match-opening",
-            "before ",
-            "river",
-            " after",
-            4,
-        ),
-        streamed_result(&research, "match-research", "near ", "river", " bank", 5),
+        streamed_result(&manuscript, &opening_match, "before ", "river", " after", 4),
+        streamed_result(&research, &research_match, "near ", "river", " bank", 5),
     ];
     let search = workspace.begin_task(ProjectTask::GlobalSearch { generation: 0 });
     assert!(
@@ -408,7 +403,7 @@ fn production_replacement_preview_uses_streamed_matches_and_requires_revalidatio
     assert_eq!(rows[2].indexed_revision, Some(4));
 
     workspace.update(ProjectMessage::SetReplacementIncluded {
-        node_id: "match-opening".into(),
+        node_id: opening_match.clone(),
         included: false,
     });
     assert_eq!(
@@ -456,7 +451,7 @@ fn production_replacement_preview_uses_streamed_matches_and_requires_revalidatio
     else {
         panic!("revalidated selections must reach the runtime exactly");
     };
-    assert_eq!(included_match_ids, &["match-opening", "match-research"]);
+    assert_eq!(included_match_ids, &[opening_match, research_match]);
 
     let refreshed_project = apply_project_command(
         &fixture.snapshot.project,
@@ -496,6 +491,7 @@ fn replacement_revalidation_failure_keeps_selected_matches_visible_and_skipped()
     let fixture = production_snapshot();
     let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
     let document = id_string(fixture.manuscript_document.as_bytes());
+    let stale_match = format!("{document}:0:Body:0:5:4");
     let search = workspace.begin_task(ProjectTask::GlobalSearch { generation: 0 });
     assert!(
         workspace.accept_completion(ProjectTaskCompletion::for_ticket(
@@ -503,7 +499,7 @@ fn replacement_revalidation_failure_keeps_selected_matches_visible_and_skipped()
             ProjectTaskPayload::SearchBatch {
                 results: vec![streamed_result(
                     &document,
-                    "stale-match",
+                    stale_match.as_str(),
                     "before ",
                     "river",
                     " after",
@@ -526,7 +522,7 @@ fn replacement_revalidation_failure_keeps_selected_matches_visible_and_skipped()
 
     assert_eq!(
         workspace.replacement_preview().included_match_ids(),
-        ["stale-match"]
+        [stale_match.as_str()]
     );
     assert!(
         workspace
@@ -538,7 +534,7 @@ fn replacement_revalidation_failure_keeps_selected_matches_visible_and_skipped()
         .replacement_preview()
         .rows()
         .into_iter()
-        .find(|row| row.node_id == "stale-match")
+        .find(|row| row.node_id == stale_match.as_str())
         .expect("the selected stale match remains visible");
     assert!(stale.issue.is_some());
     assert!(
@@ -1438,4 +1434,38 @@ fn production_snapshot() -> ProductionSnapshotFixture {
 
 fn id_string(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn replacement_preview_excludes_title_and_synopsis_matches_before_validation() {
+    let fixture = production_snapshot();
+    let mut workspace = ProjectWorkspace::from_snapshot(&fixture.snapshot);
+    let document = id_string(fixture.manuscript_document.as_bytes());
+    let body_id = format!("{document}:0:Body:0:5:4");
+    let search = workspace.begin_task(ProjectTask::GlobalSearch { generation: 0 });
+    workspace.accept_completion(ProjectTaskCompletion::for_ticket(
+        search,
+        ProjectTaskPayload::SearchBatch {
+            results: ["Body", "Title", "Synopsis"]
+                .into_iter()
+                .map(|source| {
+                    streamed_result(
+                        &document,
+                        &format!("{document}:0:{source}:0:5:4"),
+                        "",
+                        "river",
+                        "",
+                        4,
+                    )
+                })
+                .collect(),
+            finished: true,
+        },
+    ));
+    workspace.update(ProjectMessage::OpenReplacementPreview);
+    assert_eq!(workspace.global_search().results().len(), 3);
+    assert_eq!(
+        workspace.replacement_preview().included_match_ids(),
+        [body_id.as_str()]
+    );
 }

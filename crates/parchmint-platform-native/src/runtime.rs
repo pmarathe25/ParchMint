@@ -455,6 +455,31 @@ mod platform {
     }
 
     pub(super) fn appearance() -> Result<SystemAppearance, PlatformError> {
+        // The portal describes the running desktop, even when the application
+        // uses an isolated XDG_CONFIG_HOME or is running outside GNOME.
+        if let Ok(value) = command_output(
+            "system appearance",
+            Command::new("gdbus").args([
+                "call",
+                "--session",
+                "--timeout",
+                "2",
+                "--dest",
+                "org.freedesktop.portal.Desktop",
+                "--object-path",
+                "/org/freedesktop/portal/desktop",
+                "--method",
+                "org.freedesktop.portal.Settings.Read",
+                "org.freedesktop.appearance",
+                "color-scheme",
+            ]),
+        ) {
+            match value.trim() {
+                "(<<uint32 1>>,)" => return Ok(SystemAppearance::Dark),
+                "(<<uint32 2>>,)" => return Ok(SystemAppearance::Light),
+                _ => {}
+            }
+        }
         let color_scheme = command_output(
             "system appearance",
             Command::new("gsettings")
@@ -462,6 +487,16 @@ mod platform {
                 .arg("org.gnome.desktop.interface")
                 .arg("color-scheme"),
         )
+        .and_then(|scheme| {
+            if scheme.contains("prefer-dark") || scheme.contains("prefer-light") {
+                Ok(scheme)
+            } else {
+                Err(PlatformError::Failed {
+                    operation: "system appearance",
+                    reason: "No explicit color preference".into(),
+                })
+            }
+        })
         .or_else(|_| {
             command_output(
                 "system appearance",

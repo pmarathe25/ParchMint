@@ -26,3 +26,7 @@ review. Accepted replay uses the normal canonical save path.
 After saving, the journal can remove records through the exact saved revisions
 and keeps newer records. Editing can continue after a journal failure, but the
 application reports that crash recovery is unavailable.
+
+A record may retain identical content hashes while advancing document revisions:
+coalesced editing and undo can return to the same bytes. Such records preserve
+the consecutive revision frontier. Resource-only records must still change a hash.

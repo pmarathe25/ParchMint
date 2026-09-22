@@ -201,7 +201,7 @@ fn outline_creation_flows_from_name_to_synopsis_and_preserves_actual_word_counts
         .right_click_text(HarnessWindow::Project, "Act One")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .unwrap();
     harness
         .type_focused(HarnessWindow::Project, "The arrival")
@@ -824,7 +824,11 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
         .expect("commit the title");
     assert!(harness.hierarchy_node("Final scene").is_ok());
     harness
-        .scroll_target_by(HarnessWindow::Project, HarnessTarget::CardsList, 50_000.0)
+        .scroll_target_by(
+            HarnessWindow::Project,
+            HarnessTarget::CardsList,
+            -1_000_000.0,
+        )
         .unwrap();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::OverviewAdd)
@@ -864,7 +868,7 @@ fn create_group(harness: &DesktopInteractionHarness, parent: &str, title: &str) 
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent context menu");
     harness
-        .click_text(HarnessWindow::Project, "Create group")
+        .click_text(HarnessWindow::Project, "New group")
         .expect("create group");
     harness
         .redraw(HarnessWindow::Project)
@@ -882,7 +886,7 @@ fn create_document(harness: &DesktopInteractionHarness, parent: &str, title: &st
         .right_click_text(HarnessWindow::Project, parent)
         .expect("open parent context menu");
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .expect("create document");
     harness
         .redraw(HarnessWindow::Project)

@@ -15,6 +15,83 @@ fn capture(harness: &DesktopInteractionHarness, name: &str) {
 }
 
 #[test]
+fn dictionary_refresh_preserves_typing_and_added_words_survive_reopening() {
+    let run = IsolatedRun::new("dictionary-drafts").unwrap();
+    let project = run.root().join("dictionary.parchmint");
+    let harness = create_project(&run, &project, "Dictionary drafts");
+    route(&harness, RibbonDestination::Settings);
+    harness
+        .click_text(HarnessWindow::Project, "Dictionaries")
+        .unwrap();
+    harness
+        .type_into(HarnessWindow::Project, "Enter a dictionary word", "harbor")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Add word")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "harbor")
+            .unwrap()
+    );
+
+    harness
+        .type_into(
+            HarnessWindow::Project,
+            "Enter a dictionary word",
+            " harbor ",
+        )
+        .unwrap();
+    // Reentering this category refreshes global words in the background while
+    // the project dictionary and its unsubmitted input remain visible.
+    harness
+        .click_text(HarnessWindow::Project, "Dictionaries")
+        .unwrap();
+    harness
+        .replace_text(HarnessWindow::Project, " harbor ", "lantern")
+        .unwrap();
+    capture(&harness, "dictionary-draft-light");
+    harness
+        .click_text(HarnessWindow::Project, "Add word")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Appearance")
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Dark").unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Dictionaries")
+        .unwrap();
+    capture(&harness, "dictionary-words-dark");
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(project.join("dictionary.txt")).unwrap(),
+        "harbor\nlantern\n"
+    );
+
+    let reopened = DesktopInteractionHarness::launch(
+        run.root(),
+        parchmint_desktop::LaunchRequest::open(&project),
+    )
+    .unwrap();
+    route(&reopened, RibbonDestination::Settings);
+    reopened
+        .click_text(HarnessWindow::Project, "Dictionaries")
+        .unwrap();
+    capture(&reopened, "dictionary-reopened-dark");
+    for word in ["harbor", "lantern"] {
+        assert!(
+            reopened
+                .text_is_visible(HarnessWindow::Project, word)
+                .unwrap(),
+            "missing dictionary word after reopening: {word}"
+        );
+    }
+    reopened.close(HarnessWindow::Project).unwrap();
+    reopened.shutdown().unwrap();
+}
+
+#[test]
 fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
     use parchmint_desktop::{EditorPane, HarnessKey, LaunchRequest};
     let run = IsolatedRun::new("inline-fonts").unwrap();
@@ -296,12 +373,12 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Create group")
+            .text_is_visible(HarnessWindow::Project, "New group")
             .unwrap()
     );
     capture(&harness, "creation-menu");
     harness
-        .click_text(HarnessWindow::Project, "Create group")
+        .click_text(HarnessWindow::Project, "New group")
         .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "New Group", "Drafts")
@@ -317,11 +394,11 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Create document")
+            .text_is_visible(HarnessWindow::Project, "New document")
             .unwrap()
     );
     harness
-        .click_text(HarnessWindow::Project, "Create document")
+        .click_text(HarnessWindow::Project, "New document")
         .unwrap();
     harness
         .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Opening")
@@ -405,7 +482,7 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Create document")
+            .text_is_visible(HarnessWindow::Project, "New document")
             .unwrap()
     );
     capture(&harness, "creation-menu-dark-compact");
@@ -417,7 +494,7 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
         .unwrap();
     assert!(
         !harness
-            .contains_text(HarnessWindow::Project, "Create document")
+            .contains_text(HarnessWindow::Project, "New document")
             .unwrap()
     );
     harness.close(HarnessWindow::Project).unwrap();
@@ -638,7 +715,7 @@ fn appearance_and_motion_choices_survive_reopening_the_application() {
     harness.click_text(HarnessWindow::Project, "Dark").unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Dark appearance")
+            .text_is_visible(HarnessWindow::Project, "Appearance")
             .unwrap()
     );
     harness
@@ -659,13 +736,13 @@ fn appearance_and_motion_choices_survive_reopening_the_application() {
     route(&harness, RibbonDestination::Settings);
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Dark appearance")
+            .text_is_visible(HarnessWindow::Project, "Appearance")
             .unwrap()
     );
     harness.click_text(HarnessWindow::Project, "Light").unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Light appearance")
+            .text_is_visible(HarnessWindow::Project, "Appearance")
             .unwrap()
     );
     harness
@@ -696,7 +773,7 @@ fn launch_resumes_the_project_and_title_opens_a_safe_project_chooser() {
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Recent projects")
+            .text_is_visible(HarnessWindow::Project, "RECENT PROJECTS")
             .unwrap()
     );
     capture(&harness, "project-chooser");
@@ -731,7 +808,7 @@ fn launch_resumes_the_project_and_title_opens_a_safe_project_chooser() {
         .unwrap();
     assert!(
         !harness
-            .text_is_visible(HarnessWindow::Project, "Recent projects")
+            .text_is_visible(HarnessWindow::Project, "RECENT PROJECTS")
             .unwrap()
     );
     harness

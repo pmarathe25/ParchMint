@@ -439,7 +439,7 @@ impl ShellLayout {
             0,
             self.ribbon().height(),
             if self.explorer_visible {
-                self.explorer_width
+                self.effective_sidebar_width(self.explorer_width)
             } else {
                 0
             },
@@ -449,7 +449,7 @@ impl ShellLayout {
 
     pub fn inspector(&self) -> PaneGeometry {
         let width = if self.inspector_visible {
-            self.inspector_width
+            self.effective_sidebar_width(self.inspector_width)
         } else {
             0
         };
@@ -505,6 +505,9 @@ impl ShellLayout {
     pub fn resize_window(&mut self, width: u32, height: u32) {
         self.requested_width = width;
         self.requested_height = height;
+        if width < 1100 && self.inspector_visible {
+            self.explorer_visible = false;
+        }
         self.explorer_width = self.clamp_sidebar(self.explorer_width);
         self.inspector_width = self.clamp_sidebar(self.inspector_width);
     }
@@ -523,25 +526,41 @@ impl ShellLayout {
     }
 
     pub fn set_explorer_visible(&mut self, visible: bool) {
+        if visible && self.requested_width < 1100 {
+            self.inspector_visible = false;
+        }
         self.explorer_visible = visible;
     }
 
     pub fn set_inspector_visible(&mut self, visible: bool) {
+        if visible && self.requested_width < 1100 {
+            self.explorer_visible = false;
+        }
         self.inspector_visible = visible;
     }
 
     fn display_width(&self) -> u32 {
-        self.scaled(self.requested_width.max(Self::MIN_WINDOW_SIZE.0))
+        self.scaled(self.requested_width.max(1))
     }
 
     fn display_height(&self) -> u32 {
-        self.scaled(self.requested_height.max(Self::MIN_WINDOW_SIZE.1))
+        self.scaled(self.requested_height.max(1))
     }
 
     fn workspace_height(&self) -> u32 {
         self.display_height()
             .saturating_sub(self.ribbon().height())
             .saturating_sub(self.status_bar().height())
+    }
+
+    fn effective_sidebar_width(&self, requested: u32) -> u32 {
+        if self.explorer_visible && self.inspector_visible {
+            requested
+                .min(self.display_width().saturating_sub(self.scaled(800)) / 2)
+                .max(self.scaled(PaneGeometry::MIN_SIDEBAR_WIDTH))
+        } else {
+            requested
+        }
     }
 
     fn clamp_sidebar(&self, width: u32) -> u32 {
@@ -962,3 +981,5 @@ impl ShellWindows {
         }
     }
 }
+
+mod shortcut_router;

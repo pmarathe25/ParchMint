@@ -385,6 +385,31 @@ impl NativeDesktopHarness {
         window: HarnessWindow,
         target: HarnessTarget,
     ) -> Result<(), HarnessError> {
+        // Follow the production disclosure before clicking a nested control.
+        // Both clicks are recorded and dispatched through real widget bounds.
+        if self.find_target_bounds(window, target).is_err() {
+            match target {
+                HarnessTarget::Ribbon(
+                    RibbonDestination::History
+                    | RibbonDestination::Export
+                    | RibbonDestination::RecentlyDeleted
+                    | RibbonDestination::Settings,
+                ) => {
+                    self.click_target(window, HarnessTarget::ProjectMenu)?;
+                }
+                HarnessTarget::FontFamily
+                | HarnessTarget::FontSize
+                | HarnessTarget::Alignment
+                | HarnessTarget::LineSpacing
+                | HarnessTarget::BreakMenu => {
+                    self.click_target(window, HarnessTarget::FormattingMenu)?;
+                }
+                HarnessTarget::GlobalReplacement | HarnessTarget::GlobalReplacementReview => {
+                    self.click_target(window, HarnessTarget::GlobalReplaceToggle)?;
+                }
+                _ => {}
+            }
+        }
         let bounds = self.find_target_bounds(window, target)?;
         self.dispatch_events(
             window,

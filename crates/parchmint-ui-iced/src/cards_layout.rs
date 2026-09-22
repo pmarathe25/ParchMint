@@ -13,13 +13,22 @@ use crate::{
 pub(crate) const CARD_FONT: Font = Font::with_name("Source Sans 3");
 pub(crate) const SCROLLBAR_GUTTER: f32 = 12.0;
 
-pub(crate) fn column_count(width: f32) -> usize {
-    ((width + 12.0) / (280.0 + 12.0)).floor().clamp(1.0, 6.0) as usize
+pub(crate) fn column_count(_width: f32) -> usize {
+    1
+}
+
+pub(crate) fn fields_width(width: f32, has_metadata: bool) -> f32 {
+    let inner = (width - 24.0).max(1.0);
+    if has_metadata && width >= 560.0 {
+        (inner - 20.0) / 2.0
+    } else {
+        inner
+    }
 }
 
 impl CardItem<'_> {
     pub(crate) fn grid_indent(&self, width: f32) -> f32 {
-        (self.depth as f32 * 12.0).min(width * 0.15)
+        (self.depth as f32 * 32.0).min(width * 0.3)
     }
 
     pub(crate) fn grid_width(&self, width: f32, columns: usize) -> f32 {
@@ -53,7 +62,7 @@ impl CardItem<'_> {
     pub(crate) fn synopsis_height(&self, width: f32) -> f32 {
         (text_height(
             self.synopsis,
-            (self.text_width(width) - 6.0).max(1.0),
+            (fields_width(width, !self.editable_metadata.is_empty()) - 6.0).max(1.0),
             14,
             20.0,
             CARD_FONT,
@@ -64,18 +73,15 @@ impl CardItem<'_> {
     pub(crate) fn row_height(&self, width: f32) -> f32 {
         let group = self.kind == HierarchyRowKind::Group;
         let text_width = self.text_width(width);
-        let controls_width = if group {
-            74.0 + measured_text(
+        let controls_width = if group { 36.0 } else { 6.0 }
+            + measured_text(
                 &crate::components::word_count_label(self.words),
                 f32::INFINITY,
                 12,
                 15.6,
                 CARD_FONT,
             )
-            .width
-        } else {
-            0.0
-        };
+            .width;
         let mut height = 24.0
             + text_height(
                 self.title,
@@ -84,25 +90,27 @@ impl CardItem<'_> {
                 24.0,
                 self.title_font(),
             )
-            .max(if group { 32.0 } else { 24.0 });
+            .max(24.0);
         if !group || self.expanded {
-            height += 6.0 + self.synopsis_height(width);
-            if !self.editable_metadata.is_empty() {
-                height += 4.0
-                    + self
-                        .editable_metadata
-                        .iter()
-                        .map(|(label, value)| {
-                            metadata_height(value, (text_width - 96.0).max(30.0))
-                                .max(text_height(label, 88.0, 12, 15.6, CARD_FONT) + 3.0)
-                                + 4.0
-                        })
-                        .sum::<f32>()
-                    - 4.0;
-            }
-        }
-        if !group {
-            height += 6.0 + 15.6;
+            let synopsis = self.synopsis_height(width);
+            let field_width = fields_width(width, !self.editable_metadata.is_empty());
+            let metadata = self
+                .editable_metadata
+                .iter()
+                .map(|(label, value)| {
+                    metadata_height(value, (field_width - 96.0).max(30.0))
+                        .max(text_height(label, 88.0, 12, 15.6, CARD_FONT) + 3.0)
+                        + 4.0
+                })
+                .sum::<f32>()
+                .max(4.0)
+                - 4.0;
+            height += 6.0
+                + if width >= 560.0 {
+                    synopsis.max(metadata)
+                } else {
+                    synopsis + if metadata > 0.0 { 4.0 + metadata } else { 0.0 }
+                };
         }
         height.ceil() + CARDS_ROW_GAP
     }

@@ -3,6 +3,12 @@
 //! Preferences stay outside ParchMint projects and never affect project save,
 //! undo, History, or export.
 
+mod shortcuts;
+pub use shortcuts::{
+    Keybindings, Shortcut, ShortcutCommand, ShortcutScope, effective_shortcut, shortcut_commands,
+    validate_keybindings,
+};
+
 use std::{
     error::Error,
     fmt,
@@ -69,13 +75,34 @@ pub enum ResolvedAppearance {
 }
 
 /// Settings stored outside a ParchMint project.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationPreferences {
+    #[serde(default)]
+    pub keybindings: Keybindings,
+    #[serde(default = "default_ui_zoom")]
+    pub ui_zoom_percent: u16,
     #[serde(default)]
     pub reduced_motion: bool,
     pub appearance: AppearanceMode,
     pub recent_projects: Vec<RecentProject>,
     pub global_dictionary: Vec<String>,
+}
+
+const fn default_ui_zoom() -> u16 {
+    100
+}
+
+impl Default for ApplicationPreferences {
+    fn default() -> Self {
+        Self {
+            keybindings: Keybindings::new(),
+            ui_zoom_percent: 100,
+            reduced_motion: false,
+            appearance: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            global_dictionary: Vec::new(),
+        }
+    }
 }
 
 /// One typed recent-project entry stored outside project data.
@@ -122,6 +149,8 @@ pub struct PreferenceSnapshot {
 pub enum PreferenceCommand {
     SetAppearance(AppearanceMode),
     SetReducedMotion(bool),
+    SetUiZoom(u16),
+    SetKeybindings(Keybindings),
     AddRecentProject(RecentProject),
     RemoveRecentProject(String),
     ClearRecentProjects,
@@ -151,6 +180,7 @@ pub enum PreferenceError {
         path: PathBuf,
         reason: String,
     },
+    InvalidKeybindings(String),
     NotInitialized,
 }
 
@@ -179,6 +209,7 @@ impl fmt::Display for PreferenceError {
                 "could not {operation} preference file {}: {reason}",
                 path.display()
             ),
+            Self::InvalidKeybindings(reason) => formatter.write_str(reason),
             Self::NotInitialized => formatter.write_str("appearance controller is not initialized"),
         }
     }
@@ -279,6 +310,8 @@ impl FilePreferenceStore {
                 Ok(PreferenceSnapshot {
                     revision: stored.revision,
                     values: ApplicationPreferences {
+                        keybindings: Keybindings::new(),
+                        ui_zoom_percent: 100,
                         reduced_motion: false,
                         appearance: stored.preferences.appearance,
                         recent_projects: stored
@@ -294,6 +327,8 @@ impl FilePreferenceStore {
             2 => {
                 let stored: StoredPreferences = serde_json::from_slice(&bytes)
                     .map_err(|error| self.unreadable(error.to_string()))?;
+                validate_keybindings(&stored.preferences.keybindings)
+                    .map_err(|error| self.unreadable(error))?;
                 Ok(PreferenceSnapshot {
                     revision: stored.revision,
                     values: stored.preferences,
@@ -320,6 +355,8 @@ impl FilePreferenceStore {
             });
         }
 
+        validate_keybindings(&preferences.keybindings)
+            .map_err(PreferenceError::InvalidKeybindings)?;
         let snapshot = PreferenceSnapshot {
             revision: current.revision.next(),
             values: preferences.clone(),
@@ -483,6 +520,8 @@ impl PreferenceService for PreferenceCoordinator {
 
             let mut values = current.values;
             apply_command(&mut values, command);
+            validate_keybindings(&values.keybindings)
+                .map_err(PreferenceError::InvalidKeybindings)?;
             let snapshot = store.compare_and_save(expected, &values).await?;
             *state.lock().expect("preference coordinator mutex poisoned") = Some(snapshot.clone());
             coordinator.publish(PreferenceChange {
@@ -504,6 +543,8 @@ impl PreferenceService for PreferenceCoordinator {
 
 fn apply_command(values: &mut ApplicationPreferences, command: PreferenceCommand) {
     match command {
+        PreferenceCommand::SetKeybindings(bindings) => values.keybindings = bindings,
+        PreferenceCommand::SetUiZoom(value) => values.ui_zoom_percent = value.clamp(75, 150),
         PreferenceCommand::SetReducedMotion(value) => values.reduced_motion = value,
         PreferenceCommand::SetAppearance(mode) => values.appearance = mode,
         PreferenceCommand::AddRecentProject(project) => {

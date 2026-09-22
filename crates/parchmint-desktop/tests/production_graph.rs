@@ -42,6 +42,30 @@ use parchmint_ui_api::{
 };
 
 #[test]
+fn opening_a_project_hydrates_its_saved_dictionary() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project").unwrap();
+    fs::write(
+        project.root.as_path().join("dictionary.txt"),
+        b"harbor\nlantern\n",
+    )
+    .unwrap();
+    let bootstrap = DesktopBootstrap::production().unwrap();
+    let session = bootstrap
+        .project_filesystem
+        .open(&RequestedProjectPath::new(project.root.as_path()))
+        .unwrap();
+    let production = session
+        .as_any()
+        .downcast_ref::<ProductionProjectSession>()
+        .unwrap();
+    let snapshot = production.ui_snapshot().unwrap();
+    assert_eq!(
+        snapshot.project.dictionary.iter().collect::<Vec<_>>(),
+        ["harbor", "lantern"]
+    );
+}
+
+#[test]
 fn legacy_summary_hydration_runs_in_background_without_opening_unselected_documents() {
     let project = ScopedProject::from_fixture("canonical/minimal-project").unwrap();
     fs::write(
@@ -446,6 +470,134 @@ fn production_open_delivers_current_typed_ports_that_retire_with_the_lease() {
         AnnotationValue::String("preserved".into())
     );
     assert_eq!(reopened_document.body, "<p>second edit</p>");
+}
+
+#[test]
+fn document_history_restore_persists_only_selected_historical_writing() {
+    let project = ScopedProject::from_fixture("canonical/minimal-project").unwrap();
+    let bootstrap = DesktopBootstrap::production().unwrap();
+    let runtime = block_on(bootstrap.start(LaunchRequest::launcher())).unwrap();
+    let OpenProjectResult::Opened { session, .. } =
+        runtime.open_project(project.root.as_path()).unwrap()
+    else {
+        panic!("isolated project should open a new session");
+    };
+    let ui = runtime.project_ui(session).unwrap().unwrap();
+    let access = ui.ports.access().unwrap();
+    let target = DocumentId::from_bytes([91; 16]);
+    let target_node = NodeId::from_bytes([90; 16]);
+    let created = access
+        .workflows(|workflows| {
+            workflows.create_document(CreateDocumentWorkflow {
+                node: target_node,
+                document: target,
+                parent: NodeId::manuscript_root(),
+                index: usize::MAX,
+                title: "Restorable chapter".into(),
+            })
+        })
+        .unwrap()
+        .unwrap();
+    let other = created
+        .snapshot
+        .documents
+        .iter()
+        .find(|s| s.document_id != target)
+        .unwrap()
+        .clone();
+    let saved = access
+        .workflows(|workflows| workflows.create_named_snapshot("Earlier writing".into()))
+        .unwrap()
+        .unwrap();
+    for (document, revision, body) in [
+        (target, EditorRevision::from(1), "<p>newer target</p>"),
+        (
+            other.document_id,
+            other.revision.next(),
+            "<p>Keep this unsaved writing</p>",
+        ),
+    ] {
+        access
+            .persistence(|persistence| {
+                persistence.persist_editor_projection(CanonicalProjection::new(
+                    document,
+                    revision,
+                    body,
+                    Vec::new(),
+                    Vec::new(),
+                    0,
+                ))
+            })
+            .unwrap()
+            .unwrap();
+    }
+    let mut rename = access
+        .commands_service()
+        .unwrap()
+        .execute(ProjectCommand::rename_node(
+            target_node,
+            "Current chapter name",
+        ));
+    poll_ready(rename.as_mut()).unwrap();
+    let restored = access
+        .workflows(|workflows| workflows.restore_document_checkpoint(saved.checkpoint, target))
+        .unwrap()
+        .unwrap();
+    assert_ne!(restored.checkpoint, saved.checkpoint);
+    assert_eq!(
+        restored
+            .snapshot
+            .project
+            .nodes
+            .get(target_node)
+            .unwrap()
+            .title,
+        "Current chapter name"
+    );
+    assert_eq!(
+        restored
+            .snapshot
+            .documents
+            .iter()
+            .find(|s| s.document_id == target)
+            .unwrap()
+            .body,
+        "<p></p>"
+    );
+    assert_eq!(
+        restored
+            .snapshot
+            .documents
+            .iter()
+            .find(|s| s.document_id == other.document_id)
+            .unwrap()
+            .body,
+        "<p>Keep this unsaved writing</p>"
+    );
+    let preview = access
+        .history(|history| history.preview(restored.checkpoint))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        preview.checkpoint.category,
+        parchmint_history_api::CheckpointCategory::Restoration
+    );
+    let plan = access
+        .history(|history| history.restore(restored.checkpoint))
+        .unwrap()
+        .unwrap();
+    for body in ["<p>Keep this unsaved writing</p>", "<p></p>"] {
+        let resource = plan
+            .writes()
+            .writes
+            .iter()
+            .find(|resource| resource.bytes == body.as_bytes())
+            .expect("restoration checkpoint includes the expected body");
+        assert_eq!(
+            fs::read(project.root.join(&resource.path)).unwrap(),
+            body.as_bytes()
+        );
+    }
 }
 
 #[test]

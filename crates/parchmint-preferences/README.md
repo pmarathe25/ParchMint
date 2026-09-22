@@ -1,6 +1,6 @@
 # `parchmint-preferences`
 
-**Purpose:** Store application-wide appearance, global dictionary, recent
+**Purpose:** Store application-wide appearance, interface zoom, global dictionary, recent
 projects, and shared settings. These preferences stay outside project files,
 undo, recovery, History, and export styles.
 
@@ -35,3 +35,12 @@ In System mode, an OS appearance event publishes a new snapshot only if the
 resolved theme changes; it does not rewrite preferences. Each UI frame uses one
 complete immutable theme snapshot, applied across open windows and mapped to
 [design-system](../parchmint-design-system/README.md) tokens.
+
+
+Interface zoom defaults to 100% and is bounded to 75–150%. It scales the native
+view, never document styles or exports. Older preference files default to 100%.
+
+Keyboard bindings store overrides by stable command ID. An absent entry uses the
+catalog default; a null entry disables it. The coordinator and native store reject
+unknown commands, invalid combinations, and conflicting effective bindings before
+saving. Older preference files default to an empty override map.
