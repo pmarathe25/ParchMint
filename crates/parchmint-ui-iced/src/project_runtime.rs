@@ -254,6 +254,25 @@ impl NativeProjectEffectExecutor {
                     )),
                 }
             }
+            ProjectEffect::DiscardDraft(node_id) => {
+                let nodes = resolve_distinct_nodes(&resolvers, vec![node_id])?;
+                let node = *nodes.first().ok_or(ProjectRuntimeError::InvalidEffect(
+                    "draft is no longer available",
+                ))?;
+                if current.project.nodes.section(node)
+                    != Some(parchmint_domain::ProjectSection::Unfiled)
+                {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "only unfiled drafts can be discarded",
+                    ));
+                }
+                // Recovery protects this draft until the explicit discard. It
+                // does not need a pre-delete History checkpoint or tombstone.
+                // Keep the ordinary mutation completion so the native lane
+                // persists this deletion before reporting it as saved.
+                self.execute_commands([ProjectCommand::delete_node(node)])
+                    .await
+            }
             ProjectEffect::DeleteHierarchy(node_ids) => {
                 let nodes = resolve_distinct_nodes(&resolvers, node_ids)?;
                 if nodes.is_empty() {
@@ -994,6 +1013,7 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::CreateDraft { .. } => "create-draft",
         ProjectEffect::FileDraft { .. } => "file-draft",
         ProjectEffect::DeleteHierarchy(_) => "delete-hierarchy",
+        ProjectEffect::DiscardDraft(_) => "discard-draft",
         ProjectEffect::MoveHierarchy { .. } => "move-hierarchy",
         ProjectEffect::PasteCopiedSubtrees { .. } => "paste-copied-subtrees",
         ProjectEffect::PasteCutSubtrees { .. } => "paste-cut-subtrees",

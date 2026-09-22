@@ -210,6 +210,7 @@ struct ResolvedBlockStyle {
     font_size_points: Option<f32>,
     weight: Option<u16>,
     italic: Option<bool>,
+    text_decoration: Option<parchmint_editor_api::TextDecoration>,
     alignment: Option<TextAlignment>,
     first_line_indent_points: Option<f32>,
     left_indent_points: Option<f32>,
@@ -570,6 +571,7 @@ fn style_layout_signature(style: &ResolvedBlockStyle) -> u64 {
     style.font_family.hash(&mut hash);
     style.weight.hash(&mut hash);
     style.italic.hash(&mut hash);
+    style.text_decoration.hash(&mut hash);
     style
         .alignment
         .map(|alignment| std::mem::discriminant(&alignment))
@@ -1127,15 +1129,62 @@ impl BlockLayoutGeometry {
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Option<DocumentPosition> {
+        self.hit_test_caret(x, y).map(|(position, _)| position)
+    }
+
+    pub(crate) fn hit_test_caret(
+        &self,
+        x: f32,
+        y: f32,
+    ) -> Option<(DocumentPosition, EditorRectangle)> {
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
         self.carets
             .iter()
+            .copied()
+            .chain(
+                self.scalars
+                    .iter()
+                    .filter(|scalar| scalar.character != '\n')
+                    .map(|scalar| {
+                        (
+                            (scalar.position.value() + 1).into(),
+                            EditorRectangle {
+                                x: scalar.bounds.x + scalar.bounds.width,
+                                width: self.metrics.caret_width,
+                                ..scalar.bounds
+                            },
+                        )
+                    }),
+            )
             .min_by(|(_, left), (_, right)| {
-                distance_squared(*left, x, y).total_cmp(&distance_squared(*right, x, y))
+                vertical_distance(*left, y)
+                    .total_cmp(&vertical_distance(*right, y))
+                    .then_with(|| (left.x - x).abs().total_cmp(&(right.x - x).abs()))
             })
-            .map(|(position, _)| *position)
+    }
+
+    pub(crate) fn caret_with_affinity(
+        &self,
+        position: DocumentPosition,
+        upstream: bool,
+    ) -> Option<EditorRectangle> {
+        let caret = self.caret(position)?;
+        if upstream
+            && let Some(scalar) = self.scalars.iter().find(|scalar| {
+                scalar.position.value() + 1 == position.value()
+                    && scalar.character != '\n'
+                    && scalar.bounds.y < caret.y
+            })
+        {
+            return Some(EditorRectangle {
+                x: scalar.bounds.x + scalar.bounds.width,
+                width: self.metrics.caret_width,
+                ..scalar.bounds
+            });
+        }
+        Some(caret)
     }
 
     pub fn caret(&self, position: DocumentPosition) -> Option<EditorRectangle> {
@@ -1771,8 +1820,12 @@ fn scalar_geometry<'a>(
         },
         bold: false,
         italic: false,
-        underline: false,
-        strikethrough: false,
+        underline: span
+            .and_then(|span| span.style.text_decoration)
+            .is_some_and(|value| value.underline()),
+        strikethrough: span
+            .and_then(|span| span.style.text_decoration)
+            .is_some_and(|value| value.strikethrough()),
         link: false,
         small_caps: false,
         superscript: false,
@@ -1953,6 +2006,7 @@ fn merge_style(target: &mut ResolvedBlockStyle, source: &StyleProperties) {
     replace!(font_size_points);
     replace!(weight);
     replace!(italic);
+    replace!(text_decoration);
     replace!(alignment);
     replace!(first_line_indent_points);
     replace!(left_indent_points);
@@ -1989,10 +2043,16 @@ fn caret_rectangle(x: f32, y: f32, metrics: EditorLayoutMetrics) -> EditorRectan
     }
 }
 
-fn distance_squared(rectangle: EditorRectangle, x: f32, y: f32) -> f32 {
-    let center_x = rectangle.x + rectangle.width / 2.0;
-    let center_y = rectangle.y + rectangle.height / 2.0;
-    (center_x - x).powi(2) + (center_y - y).powi(2)
+// Resolve the visual row first; horizontal whitespace must never select a
+// longer neighboring line. Equal distances at row edges prefer the lower row.
+fn vertical_distance(rectangle: EditorRectangle, y: f32) -> f32 {
+    if y < rectangle.y {
+        rectangle.y - y
+    } else if y >= rectangle.y + rectangle.height {
+        y - rectangle.y - rectangle.height + f32::EPSILON
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -2038,6 +2098,56 @@ mod tests {
             flattened.get().is_none(),
             "rendering must not join the document"
         );
+    }
+
+    #[test]
+    fn whitespace_hit_testing_stays_on_the_clicked_visual_row() {
+        for text in [
+            "A long opening line\nx\n\nlast",
+            "A sentence that wraps across multiple short rows with héllo 🦀.",
+        ] {
+            let input = VisibleEditorBlock::new(block(42), text, 0.into());
+            let geometry = BlockLayoutGeometry::build(
+                &input,
+                EditorViewport::new(180.0, 600.0).unwrap(),
+                0.0,
+                regression_metrics(),
+                None,
+            )
+            .unwrap();
+            for (_, caret) in geometry.carets.iter() {
+                let row = caret.y;
+                let expected = geometry
+                    .scalars
+                    .iter()
+                    .filter(|scalar| scalar.bounds.y == row)
+                    .map(|scalar| scalar.position.value() + u64::from(scalar.character != '\n'))
+                    .chain(
+                        geometry
+                            .carets
+                            .iter()
+                            .filter(|(_, other)| other.y == row)
+                            .map(|(position, _)| position.value()),
+                    )
+                    .max()
+                    .unwrap();
+                assert_eq!(
+                    geometry.hit_test(500.0, row + caret.height * 0.5),
+                    Some(expected.into()),
+                    "row {row} in {text:?}"
+                );
+                let (position, hit) = geometry
+                    .hit_test_caret(500.0, row + caret.height * 0.5)
+                    .unwrap();
+                assert_eq!(
+                    geometry
+                        .caret_with_affinity(position, hit.y < geometry.caret(position).unwrap().y)
+                        .unwrap()
+                        .y,
+                    row
+                );
+            }
+        }
     }
 
     #[test]

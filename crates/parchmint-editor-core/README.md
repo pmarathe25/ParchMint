@@ -45,7 +45,9 @@ The engine keeps no joined document copy. Selection counts copy only the selecte
 text, using cached scalar counts to skip preceding paragraphs.
 
 Formatting toggles at a collapsed caret affect subsequent typing. They create a
-document revision when text is entered.
+document revision when text is entered. Without an explicit toggle, inserted text
+inherits inline marks from the preceding character (or the first character at
+paragraph start). Explicitly clearing a mark takes precedence over this inference.
 Inline font commands replace one property over a selection or set a view's typing
 font; clearing a property restores paragraph-style inheritance.
 
@@ -55,3 +57,9 @@ one `FullSnapshot` of the newest revision. Saves pin the exact revision they nee
 application persistence acknowledges it only after delivery. Engine changes must
 preserve stable IDs, anchor mapping, shared undo, deterministic output, and
 large-document behavior.
+
+Text replacements accept paragraph-end positions and can merge text paragraphs,
+preserving the first paragraph ID and surviving inline marks. Splitting a selected
+range removes the selection and creates the paragraph boundary in one undoable
+transaction. Internal hyperlinks use `parchmint://document/<32-digit-document-id>`;
+the same validation applies to editing, canonical loading, and pasted links.

@@ -95,6 +95,7 @@ enum HarnessAction {
     ClickHierarchyNode(HarnessWindow, HarnessNode),
     ClickCardsNode(HarnessWindow, HarnessNode),
     ToggleCardsGroup(HarnessWindow, HarnessNode),
+    ToggleCardDetails(HarnessWindow, HarnessNode),
     RightClickCardsNode(HarnessWindow, HarnessNode),
     DoubleClickCardsNode(HarnessWindow, HarnessNode),
     SelectHierarchyNode(HarnessWindow, HarnessNode, HarnessSelectionGesture),
@@ -313,6 +314,9 @@ fn execute_action(
         }
         HarnessAction::ClickCardsNode(window, node) => harness.click_cards_node(window, &node),
         HarnessAction::ToggleCardsGroup(window, node) => harness.toggle_cards_group(window, &node),
+        HarnessAction::ToggleCardDetails(window, node) => {
+            harness.toggle_card_details(window, &node)
+        }
         HarnessAction::RightClickCardsNode(window, node) => {
             harness.right_click_cards_node(window, &node)
         }
@@ -968,6 +972,15 @@ impl DesktopInteractionHarness {
         node: HarnessNode,
     ) -> Result<(), InteractionHarnessError> {
         self.request(HarnessAction::ClickCardsNode(window, node))?
+            .into_unit()
+    }
+
+    pub fn toggle_card_details(
+        &self,
+        window: HarnessWindow,
+        node: HarnessNode,
+    ) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::ToggleCardDetails(window, node))?
             .into_unit()
     }
 

@@ -109,6 +109,84 @@ where
         .menu_style(|theme| menu_style(presentation(theme)))
 }
 
+/// Compact choices open below their trigger, clamped only at the viewport edge.
+pub(crate) fn anchored_select<'a, T: ToString + Clone + 'a, Message: Clone + 'a>(
+    options: impl IntoIterator<Item = T>,
+    selected: Option<T>,
+    on_selected: impl Fn(T) -> Message,
+    theme: ParchMintTheme,
+) -> iced::Element<'a, Message> {
+    let trigger = semantic_button(
+        iced::widget::row![
+            text(selected.map_or_else(String::new, |value| value.to_string()))
+                .size(14)
+                .width(iced::Length::Fill),
+            crate::icons::icon_sized(crate::icons::Icon::ChevronDown, 18),
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center),
+    )
+    .width(iced::Length::Fill)
+    .on_press(())
+    .style(move |_, status| {
+        button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+    });
+    crate::action_menu::anchored_menu(
+        trigger.into(),
+        options
+            .into_iter()
+            .map(|value| (value.to_string(), on_selected(value)))
+            .collect(),
+        theme,
+        240.0,
+    )
+}
+
+/// Shared explorer-style row for choosing a location in a hierarchy.
+pub(crate) fn location_row<'a, Message: Clone + 'static>(
+    label: String,
+    depth: usize,
+    expanded: Option<bool>,
+    selected: bool,
+    toggle: Message,
+    select: Message,
+    theme: ParchMintTheme,
+) -> iced::Element<'a, Message> {
+    let disclosure: iced::Element<'a, Message> = if let Some(expanded) = expanded {
+        semantic_button(crate::icons::icon_sized(
+            if expanded {
+                crate::icons::Icon::ChevronDown
+            } else {
+                crate::icons::Icon::ChevronRight
+            },
+            18,
+        ))
+        .padding(4)
+        .on_press(toggle)
+        .style(move |_, status| {
+            button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+        })
+        .into()
+    } else {
+        iced::widget::Space::new().width(26).into()
+    };
+    iced::widget::row![
+        iced::widget::Space::new().width((depth as f32 * 18.0).min(144.0)),
+        disclosure,
+        semantic_button(text(label).size(13))
+            .width(iced::Length::Fill)
+            .padding([5, 6])
+            .on_press(select)
+            .style(move |_, status| button_style(
+                theme,
+                ButtonKind::Quiet,
+                button_interaction(status, selected)
+            )),
+    ]
+    .align_y(iced::alignment::Vertical::Center)
+    .into()
+}
+
 pub(crate) fn menu_style(theme: ParchMintTheme) -> iced::widget::overlay::menu::Style {
     let panel = surface(theme, Surface::Elevated, Interaction::Rest);
     iced::widget::overlay::menu::Style {
@@ -142,9 +220,22 @@ pub(crate) fn page_title<'a>(value: impl text::IntoFragment<'a>) -> iced::widget
     text(value)
         .size(u32::from(UI_PAGE_TITLE.size))
         .line_height(UI_PAGE_TITLE.line_height)
+        .style(|theme| text::Style {
+            color: Some(presentation(theme).palette().secondary_text),
+        })
         .font(Font {
             weight: font::Weight::Semibold,
             ..Font::with_name(UI_PAGE_TITLE.family)
+        })
+}
+
+/// Non-actionable captions use one compact font and the secondary text color.
+pub(crate) fn muted_label<'a>(value: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(value)
+        .size(12)
+        .font(Font::with_name(UI_LABEL.family))
+        .style(|theme| text::Style {
+            color: Some(presentation(theme).palette().secondary_text),
         })
 }
 
@@ -394,21 +485,39 @@ pub(crate) fn context_action<'a, Message: Clone + 'a>(
         "Paste without formatting" => "edit.paste-plain",
         "Select all" => "edit.select-all",
         "Rename" => "outline.rename",
+        "Open beside" => "outline.open-beside",
+        "Move to other pane" => "tab.move-pane",
+        "Close tab" => "tab.close",
+        "New document" => "outline.document",
+        "New group" => "outline.group",
+        "Add Comment" => "format.comment",
+        "Delete" => "outline.delete",
         _ => "",
     });
+    let symbol = match label.as_str() {
+        "Rename" => Some(crate::icons::Icon::Rename),
+        "Move to other pane" => Some(crate::icons::Icon::Move),
+        "Save" | "Save project" => Some(crate::icons::Icon::Save),
+        label if label.starts_with("Delete") => Some(crate::icons::Icon::RecentlyDeleted),
+        _ => None,
+    };
     semantic_button(
         iced::widget::row![
+            symbol.map_or_else(
+                || iced::Element::from(iced::widget::Space::new().width(16)),
+                |symbol| iced::Element::from(crate::icons::icon_sized(symbol, 16))
+            ),
             iced::widget::text(label).size(13),
             iced::widget::Space::new().width(iced::Length::Fill),
             iced::widget::text(shortcut)
                 .size(11)
                 .color(theme.palette().secondary_text),
         ]
-        .spacing(12)
+        .spacing(6)
         .align_y(iced::alignment::Vertical::Center),
     )
-    .padding([6, 10])
-    .height(32)
+    .padding([4, 6])
+    .height(28)
     .width(iced::Length::Fill)
     .on_press(message)
     .style(move |_, status| {

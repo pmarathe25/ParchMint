@@ -55,3 +55,7 @@ encoding, and hashing.
 Document decoding also derives rendered word counts for persistence and UI
 summaries. Markup, attributes, and empty paragraphs do not count as prose;
 adjacent blocks retain word boundaries.
+
+Internal links use `parchmint://document/<32-digit-document-id>` and remain valid
+when the target moves or is renamed. Annotation text permits tabs and newlines,
+including quoted selections and their context; other control characters are rejected.

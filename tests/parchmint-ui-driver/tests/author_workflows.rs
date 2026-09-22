@@ -92,7 +92,7 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
         .right_click_text(HarnessWindow::Project, "Harbor Notes")
         .expect("open research document menu");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open research document in companion pane");
     harness
         .type_into_target(
@@ -141,6 +141,8 @@ fn every_applicable_metadata_field_is_available_on_cards() {
     let run = IsolatedRun::new("settings-metadata").expect("isolated run");
     let project = run.root().join("settings-metadata.parchmint");
     let harness = create_project(&run, &project, "Metadata Settings");
+    create_group(&harness, "Manuscript", "Part One");
+    create_document(&harness, "Part One", "Metadata Scene");
 
     harness
         .click_target(
@@ -152,7 +154,7 @@ fn every_applicable_metadata_field_is_available_on_cards() {
         .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
         .expect("open metadata manager");
     harness
-        .click_text(HarnessWindow::Project, "+ New field")
+        .click_target(HarnessWindow::Project, HarnessTarget::CreateMetadataField)
         .expect("start metadata field creation");
     assert!(
         harness
@@ -171,13 +173,20 @@ fn every_applicable_metadata_field_is_available_on_cards() {
         .expect("persist the named metadata field");
     assert!(visible(&harness, "Point of view"));
     assert!(!visible(&harness, "Show in Overview"));
-    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    harness.click_text(HarnessWindow::Project, "Save").unwrap();
     harness
         .click_target(
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Cards),
         )
         .expect("review the configured card projection");
+    assert!(!visible(&harness, "Point of view"));
+    harness
+        .toggle_card_details(
+            HarnessWindow::Project,
+            harness.hierarchy_node("Metadata Scene").unwrap(),
+        )
+        .expect("expand the card to show the hidden field");
     assert!(visible(&harness, "Point of view"));
     harness
         .close(HarnessWindow::Project)
@@ -329,16 +338,7 @@ fn overview_creates_a_group_and_document_without_explorer() {
         )
         .unwrap();
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::OverviewAdd)
-        .unwrap();
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
-        .unwrap();
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
-        .unwrap();
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .click_target(HarnessWindow::Project, HarnessTarget::OverviewAddGroup)
         .unwrap();
     harness
         .redraw(HarnessWindow::Project)
@@ -460,7 +460,7 @@ fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
         .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
         .expect("open metadata manager");
     harness
-        .click_text(HarnessWindow::Project, "+ New field")
+        .click_target(HarnessWindow::Project, HarnessTarget::CreateMetadataField)
         .expect("start metadata field creation");
     harness
         .type_into_target(
@@ -473,7 +473,10 @@ fn keyboard_focus_can_confirm_a_settings_modal_across_commands() {
         .click_text(HarnessWindow::Project, "Add field")
         .expect("persist metadata field before deletion");
     harness
-        .click_text(HarnessWindow::Project, "Delete metadata field")
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::DeleteMetadataField(0),
+        )
         .expect("request field deletion");
     assert!(visible(&harness, "Delete metadata field"));
     assert!(
@@ -541,7 +544,7 @@ fn author_can_compare_and_restore_an_automatic_history_checkpoint() {
         .click_history_checkpoint(HarnessWindow::Project, 1)
         .expect("compare the earlier automatic checkpoint");
     assert!(
-        visible(&harness, "Saved version"),
+        visible(&harness, "Checkpoint"),
         "history status: {}",
         harness.history_status().expect("read history status")
     );
@@ -901,7 +904,9 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .click_text(HarnessWindow::Project, "Add Comment")
         .expect("begin a comment from the popover");
     assert!(
-        visible(&harness, "New comment"),
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentDraft)
+            .unwrap(),
         "the editor, rather than the Inspector, owns the selection-anchored composer"
     );
     assert!(
@@ -914,12 +919,11 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .type_focused(HarnessWindow::Project, "Verify the weather detail.")
         .expect("write a comment draft in the automatically focused anchored composer");
     harness
-        .click_text(HarnessWindow::Project, "Add comment")
-        .expect("attach the comment to the selection");
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("Enter attaches the comment to the selection");
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
         .unwrap();
-    assert!(visible(&harness, "Unresolved"));
     assert!(
         visible(&harness, "Verify the weather detail."),
         "the Inspector is a document-level index of the newly attached thread"
@@ -936,10 +940,15 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         "comment navigation must select its live anchor"
     );
     harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
+        .expect("close the persistent thread panel before testing the hover card");
+    harness
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
         .expect("hover the attached comment anchor");
     assert!(
-        visible(&harness, "Attached comment"),
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
+            .unwrap(),
         "the attached-comment hover card should appear beside the manuscript anchor; hover state: {}",
         harness
             .comment_hover_status()
@@ -949,14 +958,18 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "keeper")
         .expect("move within the commented selection");
     assert!(
-        visible(&harness, "Attached comment"),
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
+            .unwrap(),
         "the popover must remain anchored while the cursor moves within its commented text"
     );
     harness
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
         .expect("move away from the attached comment anchor");
     assert!(
-        !visible(&harness, "Attached comment"),
+        !harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
+            .unwrap(),
         "the transient comment card should dismiss after the pointer leaves its anchor; hover state: {}",
         harness
             .comment_hover_status()
@@ -969,11 +982,7 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
         .expect("open comment actions");
     harness
-        .click_target_offset(
-            HarnessWindow::Project,
-            HarnessTarget::CommentMenu(0),
-            (0.5, 1.5),
-        )
+        .click_text(HarnessWindow::Project, "Edit")
         .expect("edit the root comment inside the anchored popover");
     harness
         .replace_target(
@@ -1001,24 +1010,22 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         "the reply must remain visible in the anchored thread after its live projection refresh"
     );
     harness
-        .click_text(HarnessWindow::Project, "Resolve")
+        .click_text(HarnessWindow::Project, "✓")
         .expect("resolve the comment thread");
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
+        .expect("review the resolved thread in the persistent panel");
     assert!(visible(&harness, "Resolved"));
     assert!(visible(&harness, "Verify the storm detail."));
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
         .expect("open comment actions");
     harness
-        .click_target_offset(
-            HarnessWindow::Project,
-            HarnessTarget::CommentMenu(0),
-            (0.5, 3.5),
-        )
+        .click_text(HarnessWindow::Project, "Delete thread")
         .expect("request comment deletion");
     harness
         .click_text(HarnessWindow::Project, "Confirm delete")
         .expect("delete the comment thread");
-    assert!(!visible(&harness, "Comments"));
     assert!(!visible(&harness, "Verify the storm detail."));
     harness
         .close(HarnessWindow::Project)
@@ -1147,7 +1154,7 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
         .right_click_text(HarnessWindow::Project, "Lighthouse Log")
         .expect("open first research-note context menu");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open the first research note in the companion pane");
     harness
         .type_into_target(
@@ -1161,7 +1168,7 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
         .right_click_text(HarnessWindow::Project, "Pilot Interview")
         .expect("open second research-note context menu");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open the second research note in the companion pane");
     harness
         .type_into_target(
@@ -1280,6 +1287,9 @@ fn collection_editor_can_restore_a_deleted_story() {
         .click_text(HarnessWindow::Project, "The First Lantern")
         .expect("select deleted story");
     harness
+        .elapse_notifications()
+        .expect("let the deletion toast expire before restoring");
+    harness
         .click_text(HarnessWindow::Project, "Restore item")
         .expect("restore deleted story");
     harness
@@ -1289,7 +1299,13 @@ fn collection_editor_can_restore_a_deleted_story() {
         )
         .expect("return to collection editor");
     assert!(visible(&harness, "Stories"));
-    assert!(visible(&harness, "The First Lantern"));
+    assert!(
+        harness
+            .hierarchy_titles()
+            .unwrap()
+            .iter()
+            .any(|title| title == "The First Lantern")
+    );
     harness
         .close(HarnessWindow::Project)
         .expect("close collection");

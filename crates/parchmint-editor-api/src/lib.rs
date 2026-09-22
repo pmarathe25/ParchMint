@@ -22,7 +22,7 @@ use parchmint_save::SaveError;
 
 pub use parchmint_domain::{
     BlockId, CommentId, DocumentId, ProjectOperationId, StyleCatalog, StyleDefinition, StyleId,
-    StyleProperties, StyleRole, TextAlignment, ViewId,
+    StyleProperties, StyleRole, TextAlignment, TextDecoration, ViewId,
 };
 
 /// Resolves a semantic paragraph's reserved style name or stable hexadecimal ID.

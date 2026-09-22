@@ -12,7 +12,7 @@ use parchmint_preferences::ResolvedAppearance;
 
 /// Fixed desktop metrics from the native design source.
 pub const RIBBON_HEIGHT: u16 = 44;
-pub const STATUS_HEIGHT: u16 = 32;
+pub const STATUS_HEIGHT: u16 = 26;
 pub const COMPACT_CONTROL_HEIGHT: u16 = 28;
 pub const CONTROL_HEIGHT: u16 = 36;
 pub const CORE_ICON_SIZE: u16 = 20;
@@ -121,6 +121,7 @@ pub struct SemanticPalette {
     pub sunken: Color,
     pub primary_text: Color,
     pub secondary_text: Color,
+    pub pencil_icon: Color,
     pub muted_text: Color,
     pub disabled_text: Color,
     pub on_accent_text: Color,
@@ -179,6 +180,7 @@ impl ParchMintTheme {
                 sunken: color("color.surface.sunken"),
                 primary_text: color("color.text.primary"),
                 secondary_text: color("color.text.secondary"),
+                pencil_icon: color("color.icon.pencil"),
                 muted_text: color("color.text.muted"),
                 disabled_text: color("color.text.disabled"),
                 on_accent_text: color("color.text.on-accent"),

@@ -50,6 +50,7 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
     harness
         .click_target(WINDOW, HarnessTarget::ParagraphStyle)
         .unwrap();
+    capture(&harness, "style-menu-open");
     harness.click_text(WINDOW, "Heading 1").unwrap();
     open_formatting(&harness);
     assert!(harness.text_is_visible(WINDOW, "24").unwrap());
@@ -99,13 +100,13 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
 }
 
 #[test]
-fn link_toolbar_opens_after_promoting_an_empty_tab() {
+fn link_shortcut_opens_after_promoting_an_empty_tab() {
     let run = IsolatedRun::new("scratch-link").unwrap();
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
     harness
         .click_target(WINDOW, HarnessTarget::NewTab(EditorPane::Primary))
         .unwrap();
-    harness.click_target(WINDOW, HarnessTarget::Link).unwrap();
+    harness.press_command_key(WINDOW, 'k').unwrap();
     assert!(harness.text_is_visible(WINDOW, "Link destination").unwrap());
     harness.click_text(WINDOW, "Cancel").unwrap();
     harness.close(WINDOW).unwrap();
@@ -129,6 +130,7 @@ fn paragraph_controls_format_selection_and_future_typing_and_reopen() {
     harness
         .click_target(WINDOW, HarnessTarget::ParagraphStyle)
         .unwrap();
+    capture(&harness, "paragraph-style-menu-open");
     harness.click_text(WINDOW, "Heading 1").unwrap();
     assert!(
         harness
@@ -165,7 +167,7 @@ fn paragraph_controls_format_selection_and_future_typing_and_reopen() {
         .click_target(WINDOW, HarnessTarget::ManageStyles)
         .unwrap();
     capture(&harness, "styles-manager-light");
-    harness.click_text(WINDOW, "Done").unwrap();
+    harness.click_text(WINDOW, "Save").unwrap();
     let body = harness.active_editor_body().unwrap();
     assert!(body.contains("harborMARKER"), "{body}");
     harness.close(WINDOW).unwrap();
@@ -272,13 +274,15 @@ fn overview_groups_collapse_and_managers_are_contextual() {
     harness
         .click_target(WINDOW, HarnessTarget::ManageMetadata)
         .unwrap();
-    harness.click_text(WINDOW, "+ New field").unwrap();
+    harness
+        .click_target(WINDOW, HarnessTarget::CreateMetadataField)
+        .unwrap();
     harness
         .type_into_target(WINDOW, HarnessTarget::MetadataFieldName, "Viewpoint")
         .unwrap();
     harness.click_text(WINDOW, "Add field").unwrap();
     capture(&harness, "metadata-manager-light");
-    harness.click_text(WINDOW, "Done").unwrap();
+    harness.click_text(WINDOW, "Save").unwrap();
     harness
         .click_target(WINDOW, HarnessTarget::Ribbon(RibbonDestination::Settings))
         .unwrap();
@@ -327,4 +331,53 @@ fn navigation_destinations_share_the_vertical_rail() {
     assert!(harness.target_is_visible(WINDOW, export).unwrap());
     harness.close(WINDOW).unwrap();
     harness.shutdown().unwrap();
+}
+
+#[test]
+fn native_key_events_delete_selections_merge_empty_lines_and_insert_tabs() {
+    let run = IsolatedRun::new("editing-boundaries").unwrap();
+    let project = run.root().join("Editing.parchmint");
+    let harness = create_project(&run, &project, "Editing");
+    create_document(&harness, "Manuscript", "Boundary checks");
+    harness
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "first")
+        .unwrap();
+    harness.press_key(WINDOW, HarnessKey::Enter).unwrap();
+    harness.type_focused(WINDOW, "last").unwrap();
+    harness.press_key(WINDOW, HarnessKey::Home).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Backspace).unwrap();
+    assert!(harness.active_editor_body().unwrap().contains("firstlast"));
+    harness.press_key(WINDOW, HarnessKey::Enter).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Enter).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Backspace).unwrap();
+    harness
+        .select_editor_text(WINDOW, EditorPane::Primary, "last")
+        .unwrap();
+    harness.press_key(WINDOW, HarnessKey::Delete).unwrap();
+    assert!(!harness.active_editor_body().unwrap().contains("last"));
+    harness.press_key(WINDOW, HarnessKey::Backspace).unwrap();
+    harness.press_key(WINDOW, HarnessKey::End).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Backspace).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Tab).unwrap();
+    harness.type_focused(WINDOW, "tail").unwrap();
+    harness.press_key(WINDOW, HarnessKey::ShiftEnter).unwrap();
+    harness.type_focused(WINDOW, "soft").unwrap();
+    let body = harness.active_editor_body().unwrap();
+    assert!(body.contains("firs\ttail<br>soft"), "{body}");
+    harness
+        .select_editor_text(WINDOW, EditorPane::Primary, "firs\ttail")
+        .unwrap();
+    harness
+        .click_target(WINDOW, HarnessTarget::AddComment)
+        .unwrap();
+    harness.type_focused(WINDOW, "Tab comment").unwrap();
+    harness.click_text(WINDOW, "Add comment").unwrap();
+    harness.press_command_key(WINDOW, 's').unwrap();
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
+    let reopened =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    assert_eq!(reopened.active_editor_body().unwrap(), body);
+    reopened.close(WINDOW).unwrap();
+    reopened.shutdown().unwrap();
 }

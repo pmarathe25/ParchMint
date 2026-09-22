@@ -55,8 +55,13 @@ pub struct HarnessTraceEntry {
 /// A non-text keyboard key supported by the interaction harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessKey {
+    Backspace,
+    Delete,
+    Home,
+    End,
     Enter,
     PrimaryEnter,
+    ShiftEnter,
     Escape,
     Tab,
     F6,
@@ -138,7 +143,7 @@ pub struct HarnessHierarchyEntry {
 impl HarnessKey {
     fn into_iced(self) -> keyboard::Key {
         keyboard::Key::Named(match self {
-            Self::Enter | Self::PrimaryEnter => keyboard::key::Named::Enter,
+            Self::Enter | Self::PrimaryEnter | Self::ShiftEnter => keyboard::key::Named::Enter,
             Self::Escape => keyboard::key::Named::Escape,
             Self::Tab => keyboard::key::Named::Tab,
             Self::F6 => keyboard::key::Named::F6,
@@ -147,6 +152,10 @@ impl HarnessKey {
             Self::ArrowRight => keyboard::key::Named::ArrowRight,
             Self::ArrowDown => keyboard::key::Named::ArrowDown,
             Self::ArrowUp => keyboard::key::Named::ArrowUp,
+            Self::Backspace => keyboard::key::Named::Backspace,
+            Self::Delete => keyboard::key::Named::Delete,
+            Self::Home => keyboard::key::Named::Home,
+            Self::End => keyboard::key::Named::End,
         })
     }
 }
@@ -708,6 +717,23 @@ impl NativeDesktopHarness {
         Ok(())
     }
 
+    /// Expands or collapses details through the card's production button.
+    pub fn toggle_card_details(
+        &mut self,
+        window: HarnessWindow,
+        node: &HarnessNode,
+    ) -> Result<(), HarnessError> {
+        let position = self
+            .find_id_bounds(
+                window,
+                iced::widget::Id::from(format!("card-details-{}", node.id())),
+            )?
+            .center();
+        self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        self.record(window, format!("toggle card details {node:?}"));
+        Ok(())
+    }
+
     pub fn toggle_cards_group(
         &mut self,
         window: HarnessWindow,
@@ -805,10 +831,10 @@ impl NativeDesktopHarness {
             window,
             Self::key_tap_events(
                 key.into_iced(),
-                if key == HarnessKey::PrimaryEnter {
-                    keyboard::Modifiers::COMMAND
-                } else {
-                    keyboard::Modifiers::NONE
+                match key {
+                    HarnessKey::PrimaryEnter => keyboard::Modifiers::COMMAND,
+                    HarnessKey::ShiftEnter => keyboard::Modifiers::SHIFT,
+                    _ => keyboard::Modifiers::NONE,
                 },
             ),
         )?;

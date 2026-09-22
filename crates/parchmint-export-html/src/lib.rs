@@ -94,7 +94,11 @@ fn render_item(item: &SemanticExportItem, out: &mut String) {
         }
         SemanticExportItem::Document(document) => {
             let body = sanitize_body(&document.body);
-            out.push_str("<article>");
+            out.push_str("<article id=\"document-");
+            for byte in document.id.as_bytes() {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push_str("\">");
             if document.settings.emit_titles && !has_document_title(&body, &document.title) {
                 out.push_str("<h2>");
                 escape_text(&document.title, out);
@@ -377,6 +381,15 @@ fn sanitize_body(body: &str) -> String {
             }
         }
         for (name, value) in token.attributes {
+            let value = if token.name == "a" && name == "href" {
+                value
+                    .strip_prefix("parchmint://document/")
+                    .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                    .map(|id| format!("#document-{id}"))
+                    .unwrap_or(value)
+            } else {
+                value
+            };
             if matches!(name.as_str(), "data-font-family" | "data-font-size") {
                 continue; // Already translated to validated CSS above.
             }

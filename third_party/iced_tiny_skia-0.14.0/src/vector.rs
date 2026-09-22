@@ -182,7 +182,7 @@ impl Cache {
                 log::warn!("SVG rendering for {handle:?} panicked: {error:?}");
             }
 
-            if let Some([r, g, b, _]) = key.color {
+            if let Some([r, g, b, a]) = key.color {
                 // Apply color filter
                 for pixel in
                     bytemuck::cast_slice_mut::<u8, u32>(image.data_mut())
@@ -192,7 +192,7 @@ impl Cache {
                             b,
                             g,
                             r,
-                            (*pixel >> 24) as u8,
+                            (((*pixel >> 24) * u32::from(a) + 127) / 255) as u8,
                         )
                         .premultiply(),
                     );
@@ -211,17 +211,39 @@ impl Cache {
             let _ = self.rasters.insert(key, image);
         }
 
+        let _ = self.tree_hits.insert(handle.id());
         let _ = self.raster_hits.insert(key);
         self.rasters.get(&key).map(tiny_skia::Pixmap::as_ref)
     }
 
     fn trim(&mut self) {
-        self.trees.retain(|key, _| self.tree_hits.contains(key));
-        self.rasters.retain(|key, _| self.raster_hits.contains(key));
-
+        // Incremental painting only visits damaged icons. Absence from this
+        // paint pass does not mean an icon has disappeared from the UI.
+        const MAX_TREES: usize = 128;
+        const MAX_RASTERS: usize = 512;
+        const MAX_RASTER_BYTES: usize = 8 * 1024 * 1024;
+        if self.trees.len() > MAX_TREES {
+            self.trees.retain(|key, _| self.tree_hits.contains(key));
+            while self.trees.len() > MAX_TREES {
+                let key = *self.trees.keys().next().expect("nonempty cache");
+                let _ = self.trees.remove(&key);
+            }
+        }
+        let bytes: usize = self.rasters.values().map(|image| image.data().len()).sum();
+        if self.rasters.len() > MAX_RASTERS || bytes > MAX_RASTER_BYTES {
+            self.rasters.retain(|key, _| self.raster_hits.contains(key));
+            let mut bytes: usize = self.rasters.values().map(|image| image.data().len()).sum();
+            while self.rasters.len() > MAX_RASTERS || bytes > MAX_RASTER_BYTES {
+                let key = *self.rasters.keys().next().expect("nonempty cache");
+                if let Some(image) = self.rasters.remove(&key) {
+                    bytes -= image.data().len();
+                }
+            }
+        }
         self.tree_hits.clear();
         self.raster_hits.clear();
     }
+
 }
 
 impl std::fmt::Debug for Cache {
@@ -231,5 +253,42 @@ impl std::fmt::Debug for Cache {
             .field("rasters", &self.rasters)
             .field("raster_hits", &self.raster_hits)
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn icon() -> Handle {
+        Handle::from_memory(br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="black"/></svg>"#.as_slice())
+    }
+
+    #[test]
+    fn partial_repaints_keep_bounded_icon_cache_warm() {
+        let mut cache = Cache::default();
+        let handle = icon();
+        let _ = cache.draw(&handle, None, Size::new(16, 16)).unwrap();
+        cache.trim();
+        for _ in 0..100 {
+            cache.trim(); // repainting another control does not touch this icon
+        }
+        assert_eq!(cache.trees.len(), 1);
+        assert_eq!(cache.rasters.len(), 1);
+        for side in 1..530 {
+            let _ = cache.draw(&handle, None, Size::new(side, 1));
+        }
+        cache.trim();
+        assert!(cache.rasters.len() <= 512);
+        assert!(cache.rasters.values().map(|r| r.data().len()).sum::<usize>() <= 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn icon_tint_preserves_requested_transparency() {
+        let mut cache = Cache::default();
+        let handle = icon();
+        let image = cache.draw(&handle, Some(Color::from_rgba(0.5, 0.4, 0.3, 0.25)), Size::new(16, 16)).unwrap();
+        let alpha = image.data()[3];
+        assert!((63..=64).contains(&alpha), "tint alpha: {alpha}");
     }
 }

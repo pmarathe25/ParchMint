@@ -212,6 +212,7 @@ pub enum MountedEditorMessage {
     /// presentation-only: the project surface owns the accompanying card,
     /// which remains anchored to the highlighted text rather than the cursor.
     HoverComment {
+        link_target: Option<String>,
         comment_id: Option<String>,
         anchor_bounds: (f32, f32, f32, f32),
     },
@@ -308,6 +309,7 @@ struct SurfaceState {
     focused: bool,
     modifiers: keyboard::Modifiers,
     drag_anchor: Option<DocumentPosition>,
+    upstream_caret: Option<DocumentPosition>,
     last_click: Option<SurfaceClick>,
     hovered_comment: Option<String>,
     hovered_link: Option<String>,
@@ -398,6 +400,7 @@ impl Default for SurfaceState {
             focused: false,
             modifiers: keyboard::Modifiers::NONE,
             drag_anchor: None,
+            upstream_caret: None,
             last_click: None,
             hovered_comment: None,
             hovered_link: None,
@@ -446,6 +449,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
     ) -> Option<Action<MountedEditorMessage>> {
         let mut content = self.content();
         state.focused = content.focused;
+        if matches!(
+            event,
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+        ) {
+            state.upstream_caret = None;
+        }
         match event {
             iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = *modifiers;
@@ -470,7 +479,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                             .and_capture(),
                     );
                 }
-                let document = content.geometry.hit_test(position.x, position.y)?;
+                let (document, caret) = content.geometry.hit_test_caret(position.x, position.y)?;
+                state.upstream_caret = content
+                    .geometry
+                    .caret(document)
+                    .filter(|normal| caret.y < normal.y)
+                    .map(|_| document);
                 state.focused = true;
                 content.focused = true;
                 let clicks = state.register_left_click(position);
@@ -507,7 +521,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             }
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag_anchor.is_some() => {
                 let position = cursor.position_in(bounds)?;
-                let document = content.geometry.hit_test(position.x, position.y)?;
+                let (document, caret) = content.geometry.hit_test_caret(position.x, position.y)?;
+                state.upstream_caret = content
+                    .geometry
+                    .caret(document)
+                    .filter(|normal| caret.y < normal.y)
+                    .map(|_| document);
                 Some(
                     Action::publish(MountedEditorMessage::SetSelection(EditorSelection::new(
                         state.drag_anchor.expect("drag anchor guard"),
@@ -530,11 +549,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                             .unwrap_or((None, (0.0, 0.0, 0.0, 0.0)))
                     })
                     .unwrap_or((None, (0.0, 0.0, 0.0, 0.0)));
-                if state.hovered_comment == comment_id {
-                    return link_changed.then(Action::request_redraw);
+                if state.hovered_comment == comment_id && !link_changed {
+                    return None;
                 }
                 state.hovered_comment = comment_id.clone();
                 Some(Action::publish(MountedEditorMessage::HoverComment {
+                    link_target: state.hovered_link.clone(),
                     comment_id,
                     anchor_bounds,
                 }))
@@ -619,7 +639,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        cursor: mouse::Cursor,
+        _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let content = self.content();
         let (background, text) = state
@@ -627,7 +647,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             .borrow_mut()
             .draw(renderer, bounds.size(), &content);
         let mut frame = Frame::new(renderer, bounds.size());
-        let mut overlay = Frame::new(renderer, bounds.size());
+        let overlay = Frame::new(renderer, bounds.size());
 
         frame.with_clip(canvas_clip_bounds(bounds), |frame| {
             let range = content.geometry.document_range();
@@ -725,54 +745,15 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             }
 
             if self.draws_focused_caret(state, &content)
-                && let Some(caret) = content.geometry.caret(content.selection.head())
+                && let Some(caret) = content.geometry.caret_with_affinity(
+                    content.selection.head(),
+                    state.upstream_caret == Some(content.selection.head()),
+                )
             {
                 fill_rectangle(frame, caret, content.theme.caret().iced());
             }
         });
 
-        if let Some(url) = cursor
-            .position_in(bounds)
-            .filter(|_| state.drag_anchor.is_none())
-            .and_then(|point| content.geometry.link_at(point.x, point.y))
-        {
-            let hint = if cfg!(target_os = "macos") {
-                "⌘ click to open"
-            } else {
-                "Ctrl+click to open"
-            };
-            let label = format!("{url}  ·  {hint}");
-            let width = (label.chars().count() as f32 * 6.2 + 16.0)
-                .min(bounds.width - 16.0)
-                .max(1.0);
-            let height = (label.chars().count() as f32 * 6.2 / (width - 16.0).max(1.0))
-                .ceil()
-                .max(1.0)
-                * 17.0
-                + 12.0;
-            let y = (bounds.height - height - 8.0).max(0.0);
-            let preview = canvas::Path::rounded_rectangle(
-                Point::new(8.0, y),
-                iced::Size::new(width, height),
-                4.0.into(),
-            );
-            frame.fill(&preview, content.theme.manuscript().iced());
-            let mut border = content.theme.text().iced();
-            border.a = 0.18;
-            frame.stroke(
-                &preview,
-                canvas::Stroke::default().with_color(border).with_width(1.0),
-            );
-            overlay.fill_text(canvas::Text {
-                content: label,
-                position: Point::new(16.0, y + 6.0),
-                max_width: (width - 16.0).max(1.0),
-                size: 12.0.into(),
-                line_height: iced::Pixels(17.0).into(),
-                color: content.theme.link().iced(),
-                ..Default::default()
-            });
-        }
         let mut geometry = Vec::with_capacity(text.len() + 3);
         geometry.push(background);
         geometry.push(frame.into_geometry());
@@ -787,12 +768,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
-        if cursor
-            .position_in(bounds)
-            .is_some_and(|p| self.content().geometry.link_at(p.x, p.y).is_some())
-        {
-            mouse::Interaction::Pointer
-        } else if cursor.is_over(bounds) {
+        if cursor.is_over(bounds) {
             mouse::Interaction::Text
         } else {
             mouse::Interaction::default()
@@ -857,16 +833,18 @@ fn comment_hit(content: &SurfaceContent, x: f32, y: f32) -> Option<CommentHit> {
     if content.comments.is_empty() {
         return None;
     }
-    let document = content.geometry.hit_test(x, y)?;
     content.comments.iter().find_map(|decoration| {
-        if decoration.range().start() > document || document >= decoration.range().end() {
+        let rectangles = content.geometry.selection_rectangles(decoration.range());
+        if !rectangles.iter().any(|bounds| {
+            x >= bounds.x
+                && x < bounds.x + bounds.width
+                && y >= bounds.y
+                && y < bounds.y + bounds.height
+        }) {
             return None;
         }
-        let bounds = content
-            .geometry
-            .selection_rectangles(decoration.range())
-            .into_iter()
-            .next()?;
+        // Keep the anchor stable while moving across glyphs or wrapped lines.
+        let bounds = rectangles.first()?;
         Some((
             Some(
                 decoration
@@ -1264,11 +1242,28 @@ fn apply_key_command(
             }
         }
     };
+    let advance = match &kind {
+        EditorCommandKind::ReplaceRange { range, text } => Some(DocumentPosition::from(
+            range.start().value() + text.chars().count() as u64,
+        )),
+        EditorCommandKind::InsertSoftBreak { selection } => {
+            Some(DocumentPosition::from(selection.start().value() + 1))
+        }
+        _ => None,
+    };
     adapter.execute(
         session.clone(),
         EditorCommandOrigin::new(view),
         EditorCommand::new(revision, kind),
     )?;
+    if let Some(caret) = advance {
+        set_selection(
+            adapter,
+            session.clone(),
+            view,
+            EditorSelection::new(caret, caret),
+        )?;
+    }
     if !matches!(
         command,
         MountedEditorKeyCommand::Backspace
@@ -1540,6 +1535,44 @@ impl MountedEditorHost {
             document_changed: revision != before,
             active_style,
         })
+    }
+
+    /// Visible selection bounds in pane-local coordinates, for anchored controls.
+    pub fn selection_anchor(&self) -> Option<EditorRectangle> {
+        let content = self
+            .surface
+            .content
+            .lock()
+            .expect("mounted editor surface mutex poisoned");
+        if content.selection.anchor() == content.selection.head() {
+            return None;
+        }
+        content
+            .geometry
+            .selection_rectangles(content.selection)
+            .into_iter()
+            .rfind(|rect| rect.y >= 0.0 && rect.y + rect.height + 40.0 <= content.viewport.height)
+    }
+
+    pub fn action_anchor(&self) -> Option<EditorRectangle> {
+        self.selection_anchor().or_else(|| {
+            let content = self
+                .surface
+                .content
+                .lock()
+                .expect("mounted editor surface mutex poisoned");
+            content.geometry.caret(content.selection.head())
+        })
+    }
+
+    /// The paragraph type under this view's caret.
+    pub fn active_block_kind(&self) -> Option<parchmint_editor_api::SemanticBlockKind> {
+        let content = self
+            .surface
+            .content
+            .lock()
+            .expect("mounted editor surface mutex poisoned");
+        content.geometry.block_kind_at(content.selection.head())
     }
 
     pub fn active_style(&self) -> Result<StyleId, EditorError> {
@@ -2306,7 +2339,7 @@ mod tests {
         let cursor = mouse::Cursor::Available(point);
         assert_eq!(
             canvas::Program::mouse_interaction(&surface, &state, bounds, cursor),
-            mouse::Interaction::Pointer,
+            mouse::Interaction::Text,
         );
         assert_eq!(
             canvas::Program::mouse_interaction(
@@ -2967,6 +3000,16 @@ mod tests {
             "moving within a highlighted comment must keep its anchor fixed"
         );
         assert_eq!(comment_at(&content, 220.0, 80.0), None);
+        assert_eq!(
+            comment_at(&content, expected.x + expected.width + 30.0, first.y),
+            None,
+            "blank space beside the comment must not open it"
+        );
+        assert_eq!(
+            comment_at(&content, first.x, expected.y + expected.height + 30.0),
+            None,
+            "blank space below the comment must not open it"
+        );
     }
 
     #[test]

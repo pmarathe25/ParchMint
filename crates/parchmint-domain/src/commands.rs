@@ -429,6 +429,11 @@ fn delete_node(
         reason: "deleted node is not below a fixed root",
     })?;
     let subtree = project.nodes.remove_subtree(id)?;
+    // Unfiled nodes are crash-recoverable tab drafts, not filed project items.
+    // Explicitly discarding one must not offer it as a recently deleted item.
+    if section == crate::ProjectSection::Unfiled {
+        return Ok(());
+    }
     project.deleted.insert(
         id,
         DeletionTombstone {
@@ -601,6 +606,35 @@ mod tests {
 
     fn make_project() -> Project {
         Project::new(ProjectId::from_bytes([1; 16]))
+    }
+
+    #[test]
+    fn discarded_unfiled_draft_does_not_create_a_deletion_tombstone() {
+        let project = make_project();
+        let id = NodeId::from_bytes([23; 16]);
+        let created = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::create_document(
+                id,
+                DocumentId::from_bytes([24; 16]),
+                NodeId::unfiled_root(),
+                0,
+                "Unsaved draft",
+            ),
+        )
+        .unwrap()
+        .project;
+        assert!(
+            created.nodes.get(id).is_some(),
+            "draft remains recoverable until explicitly discarded"
+        );
+        let discarded =
+            apply_project_command(&created, created.revision, ProjectCommand::delete_node(id))
+                .unwrap()
+                .project;
+        assert!(discarded.nodes.get(id).is_none());
+        assert!(discarded.deleted.is_empty());
     }
 
     #[test]

@@ -249,6 +249,10 @@ fn closing_a_changed_draft_can_cancel_save_or_discard() {
                 .unwrap()
         );
     }
+    assert!(
+        canonical_bodies_in(&project.join("unfiled")).is_empty(),
+        "discard must be durable before closing the project"
+    );
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
     assert!(
@@ -257,6 +261,18 @@ fn closing_a_changed_draft_can_cancel_save_or_discard() {
             .any(|body| body.contains("Keep this idea."))
     );
     assert!(canonical_bodies_in(&project.join("unfiled")).is_empty());
+    let codec = parchmint_project_format::ProjectFormatCodec::default();
+    let manifest = codec
+        .decode_manifest(&std::fs::read(project.join("project.toml")).unwrap())
+        .unwrap();
+    let (saved, _) = codec
+        .decode_domain_project(&manifest, parchmint_domain::ProjectId::from_bytes([1; 16]))
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved.deleted.is_empty(),
+        "discarding never-filed writing is not a project deletion"
+    );
 }
 
 #[test]
@@ -732,7 +748,7 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
         .right_click_text(HarnessWindow::Project, "Mara's background")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .unwrap();
     let research = harness
         .active_editor_document_id(EditorPane::Companion)
@@ -899,7 +915,7 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
         .right_click_text(HarnessWindow::Project, "Tide Journal")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open the same source beside the primary pane");
     assert_eq!(
         document_id,

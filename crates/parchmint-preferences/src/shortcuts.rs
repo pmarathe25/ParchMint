@@ -33,11 +33,14 @@ impl Shortcut {
         (self.key.chars().count() != 1 || self.key == self.key.to_uppercase())
             && !self.key.chars().any(char::is_whitespace)
             && self.modifiers <= 15
-            && (function || self.modifiers & 11 != 0)
-            && !matches!(self.key.as_str(), "Escape" | "Tab" | "Backspace" | "Delete")
+            && (function || self.key == "Delete" || self.modifiers & 11 != 0)
+            && !matches!(self.key.as_str(), "Escape" | "Tab" | "Backspace")
             && (function
                 || self.key.chars().count() == 1
-                || matches!(self.key.as_str(), "Enter" | "PageUp" | "PageDown"))
+                || matches!(
+                    self.key.as_str(),
+                    "Enter" | "PageUp" | "PageDown" | "Delete"
+                ))
     }
 }
 impl std::fmt::Display for Shortcut {
@@ -97,6 +100,22 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
         ("file.close", "Close window", "Projects", "W", 0),
         ("file.new-tab", "New document tab", "Documents", "T", 0),
         ("tab.close", "Close tab", "Documents", "W", 2),
+        (
+            "tab.move-pane",
+            "Move tab to other pane",
+            "Documents",
+            "\\",
+            4,
+        ),
+        ("search.next", "Next local match", "Editing", "G", 0),
+        ("search.previous", "Previous local match", "Editing", "G", 4),
+        (
+            "outline.open-beside",
+            "Open selected document beside",
+            "Overview",
+            "Enter",
+            2,
+        ),
         ("tab.next", "Next tab", "Documents", "PageDown", 0),
         ("tab.previous", "Previous tab", "Documents", "PageUp", 0),
         ("view.editor", "Editor", "Navigation", "1", 0),
@@ -214,14 +233,21 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
             "Enter",
             4,
         ),
+        (
+            "outline.delete",
+            "Delete selected documents or groups",
+            "Overview",
+            "Delete",
+            16,
+        ),
         ("outline.rename", "Rename", "Overview", "F2", 16),
         ("outline.group", "New outline group", "Overview", "N", 6),
         (
             "outline.fields",
             "Manage metadata fields",
             "Overview",
-            "",
-            0,
+            "F",
+            2,
         ),
     ];
     specs
@@ -231,7 +257,12 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
                 || id.starts_with("tab.")
                 || matches!(
                     id,
-                    "search.local" | "search.replace" | "view.focus" | "view.companion"
+                    "search.local"
+                        | "search.replace"
+                        | "search.next"
+                        | "search.previous"
+                        | "view.focus"
+                        | "view.companion"
                 ) {
                 ShortcutScope::Editor
             } else if matches!(id, "outline.next-document" | "outline.next-group") {
@@ -288,7 +319,7 @@ mod tests {
     use super::*;
     #[test]
     fn defaults_are_unique_and_overrides_detect_conflicts() {
-        assert!(validate_keybindings(&Keybindings::new()).is_ok());
+        assert_eq!(validate_keybindings(&Keybindings::new()), Ok(()));
         let mut bindings = Keybindings::new();
         let commands = shortcut_commands();
         bindings.insert(

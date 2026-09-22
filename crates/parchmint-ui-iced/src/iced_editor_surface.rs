@@ -2,17 +2,14 @@
 
 use std::collections::BTreeMap;
 
-use crate::components::{
-    button_interaction, field_interaction, multiline_field_style, semantic_pick_list as pick_list,
-};
+use crate::components::{button_interaction, field_interaction, multiline_field_style};
 
 use iced::widget::{
     Space, column, container, mouse_area, opaque, responsive, row, sensor, stack, text, text_editor,
 };
 use iced::{
-    Background, Element, Font, Length,
+    Background, Element, Length,
     alignment::{Horizontal, Vertical},
-    font,
 };
 use parchmint_editor_api::{EditorError, ViewId};
 use parchmint_editor_iced::{
@@ -202,20 +199,27 @@ impl EditorCenterMessage {
                 pane,
                 message:
                     MountedEditorMessage::HoverComment {
+                        link_target,
                         comment_id,
                         anchor_bounds,
                     },
                 ..
-            } => vec![EditorMessage::SetCommentHover {
-                pane: *pane,
-                comment_id: comment_id.clone(),
-                anchor_bounds: crate::Rect::new(
-                    anchor_bounds.0,
-                    anchor_bounds.1,
-                    anchor_bounds.2,
-                    anchor_bounds.3,
-                ),
-            }],
+            } => {
+                let mut messages = vec![EditorMessage::SetHoveredLink(link_target.clone())];
+                if comment_id.is_some() {
+                    messages.push(EditorMessage::SetCommentHover {
+                        pane: *pane,
+                        comment_id: comment_id.clone(),
+                        anchor_bounds: crate::Rect::new(
+                            anchor_bounds.0,
+                            anchor_bounds.1,
+                            anchor_bounds.2,
+                            anchor_bounds.3,
+                        ),
+                    });
+                }
+                messages
+            }
             Self::Mounted { pane, .. } => vec![EditorMessage::FocusPane(*pane)],
             Self::SetReplaceDraft { .. } => Vec::new(),
             Self::ChooseSpellingAction(_) | Self::DismissSpellingMenu => Vec::new(),
@@ -360,19 +364,6 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
                     bottom: 0.0,
                     left: 0.0,
                 }),
-        );
-    }
-    if workspace.link_editor().is_open() {
-        layers = layers.push(
-            container(crate::motion::enter(
-                "link",
-                link_editor_popover(workspace, theme),
-            ))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .padding([52, 12])
-            .align_x(Horizontal::Center)
-            .align_y(Vertical::Top),
         );
     }
     layers.into()
@@ -602,27 +593,13 @@ pub(crate) fn formatting_toolbar_for_width(
             "U" => "Underline",
             _ => "Strikethrough",
         };
-        let mut span: iced::advanced::text::Span<'_, ()> = iced::widget::span(label).font(Font {
-            weight: if label == "B" {
-                font::Weight::Bold
-            } else {
-                font::Weight::Medium
-            },
-            style: if label == "I" {
-                font::Style::Italic
-            } else {
-                font::Style::Normal
-            },
-            ..Font::with_name("Source Sans 3")
-        });
-        if label == "U" {
-            span = span.underline(true);
-        }
-        if label == "S" {
-            span = span.strikethrough(true);
-        }
         let control = toolbar_button(
-            iced::widget::rich_text([span]).size(14),
+            match label {
+                "B" => Element::from(icon_sized(Icon::Bold, 20)),
+                "I" => Element::from(icon_sized(Icon::Italic, 20)),
+                "U" => Element::from(icon_sized(Icon::Underline, 20)),
+                _ => Element::from(icon_sized(Icon::Strikethrough, 20)),
+            },
             format_message(command),
             active,
             theme,
@@ -638,13 +615,37 @@ pub(crate) fn formatting_toolbar_for_width(
             extra_marks = extra_marks.push(toolbar_tooltip(control, name, theme));
         }
     }
+    let in_list = matches!(
+        workspace.active_block_kind,
+        Some(
+            parchmint_editor_api::SemanticBlockKind::OrderedListItem
+                | parchmint_editor_api::SemanticBlockKind::UnorderedListItem
+        )
+    );
+    let numbered = workspace.active_block_kind
+        == Some(parchmint_editor_api::SemanticBlockKind::OrderedListItem);
     let lists = row![
         harness_target::target(
             HarnessTarget::ListBulleted,
-            formatting_icon_button(
-                Icon::BulletedList,
-                "Bulleted list",
-                FormattingCommand::BulletedList,
+            toolbar_tooltip(
+                toolbar_button(
+                    icon_sized(
+                        if numbered {
+                            Icon::NumberedList
+                        } else {
+                            Icon::BulletedList
+                        },
+                        20
+                    ),
+                    format_message(if numbered {
+                        FormattingCommand::NumberedList
+                    } else {
+                        FormattingCommand::BulletedList
+                    }),
+                    in_list,
+                    theme
+                ),
+                "List",
                 theme
             )
         ),
@@ -652,8 +653,8 @@ pub(crate) fn formatting_toolbar_for_width(
             HarnessTarget::ListMenu,
             toolbar_tooltip(
                 crate::action_menu::icon_menu(
-                    button(container(icon_sized(Icon::ChevronDown, 10)).center(Length::Fill))
-                        .width(20)
+                    button(container(icon_sized(Icon::ChevronDown, 12)).center(Length::Fill))
+                        .width(16)
                         .height(32)
                         .padding(0)
                         .on_press_maybe(enabled.then_some(()))
@@ -709,27 +710,6 @@ pub(crate) fn formatting_toolbar_for_width(
     )]
     .spacing(2)
     .align_y(Vertical::Center);
-    let insertions = row![
-        harness_target::target(
-            HarnessTarget::Link,
-            formatting_icon_button(Icon::Link, "Link", FormattingCommand::Link, theme),
-        ),
-        harness_target::target(
-            HarnessTarget::AddComment,
-            toolbar_tooltip(
-                toolbar_button(
-                    icon_sized(Icon::Comment, 16),
-                    EditorCenterMessage::BeginComment,
-                    false,
-                    theme
-                ),
-                "Add comment",
-                theme
-            )
-        ),
-    ]
-    .spacing(2)
-    .align_y(Vertical::Center);
     if wide {
         return row![
             style_selector,
@@ -742,7 +722,6 @@ pub(crate) fn formatting_toolbar_for_width(
             paragraphs,
             paragraph_options(workspace, theme),
             container(iced::widget::rule::vertical(1)).height(20),
-            insertions,
             breaks
         ]
         .spacing(6)
@@ -788,7 +767,6 @@ pub(crate) fn formatting_toolbar_for_width(
             marks,
             lists,
             container(iced::widget::rule::vertical(1)).height(20),
-            insertions,
             more,
         ]
         .spacing(10)
@@ -837,35 +815,38 @@ fn paragraph_options(
         TextAlignment::End => Icon::AlignRight,
         TextAlignment::Justify => Icon::AlignJustify,
     };
-    let align = crate::action_menu::action_menu(
+    let align = crate::action_menu::symbol_menu(
         align_icon,
         vec![
             (
+                Icon::AlignLeft,
                 "Align left",
                 format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
                     TextAlignment::Start,
                 ))),
             ),
             (
+                Icon::AlignCenter,
                 "Center",
                 format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
                     TextAlignment::Center,
                 ))),
             ),
             (
+                Icon::AlignRight,
                 "Align right",
                 format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
                     TextAlignment::End,
                 ))),
             ),
             (
+                Icon::AlignJustify,
                 "Justify",
                 format_message(FormattingCommand::ParagraphFormat(Format::Alignment(
                     TextAlignment::Justify,
                 ))),
             ),
         ],
-        true,
         theme,
     );
     let spacing = crate::action_menu::action_menu(
@@ -952,7 +933,7 @@ fn formatting_icon_button(
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
     toolbar_tooltip(
-        toolbar_button(icon_sized(icon, 16), format_message(command), false, theme),
+        toolbar_button(icon_sized(icon, 20), format_message(command), false, theme),
         label,
         theme,
     )
@@ -969,12 +950,60 @@ fn link_editor_popover(
         .on_submit(EditorCenterMessage::Workspace(EditorMessage::ApplyLink))
         .padding([6, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
-    let mut content = column![
-        text("Link destination").size(14),
-        text("URL").size(12),
-        url_input,
-    ]
-    .spacing(6);
+    let internal = link_editor.internal;
+    let mode_button = |label, internal_mode| {
+        button(text(label).size(13))
+            .padding([5, 10])
+            .on_press(EditorCenterMessage::Workspace(
+                EditorMessage::SetLinkInternal(internal_mode),
+            ))
+            .style(move |_, status| {
+                components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, internal == internal_mode),
+                )
+            })
+    };
+    let mode = row![mode_button("Web", false), mode_button("Document", true)].spacing(4);
+    let mut content = column![text("Link destination").size(14), mode].spacing(6);
+    if internal {
+        let mut locations = column![].spacing(2);
+        for item in workspace.link_outline.rows().into_iter().filter(|item| {
+            crate::iced_project_surface::hierarchy_row_is_visible(
+                &workspace.link_outline,
+                item.parent_id,
+            )
+        }) {
+            let toggle =
+                EditorCenterMessage::Workspace(EditorMessage::ToggleLinkGroup(item.id.to_owned()));
+            let document_id = item
+                .document_id
+                .filter(|_| item.kind == crate::HierarchyRowKind::Document);
+            let select = document_id
+                .map(|id| {
+                    EditorCenterMessage::Workspace(EditorMessage::SetLinkTarget(format!(
+                        "parchmint://document/{id}"
+                    )))
+                })
+                .unwrap_or_else(|| toggle.clone());
+            locations = locations.push(components::location_row(
+                item.title.to_owned(),
+                crate::iced_project_surface::hierarchy_depth(
+                    &workspace.link_outline,
+                    item.parent_id,
+                ),
+                (item.kind != crate::HierarchyRowKind::Document).then_some(item.expanded),
+                document_id.is_some_and(|id| target == format!("parchmint://document/{id}")),
+                toggle,
+                select,
+                theme,
+            ));
+        }
+        content = content.push(container(iced::widget::scrollable(locations)).max_height(240));
+    } else {
+        content = content.push(url_input);
+    }
     if let Some(error) = link_editor.validation_error() {
         content = content.push(text(error.to_owned()).size(12));
     }
@@ -982,7 +1011,10 @@ fn link_editor_popover(
         row![
             button(text("Apply Link").size(12))
                 .padding([5, 7])
-                .on_press(EditorCenterMessage::Workspace(EditorMessage::ApplyLink))
+                .on_press_maybe(
+                    (!target.trim().is_empty())
+                        .then_some(EditorCenterMessage::Workspace(EditorMessage::ApplyLink))
+                )
                 .style(move |_, status| components::button_style(
                     theme,
                     ButtonKind::Primary,
@@ -1068,16 +1100,26 @@ fn editor_pane_surface<'a>(
         {
             text_editor(content)
                 .id(iced::widget::Id::from(format!("scratch-editor-{id}")))
-                .placeholder("Start writing…")
+                .placeholder("")
                 .height(Length::Fill)
-                .padding(28)
+                .padding(iced::Padding {
+                    top: 32.0,
+                    right: 54.0,
+                    bottom: 32.0,
+                    left: 54.0,
+                })
                 .size(18)
                 .on_action(move |action| EditorCenterMessage::Scratch {
                     pane,
                     id: id.to_owned(),
                     action,
                 })
-                .style(move |_, status| multiline_field_style(theme, status))
+                .style(move |_, status| {
+                    let mut style = multiline_field_style(theme, status);
+                    style.border = iced::Border::default();
+                    style.background = theme.palette().manuscript.into();
+                    style
+                })
                 .into()
         } else {
             pane_body(state, pane, theme, slots)
@@ -1097,6 +1139,59 @@ fn editor_pane_surface<'a>(
     } else {
         body
     };
+    let body = if workspace.focused_pane() == pane
+        && workspace.comment_composer(pane).is_none()
+        && !workspace.link_editor().is_open()
+        && spelling_menu.is_none()
+        && let Some(anchor) = slots
+            .slot(pane)
+            .and_then(EditorPaneSlot::host)
+            .and_then(|host| {
+                host.selection_anchor().map(|mut anchor| {
+                    anchor.x = anchor.x.min((host.viewport().width - 84.0).max(4.0));
+                    anchor
+                })
+            }) {
+        let actions = row![
+            harness_target::target(
+                HarnessTarget::AddComment,
+                toolbar_tooltip(
+                    toolbar_button(
+                        row![icon_sized(Icon::Comment, 18), text("+").size(12)].spacing(0),
+                        EditorCenterMessage::BeginComment,
+                        false,
+                        theme
+                    ),
+                    "Add comment",
+                    theme
+                )
+            ),
+            harness_target::target(
+                HarnessTarget::Link,
+                formatting_icon_button(Icon::Link, "Link", FormattingCommand::Link, theme)
+            ),
+        ]
+        .spacing(2);
+        stack![
+            body,
+            container(opaque(container(actions).padding(3).style(move |_| {
+                components::surface(theme, Surface::Elevated, Interaction::Rest)
+            })))
+            .padding(iced::Padding {
+                top: anchor.y + anchor.height + 4.0,
+                left: anchor.x.max(4.0),
+                right: 0.0,
+                bottom: 0.0
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Horizontal::Left)
+            .align_y(Vertical::Top)
+        ]
+        .into()
+    } else {
+        body
+    };
     let hovered_thread = workspace.hovered_comment(pane).and_then(|hover| {
         workspace
             .comment_thread(hover.comment_id())
@@ -1109,45 +1204,62 @@ fn editor_pane_surface<'a>(
         }
         (None, None) => body,
     };
+    let body = if workspace.link_editor().is_open() && workspace.focused_pane() == pane {
+        let anchor = slots
+            .slot(pane)
+            .and_then(EditorPaneSlot::host)
+            .and_then(|host| host.action_anchor())
+            .map(|r| crate::Rect::new(r.x, r.y, r.width, r.height))
+            .unwrap_or(crate::Rect::new(20.0, 20.0, 1.0, 20.0));
+        crate::anchored_popover::anchored(
+            body,
+            link_editor_popover(workspace, theme),
+            anchor,
+            crate::anchored_popover::Dismissal::OutsideClick,
+            EditorCenterMessage::Workspace(EditorMessage::CancelLinkEditor),
+        )
+    } else {
+        body
+    };
     let body = container(container(body).max_width(800))
         .center_x(Length::Fill)
         .height(Length::Fill);
-    let body = mouse_area(body)
-        .on_exit(EditorCenterMessage::Workspace(
-            EditorMessage::SetCommentHover {
-                pane,
-                comment_id: None,
-                anchor_bounds: crate::Rect::default(),
-            },
-        ))
-        .into();
+    let body = body.into();
     let body = if workspace.focused_pane() == pane {
         focus::f6_region(F6Region::FocusedEditor, body)
     } else {
         body
     };
+    let search_open = search.is_open();
     let content = column![
         crate::motion::reveal(workspace.expanded_pane().is_none(), tabs),
         crate::motion::reveal(
             workspace.expanded_pane().is_none(),
             container(
                 row![
-                    text(breadcrumb.join(" › "))
+                    text(breadcrumb.join(" > "))
                         .size(12)
                         .color(theme.palette().secondary_text)
                         .width(Length::Fill),
                     stationary_tooltip::tooltip(
-                        button(icon_sized(Icon::Search, 16))
-                            .padding(3)
-                            .on_press(EditorCenterMessage::PaneWorkspace {
-                                pane,
-                                message: EditorMessage::OpenLocalFind
-                            })
-                            .style(move |_, status| components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                button_interaction(status, false)
-                            )),
+                        harness_target::target_id(
+                            iced::widget::Id::from(format!("breadcrumb-search-{pane:?}")),
+                            button(icon_sized(Icon::Search, 16))
+                                .padding(3)
+                                .on_press(EditorCenterMessage::PaneWorkspace {
+                                    pane,
+                                    message: if search.is_open() {
+                                        EditorMessage::CloseLocalFind
+                                    } else {
+                                        EditorMessage::OpenLocalFind
+                                    }
+                                })
+                                .style(move |_, status| components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    button_interaction(status, search_open)
+                                ))
+                        ),
                         text("Find in document").size(12),
                         components::surface(theme, Surface::Elevated, Interaction::Rest)
                     )
@@ -1202,13 +1314,23 @@ fn comment_hover_overlay<'a>(
         | crate::CommentAnchor::Orphaned { quote, .. } => quote.clone(),
         crate::CommentAnchor::Document { .. } => "Whole document".to_owned(),
     };
-    let status = if thread.resolved() {
-        "Attached comment · Resolved"
+    let card = comment_thread_card("", quote, thread, workspace, theme);
+    anchored_comment_overlay(content, hover.anchor_bounds(), card, true, theme)
+}
+
+fn comment_key_binding(
+    press: text_editor::KeyPress,
+    submit: EditorMessage,
+) -> Option<text_editor::Binding<EditorCenterMessage>> {
+    if press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) {
+        Some(if press.modifiers.shift() || press.modifiers.alt() {
+            text_editor::Binding::Enter
+        } else {
+            text_editor::Binding::Custom(EditorCenterMessage::Workspace(submit))
+        })
     } else {
-        "Attached comment"
-    };
-    let card = comment_thread_card(status, quote, thread, workspace, theme);
-    anchored_comment_overlay(content, hover.anchor_bounds(), card, theme)
+        text_editor::Binding::from_key_press(press)
+    }
 }
 
 fn comment_composer_overlay<'a>(
@@ -1218,9 +1340,14 @@ fn comment_composer_overlay<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let mut card = column![
-        text("New comment").size(12),
         text_editor(workspace.comment_draft())
             .id(HarnessTarget::CommentDraft.id())
+            .key_binding(|press| comment_key_binding(
+                press,
+                EditorMessage::CreateComment {
+                    document_level: false
+                }
+            ))
             .placeholder("Write a comment")
             .on_action(|action| {
                 EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(action))
@@ -1228,17 +1355,18 @@ fn comment_composer_overlay<'a>(
             .height(Length::Fixed(76.0))
             .style(move |_, status| multiline_field_style(theme, status)),
         row![
-            comment_popover_action(
-                "Add comment",
-                EditorCenterMessage::Workspace(EditorMessage::CreateComment {
-                    document_level: false,
-                }),
-                theme,
-            ),
+            Space::new().width(Length::Fill),
             comment_popover_action(
                 "Cancel",
                 EditorCenterMessage::Workspace(EditorMessage::CancelCommentComposer),
-                theme,
+                theme
+            ),
+            comment_popover_action(
+                "Add comment",
+                EditorCenterMessage::Workspace(EditorMessage::CreateComment {
+                    document_level: false
+                }),
+                theme
             ),
         ]
         .spacing(6),
@@ -1251,20 +1379,54 @@ fn comment_composer_overlay<'a>(
                 .color(theme.palette().secondary_text),
         );
     }
-    anchored_comment_overlay(content, composer.anchor_bounds(), card.into(), theme)
+    anchored_comment_overlay(content, composer.anchor_bounds(), card.into(), false, theme)
 }
 
 pub(crate) fn comment_thread_card<'a>(
-    status: &str,
+    _status: &str,
     quote: String,
     thread: &crate::CommentThreadView,
     workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let thread_id = thread.id().to_owned();
+    let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut card = column![
-        text(status.to_owned()).size(11),
-        text(quote).size(12).color(theme.palette().secondary_text),
+        row![
+            container(text(quote).size(12).color(theme.palette().secondary_text))
+                .padding([4, 8])
+                .width(Length::Fill)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(theme.palette().comment_active.scale_alpha(0.10).into()),
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            text(if thread.resolved() { "Resolved" } else { "" })
+                .size(11)
+                .color(theme.palette().comment_resolved),
+            stationary_tooltip::tooltip(
+                comment_popover_action(
+                    if thread.resolved() { "↶" } else { "✓" },
+                    EditorCenterMessage::Workspace(EditorMessage::ToggleCommentResolved {
+                        thread_id: thread_id.clone(),
+                        resolved: !thread.resolved(),
+                    }),
+                    theme,
+                ),
+                text(if thread.resolved() {
+                    "Reopen thread"
+                } else {
+                    "Resolve thread"
+                })
+                .size(12),
+                components::surface(theme, Surface::Elevated, Interaction::Rest),
+            ),
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center),
     ]
     .spacing(5);
 
@@ -1280,6 +1442,13 @@ pub(crate) fn comment_thread_card<'a>(
                             .expect("every rendered comment thread has an edit draft"),
                     )
                     .id(HarnessTarget::CommentEdit.id())
+                    .key_binding({
+                        let thread_id = thread_id.clone();
+                        let message_id = message_id.clone();
+                        move |press| comment_key_binding(press, EditorMessage::SaveEditedCommentMessage {
+                            thread_id: thread_id.clone(), message_id: message_id.clone(),
+                        })
+                    })
                     .placeholder("Edit comment")
                     .on_action(move |action| {
                         EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
@@ -1320,34 +1489,49 @@ pub(crate) fn comment_thread_card<'a>(
                     text(message.body().to_owned()).size(13).width(Length::Fill),
                     harness_target::target(
                         HarnessTarget::CommentMenu(message_index),
-                        pick_list(
-                            vec!["Edit", "Delete message", "Delete thread"],
-                            Option::<&str>::None,
-                            move |action| {
-                                EditorCenterMessage::Workspace(match action {
-                                    "Edit" => EditorMessage::BeginEditCommentMessage {
-                                        thread_id: edit_thread.clone(),
-                                        message_id: message_id.clone(),
-                                        body: body.clone(),
-                                    },
-                                    "Delete message" => EditorMessage::DeleteCommentMessage {
-                                        thread_id: edit_thread.clone(),
-                                        message_id: message_id.clone(),
-                                    },
-                                    _ => EditorMessage::RequestDeleteCommentThread(
-                                        edit_thread.clone(),
-                                    ),
-                                })
-                            }
+                        crate::action_menu::notifying_menu(
+                            button(text("⋮").size(20))
+                                .padding([0, 7])
+                                .on_press(())
+                                .style(move |_, status| components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    button_interaction(status, false)
+                                ))
+                                .into(),
+                            vec![
+                                (
+                                    "Edit".into(),
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::BeginEditCommentMessage {
+                                            thread_id: edit_thread.clone(),
+                                            message_id: message_id.clone(),
+                                            body,
+                                        }
+                                    )
+                                ),
+                                (
+                                    "Delete message".into(),
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::DeleteCommentMessage {
+                                            thread_id: edit_thread.clone(),
+                                            message_id,
+                                        }
+                                    )
+                                ),
+                                (
+                                    "Delete thread".into(),
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::RequestDeleteCommentThread(edit_thread)
+                                    )
+                                ),
+                            ],
+                            theme,
+                            168.0,
+                            |open| EditorCenterMessage::Workspace(
+                                EditorMessage::SetCommentActionsOpen(open)
+                            ),
                         )
-                        .on_open(EditorCenterMessage::Workspace(
-                            EditorMessage::SetCommentActionsOpen(true)
-                        ))
-                        .on_close(EditorCenterMessage::Workspace(
-                            EditorMessage::SetCommentActionsOpen(false)
-                        ))
-                        .placeholder("More")
-                        .width(128)
                     ),
                 ]
                 .spacing(6),
@@ -1367,7 +1551,18 @@ pub(crate) fn comment_thread_card<'a>(
                     .expect("every rendered comment thread has a reply draft"),
             )
             .id(HarnessTarget::CommentReply.id())
-            .placeholder("Reply to thread")
+            .key_binding({
+                let thread_id = thread_id.clone();
+                move |press| {
+                    comment_key_binding(
+                        press,
+                        EditorMessage::SubmitCommentReply {
+                            thread_id: thread_id.clone(),
+                        },
+                    )
+                }
+            })
+            .placeholder("Reply…")
             .on_action(move |action| {
                 EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
                     thread_id: reply_thread.clone(),
@@ -1379,30 +1574,18 @@ pub(crate) fn comment_thread_card<'a>(
         );
     }
 
-    card = card.push(
-        row![
+    if workspace.editing_comment_message().is_none() {
+        card = card.push(row![
+            Space::new().width(Length::Fill),
             comment_popover_action(
                 "Reply",
                 EditorCenterMessage::Workspace(EditorMessage::SubmitCommentReply {
-                    thread_id: thread_id.clone(),
+                    thread_id: thread_id.clone()
                 }),
                 theme,
             ),
-            comment_popover_action(
-                if thread.resolved() {
-                    "Reopen"
-                } else {
-                    "Resolve"
-                },
-                EditorCenterMessage::Workspace(EditorMessage::ToggleCommentResolved {
-                    thread_id: thread_id.clone(),
-                    resolved: !thread.resolved(),
-                }),
-                theme,
-            ),
-        ]
-        .spacing(6),
-    );
+        ]);
+    }
     if workspace.pending_delete_comment() == Some(thread_id.as_str()) {
         card = card.push(
             row![
@@ -1435,28 +1618,28 @@ fn anchored_comment_overlay<'a>(
     content: Element<'a, EditorCenterMessage>,
     anchor: crate::Rect,
     card: Element<'a, EditorCenterMessage>,
+    hover: bool,
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
-    stack![
+    crate::anchored_popover::anchored(
         content,
-        container(opaque(
-            container(crate::motion::enter("comment", card))
-                .width(320)
-                .padding(10)
-                .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest)),
-        ))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(iced::Padding {
-            top: (anchor.bottom() + 8.0).max(8.0),
-            right: 0.0,
-            bottom: 0.0,
-            left: anchor.left().max(8.0),
-        })
-        .align_x(Horizontal::Left)
-        .align_y(Vertical::Top),
-    ]
-    .into()
+        container(card)
+            .width(320)
+            .padding(10)
+            .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+            .into(),
+        anchor,
+        if hover {
+            crate::anchored_popover::Dismissal::Hover
+        } else {
+            crate::anchored_popover::Dismissal::Explicit
+        },
+        EditorCenterMessage::Workspace(if hover {
+            EditorMessage::DismissCommentHover
+        } else {
+            EditorMessage::CancelCommentComposer
+        }),
+    )
 }
 
 fn comment_popover_action(
@@ -1464,11 +1647,17 @@ fn comment_popover_action(
     message: EditorCenterMessage,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
-    button(text(label.into()).size(12))
-        .padding([4, 6])
+    let label = label.into();
+    let kind = match label.as_str() {
+        "Reply" | "Add comment" | "Save edit" => ButtonKind::Primary,
+        "Confirm delete" => ButtonKind::Destructive,
+        _ => ButtonKind::Quiet,
+    };
+    button(text(label).size(12))
+        .padding([5, 9])
         .on_press(message)
         .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+            components::button_style(theme, kind, button_interaction(status, false))
         })
         .into()
 }
@@ -1559,7 +1748,7 @@ fn tab_strip_for_width(
                     tab,
                     presentation,
                     (presentation.is_active() && !breadcrumb.is_empty())
-                        .then(|| breadcrumb.join(" › ")),
+                        .then(|| breadcrumb.join(" > ")),
                     TabButtonContext {
                         pane,
                         index,
@@ -1778,7 +1967,7 @@ fn tab_button(
         } else {
             activate
         };
-    let close = button(text("×").size(14))
+    let close = button(icon_sized(Icon::Close, 16))
         .padding([6, 6])
         .width(presentation.close_bounds().width())
         .on_press(EditorCenterMessage::Workspace(EditorMessage::CloseTab {
@@ -1789,7 +1978,10 @@ fn tab_button(
             components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
         });
     let close: Element<'static, EditorCenterMessage> = stationary_tooltip::tooltip(
-        close,
+        harness_target::target_id(
+            iced::widget::Id::from(format!("tab-close-{pane:?}-{id}")),
+            close,
+        ),
         container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     );
@@ -1918,48 +2110,48 @@ fn local_search_bar(
         .padding([5, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
     let controls = row![
-        find_button(
+        find_icon_button(
             "Previous",
+            "↑",
             pane,
             EditorMessage::NavigateFind(FindDirection::Previous),
             theme,
             matches > 0,
+            false
         ),
-        find_button(
+        find_icon_button(
             "Next",
+            "↓",
             pane,
             EditorMessage::NavigateFind(FindDirection::Next),
             theme,
             matches > 0,
+            false
         ),
-        button(text("Match case").size(12))
-            .padding([5, 7])
-            .on_press(EditorCenterMessage::PaneWorkspace {
-                pane,
-                message: EditorMessage::SetFindOptions {
-                    case_sensitive: !case_sensitive,
-                    whole_word,
-                },
-            })
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                button_interaction(status, case_sensitive),
-            )),
-        button(text("Whole words").size(12))
-            .padding([5, 7])
-            .on_press(EditorCenterMessage::PaneWorkspace {
-                pane,
-                message: EditorMessage::SetFindOptions {
-                    case_sensitive,
-                    whole_word: !whole_word,
-                },
-            })
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                button_interaction(status, whole_word),
-            )),
+        find_icon_button(
+            "Match case",
+            "Aa",
+            pane,
+            EditorMessage::SetFindOptions {
+                case_sensitive: !case_sensitive,
+                whole_word
+            },
+            theme,
+            true,
+            case_sensitive
+        ),
+        find_icon_button(
+            "Whole words",
+            "ab",
+            pane,
+            EditorMessage::SetFindOptions {
+                case_sensitive,
+                whole_word: !whole_word
+            },
+            theme,
+            true,
+            whole_word
+        ),
         button(text("Replace…").size(12))
             .padding([5, 7])
             .on_press(EditorCenterMessage::PaneWorkspace {
@@ -1971,24 +2163,12 @@ fn local_search_bar(
                 ButtonKind::Quiet,
                 button_interaction(status, replace_visible),
             )),
-        button(text("Close").size(12))
-            .padding([5, 7])
-            .on_press(EditorCenterMessage::PaneWorkspace {
-                pane,
-                message: EditorMessage::CloseLocalFind,
-            })
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                button_interaction(status, false),
-            )),
     ]
     .spacing(4)
     .align_y(Vertical::Center);
     let content = if replace_visible {
         column![
-            query,
-            controls.wrap(),
+            row![query, controls].spacing(4).align_y(Vertical::Center),
             row![
                 text_input("Replace with", &draft)
                     .id(HarnessTarget::LocalReplace(pane).id())
@@ -2018,14 +2198,12 @@ fn local_search_bar(
         ]
         .spacing(4)
     } else {
-        column![query, controls.wrap()].spacing(4)
+        column![row![query, controls].spacing(4).align_y(Vertical::Center)]
     };
-    container(
-        column![
-            content,
-            text(if query_value.is_empty() {
-                "Enter text to search this document.".to_owned()
-            } else if matches == 0 {
+    let mut body = column![content].spacing(3);
+    if !query_value.is_empty() {
+        body = body.push(
+            text(if matches == 0 {
                 "No matches in this document.".to_owned()
             } else {
                 format!(
@@ -2035,14 +2213,53 @@ fn local_search_bar(
                 )
             })
             .size(11)
-            .color(theme.palette().secondary_text)
-        ]
-        .spacing(3),
+            .color(theme.palette().secondary_text),
+        );
+    }
+    container(body)
+        .padding([4, 6])
+        .width(Length::Fill)
+        .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+        .into()
+}
+
+fn find_icon_button(
+    label: &'static str,
+    glyph: &'static str,
+    pane: EditorPane,
+    message: EditorMessage,
+    theme: ParchMintTheme,
+    enabled: bool,
+    selected: bool,
+) -> Element<'static, EditorCenterMessage> {
+    let symbol = icon_sized(
+        match glyph {
+            "↑" => Icon::PreviousMatch,
+            "↓" => Icon::NextMatch,
+            "Aa" => Icon::MatchCase,
+            _ => Icon::WholeWords,
+        },
+        20,
+    );
+    stationary_tooltip::tooltip(
+        harness_target::target_id(
+            iced::widget::Id::from(format!("find-{pane:?}-{label}")),
+            button(container(symbol).center(24))
+                .padding(2)
+                .on_press_maybe(
+                    enabled.then_some(EditorCenterMessage::PaneWorkspace { pane, message }),
+                )
+                .style(move |_, status| {
+                    components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        button_interaction(status, selected),
+                    )
+                }),
+        ),
+        text(label).size(12),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
-    .padding([4, 6])
-    .width(Length::Fill)
-    .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-    .into()
 }
 
 fn find_button(
@@ -2172,6 +2389,7 @@ mod tests {
                     if let MountedEditorMessage::HoverComment {
                         comment_id,
                         anchor_bounds,
+                        ..
                     } = message
                     {
                         effects.extend(workspace.update(EditorMessage::SetCommentHover {
@@ -2333,28 +2551,17 @@ mod tests {
             .find(HarnessTarget::ListBulleted.id())
             .unwrap()
             .bounds();
-        let comment = simulator
-            .find(HarnessTarget::AddComment.id())
-            .unwrap()
-            .bounds();
+        assert!(simulator.find(HarnessTarget::AddComment.id()).is_err());
+        assert!(simulator.find(HarnessTarget::Link.id()).is_err());
         let breaks = simulator
             .find(HarnessTarget::FormattingMenu.id())
             .unwrap()
             .bounds();
-        for bounds in [bold, lists, breaks, comment] {
+        for bounds in [bold, lists, breaks] {
             assert!(bounds.width >= 32.0 && bounds.height >= 32.0);
         }
-        assert!(
-            comment.y < bold.y + bold.height,
-            "toolbar must fit one line"
-        );
-        assert!(comment.x + comment.width <= 480.0);
-
-        simulator.click(HarnessTarget::AddComment.id()).unwrap();
-        assert_eq!(
-            simulator.into_messages().collect::<Vec<_>>(),
-            [EditorCenterMessage::BeginComment]
-        );
+        assert!(breaks.y < bold.y + bold.height, "toolbar must fit one line");
+        assert!(breaks.x + breaks.width <= 480.0);
     }
 
     #[test]
@@ -2612,17 +2819,21 @@ mod tests {
             view,
             mount_generation: workspace.pane(EditorPane::Companion).mount_generation(),
             message: MountedEditorMessage::HoverComment {
+                link_target: None,
                 comment_id: Some("comment".to_owned()),
                 anchor_bounds: (24.0, 36.0, 30.0, 14.0),
             },
         };
         assert_eq!(
             message.workspace_messages(),
-            vec![EditorMessage::SetCommentHover {
-                pane: EditorPane::Companion,
-                comment_id: Some("comment".to_owned()),
-                anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
-            }]
+            vec![
+                EditorMessage::SetHoveredLink(None),
+                EditorMessage::SetCommentHover {
+                    pane: EditorPane::Companion,
+                    comment_id: Some("comment".to_owned()),
+                    anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
+                }
+            ]
         );
     }
 
@@ -2660,7 +2871,9 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
 
-        simulator.click("Resolve").expect("comment hover popover");
+        simulator
+            .click("✓")
+            .expect("comment hover popover resolve control");
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert_eq!(
             messages,
@@ -2729,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn anchored_comment_composer_emits_multiline_editor_actions() {
+    fn anchored_comment_composer_submits_enter_and_keeps_modified_enter_multiline() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::BeginCommentAtSelection {
             pane: EditorPane::Primary,
@@ -2753,9 +2966,28 @@ mod tests {
         assert_eq!(
             simulator.tap_key(iced::keyboard::key::Named::Enter),
             iced::event::Status::Captured,
-            "the anchored composer must accept paragraph breaks"
+            "Enter must submit the comment"
         );
+        for modifier in [
+            iced::keyboard::Modifiers::SHIFT,
+            iced::keyboard::Modifiers::ALT,
+        ] {
+            let mut event =
+                iced_test::simulator::press_key(iced::keyboard::key::Named::Enter, None);
+            if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { modifiers, .. }) =
+                &mut event
+            {
+                *modifiers = modifier;
+            }
+            simulator.simulate([event]);
+        }
         let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            EditorCenterMessage::Workspace(EditorMessage::CreateComment {
+                document_level: false
+            })
+        )));
         assert!(messages.iter().any(|message| matches!(
             message,
             EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(
@@ -2821,6 +3053,35 @@ mod tests {
                 .expect("headless center snapshot");
             assert!(format!("{snapshot:?}").contains("renderer: \"tiny-skia\""));
         }
+    }
+
+    #[test]
+    fn internal_link_groups_only_toggle_children() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::OpenLinkEditor);
+        workspace.update(EditorMessage::SetLinkInternal(true));
+        let group = workspace
+            .link_outline
+            .rows()
+            .into_iter()
+            .find(|item| item.kind == crate::HierarchyRowKind::Group)
+            .unwrap();
+        let id = group.id.to_owned();
+        let title = group.title.to_owned();
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(600.0, 500.0),
+            link_editor_popover(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+        );
+        simulator.click(title.as_str()).unwrap();
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![EditorCenterMessage::Workspace(
+                EditorMessage::ToggleLinkGroup(id)
+            )]
+        );
+        assert!(workspace.link_editor().target().is_empty());
     }
 
     #[test]
@@ -2976,7 +3237,9 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
 
-        simulator.click("×").expect("primary tab close target");
+        simulator
+            .click(iced::widget::Id::new("tab-close-Primary-chapter-one"))
+            .expect("primary tab close target");
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
@@ -3155,6 +3418,38 @@ mod tests {
     }
 
     #[test]
+    fn breadcrumb_search_toggles_the_originating_panes_search() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let slots = EditorHostSlots::default();
+        for expected in [EditorMessage::OpenLocalFind, EditorMessage::CloseLocalFind] {
+            let mut surface = Simulator::with_size(
+                Settings::default(),
+                Size::new(1280.0, 720.0),
+                editor_center_surface(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    &slots,
+                    None,
+                ),
+            );
+            surface
+                .click(iced::widget::Id::from("breadcrumb-search-Primary"))
+                .unwrap();
+            assert!(surface.into_messages().any(|message| message
+                == EditorCenterMessage::PaneWorkspace {
+                    pane: EditorPane::Primary,
+                    message: expected.clone()
+                }));
+            workspace.update(expected);
+        }
+        assert!(
+            !workspace
+                .local_search(workspace.pane(EditorPane::Primary).view())
+                .is_open()
+        );
+    }
+
+    #[test]
     fn local_find_without_matches_disables_navigation_and_replacement() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::OpenLocalFind);
@@ -3167,10 +3462,16 @@ mod tests {
             Size::new(440.0, 240.0),
             local_search_bar(search, EditorPane::Primary, theme, &slots),
         );
-        assert!(surface.find("Enter text to search this document.").is_ok());
-        for label in ["Previous", "Next", "Replace", "Replace all"] {
+        assert!(surface.find("Enter text to search this document.").is_err());
+        for label in ["Previous", "Next"] {
+            surface
+                .click(iced::widget::Id::from(format!("find-Primary-{label}")))
+                .unwrap();
+        }
+        for label in ["Replace", "Replace all"] {
             surface.click(label).unwrap();
         }
+        assert!(surface.find("Close").is_err());
         assert!(surface.into_messages().next().is_none());
     }
 

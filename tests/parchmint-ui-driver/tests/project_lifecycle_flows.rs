@@ -5,7 +5,7 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_document, create_project};
 
 #[test]
-fn style_fields_commit_on_enter_and_leaving_the_form() {
+fn style_fields_save_explicitly_and_cancel_discards_staged_edits() {
     let run = IsolatedRun::new("style-field-editing").unwrap();
     let project = run.root().join("styles.parchmint");
     let harness = create_project(&run, &project, "Style editing");
@@ -27,6 +27,47 @@ fn style_fields_commit_on_enter_and_leaving_the_form() {
         .unwrap();
     harness.click_text(HarnessWindow::Project, "Body").unwrap();
     let before = std::fs::read(project.join("styles.css")).ok();
+    harness
+        .type_into_target(HarnessWindow::Project, HarnessTarget::StyleFontSize, "27")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, parchmint_desktop::HarnessKey::Enter)
+        .unwrap();
+    assert_eq!(
+        std::fs::read(project.join("styles.css")).ok(),
+        before,
+        "Enter updates the local preview, not persistent project styles"
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Cancel")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "Discard changes?")
+            .unwrap()
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Keep editing")
+        .unwrap();
+    assert!(
+        harness
+            .text_is_visible(HarnessWindow::Project, "27")
+            .unwrap()
+    );
+    harness
+        .click_text(HarnessWindow::Project, "Cancel")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Discard")
+        .unwrap();
+    assert_eq!(std::fs::read(project.join("styles.css")).ok(), before);
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Body").unwrap();
     for (field, value) in [
         (HarnessTarget::StyleFontFamily, "Source Serif 4"),
         (HarnessTarget::StyleFontSize, "12.5"),
@@ -42,7 +83,7 @@ fn style_fields_commit_on_enter_and_leaving_the_form() {
                 .press_key(HarnessWindow::Project, parchmint_desktop::HarnessKey::Enter)
                 .unwrap();
         } else {
-            harness.click_text(HarnessWindow::Project, "Done").unwrap();
+            harness.click_text(HarnessWindow::Project, "Save").unwrap();
         }
     }
     harness.close(HarnessWindow::Project).unwrap();

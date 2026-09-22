@@ -20,6 +20,9 @@ fn hierarchy_drag_previews_reflow_cancel_and_commit_on_both_surfaces() {
         let run = IsolatedRun::new("hierarchy-reflow").unwrap();
         let project = run.root().join("reflow.parchmint");
         let harness = create_project(&run, &project, "Live Outline");
+        harness
+            .resize(HarnessWindow::Project, 1280.0, 900.0)
+            .unwrap();
         create_group(&harness, "Manuscript", "Act One");
         create_group(&harness, "Manuscript", "Act Two");
         for title in ["Arrival", "Discovery", "Departure"] {

@@ -17,7 +17,7 @@ const TAB_CLOSE_WIDTH: f32 = 24.0;
 const TAB_OVERFLOW_WIDTH: f32 = 44.0;
 const TAB_TITLE_INSET: f32 = 16.0;
 
-const SPELLING_MENU_WIDTH: f32 = 180.0;
+const SPELLING_MENU_WIDTH: f32 = 280.0;
 
 /// The two editor hosts available in the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -483,6 +483,7 @@ impl FormattingCommand {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkEditorState {
     open: bool,
+    pub(crate) internal: bool,
     target: String,
     validation_error: Option<String>,
 }
@@ -513,7 +514,7 @@ impl LinkEditorState {
     }
 
     fn reject_empty_target(&mut self) {
-        self.validation_error = Some("Enter a URL before applying a link.".to_owned());
+        self.validation_error = Some("Choose a document or enter a URL.".to_owned());
     }
 
     fn close(&mut self) {
@@ -732,7 +733,7 @@ impl SpellingMenu {
             actions.push(SpellingMenuAction::Ignore);
         }
         actions.push(SpellingMenuAction::AddComment);
-        let height = (actions.len() as f32 * 34.0 + 12.0).min(request.pane_bounds.height.max(0.0));
+        let height = (actions.len() as f32 * 30.0 + 10.0).min(request.pane_bounds.height.max(0.0));
         let maximum_y = (request.pane_bounds.bottom() - height).max(request.pane_bounds.top());
         let y = preferred_y.clamp(request.pane_bounds.top(), maximum_y);
         Self {
@@ -1306,6 +1307,9 @@ pub enum EditorMessage {
     SetActiveParagraphStyle(String),
     OpenLinkEditor,
     SetLinkTarget(String),
+    SetLinkInternal(bool),
+    SetHoveredLink(Option<String>),
+    ToggleLinkGroup(String),
     ApplyLink,
     RemoveLink,
     CancelLinkEditor,
@@ -1330,6 +1334,7 @@ pub enum EditorMessage {
     },
     SelectComment(String),
     SetCommentActionsOpen(bool),
+    DismissCommentHover,
     SetCommentHover {
         pane: EditorPane,
         comment_id: Option<String>,
@@ -1470,7 +1475,9 @@ pub struct EditorWorkspace {
     active_style: String,
     effective_style: parchmint_domain::StyleProperties,
     active_inline_marks: Vec<parchmint_editor_api::SemanticInlineMark>,
+    pub(crate) active_block_kind: Option<parchmint_editor_api::SemanticBlockKind>,
     link_editor: LinkEditorState,
+    pub(crate) link_outline: crate::ExplorerState,
     local_search: BTreeMap<ViewId, LocalSearchState>,
     decorations: BTreeMap<ViewId, EditorDecorations>,
     selection_word_counts: BTreeMap<ViewId, Option<usize>>,
@@ -1482,6 +1489,7 @@ pub struct EditorWorkspace {
     comment_threads: BTreeMap<String, CommentThreadView>,
     group_comment_documents: BTreeSet<String>,
     hovered_comment: Option<CommentHover>,
+    pub(crate) hovered_link: Option<String>,
     comment_actions_open: bool,
     comment_composer: Option<CommentComposer>,
     selected_comment: Option<String>,
@@ -1688,7 +1696,9 @@ impl EditorWorkspace {
                 parchmint_domain::StyleRole::Body,
             ),
             active_inline_marks: Vec::new(),
+            active_block_kind: None,
             link_editor: LinkEditorState::default(),
+            link_outline: crate::ExplorerState::fixture(),
             local_search,
             decorations,
             selection_word_counts,
@@ -1700,6 +1710,7 @@ impl EditorWorkspace {
             comment_threads: BTreeMap::new(),
             group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
+            hovered_link: None,
             comment_actions_open: false,
             comment_composer: None,
             selected_comment: None,
@@ -1798,7 +1809,9 @@ impl EditorWorkspace {
                 parchmint_domain::StyleRole::Body,
             ),
             active_inline_marks: Vec::new(),
+            active_block_kind: None,
             link_editor: LinkEditorState::default(),
+            link_outline: crate::ExplorerState::from_project(&snapshot.project),
             local_search,
             decorations,
             selection_word_counts,
@@ -1810,6 +1823,7 @@ impl EditorWorkspace {
             comment_threads: snapshot_comment_threads(snapshot),
             group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
+            hovered_link: None,
             comment_actions_open: false,
             comment_composer: None,
             selected_comment: None,
@@ -1835,6 +1849,7 @@ impl EditorWorkspace {
 
     /// Reconciles authoritative documents without resetting surviving pane/view state.
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        self.link_outline.reconcile_project(&snapshot.project);
         let hydrated = HydratedDocuments::from_snapshot(snapshot);
         self.style_names = snapshot
             .project
@@ -2197,9 +2212,15 @@ impl EditorWorkspace {
     }
 
     pub fn hovered_comment(&self, pane: EditorPane) -> Option<&CommentHover> {
-        self.hovered_comment
-            .as_ref()
-            .filter(|hover| hover.pane() == pane)
+        self.hovered_comment.as_ref().filter(|hover| {
+            hover.pane() == pane
+                && self
+                    .comment_threads
+                    .get(hover.comment_id())
+                    .is_some_and(|thread| {
+                        self.pane(pane).active_document() == Some(thread.document_id())
+                    })
+        })
     }
 
     pub(crate) fn comment_composer(&self, pane: EditorPane) -> Option<CommentComposer> {
@@ -2804,6 +2825,20 @@ impl EditorWorkspace {
                 }
                 Vec::new()
             }
+            EditorMessage::SetHoveredLink(target) => {
+                self.hovered_link = target;
+                Vec::new()
+            }
+            EditorMessage::SetLinkInternal(internal) => {
+                self.link_editor.internal = internal;
+                self.link_editor.target.clear();
+                Vec::new()
+            }
+            EditorMessage::ToggleLinkGroup(id) => {
+                self.link_outline.toggle_expanded(&id);
+                self.link_editor.target.clear();
+                Vec::new()
+            }
             EditorMessage::SetLinkTarget(target) => {
                 if self.link_editor.is_open() {
                     self.link_editor.set_target(target);
@@ -2863,6 +2898,15 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::SelectComment(comment_id) => self.select_comment(comment_id),
+            EditorMessage::DismissCommentHover => {
+                if !self.comment_actions_open {
+                    self.hovered_comment = None;
+                    // The overlay consumes the pointer event that leaves its anchor.
+                    // Clear the link from that anchor along with the comment.
+                    self.hovered_link = None;
+                }
+                Vec::new()
+            }
             EditorMessage::SetCommentActionsOpen(open) => {
                 self.comment_actions_open = open;
                 Vec::new()
@@ -2873,6 +2917,11 @@ impl EditorWorkspace {
                 anchor_bounds,
             } => {
                 if self.comment_actions_open {
+                    return Vec::new();
+                }
+                if self.hovered_comment.as_ref().is_some_and(|hover| {
+                    hover.pane == pane && Some(&hover.comment_id) == comment_id.as_ref()
+                }) {
                     return Vec::new();
                 }
                 self.hovered_comment = comment_id
@@ -3110,6 +3159,7 @@ impl EditorWorkspace {
     }
 
     fn focus_pane(&mut self, pane: EditorPane) {
+        self.hovered_link = None;
         if !self.pane(pane).is_populated() {
             return;
         }
@@ -3169,9 +3219,13 @@ impl EditorWorkspace {
         }
         let target = target.to_owned();
         self.link_editor.close();
-        self.command(EditorCommand::SetLink {
+        let mut effects = self.command(EditorCommand::SetLink {
             target: Some(target),
-        })
+        });
+        effects.push(EditorEffect::RestoreEditorFocus {
+            view: self.pane(self.focused_pane).view,
+        });
+        effects
     }
 
     fn remove_link(&mut self) -> Vec<EditorEffect> {
@@ -3179,7 +3233,11 @@ impl EditorWorkspace {
             return Vec::new();
         }
         self.link_editor.close();
-        self.command(EditorCommand::SetLink { target: None })
+        let mut effects = self.command(EditorCommand::SetLink { target: None });
+        effects.push(EditorEffect::RestoreEditorFocus {
+            view: self.pane(self.focused_pane).view,
+        });
+        effects
     }
 
     fn open_tab(&mut self, pane: EditorPane, tab: TabSpec) -> Vec<EditorEffect> {
@@ -4166,7 +4224,7 @@ mod tests {
         let [EditorEffect::ShowSpellingMenu(menu)] = effects.as_slice() else {
             panic!("expected the spelling menu")
         };
-        assert_eq!(menu.bounds(), Rect::new(140.0, 48.0, 180.0, 352.0));
+        assert_eq!(menu.bounds(), Rect::new(140.0, 90.0, 280.0, 310.0));
 
         let request = SpellingMenuRequest::new(
             EditorPane::Primary,
@@ -4181,7 +4239,7 @@ mod tests {
         };
 
         assert_eq!(menu.invocation_point(), Point::new(420.0, 140.0));
-        assert_eq!(menu.bounds(), Rect::new(240.0, 48.0, 180.0, 352.0));
+        assert_eq!(menu.bounds(), Rect::new(140.0, 90.0, 280.0, 310.0));
     }
 
     #[test]
@@ -4544,6 +4602,10 @@ mod tests {
                 .map(CommentHover::anchor_bounds),
             Some(Rect::new(48.0, 64.0, 32.0, 16.0))
         );
+        let active_tab = workspace.primary.active_tab;
+        workspace.primary.active_tab = None;
+        assert!(workspace.hovered_comment(EditorPane::Primary).is_none());
+        workspace.primary.active_tab = active_tab;
         assert!(
             workspace
                 .comment_thread("07070707070707070707070707070707")
@@ -4577,6 +4639,13 @@ mod tests {
             anchor_bounds: Rect::default(),
         });
         assert!(workspace.hovered_comment(EditorPane::Primary).is_some());
+        workspace.update(EditorMessage::SetCommentActionsOpen(false));
+        workspace.update(EditorMessage::SetHoveredLink(Some(
+            "https://example.com".into(),
+        )));
+        workspace.update(EditorMessage::DismissCommentHover);
+        assert!(workspace.hovered_comment(EditorPane::Primary).is_none());
+        assert!(workspace.hovered_link.is_none());
         workspace.update(EditorMessage::CancelCommentComposer);
         assert!(!workspace.comment_actions_open);
         assert!(workspace.hovered_comment(EditorPane::Primary).is_none());

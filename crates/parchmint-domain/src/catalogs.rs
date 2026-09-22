@@ -28,21 +28,106 @@ pub enum TextAlignment {
     Justify,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct StyleProperties {
-    pub font_family: Option<String>,
-    pub font_size_points: Option<f32>,
-    pub weight: Option<u16>,
-    pub italic: Option<bool>,
-    pub alignment: Option<TextAlignment>,
-    pub first_line_indent_points: Option<f32>,
-    pub left_indent_points: Option<f32>,
-    pub right_indent_points: Option<f32>,
-    pub line_spacing: Option<f32>,
-    pub space_before_points: Option<f32>,
-    pub space_after_points: Option<f32>,
-    pub keep_with_next: Option<bool>,
-    pub page_break_before: Option<bool>,
+/// Shared schema for persisted style properties and their editing controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StylePropertyInput {
+    Text,
+    Number,
+    Boolean,
+    Alignment,
+    Decoration,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextDecoration {
+    None,
+    Underline,
+    Strikethrough,
+    UnderlineAndStrikethrough,
+}
+impl TextDecoration {
+    pub const fn underline(self) -> bool {
+        matches!(self, Self::Underline | Self::UnderlineAndStrikethrough)
+    }
+    pub const fn strikethrough(self) -> bool {
+        matches!(self, Self::Strikethrough | Self::UnderlineAndStrikethrough)
+    }
+}
+impl StylePropertyInput {
+    pub const fn choices(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Boolean => &[("false", "Off"), ("true", "On")],
+            Self::Alignment => &[
+                ("Start", "Left"),
+                ("Center", "Center"),
+                ("End", "Right"),
+                ("Justify", "Justified"),
+            ],
+            Self::Decoration => &[
+                ("none", "None"),
+                ("underline", "Underline"),
+                ("line-through", "Strikethrough"),
+                ("underline line-through", "Underline and strikethrough"),
+            ],
+            Self::Text | Self::Number => &[],
+        }
+    }
+}
+macro_rules! style_enum_value {
+    ($ty:ty, $($variant:ident => $value:literal),+ $(,)?) => {
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(match self { $(Self::$variant => $value),+ }) }
+        }
+        impl std::str::FromStr for $ty {
+            type Err = &'static str;
+            fn from_str(s: &str) -> Result<Self, Self::Err> { match s { $($value => Ok(Self::$variant)),+, _ => Err("Unsupported style value") } }
+        }
+    };
+}
+style_enum_value!(TextAlignment, Start => "Start", Center => "Center", End => "End", Justify => "Justify");
+style_enum_value!(TextDecoration, None => "none", Underline => "underline", Strikethrough => "line-through", UnderlineAndStrikethrough => "underline line-through");
+macro_rules! style_properties {
+    ($($variant:ident => $field:ident: $ty:ty, $label:literal, $group:literal, $input:ident;)+) => {
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct StyleProperties { $(pub $field: Option<$ty>,)+ }
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+        pub enum StyleProperty { $($variant,)+ }
+        impl StyleProperty {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+            pub const fn label(self) -> &'static str { match self { $(Self::$variant => $label,)+ } }
+            pub const fn group(self) -> &'static str { match self { $(Self::$variant => $group,)+ } }
+            pub const fn input(self) -> StylePropertyInput { match self { $(Self::$variant => StylePropertyInput::$input,)+ } }
+            pub fn value(self, properties: &StyleProperties) -> String { match self { $(Self::$variant => properties.$field.as_ref().map(ToString::to_string).unwrap_or_default(),)+ } }
+            pub fn set(self, properties: &mut StyleProperties, value: &str) -> bool {
+                let value = value.trim();
+                match self { $(Self::$variant => {
+                    match (!value.is_empty()).then_some(value).map(str::parse).transpose() {
+                        Ok(value) => properties.$field = value,
+                        Err(_) => return false,
+                    }
+                },)+ }
+                true
+            }
+        }
+        impl StyleProperties {
+            pub fn overlay(&mut self, source: &Self) { $(if source.$field.is_some() { self.$field.clone_from(&source.$field); })+ }
+        }
+    };
+}
+style_properties! {
+    FontFamily => font_family: String, "Font family", "Typography", Text;
+    FontSizePoints => font_size_points: f32, "Font size (pt)", "Typography", Number;
+    Weight => weight: u16, "Weight", "Typography", Number;
+    Italic => italic: bool, "Italic", "Typography", Boolean;
+    TextDecoration => text_decoration: TextDecoration, "Text decoration", "Typography", Decoration;
+    Alignment => alignment: TextAlignment, "Alignment", "Typography", Alignment;
+    FirstLineIndentPoints => first_line_indent_points: f32, "First-line indent (pt)", "Spacing", Number;
+    LeftIndentPoints => left_indent_points: f32, "Left indent (pt)", "Spacing", Number;
+    RightIndentPoints => right_indent_points: f32, "Right indent (pt)", "Spacing", Number;
+    LineSpacing => line_spacing: f32, "Line spacing", "Spacing", Number;
+    SpaceBeforePoints => space_before_points: f32, "Space before (pt)", "Spacing", Number;
+    SpaceAfterPoints => space_after_points: f32, "Space after (pt)", "Spacing", Number;
+    KeepWithNext => keep_with_next: bool, "Keep with next", "Pagination", Boolean;
+    PageBreakBefore => page_break_before: bool, "Page break before", "Pagination", Boolean;
 }
 
 impl StyleProperties {
@@ -52,9 +137,16 @@ impl StyleProperties {
             font_size_points: Some(15.0),
             weight: Some(400),
             italic: Some(false),
+            text_decoration: Some(TextDecoration::None),
+            first_line_indent_points: Some(0.0),
+            left_indent_points: Some(0.0),
+            right_indent_points: Some(0.0),
+            space_before_points: Some(0.0),
+            space_after_points: Some(0.0),
+            keep_with_next: Some(false),
+            page_break_before: Some(false),
             alignment: Some(TextAlignment::Start),
             line_spacing: Some(1.0),
-            ..Self::default()
         };
         match role {
             StyleRole::DocumentTitle => {
@@ -83,31 +175,6 @@ impl StyleProperties {
             _ => {}
         }
         value
-    }
-
-    pub fn overlay(&mut self, source: &Self) {
-        macro_rules! merge {
-            ($($field:ident),*) => { $(if source.$field.is_some() {
-                self.$field = source.$field;
-            })* };
-        }
-        if let Some(family) = &source.font_family {
-            self.font_family = Some(family.clone());
-        }
-        merge!(
-            font_size_points,
-            weight,
-            italic,
-            alignment,
-            first_line_indent_points,
-            left_indent_points,
-            right_indent_points,
-            line_spacing,
-            space_before_points,
-            space_after_points,
-            keep_with_next,
-            page_break_before
-        );
     }
 }
 
@@ -481,6 +548,15 @@ pub enum MetadataApplicability {
 }
 
 impl MetadataApplicability {
+    pub const ALL: &'static [Self] = &[Self::Groups, Self::Documents, Self::GroupsAndDocuments];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Groups => "Groups",
+            Self::Documents => "Documents",
+            Self::GroupsAndDocuments => "Groups and documents",
+        }
+    }
+
     pub const fn applies_to_group(self) -> bool {
         matches!(self, Self::Groups | Self::GroupsAndDocuments)
     }
@@ -502,6 +578,26 @@ impl MetadataApplicability {
 pub enum MetadataTextKind {
     SingleLine,
     Multiline,
+}
+
+impl MetadataTextKind {
+    pub const ALL: &'static [Self] = &[Self::SingleLine, Self::Multiline];
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SingleLine => "Single line",
+            Self::Multiline => "Multiline",
+        }
+    }
+}
+impl std::fmt::Display for MetadataApplicability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+impl std::fmt::Display for MetadataTextKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

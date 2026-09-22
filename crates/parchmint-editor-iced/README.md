@@ -6,6 +6,9 @@ one shared [editor-core](../parchmint-editor-core/README.md) session.
 ## Rendering and input
 
 The widget draws semantic blocks with Iced canvas text primitives.
+Pointer hit testing chooses the visual row before the nearest horizontal caret;
+clicks beyond a wrapped row keep the caret at that row’s trailing edge until
+keyboard navigation changes its position.
 `EditorLayoutMetrics` and `BlockLayoutGeometry` supply a deterministic
 proportional-width model for wrapping, hit testing, caret placement, selections,
 comments, search highlights, and spelling underlines. Layout uses this model
@@ -74,3 +77,7 @@ selection changes clear it.
 Input currently targets normal en-US keyboards and preserves valid UTF-8. IME,
 multilingual layout, bidirectional editing, and assistive-technology work remain
 in [future work](../../plans/unimplemented/future-work.md).
+
+Mounted hosts expose the visible selection anchor and caret paragraph kind for
+selection actions and toolbar state. These come from the retained layout for that
+pane, so the UI does not build a separate selection or paragraph model.

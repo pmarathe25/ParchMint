@@ -2271,3 +2271,176 @@ fn paragraph_alignment_and_spacing_survive_typing_undo_and_reload() {
         .unwrap();
     assert_eq!(session.canonical_projection().body(), body);
 }
+
+#[test]
+fn boundary_edits_round_trip_and_undo_as_single_transactions() {
+    let original = "<p><strong>first</strong></p><p></p><p>last</p>";
+    for (kind, expected) in [
+        (
+            EditorCommandKind::DeleteRange {
+                range: selection(4, 5),
+            },
+            "firs\n\nlast",
+        ),
+        (
+            EditorCommandKind::DeleteRange {
+                range: selection(5, 6),
+            },
+            "first\nlast",
+        ),
+        (
+            EditorCommandKind::DeleteRange {
+                range: selection(3, 9),
+            },
+            "first",
+        ),
+        (
+            EditorCommandKind::ReplaceRange {
+                range: selection(5, 5),
+                text: "\t".into(),
+            },
+            "first\t\n\nlast",
+        ),
+        (
+            EditorCommandKind::SplitBlock {
+                selection: selection(5, 5),
+            },
+            "first\n\n\nlast",
+        ),
+        (
+            EditorCommandKind::SplitBlock {
+                selection: selection(3, 9),
+            },
+            "fir\nst",
+        ),
+    ] {
+        let mut session = EditorCoreSession::open(load(original)).unwrap();
+        session.attach_view(view(1)).unwrap();
+        session.execute(origin(view(1)), command(0, kind)).unwrap();
+        let projection = session.canonical_projection();
+        assert_eq!(
+            session.canonical_projection().semantic().plain_text(),
+            expected
+        );
+        let reopened = EditorCoreSession::open(load(projection.body())).unwrap();
+        assert_eq!(
+            reopened.canonical_projection().semantic().plain_text(),
+            expected
+        );
+        session
+            .execute(origin(view(1)), command(1, EditorCommandKind::Undo))
+            .unwrap();
+        assert_eq!(session.canonical_projection().body(), original);
+        session
+            .execute(origin(view(1)), command(2, EditorCommandKind::Redo))
+            .unwrap();
+        assert_eq!(session.canonical_projection().body(), projection.body());
+    }
+}
+
+#[test]
+fn internal_document_links_survive_save_and_reopen() {
+    let target = "parchmint://document/01010101010101010101010101010101";
+    let mut session = EditorCoreSession::open(load("<p>Destination</p>")).unwrap();
+    session.attach_view(view(1)).unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::SetLink {
+                    range: selection(0, 11),
+                    target: Some(target.into()),
+                },
+            ),
+        )
+        .unwrap();
+    let saved = session.canonical_projection();
+    assert!(saved.body().contains(target));
+    assert_eq!(
+        EditorCoreSession::open(load(saved.body()))
+            .unwrap()
+            .canonical_projection()
+            .body(),
+        saved.body()
+    );
+    assert!(validate_link_target("parchmint://document/../../outside").is_err());
+}
+
+#[test]
+fn typing_at_formatted_boundaries_inherits_marks_and_explicit_toggle_wins() {
+    let original = "<p><strong><em>word</em></strong></p>";
+    for at in [0, 2, 4] {
+        let mut session = EditorCoreSession::open(load(original)).unwrap();
+        session.attach_view(view(1)).unwrap();
+        session
+            .execute(
+                origin(view(1)),
+                command(
+                    0,
+                    EditorCommandKind::InsertText {
+                        at: position(at),
+                        text: "X".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        let projection = session.canonical_projection();
+        let marks = projection.semantic().blocks()[0].marks();
+        for mark in [SemanticInlineMark::Bold, SemanticInlineMark::Italic] {
+            assert!(
+                marks
+                    .iter()
+                    .any(|m| m.mark() == &mark && m.range() == selection(0, 5)),
+                "{projection:?}"
+            );
+        }
+        let reopened = EditorCoreSession::open(load(projection.body())).unwrap();
+        assert_eq!(reopened.canonical_projection().body(), projection.body());
+        session
+            .execute(origin(view(1)), command(1, EditorCommandKind::Undo))
+            .unwrap();
+        assert_eq!(
+            session.canonical_projection().semantic().plain_text(),
+            "word"
+        );
+    }
+    let mut session = EditorCoreSession::open(load(original)).unwrap();
+    session.attach_view(view(1)).unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::ToggleInlineMark {
+                    range: selection(4, 4),
+                    mark: InlineMarkKind::Bold,
+                },
+            ),
+        )
+        .unwrap();
+    session
+        .execute(
+            origin(view(1)),
+            command(
+                0,
+                EditorCommandKind::InsertText {
+                    at: position(4),
+                    text: "X".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let projection = session.canonical_projection();
+    let marks = projection.semantic().blocks()[0].marks();
+    assert!(
+        marks
+            .iter()
+            .any(|m| m.mark() == &SemanticInlineMark::Bold && m.range() == selection(0, 4))
+    );
+    assert!(
+        marks
+            .iter()
+            .any(|m| m.mark() == &SemanticInlineMark::Italic && m.range() == selection(0, 5))
+    );
+}

@@ -84,22 +84,28 @@ fn link_editor_applies_trimmed_targets_removes_links_and_cancels_without_command
     ));
     assert_eq!(
         workspace.update(EditorMessage::ApplyLink),
-        [EditorEffect::Command {
-            view: companion,
-            command: EditorCommand::SetLink {
-                target: Some("https://example.com/story".into()),
+        [
+            EditorEffect::Command {
+                view: companion,
+                command: EditorCommand::SetLink {
+                    target: Some("https://example.com/story".into()),
+                },
             },
-        }]
+            EditorEffect::RestoreEditorFocus { view: companion }
+        ]
     );
     assert!(!workspace.link_editor().is_open());
 
     workspace.update(EditorMessage::OpenLinkEditor);
     assert_eq!(
         workspace.update(EditorMessage::RemoveLink),
-        [EditorEffect::Command {
-            view: companion,
-            command: EditorCommand::SetLink { target: None },
-        }]
+        [
+            EditorEffect::Command {
+                view: companion,
+                command: EditorCommand::SetLink { target: None },
+            },
+            EditorEffect::RestoreEditorFocus { view: companion }
+        ]
     );
 
     workspace.update(EditorMessage::OpenLinkEditor);
@@ -107,7 +113,7 @@ fn link_editor_applies_trimmed_targets_removes_links_and_cancels_without_command
     assert!(workspace.update(EditorMessage::ApplyLink).is_empty());
     assert_eq!(
         workspace.link_editor().validation_error(),
-        Some("Enter a URL before applying a link.")
+        Some("Choose a document or enter a URL.")
     );
     assert!(workspace.link_editor().is_open());
     assert!(workspace.update(EditorMessage::CancelLinkEditor).is_empty());

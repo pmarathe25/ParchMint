@@ -36,7 +36,11 @@ pub(crate) fn view(
         })
         .size(12)
         .color(theme.palette().secondary_text),
-        row![header("Saved version", theme), header("Current", theme)].spacing(12),
+        row![
+            header("Checkpoint", theme),
+            header("Current project", theme)
+        ]
+        .spacing(12),
     ]
     .spacing(6);
     if change.lines.is_empty() {
@@ -59,17 +63,17 @@ pub(crate) fn view(
     content.into()
 }
 
-pub(crate) fn tree_view<'a>(
-    changes: &'a [HistoryComparison],
+pub(crate) fn tree_view(
+    changes: &[HistoryComparison],
     collapsed: &std::collections::BTreeSet<String>,
     theme: ParchMintTheme,
-) -> Element<'a, ProjectSurfaceMessage> {
-    fn branch<'a>(
-        changes: &[&'a HistoryComparison],
+) -> Element<'static, ProjectSurfaceMessage> {
+    fn branch(
+        changes: &[&HistoryComparison],
         depth: usize,
         collapsed: &std::collections::BTreeSet<String>,
         theme: ParchMintTheme,
-    ) -> Element<'a, ProjectSurfaceMessage> {
+    ) -> Element<'static, ProjectSurfaceMessage> {
         let mut content = column![].spacing(8);
         for change in changes.iter().filter(|change| change.path.len() == depth) {
             if change.document_title.starts_with("Structure ·") && change.lines.is_empty() {
@@ -83,7 +87,7 @@ pub(crate) fn tree_view<'a>(
             };
             content = content.push(
                 container(
-                    if change.path.is_empty()
+                    if (change.path.is_empty() && !section.document_title.starts_with("Project "))
                         || section.document_title == "Content"
                         || section.document_title == "Formatting"
                     {
@@ -202,7 +206,14 @@ fn compact_view(
             .size(12)
             .color(theme.palette().secondary_text)
     ]
-    .spacing(3);
+    .spacing(3)
+    .push(
+        row![
+            header("Checkpoint", theme),
+            header("Current project", theme)
+        ]
+        .spacing(6),
+    );
     for line in change
         .lines
         .iter()
@@ -222,7 +233,7 @@ fn compact_view(
             container(
                 row![
                     text(if added { "+" } else { "−" }).size(12),
-                    text(body).size(13)
+                    text(body).size(12)
                 ]
                 .spacing(6),
             )
@@ -249,7 +260,19 @@ fn compact_view(
             .spacing(6),
         );
     }
-    content.into()
+    container(content)
+        .padding([8, 12])
+        .width(Length::Fill)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(theme.palette().application.into()),
+            border: iced::Border {
+                color: theme.palette().divider,
+                width: 1.0,
+                radius: 4.0.into(),
+            },
+            ..Default::default()
+        })
+        .into()
 }
 
 fn header(label: &'static str, theme: ParchMintTheme) -> Element<'static, ProjectSurfaceMessage> {
@@ -395,6 +418,22 @@ mod tests {
     use iced::Settings;
     use iced_test::Simulator;
     use parchmint_preferences::ResolvedAppearance;
+
+    #[test]
+    fn non_content_comparisons_identify_checkpoint_and_current_columns() {
+        let comparison =
+            compare_history_text("saved", "Metadata", "Status: Draft", "Status: Final");
+        let mut surface = Simulator::with_size(
+            Settings::default(),
+            Size::new(640.0, 300.0),
+            compact_view(&comparison, ParchMintTheme::new(ResolvedAppearance::Dark)),
+        );
+        let before = surface.find("Checkpoint").unwrap().bounds();
+        let after = surface.find("Current project").unwrap().bounds();
+        assert!(surface.find("Status: Draft").unwrap().bounds().x < after.x);
+        assert!(surface.find("Status: Final").unwrap().bounds().x >= after.x);
+        assert!(after.x > before.x);
+    }
 
     #[test]
     fn changed_words_use_only_background_highlights_in_both_themes() {

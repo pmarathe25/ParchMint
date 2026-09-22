@@ -460,7 +460,8 @@ fn safe_href(tag: &str) -> Option<String> {
     };
     let normalized = candidate.trim();
     let lowercase = normalized.to_ascii_lowercase();
-    if lowercase.starts_with("https://")
+    if crate::is_internal_link_target(normalized)
+        || lowercase.starts_with("https://")
         || lowercase.starts_with("http://")
         || lowercase.starts_with("mailto:")
         || lowercase.starts_with('#')

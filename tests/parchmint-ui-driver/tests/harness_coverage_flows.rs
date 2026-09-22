@@ -954,7 +954,7 @@ fn author_can_export_the_manuscript_to_a_controlled_html_artifact() {
         .right_click_text(HarnessWindow::Project, "Harbor Archive")
         .expect("open research menu");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open research note");
     harness
         .type_into_target(

@@ -3,6 +3,8 @@
 **Purpose:** Own the Iced event loop, windows, widgets, and temporary UI state.
 Project changes, saves, native actions, and rich-text editing use their owning
 crate's interfaces through [ui-api](../parchmint-ui-api/README.md).
+Use the [visual language](../../docs/design-language.md) for shared surfaces,
+controls, typography, spacing, and icons.
 
 ## Interface
 
@@ -22,7 +24,7 @@ builds enable neither feature.
 | [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and comment drafts |
 | [project_runtime.rs](src/project_runtime.rs) | Resolve IDs from current snapshots and call application ports |
 | [iced_project_surface.rs](src/iced_project_surface.rs), [iced_editor_surface.rs](src/iced_editor_surface.rs) | Render workspace state |
-| [cards_layout.rs](src/cards_layout.rs) | Measure wrapped card content for grid layout and virtual scrolling |
+| [cards_layout.rs](src/cards_layout.rs), [card_frames.rs](src/card_frames.rs) | Card geometry, text measurement, and enclosing group outlines |
 | [components.rs](src/components.rs), [design_tokens.rs](src/design_tokens.rs) | Shared controls and Iced theme mapping |
 | [async_service_feeds.rs](src/async_service_feeds.rs) | Search, History previews, and recovery results |
 | [history_project.rs](src/history_project.rs) | Compare checkpoint data with the current project on a worker |
@@ -41,15 +43,21 @@ created node. Unrelated snapshots preserve an unconfirmed name.
 Empty tabs remain local UI state. First edits promote them to protected drafts,
 retaining input until the editor mounts. Explicit Save chooses a name and location;
 closing a changed draft offers Save, Don’t Save, and Cancel. The internal Unfiled
-root is never a navigation section.
+root is never a navigation section. Discarded unfiled drafts do not create
+Recently Deleted entries; undiscarded drafts remain available to crash recovery.
+Discard uses the ordinary mutation/save lane, so it is durable before the UI
+reports it as saved.
 
 Comment drafts retain their originating pane, mount generation, revision, and
 selection; failed submission keeps the text. The comments panel indexes threads using
 live anchors, including unsaved comments. The anchored popover owns editing.
 
-Style fields keep local drafts across snapshots. Enter or Apply commits one
-property; invalid values keep their draft and show an error. Unchanged values
-request no save. Dictionary controls retain input until returned words confirm
+Styles and metadata managers stage changes locally across snapshots. Save applies
+the staged definitions; Cancel asks before discarding only when the draft differs
+from its starting state. Built-in styles have
+a separate Reset to defaults action, while custom styles can be deleted. Invalid
+property values keep the dialog open. Repeated edits to a definition coalesce
+before Save. Dictionary controls retain input until returned words confirm
 the change; project words use commands and global words use preference ports.
 
 Shared document sessions serve both panes with independent view state. Tab
@@ -66,9 +74,20 @@ History opens from the clicked tab or outline entry, independently of editor
 focus. Document restores replace that document's sessions while retaining other
 documents' undo.
 
-Overview has independent section and disclosure state. Group headings toggle their
-contents; synopsis and metadata become editable when clicked. While dragging, a
-floating card follows the cursor and a temporary tree previews its placement.
+Overview has independent section and disclosure state. Groups share the document
+card surface and enclose their nested contents. Group frames follow allocated row
+heights during animations and remain continuous across virtualized windows.
+Creation slots use muted icons, transparent fills, and dashed borders.
+Group headings toggle their children; group synopsis and metadata remain fully
+visible. Document cards keep synopsis and labeled metadata in separate columns in
+both states. Collapsed cards show fields marked visible, including dashes for empty
+values; dragging between the named Settings sections changes that visibility with
+the same threshold, floating copy, and drop indicator as cards. New fields start
+hidden. Expanding a card reveals all details by growing vertically. Cards expand
+independently with animated height allocation. Only the viewport and a short
+overscan are mounted, and text measurements are cached across redraws. While
+dragging, a floating card follows the cursor and a temporary tree previews its
+placement.
 Explorer keeps its rows stationary and marks the destination. Window-wide release
 commits; cancellation discards the preview.
 Tabs can move between panes, and either pane accepts Explorer document drops.
@@ -95,6 +114,12 @@ can also advance a controlled frame clock for full-workspace motion captures.
 Incoming panes retain readable text widths; moving cards draw as complete layers,
 and drop placeholders stay at their destinations.
 
+The pencil icon pack lives in `assets/pencil/`. The Iced wrapper caches SVG
+handles and applies one muted brown per theme. Imported vectors use centered optical
+bounds and six translucent contours, reducing both parsing work and inconsistent sizing.
+`scripts/normalize-pencil-icons.py` reproduces normalization from the original packs. The corrected additions pack supplies
+the four inward arrows shared by card collapse and Exit focus. The main `parchmint-brand.svg` remains separate.
+
 ## Keyboard commands and branding
 
 `parchmint-preferences::shortcut_commands` defines command IDs, labels, and
@@ -111,3 +136,40 @@ bindings for their labels.
 
 `assets/parchmint-brand.svg` is a transparent vector interpretation of the supplied typewriter artwork. The
 navigation rail and launcher render the same artwork without an external path.
+
+Location rows are shared by the draft-save tree and History scope menu. History
+group filtering keeps only changes whose path includes that group. Notifications
+occupy a bottom-right overlay and do not change workspace geometry. Splitter
+release and window departure end resizing before hierarchy drag routing.
+
+Selection actions appear below highlighted manuscript text. The Link dialog offers
+Web and Document destinations; Document uses the shared hierarchy row controls.
+Internal links store stable document IDs and resolve through the project navigation
+path, so renaming and moving documents does not break links. Global search groups
+can collapse independently without discarding matches or changing result counts.
+
+Overview caches measured row layouts, visible IDs, and cumulative row offsets
+across scrolling and hover redraws. Project edits, hierarchy changes, width
+changes, and detail expansion invalidate the cache. Finding a viewport now uses
+the cached offsets, and mounting reads only its visible IDs. Only visible rows
+and a small overscan are mounted. Cards offer expansion only
+when their full title, synopsis, or metadata exceeds the compact bounds.
+The native Overview uses the shell's current dimensions to construct its grid
+before the first paint, so navigation does not wait for a second layout pass to
+show the selected section and card fields.
+The large-outline unit test has an opt-in release timing report for cached
+viewport layout and repeated drag previews:
+
+```console
+PARCHMINT_MEASURE_CARDS=1 cargo test --release --locked -j 1 -p parchmint-ui-iced --lib cards_window_bounds_a_large_outline_and_preserves_selected_rows -- --nocapture
+```
+
+These timings cover state updates and view construction, not native frame
+rendering. Check card dragging in the release app as well.
+
+Style controls enumerate the domain `StyleProperty` schema, which also generates
+`StyleProperties` and inheritance merging. Add properties there rather than a
+second UI list. Controls display resolved values; Reset removes the local override.
+Metadata applicability and text-kind choices likewise use the domain enums.
+Editor popovers use `anchored_popover`: fixed document anchors, viewport clamping,
+and a continuous pointer region between the anchor and card.

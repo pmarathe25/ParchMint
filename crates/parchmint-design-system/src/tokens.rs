@@ -41,8 +41,8 @@ pub const TOKENS: &[DesignToken] = &[
     DesignToken {
         name: "color.focus.ring",
         token_type: "color",
-        light: "#3578B8",
-        dark: "#73B7F0",
+        light: "#216E52",
+        dark: "#77C3A0",
     },
     DesignToken {
         name: "color.surface.sidebar",
@@ -91,6 +91,12 @@ pub const TOKENS: &[DesignToken] = &[
         token_type: "color",
         light: "#39423C",
         dark: "#C4CCC5",
+    },
+    DesignToken {
+        name: "color.icon.pencil",
+        token_type: "color",
+        light: "#6F5741",
+        dark: "#B19A83",
     },
     DesignToken {
         name: "color.text.muted",
@@ -227,8 +233,8 @@ pub const TOKENS: &[DesignToken] = &[
     DesignToken {
         name: "color.status.saving",
         token_type: "color",
-        light: "#3578B8",
-        dark: "#73B7F0",
+        light: "#216E52",
+        dark: "#77C3A0",
     },
     DesignToken {
         name: "color.status.warning",
@@ -251,8 +257,8 @@ pub const TOKENS: &[DesignToken] = &[
     DesignToken {
         name: "color.status.saving.subtle",
         token_type: "color",
-        light: "#DDEBFA",
-        dark: "#1C3447",
+        light: "#E0F0E7",
+        dark: "#233D30",
     },
     DesignToken {
         name: "color.status.warning.subtle",
@@ -361,6 +367,7 @@ pub const REQUIRED_SEMANTIC_ROLES: &[&str] = &[
     "color.surface.elevated",
     "color.text.primary",
     "color.text.secondary",
+    "color.icon.pencil",
     "color.text.disabled",
     "color.border.default",
     "color.focus.ring",

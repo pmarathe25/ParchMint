@@ -210,7 +210,7 @@ impl SemanticDocumentSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct EngineEdit {
-    at: usize,
+    pub(super) at: usize,
     removed: usize,
     inserted: String,
 }
@@ -453,25 +453,48 @@ impl DocumentEngine for PrivateTextEngine {
             .at
             .checked_add(edit.removed)
             .ok_or(EngineError::InvalidEdit)?;
-        let (end_block, local_end) = locate_position(&document.blocks, removed_end, false)?;
-        if block_index != end_block {
+        // Positions at a paragraph's end belong to that paragraph; the next
+        // paragraph starts one scalar later, after the paragraph separator.
+        let (end_block, local_end) = locate_position(&document.blocks, removed_end, true)?;
+        if document.blocks[block_index..=end_block]
+            .iter()
+            .any(|block| is_atomic(block.kind))
+        {
             return Err(EngineError::InvalidEdit);
         }
-        let block = &mut document.blocks[block_index];
-        if is_atomic(block.kind) {
-            return Err(EngineError::InvalidEdit);
+        let inserted_len = edit.inserted.chars().count();
+        let changed_block = document.blocks[block_index].id;
+        if block_index == end_block {
+            let block = &mut document.blocks[block_index];
+            let byte_start =
+                scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
+            let byte_end =
+                scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
+            Arc::make_mut(&mut block.text).replace_range(byte_start..byte_end, &edit.inserted);
+            update_marks_for_edit(block.marks_mut(), local_start, local_end, inserted_len);
+        } else {
+            let first = &document.blocks[block_index];
+            let last = &document.blocks[end_block];
+            let start_byte =
+                scalar_to_byte(&first.text, local_start).ok_or(EngineError::InvalidEdit)?;
+            let end_byte = scalar_to_byte(&last.text, local_end).ok_or(EngineError::InvalidEdit)?;
+            let text = format!(
+                "{}{}{}",
+                &first.text[..start_byte],
+                edit.inserted,
+                &last.text[end_byte..]
+            );
+            let mut marks = clipped_marks(&first.marks, 0, local_start);
+            for mut mark in clipped_marks(&last.marks, local_end, last.text.chars().count()) {
+                mark.start += local_start + inserted_len;
+                mark.end += local_start + inserted_len;
+                marks.push(mark);
+            }
+            let first = &mut document.blocks[block_index];
+            first.text = text.into();
+            first.marks = marks;
+            document.blocks.drain(block_index + 1..=end_block);
         }
-        let byte_start =
-            scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
-        let byte_end = scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
-        Arc::make_mut(&mut block.text).replace_range(byte_start..byte_end, &edit.inserted);
-        update_marks_for_edit(
-            block.marks_mut(),
-            local_start,
-            local_end,
-            edit.inserted.chars().count(),
-        );
-        let changed_block = block.id;
         Ok(EngineChange {
             mapping: PositionMapping {
                 at: edit.at,
@@ -870,9 +893,20 @@ impl DocumentEngine for PrivateTextEngine {
         end: usize,
         after_id: BlockId,
     ) -> Result<EngineChange, EngineError> {
+        if start > end {
+            return Err(EngineError::InvalidEdit);
+        }
+        if start != end {
+            // Replace the selection and split the resulting paragraph as one
+            // caller-owned transaction, including selections spanning blocks.
+            self.apply(EngineEdit::new(start, end - start, String::new()))?;
+            let mut change = self.split_block(start, start, after_id)?;
+            change.mapping.removed = end - start;
+            return Ok(change);
+        }
         let document = self.document.as_mut().ok_or(EngineError::InvalidSnapshot)?;
         let (index, local_start) = locate_position(&document.blocks, start, true)?;
-        let (end_index, local_end) = locate_position(&document.blocks, end, false)?;
+        let (end_index, local_end) = locate_position(&document.blocks, end, true)?;
         if index != end_index || is_atomic(document.blocks[index].kind) {
             return Err(EngineError::InvalidEdit);
         }
@@ -1323,6 +1357,82 @@ mod tests {
             list_depth: 0,
         }
         .into()
+    }
+
+    #[test]
+    fn every_text_replacement_handles_paragraph_boundaries_and_empty_lines() {
+        let original = SemanticDocumentSnapshot {
+            blocks: vec![
+                block(1, SemanticBlockKind::Paragraph, "é🦀"),
+                block(2, SemanticBlockKind::Paragraph, ""),
+                block(3, SemanticBlockKind::Paragraph, "last"),
+                block(4, SemanticBlockKind::Paragraph, ""),
+            ],
+            canonical_html: true,
+        };
+        let text = original.plain_text();
+        let chars = text.chars().collect::<Vec<_>>();
+        for start in 0..=chars.len() {
+            for end in start..=chars.len() {
+                for inserted in ["", "\t", "尾", "two\nlines"] {
+                    let mut engine = PrivateTextEngine::default();
+                    engine.load(original.clone()).unwrap();
+                    engine
+                        .apply(EngineEdit::new(start, end - start, inserted.into()))
+                        .unwrap_or_else(|error| {
+                            panic!("{start}..{end} -> {inserted:?}: {error:?}")
+                        });
+                    let expected = chars[..start].iter().collect::<String>()
+                        + inserted
+                        + &chars[end..].iter().collect::<String>();
+                    assert_eq!(engine.snapshot().plain_text(), expected);
+                    assert_eq!(engine.scalar_len(), expected.chars().count());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merging_paragraphs_preserves_surviving_marks_and_first_block_identity() {
+        let mut first = block(1, SemanticBlockKind::Paragraph, "abc");
+        first.marks = vec![EngineMark {
+            start: 0,
+            end: 3,
+            mark: SemanticInlineMark::Bold,
+        }];
+        let mut last = block(2, SemanticBlockKind::Paragraph, "def");
+        last.marks = vec![EngineMark {
+            start: 0,
+            end: 3,
+            mark: SemanticInlineMark::Italic,
+        }];
+        let mut engine = PrivateTextEngine::default();
+        engine
+            .load(SemanticDocumentSnapshot {
+                blocks: vec![first, last],
+                canonical_html: true,
+            })
+            .unwrap();
+        engine.apply(EngineEdit::new(2, 3, "".into())).unwrap();
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.plain_text(), "abef");
+        assert_eq!(snapshot.blocks.len(), 1);
+        assert_eq!(snapshot.blocks[0].id, BlockId::from_bytes([1; 16]));
+        assert_eq!(
+            snapshot.blocks[0].marks,
+            vec![
+                EngineMark {
+                    start: 0,
+                    end: 2,
+                    mark: SemanticInlineMark::Bold
+                },
+                EngineMark {
+                    start: 2,
+                    end: 4,
+                    mark: SemanticInlineMark::Italic
+                },
+            ]
+        );
     }
 
     #[test]

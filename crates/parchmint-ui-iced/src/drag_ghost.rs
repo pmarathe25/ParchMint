@@ -62,7 +62,7 @@ impl<Message> canvas::Program<Message> for DragGhost {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let shadow =
             canvas::Path::rounded_rectangle(origin + Vector::new(3.0, 5.0), self.size, 6.0.into());
-        frame.fill(&shadow, iced::Color::from_rgba(0.0, 0.0, 0.0, 0.14));
+        frame.fill(&shadow, self.theme.palette().scrim.scale_alpha(0.35));
         let card = canvas::Path::rounded_rectangle(origin, self.size, 6.0.into());
         let mut background = self.theme.palette().control_hover;
         background.a = 0.94;

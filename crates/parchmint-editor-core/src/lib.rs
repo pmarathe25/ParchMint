@@ -532,21 +532,21 @@ impl<E: DocumentEngine> EditorSession<E> {
         text: &str,
         edit: EngineEdit,
     ) -> Result<AppliedEditorChange, EditorError> {
-        if let Some(marks) = self.typing_marks.get(&view) {
-            let length = text.chars().count();
-            let marks = marks
-                .iter()
-                .filter(|_| length > 0)
-                .map(|mark| document_engine::EngineMark {
-                    start: 0,
-                    end: length,
-                    mark: mark.clone(),
-                })
-                .collect();
-            self.apply_new_semantic_edit(edit, marks)
-        } else {
-            self.apply_new_edit(edit)
-        }
+        let marks = self.typing_marks.get(&view).cloned().unwrap_or_else(|| {
+            let at = DocumentPosition::from(edit.at as u64);
+            self.engine.inline_marks(EditorSelection::new(at, at))
+        });
+        let length = text.chars().count();
+        let marks = marks
+            .into_iter()
+            .filter(|_| length > 0)
+            .map(|mark| document_engine::EngineMark {
+                start: 0,
+                end: length,
+                mark,
+            })
+            .collect();
+        self.apply_new_semantic_edit(edit, marks)
     }
 
     fn apply_new_edit(&mut self, edit: EngineEdit) -> Result<AppliedEditorChange, EditorError> {
@@ -1479,7 +1479,7 @@ fn validate_message(message: &CanonicalCommentMessage) -> Result<(), EditorError
 fn validate_annotation_text(text: &str) -> Result<(), EditorError> {
     if text
         .chars()
-        .any(|character| character != '\n' && character.is_control())
+        .any(|character| !matches!(character, '\n' | '\t') && character.is_control())
     {
         return Err(invalid(
             "comment text contains unsupported control characters",
@@ -1778,7 +1778,16 @@ fn validate_inline_mark(mark: &SemanticInlineMark) -> Result<(), EditorError> {
     }
 }
 
+pub(crate) fn is_internal_link_target(target: &str) -> bool {
+    target
+        .strip_prefix("parchmint://document/")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn validate_link_target(target: &str) -> Result<(), EditorError> {
+    if is_internal_link_target(target) {
+        return Ok(());
+    }
     if target.is_empty()
         || target.starts_with(['/', '\\'])
         || target.starts_with("//")

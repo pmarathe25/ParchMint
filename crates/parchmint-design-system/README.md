@@ -13,3 +13,6 @@ Edit [tokens.rs](src/tokens.rs) for colors, spacing, and typography, and
 [lib.rs](src/lib.rs) for icons. This crate has no dependencies or runtime parser.
 Tests check required roles in both appearances and the icon catalog. Project
 styles and export CSS belong to their own crates.
+The application maps these roles through
+[the visual language](../../docs/design-language.md); `color.icon.pencil` is the
+shared tint for the pencil SVG pack.

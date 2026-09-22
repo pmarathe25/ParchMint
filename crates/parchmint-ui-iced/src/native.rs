@@ -1428,6 +1428,7 @@ fn dismiss_workspace_notification(
 fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
     match effect {
         ProjectEffect::DeleteHierarchy(_) => Some("Moved item to Recently Deleted"),
+        ProjectEffect::DiscardDraft(_) => Some("Discarded draft"),
         ProjectEffect::PasteCopiedSubtrees { .. } => Some("Copied item"),
         ProjectEffect::PasteCutSubtrees { .. } => Some("Moved item"),
         ProjectEffect::UndoProject => Some("Undid project change"),
@@ -2130,6 +2131,7 @@ fn project_effect_requires_durability(effect: &ProjectEffect) -> bool {
             | ProjectEffect::CreateDraft { .. }
             | ProjectEffect::FileDraft { .. }
             | ProjectEffect::DeleteHierarchy(_)
+            | ProjectEffect::DiscardDraft(_)
             | ProjectEffect::MoveHierarchy { .. }
             | ProjectEffect::PasteCopiedSubtrees { .. }
             | ProjectEffect::PasteCutSubtrees { .. }
@@ -2430,6 +2432,11 @@ impl NativeDesktop {
                         ));
                 }
             }
+            workspace.editor_mut().active_block_kind = state
+                .editor_bindings
+                .get(&workspace.editor().focused_pane())
+                .filter(|_| !scratch_focused)
+                .and_then(|binding| binding.host().active_block_kind());
             workspace.editor_mut().set_active_inline_marks(marks);
             for (&pane, &document) in &state.mounted_documents {
                 let document_id = stable_id_string(document.as_bytes());
@@ -2502,13 +2509,17 @@ impl NativeDesktop {
                     window,
                     ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyDrag),
                 );
+                let metadata = self.update_project_surface(
+                    window,
+                    ProjectSurfaceMessage::Project(ProjectMessage::CommitMetadataFieldDrag),
+                );
                 let tabs = self.update_project_surface(
                     window,
                     ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
                         crate::EditorMessage::CommitTabDrag,
                     )),
                 );
-                Task::batch([hierarchy, tabs])
+                Task::batch([hierarchy, metadata, tabs])
             }
             Message::DraftMounted {
                 window,
@@ -4094,11 +4105,21 @@ impl NativeDesktop {
         let theme = ParchMintTheme::new(self.appearance);
         if !self.creating_project {
             let menu_button = |label: String, message| {
+                let symbol = match label.as_str() {
+                    "Create Project" => crate::icons::Icon::NewProject,
+                    "Open Project" => crate::icons::Icon::OpenProject,
+                    _ => crate::icons::Icon::Project,
+                };
                 button(
-                    text(label)
-                        .size(13)
-                        .color(theme.palette().primary_text)
-                        .wrapping(text::Wrapping::WordOrGlyph),
+                    row![
+                        crate::icons::icon(symbol),
+                        text(label)
+                            .size(13)
+                            .color(theme.palette().primary_text)
+                            .wrapping(text::Wrapping::WordOrGlyph)
+                    ]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
                 )
                 .width(Length::Fill)
                 .padding([8, 10])
@@ -4163,7 +4184,7 @@ impl NativeDesktop {
                     .height(Length::Fill)
                     .padding(iced::Padding {
                         top: 48.0,
-                        left: 60.0,
+                        left: 6.0,
                         right: 12.0,
                         bottom: 12.0
                     })
@@ -4175,7 +4196,7 @@ impl NativeDesktop {
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .style(move |_| iced::widget::container::Style {
-                    background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.16).into()),
+                    background: Some(theme.palette().scrim.scale_alpha(0.4).into()),
                     ..Default::default()
                 }),
         )
@@ -4185,18 +4206,21 @@ impl NativeDesktop {
                 row![
                     text("Projects").size(18),
                     Space::new().width(Length::Fill),
-                    button(container(text("×").size(22)).center(Length::Fill))
-                        .width(32)
-                        .height(32)
-                        .padding(0)
-                        .style(move |_, status| components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            components::button_interaction(status, false)
-                        ))
-                        .on_press_maybe(
-                            (!self.opening_project).then_some(Message::CloseProjectChooser)
-                        ),
+                    button(
+                        container(crate::icons::icon_sized(crate::icons::Icon::Close, 22))
+                            .center(Length::Fill)
+                    )
+                    .width(32)
+                    .height(32)
+                    .padding(0)
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        components::button_interaction(status, false)
+                    ))
+                    .on_press_maybe(
+                        (!self.opening_project).then_some(Message::CloseProjectChooser)
+                    ),
                 ]
                 .align_y(iced::alignment::Vertical::Center),
                 project_chooser_content(
@@ -4562,7 +4586,12 @@ impl NativeDesktop {
                 || command.starts_with("tab.")
                 || matches!(
                     command,
-                    "search.local" | "search.replace" | "view.focus" | "view.companion"
+                    "search.local"
+                        | "search.replace"
+                        | "search.next"
+                        | "search.previous"
+                        | "view.focus"
+                        | "view.companion"
                 ))
         {
             return Task::none();
@@ -4635,6 +4664,42 @@ impl NativeDesktop {
                     },
                 )),
             ),
+            "outline.open-beside" => {
+                let node = match self.windows.get(&id) {
+                    Some(NativeWindow::Project(state)) => {
+                        state.workspace.as_ref().and_then(|workspace| {
+                            workspace
+                                .explorer()
+                                .selected_ids()
+                                .into_iter()
+                                .next()
+                                .map(str::to_owned)
+                        })
+                    }
+                    _ => None,
+                };
+                node.map_or_else(Task::none, |node| {
+                    self.update_project_surface(
+                        id,
+                        ProjectSurfaceMessage::Project(
+                            ProjectMessage::OpenHierarchyNodeInCompanion(node),
+                        ),
+                    )
+                })
+            }
+            "outline.delete" => {
+                let allowed = matches!(self.windows.get(&id), Some(NativeWindow::Project(state))
+                    if state.shell.destination() == RibbonDestination::Cards
+                        || (editing && state.shell.focus_target() == crate::FocusTarget::Explorer));
+                if allowed {
+                    self.update_project_surface(
+                        id,
+                        ProjectSurfaceMessage::Project(ProjectMessage::DeleteSelection),
+                    )
+                } else {
+                    Task::none()
+                }
+            }
             "outline.document"
             | "outline.group"
             | "outline.next-document"
@@ -4666,7 +4731,7 @@ impl NativeDesktop {
                 ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::BeginComment),
             ),
             "view.focus" | "view.companion" | "search.local" | "search.replace" | "tab.close"
-            | "tab.next" | "tab.previous" => {
+            | "tab.next" | "tab.previous" | "tab.move-pane" | "search.next" | "search.previous" => {
                 let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
                     return Task::none();
                 };
@@ -4679,6 +4744,16 @@ impl NativeDesktop {
                     "view.focus" => crate::EditorMessage::TogglePaneFocus(pane),
                     "view.companion" => crate::EditorMessage::ToggleCompanion,
                     "search.local" | "search.replace" => crate::EditorMessage::OpenLocalFind,
+                    "search.next" => crate::EditorMessage::NavigateFind(crate::FindDirection::Next),
+                    "search.previous" => {
+                        crate::EditorMessage::NavigateFind(crate::FindDirection::Previous)
+                    }
+                    "tab.move-pane" => {
+                        let Some(document_id) = editor.active_document().map(str::to_owned) else {
+                            return Task::none();
+                        };
+                        crate::EditorMessage::MoveTabToOtherPane { pane, document_id }
+                    }
                     "tab.close" => {
                         let Some(document_id) = editor.active_document().map(str::to_owned) else {
                             return Task::none();
@@ -4959,12 +5034,23 @@ impl NativeDesktop {
         }
         if matches!(
             event,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                | Event::Mouse(mouse::Event::CursorLeft)
+                | Event::Window(window::Event::Unfocused)
+        ) && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id)
+            && state.resizing.take().is_some()
+        {
+            return Self::workspace_persist_task(id, state);
+        }
+        if matches!(
+            event,
             Event::Mouse(mouse::Event::CursorLeft) | Event::Window(window::Event::Unfocused)
         ) {
             if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id)
                 && let Some(workspace) = state.workspace.as_mut()
             {
                 workspace.update(ProjectMessage::CancelHierarchyDrag);
+                workspace.update(ProjectMessage::CancelMetadataFieldDrag);
                 workspace
                     .editor_mut()
                     .update(crate::EditorMessage::CancelTabDrag);
@@ -5006,6 +5092,7 @@ impl NativeDesktop {
                         };
                         state.workspace.as_ref().is_some_and(|workspace| {
                             workspace.hierarchy_drag_source().is_some()
+                                || workspace.settings().metadata_drag_source().is_some()
                                 || workspace.has_context_menu()
                                 || [EditorPane::Primary, EditorPane::Companion]
                                     .into_iter()
@@ -5017,6 +5104,7 @@ impl NativeDesktop {
                     && let Some(workspace) = state.workspace.as_mut()
                 {
                     workspace.update(ProjectMessage::CancelHierarchyDrag);
+                    workspace.update(ProjectMessage::CancelMetadataFieldDrag);
                     workspace.update(ProjectMessage::CloseHierarchyContextMenu);
                     workspace
                         .editor_mut()
@@ -5579,17 +5667,17 @@ impl NativeDesktop {
                             ]
                             .spacing(2)
                             .width(Length::Fill),
-                            button(text("Dismiss").size(12)).on_press(
-                                Message::DismissNotification {
+                            button(crate::icons::icon_sized(crate::icons::Icon::Close, 16))
+                                .on_press(Message::DismissNotification {
                                     window: id,
                                     notification_id: notification.id,
-                                }
-                            ),
+                                }),
                         ]
                         .spacing(8),
                     )
                     .padding([8, 12])
                     .width(Length::Fill)
+                    .max_width(360)
                     .max_height(100)
                     .style(move |_| {
                         components::surface(theme, components::Surface::Elevated, interaction)
@@ -5671,7 +5759,7 @@ impl NativeDesktop {
             Space::new().into()
         } else {
             container(
-                button(text(format!("Notifications {}", notifications.len())).size(11))
+                button(text("Notifications").size(11))
                     .padding([3, 6])
                     .on_press(Message::ToggleNotificationDrawer { window: id })
                     .style(move |_, status| {
@@ -5687,19 +5775,28 @@ impl NativeDesktop {
             .into()
         };
 
-        // Reserve space for transient messages: they must never cover controls.
-        let content: Element<'a, Message> = stack![
+        let notices = container(
             column![
-                crate::motion::reveal(toast_visible, toast),
-                surface,
-                crate::motion::reveal(!notifications.is_empty(), notification_button)
+                crate::motion::reveal(toast_visible && !notification_drawer_open, toast),
+                notification_button,
             ]
-            .height(Length::Fill),
-            drawer,
-        ]
+            .spacing(6)
+            .width(360),
+        )
+        .padding(iced::Padding {
+            top: 12.0,
+            right: 12.0,
+            bottom: 36.0,
+            left: 12.0,
+        })
         .width(Length::Fill)
         .height(Length::Fill)
-        .into();
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Bottom);
+        let content: Element<'a, Message> = stack![surface, notices, drawer]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
         let modal: Option<Element<'a, Message>> = if close_failure.is_some() {
             Some(Self::native_error_modal(
                 "Couldn't save before closing",
@@ -6236,6 +6333,7 @@ impl NativeDesktop {
                 };
                 let history_filter = match &message {
                     ProjectMessage::SetHistoryDocumentFilter(document) => Some(document.clone()),
+                    ProjectMessage::SetHistoryGroupFilter(_) => Some(None),
                     _ => None,
                 };
                 let clipboard_status = match &message {
@@ -8389,6 +8487,26 @@ impl NativeDesktop {
         url: String,
         copy: bool,
     ) -> Task<Message> {
+        if !copy && let Some(document) = url.strip_prefix("parchmint://document/") {
+            return state
+                .workspace
+                .as_ref()
+                .and_then(|workspace| workspace.explorer().node_id_for_document(document))
+                .map(|node| {
+                    Task::done(Message::ProjectSurface {
+                        window,
+                        message: ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(
+                            node.to_owned(),
+                        )),
+                    })
+                })
+                .unwrap_or_else(|| {
+                    Task::done(Message::LinkActionFinished {
+                        window,
+                        result: Err("This linked document is no longer in the project.".into()),
+                    })
+                });
+        }
         let Some(ports) = state.project.ports().cloned() else {
             return Task::none();
         };
@@ -12864,7 +12982,10 @@ fn launcher_project_card(
         .width(Length::Fill)
         .wrapping(text::Wrapping::WordOrGlyph),
         row![
-            launcher_icon("launcher-last-opened", LAUNCHER_LAST_OPENED_ICON_SIZE),
+            crate::icons::icon_sized(
+                crate::icons::Icon::LastOpened,
+                LAUNCHER_LAST_OPENED_ICON_SIZE
+            ),
             launcher_text(
                 format!("Opened {}", project.last_opened()),
                 LAUNCHER_PROJECT_LAST_OPENED_SIZE,
@@ -12897,6 +13018,9 @@ fn launcher_project_card(
 }
 
 fn launcher_icon(name: &'static str, size: u16) -> iced::widget::Svg<'static> {
+    if name == "launcher-project" {
+        return crate::icons::icon_sized(crate::icons::Icon::Project, size);
+    }
     let source =
         production_icon_svg(name).expect("launcher icon is checked into the design system");
     svg(Handle::from_memory(source.as_bytes()))
@@ -15260,6 +15384,42 @@ mod tests {
             .is_some(),
             "pointer selection gestures observe modifier changes"
         );
+    }
+
+    #[test]
+    fn resizing_ends_on_release_or_window_departure_before_drag_routing() {
+        for event in [
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::CursorLeft),
+            Event::Window(window::Event::Unfocused),
+        ] {
+            let project = legacy_project(PathBuf::from("/tmp/resize-release.parchmint"), 67);
+            let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+                appearance: ResolvedAppearance::Light,
+                appearance_mode: AppearanceMode::System,
+                recent_projects: Vec::new(),
+                projects: vec![project.clone()],
+                locked_project: None,
+                capture: None,
+                callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+            });
+            let id = desktop.project_windows[&project.window];
+            for panel in [
+                SidebarPanel::Explorer,
+                SidebarPanel::Inspector,
+                SidebarPanel::Editor,
+            ] {
+                let NativeWindow::Project(state) = desktop.windows.get_mut(&id).unwrap() else {
+                    unreachable!()
+                };
+                state.resizing = Some(panel);
+                let _ = desktop.runtime_event(id, event.clone(), false);
+                let NativeWindow::Project(state) = desktop.windows.get(&id).unwrap() else {
+                    unreachable!()
+                };
+                assert!(state.resizing.is_none(), "{event:?}");
+            }
+        }
     }
 
     #[test]

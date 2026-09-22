@@ -140,10 +140,21 @@ pub(crate) fn slot<'a, Message>(
     }
 }
 pub(crate) fn row<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
-    Element::new(MotionRow { slots })
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+    })
+}
+
+pub(crate) fn row_instant<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: false,
+    })
 }
 struct MotionRow<'a, Message> {
     slots: Vec<Slot<'a, Message>>,
+    animated: bool,
 }
 struct RowState {
     reveals: Vec<Tween>,
@@ -180,7 +191,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             .reveals
             .resize_with(self.slots.len(), || Tween::new(0.0, now, LAYOUT));
         for (reveal, slot) in state.reveals.iter_mut().zip(&self.slots) {
-            reveal.set(if slot.visible { 1.0 } else { 0.0 }, now, enabled());
+            reveal.set(
+                if slot.visible { 1.0 } else { 0.0 },
+                now,
+                self.animated && enabled(),
+            );
         }
         state.now = now;
         tree.diff_children_custom(
@@ -205,7 +220,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             .iter()
             .enumerate()
             .map(|(i, slot)| {
-                if enabled() {
+                if self.animated && enabled() {
                     state.reveals[i].value(state.now)
                 } else {
                     if slot.visible { 1.0 } else { 0.0 }
@@ -329,7 +344,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             if was_active {
                 shell.invalidate_layout();
             }
-            if enabled() && state.reveals.iter().any(|reveal| reveal.active(*now)) {
+            if self.animated && enabled() && state.reveals.iter().any(|reveal| reveal.active(*now))
+            {
                 shell.request_redraw();
             }
         }
@@ -474,6 +490,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         key: key.into(),
         content: content.into(),
         reveal: None,
+        resize: false,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -484,12 +501,26 @@ pub(crate) fn reveal<'a, Message: 'a>(
         key: String::new(),
         content: content.into(),
         reveal: Some(visible),
+        resize: false,
+    })
+}
+/// Animate allocated height so following rows move with the card boundary.
+pub(crate) fn resize_height<'a, Message: 'a>(
+    key: impl Into<String>,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: key.into(),
+        content: content.into(),
+        reveal: Some(true),
+        resize: true,
     })
 }
 struct Entrance<'a, Message> {
     key: String,
     content: Element<'a, Message>,
     reveal: Option<bool>,
+    resize: bool,
 }
 struct EntranceState {
     height: f32,
@@ -523,7 +554,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             state.progress = Tween::new(0.0, state.now, ENTRANCE);
             state.progress.set(1.0, state.now, enabled());
         }
-        if let Some(visible) = self.reveal {
+        if let Some(visible) = self.reveal.filter(|_| !self.resize) {
             state.now = now();
             state.progress.set(f32::from(visible), state.now, enabled());
         }
@@ -558,7 +589,16 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
         let mut size = child.size();
-        if self.reveal.is_some() {
+        if self.resize {
+            let now = now();
+            if state.height == 0.0 {
+                state.progress = Tween::new(size.height, now, ENTRANCE);
+            }
+            state.height = size.height;
+            state.progress.set(size.height, now, enabled());
+            state.now = now;
+            size.height = state.progress.value(now);
+        } else if self.reveal.is_some() {
             if self.reveal == Some(true) || state.height == 0.0 {
                 state.height = size.height;
             }
@@ -1044,6 +1084,38 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer> for MenuEnt
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expanded_height_moves_following_rows_without_overlap() {
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let mut card: Element<'_, ()> =
+            resize_height("card", iced::widget::Space::new().width(320).height(192));
+        let mut tree = Tree::new(&card);
+        assert_eq!(
+            card.as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            192.0
+        );
+        card = resize_height("card", iced::widget::Space::new().width(320).height(400));
+        tree.diff(&card);
+        let initial = card.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(initial.size().height, 192.0);
+        FRAME_TIME.set(Some(now() + ENTRANCE / 2));
+        let middle = card.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert!(middle.size().height > 192.0 && middle.size().height < 400.0);
+        FRAME_TIME.set(Some(now() + ENTRANCE));
+        assert_eq!(
+            card.as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            400.0
+        );
+    }
+
     #[test]
     fn interrupted_motion_continues_from_its_visible_position_and_settles() {
         let start = Instant::now();

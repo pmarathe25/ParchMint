@@ -20,7 +20,7 @@ pub(crate) fn action_menu<'a, Message: Clone + 'a>(
 ) -> Element<'a, Message> {
     let trigger = components::semantic_button(
         container(
-            row![icon_sized(icon, 16), icon_sized(Icon::ChevronDown, 10)]
+            row![icon_sized(icon, 20), icon_sized(Icon::ChevronDown, 10)]
                 .spacing(2)
                 .align_y(iced::alignment::Vertical::Center),
         )
@@ -55,6 +55,9 @@ pub(crate) fn anchored_menu<'a, Message: Clone + 'a>(
     width: f32,
 ) -> Element<'a, Message> {
     Element::new(ActionMenu {
+        horizontal: false,
+        menu_content: None,
+        on_toggle: None,
         trigger,
         panel: None,
         enabled: !options.is_empty(),
@@ -70,7 +73,35 @@ pub(crate) fn anchored_menu<'a, Message: Clone + 'a>(
             .collect(),
         theme,
         width,
-        menu_style: Box::new(move |_| components::menu_style(theme)),
+    })
+}
+
+pub(crate) fn notifying_menu<'a, Message: Clone + 'a>(
+    trigger: Element<'a, ()>,
+    options: Vec<(String, Message)>,
+    theme: ParchMintTheme,
+    width: f32,
+    on_toggle: fn(bool) -> Message,
+) -> Element<'a, Message> {
+    Element::new(ActionMenu {
+        horizontal: false,
+        menu_content: None,
+        on_toggle: Some(on_toggle),
+        trigger,
+        panel: None,
+        enabled: !options.is_empty(),
+        options: options
+            .into_iter()
+            .map(|(label, message)| Choice {
+                label,
+                message,
+                icon: None,
+                target: None,
+                divider_before: false,
+            })
+            .collect(),
+        theme,
+        width,
     })
 }
 
@@ -99,24 +130,28 @@ pub(crate) fn menu_with_footer<'a, Message: Clone + 'a>(
         divider_before: true,
     });
     Element::new(ActionMenu {
+        horizontal: false,
+        menu_content: None,
+        on_toggle: None,
         trigger,
         panel: None,
         options,
         enabled: true,
         theme,
         width,
-        menu_style: Box::new(move |_| components::menu_style(theme)),
     })
 }
 
 struct ActionMenu<'a, Message> {
+    horizontal: bool,
+    on_toggle: Option<fn(bool) -> Message>,
+    menu_content: Option<(Option<usize>, Element<'a, Message>)>,
     trigger: Element<'a, ()>,
     panel: Option<Element<'a, Message>>,
     options: Vec<Choice<Message>>,
     enabled: bool,
     theme: ParchMintTheme,
     width: f32,
-    menu_style: iced::widget::overlay::menu::StyleFn<'a, iced::Theme>,
 }
 
 struct State {
@@ -124,10 +159,11 @@ struct State {
     open: bool,
     selected: Option<usize>,
     menu: Tree,
-    text_menu: iced::widget::overlay::menu::State,
 }
 
-impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu<'_, Message> {
+impl<'a, Message: Clone + 'a> Widget<Message, iced::Theme, iced::Renderer>
+    for ActionMenu<'a, Message>
+{
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<State>()
     }
@@ -137,7 +173,6 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
             open: false,
             selected: None,
             menu: Tree::empty(),
-            text_menu: Default::default(),
         })
     }
     fn children(&self) -> Vec<Tree> {
@@ -212,6 +247,11 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                     }
                     _ => return,
                 }
+                if !state.open
+                    && let Some(on_toggle) = self.on_toggle
+                {
+                    shell.publish(on_toggle(false));
+                }
                 shell.capture_event();
                 shell.request_redraw();
                 return;
@@ -223,6 +263,9 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                 ))
             ) {
                 state.open = false;
+                if let Some(on_toggle) = self.on_toggle {
+                    shell.publish(on_toggle(false));
+                }
                 if self.panel.is_none() {
                     shell.capture_event();
                 }
@@ -246,8 +289,17 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
             shell.capture_event();
         }
         shell.request_redraw_at(local.redraw_request());
+        if local.is_layout_invalid() {
+            shell.invalidate_layout();
+        }
+        if local.are_widgets_invalid() {
+            shell.invalidate_widgets();
+        }
         if !messages.is_empty() {
             state.open = !state.open;
+            if let Some(on_toggle) = self.on_toggle {
+                shell.publish(on_toggle(state.open));
+            }
             if state.open {
                 if self.panel.is_some() {
                     state.menu = Tree::empty();
@@ -347,84 +399,93 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
             );
         }
         if self
-            .options
-            .iter()
-            .all(|choice| choice.icon.is_none() && !choice.divider_before)
+            .menu_content
+            .as_ref()
+            .is_none_or(|(selected, _)| *selected != state.selected)
         {
-            return Some(
-                state.motion.overlay(
-                    iced::widget::overlay::menu::Menu::new(
-                        &mut state.text_menu,
-                        &self.options,
-                        &mut state.selected,
-                        |choice| {
-                            state.open = false;
-                            choice.message
-                        },
-                        None,
-                        &self.menu_style,
-                    )
-                    .width(width)
-                    .text_size(13)
-                    .text_line_height(iced::Pixels(18.0))
-                    .padding([7, 10])
-                    .overlay(
-                        point,
-                        *viewport,
-                        bounds.height + 4.0,
-                        Length::Shrink,
-                    ),
-                ),
-            );
-        }
-        let theme = self.theme;
-        let options =
-            self.options
-                .iter()
-                .enumerate()
-                .fold(column![].spacing(2), |items, (index, choice)| {
-                    let items = if choice.divider_before {
-                        items.push(container(iced::widget::rule::horizontal(1)).padding([4, 6]))
-                    } else {
-                        items
-                    };
-                    let mut label = row![]
-                        .spacing(10)
-                        .align_y(iced::alignment::Vertical::Center);
-                    if let Some(icon) = choice.icon {
-                        label = label.push(icon_sized(icon, 18));
-                    }
+            let theme = self.theme;
+            let mut choices = Vec::new();
+            for (index, choice) in self.options.iter().enumerate() {
+                if choice.divider_before {
+                    choices.push(
+                        container(iced::widget::rule::horizontal(1))
+                            .padding([4, 6])
+                            .into(),
+                    );
+                }
+                let mut label = row![]
+                    .spacing(10)
+                    .align_y(iced::alignment::Vertical::Center);
+                if let Some(icon) = choice.icon {
+                    label = label.push(icon_sized(icon, 18));
+                }
+                if !self.horizontal {
                     label = label.push(
                         text(choice.label.clone())
                             .size(13)
                             .color(theme.palette().primary_text),
                     );
-                    let selected = state.selected == Some(index);
-                    let button = components::semantic_button(label)
-                        .width(Length::Fill)
-                        .padding([7, 10])
-                        .on_press(choice.message.clone())
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                components::button_interaction(status, selected),
-                            )
-                        });
-                    items.push(if let Some(target) = choice.target {
-                        crate::harness_target::target(target, button)
+                }
+                let selected = state.selected == Some(index);
+                let button = components::semantic_button(label)
+                    .width(if self.horizontal {
+                        Length::Fixed(32.0)
                     } else {
-                        button.into()
+                        Length::Fill
                     })
+                    .height(if self.horizontal {
+                        Length::Fixed(32.0)
+                    } else {
+                        Length::Shrink
+                    })
+                    .padding(if self.horizontal { [6, 6] } else { [5, 8] })
+                    .on_press(choice.message.clone())
+                    .style(move |_, status| {
+                        let mut style = components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            components::button_interaction(status, selected),
+                        );
+                        if matches!(status, iced::widget::button::Status::Hovered) {
+                            style.background = Some(theme.palette().accent_subtle.into());
+                            style.text_color = theme.palette().primary_text;
+                        }
+                        style
+                    });
+                let item = if let Some(target) = choice.target {
+                    crate::harness_target::target(target, button)
+                } else {
+                    button.into()
+                };
+                choices.push(if self.horizontal {
+                    crate::stationary_tooltip::tooltip(
+                        item,
+                        text(choice.label.clone()).size(12),
+                        components::surface(theme, Surface::Elevated, Interaction::Rest),
+                    )
+                } else {
+                    item
                 });
-        let content: Element<'_, Message> =
-            container(iced::widget::scrollable(options).height(Length::Shrink))
-                .max_height(440)
-                .width(width)
-                .padding(4)
-                .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-                .into();
-        state.menu.diff(&content);
+            }
+            let options: Element<'_, Message> = if self.horizontal {
+                row(choices).spacing(2).into()
+            } else {
+                column(choices).spacing(2).into()
+            };
+
+            let content: Element<'_, Message> =
+                container(iced::widget::scrollable(options).height(Length::Shrink))
+                    .max_height(440)
+                    .width(width)
+                    .padding(4)
+                    .style(move |_| {
+                        components::surface(theme, Surface::Elevated, Interaction::Rest)
+                    })
+                    .into();
+            self.menu_content = Some((state.selected, content));
+        }
+        let (_, content) = self.menu_content.as_mut().expect("open menu has content");
+        state.menu.diff(&*content);
         Some(
             state
                 .motion
@@ -432,7 +493,9 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for ActionMenu
                     content,
                     tree: &mut state.menu,
                     open: &mut state.open,
+                    on_toggle: self.on_toggle,
                     point: Point::new(point.x, point.y + bounds.height + 4.0),
+                    viewport: *viewport,
                 }))),
         )
     }
@@ -458,12 +521,14 @@ pub(crate) fn icon_menu<'a, Message: Clone + 'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, Message> {
     Element::new(ActionMenu {
+        horizontal: true,
+        menu_content: None,
+        on_toggle: None,
         trigger,
         panel: None,
         enabled: true,
         theme,
-        width: 184.0,
-        menu_style: Box::new(move |_| components::menu_style(theme)),
+        width: (options.len() as f32 * 34.0 + 8.0),
         options: options
             .into_iter()
             .map(|(icon, label, target, message)| Choice {
@@ -477,14 +542,58 @@ pub(crate) fn icon_menu<'a, Message: Clone + 'a>(
     })
 }
 
-struct ChoiceOverlay<'a, Message> {
-    content: Element<'a, Message>,
+pub(crate) fn symbol_menu<'a, Message: Clone + 'a>(
+    icon: Icon,
+    options: Vec<(Icon, &'static str, Message)>,
+    theme: ParchMintTheme,
+) -> Element<'a, Message> {
+    Element::new(ActionMenu {
+        horizontal: true,
+        menu_content: None,
+        on_toggle: None,
+        trigger: components::semantic_button(
+            row![icon_sized(icon, 20), icon_sized(Icon::ChevronDown, 10)]
+                .spacing(2)
+                .align_y(iced::alignment::Vertical::Center),
+        )
+        .padding([4, 3])
+        .height(32)
+        .on_press(())
+        .style(move |_, status| {
+            components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                components::button_interaction(status, false),
+            )
+        })
+        .into(),
+        panel: None,
+        enabled: true,
+        theme,
+        width: (options.len() as f32 * 34.0 + 8.0),
+        options: options
+            .into_iter()
+            .map(|(icon, label, message)| Choice {
+                icon: Some(icon),
+                label: label.into(),
+                message,
+                target: None,
+                divider_before: false,
+            })
+            .collect(),
+    })
+}
+
+struct ChoiceOverlay<'a, 'b, Message> {
+    content: &'a mut Element<'b, Message>,
     tree: &'a mut Tree,
     open: &'a mut bool,
+    on_toggle: Option<fn(bool) -> Message>,
     point: Point,
+    viewport: Rectangle,
 }
 impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
-    for ChoiceOverlay<'_, Message>
+    for ChoiceOverlay<'_, '_, Message>
 {
     fn layout(&mut self, renderer: &iced::Renderer, bounds: Size) -> layout::Node {
         let node = self.content.as_widget_mut().layout(
@@ -527,8 +636,17 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
             shell.capture_event();
         }
         shell.request_redraw_at(local.redraw_request());
+        if local.is_layout_invalid() {
+            shell.invalidate_layout();
+        }
+        if local.are_widgets_invalid() {
+            shell.invalidate_widgets();
+        }
         if !messages.is_empty() {
             *self.open = false;
+            if let Some(on_toggle) = self.on_toggle {
+                shell.publish(on_toggle(false));
+            }
             shell.request_redraw();
             for message in messages {
                 shell.publish(message);
@@ -577,6 +695,19 @@ impl<Message: Clone> overlay::Overlay<Message, iced::Theme, iced::Renderer>
             renderer,
         )
     }
+    fn overlay<'c>(
+        &'c mut self,
+        layout: Layout<'c>,
+        renderer: &iced::Renderer,
+    ) -> Option<overlay::Element<'c, Message, iced::Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            self.tree,
+            layout,
+            renderer,
+            &self.viewport,
+            Vector::ZERO,
+        )
+    }
 }
 
 /// An anchored formatting panel. Child menus retain their own keyboard handling.
@@ -587,6 +718,9 @@ pub(crate) fn panel<'a, Message: Clone + 'a>(
     width: f32,
 ) -> Element<'a, Message> {
     Element::new(ActionMenu {
+        horizontal: false,
+        menu_content: None,
+        on_toggle: None,
         trigger,
         panel: Some(
             container(content)
@@ -599,7 +733,6 @@ pub(crate) fn panel<'a, Message: Clone + 'a>(
         enabled: true,
         theme,
         width,
-        menu_style: Box::new(move |_| components::menu_style(theme)),
     })
 }
 
@@ -702,5 +835,58 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer>
             &self.viewport,
             Vector::ZERO,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iced::advanced::{overlay::Overlay, renderer::Headless};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn menu_tooltip_can_invalidate_layout_and_open_its_nested_overlay() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut content: Element<'_, ()> = crate::stationary_tooltip::tooltip(
+            iced::widget::button(text("List")).on_press(()),
+            text("Numbered list"),
+            iced::widget::container::Style::default(),
+        );
+        let mut tree = Tree::new(&content);
+        let mut open = true;
+        let mut overlay = ChoiceOverlay {
+            content: &mut content,
+            tree: &mut tree,
+            open: &mut open,
+            on_toggle: None,
+            point: Point::new(10.0, 10.0),
+            viewport: Rectangle::with_size(Size::new(800.0, 600.0)),
+        };
+        let node = overlay.layout(&renderer, Size::new(800.0, 600.0));
+        let now = Instant::now();
+        for (offset, should_open) in [(0, false), (700, true)] {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            overlay.update(
+                &Event::Window(iced::window::Event::RedrawRequested(
+                    now + Duration::from_millis(offset),
+                )),
+                Layout::new(&node),
+                mouse::Cursor::Available(Point::new(15.0, 15.0)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+            );
+            assert_eq!(shell.is_layout_invalid(), should_open);
+            assert_eq!(
+                overlay.overlay(Layout::new(&node), &renderer).is_some(),
+                should_open
+            );
+        }
     }
 }

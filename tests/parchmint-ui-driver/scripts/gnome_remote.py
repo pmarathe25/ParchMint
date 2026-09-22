@@ -31,13 +31,20 @@ def validate_actions(actions, width, height):
         raise ValueError("Actions must be a JSON list")
     for action in actions:
         if not isinstance(action, dict) or len(action) != 1:
-            raise ValueError("Each action must contain one of click, right_click, key, text")
+            raise ValueError("Each action must contain one of click, right_click, move, drag, key, text")
         kind, value = next(iter(action.items()))
-        if kind in ("click", "right_click"):
+        if kind in ("click", "right_click", "move"):
             if (not isinstance(value, list) or len(value) != 2
                     or not all(isinstance(v, (int, float)) for v in value)
                     or not (0 <= value[0] < width and 0 <= value[1] < height)):
-                raise ValueError("Click must be [x, y] inside the capture area")
+                raise ValueError("Pointer position must be [x, y] inside the capture area")
+        elif kind == "drag":
+            if (not isinstance(value, list) or len(value) < 2
+                    or any(not isinstance(point, list) or len(point) != 2
+                           or not all(isinstance(v, (int, float)) for v in point)
+                           or not (0 <= point[0] < width and 0 <= point[1] < height)
+                           for point in value)):
+                raise ValueError("Drag must be at least two [x, y] points inside the capture area")
         elif kind == "key":
             if not isinstance(value, str) or not all(keysyms(value)):
                 raise ValueError("Unknown key chord")
@@ -94,14 +101,25 @@ def run(area, actions, output):
 
         for action in actions:
             kind, value = next(iter(action.items()))
-            if kind in ("click", "right_click"):
+            if kind in ("click", "right_click", "move"):
                 remote.NotifyPointerMotionAbsolute(str(stream), *value)
                 time.sleep(0.1)
-                button = 272 if kind == "click" else 273
+                if kind != "move":
+                    button = 272 if kind == "click" else 273
+                    try:
+                        remote.NotifyPointerButton(button, True)
+                    finally:
+                        remote.NotifyPointerButton(button, False)
+            elif kind == "drag":
+                remote.NotifyPointerMotionAbsolute(str(stream), *value[0])
+                time.sleep(0.1)
+                remote.NotifyPointerButton(272, True)
                 try:
-                    remote.NotifyPointerButton(button, True)
+                    for point in value[1:]:
+                        remote.NotifyPointerMotionAbsolute(str(stream), *point)
+                        time.sleep(0.05)
                 finally:
-                    remote.NotifyPointerButton(button, False)
+                    remote.NotifyPointerButton(272, False)
             else:
                 chords = [keysyms(value)] if kind == "key" else [[ord(c)] for c in value]
                 for chord in chords:
@@ -136,7 +154,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--area", type=int, nargs=4, required=True,
                         metavar=("X", "Y", "WIDTH", "HEIGHT"))
-    parser.add_argument("--actions", default="[]", help='JSON list of click, right_click, key, or text actions')
+    parser.add_argument("--actions", default="[]", help='JSON list of click, right_click, move, drag, key, or text actions')
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:

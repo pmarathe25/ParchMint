@@ -1,7 +1,9 @@
 //! Iced desktop presentation state for the shell and editor workspace.
 
 mod action_menu;
+mod anchored_popover;
 mod async_service_feeds;
+mod card_frames;
 mod cards_layout;
 pub mod components;
 pub mod design_tokens;
@@ -383,7 +385,7 @@ pub struct ShellLayout {
 impl ShellLayout {
     pub const MIN_WINDOW_SIZE: (u32, u32) = (1280, 720);
     pub const RIBBON_HEIGHT: u32 = 44;
-    pub const STATUS_BAR_HEIGHT: u32 = 32;
+    pub const STATUS_BAR_HEIGHT: u32 = 26;
     pub const MIN_HIT_TARGET: u32 = 32;
     const DEFAULT_EXPLORER_WIDTH: u32 = 280;
     /// Matches the persistent Inspector column in the 1440 px desktop shell.

@@ -26,6 +26,7 @@ fn workload() -> (usize, usize, bool) {
         "chapters" => (10, 5_000, false),
         "single" => (1, 50_000, false),
         "small" => (10, 80, false),
+        "cards" => (200, 80, false),
         "formatted" => (1, 50_000, true),
         other => panic!("unknown benchmark layout: {other}"),
     }
@@ -163,7 +164,7 @@ fn novel_application_performance() {
     let title = harness.active_editor_tab_title().unwrap();
     harness.right_click_text(WINDOW, title).unwrap();
     let start = Instant::now();
-    harness.click_text(WINDOW, "Open in companion").unwrap();
+    harness.click_text(WINDOW, "Open beside").unwrap();
     let split_ms = ms(start);
     assert!(harness.editor_panes_share_session().unwrap());
     harness

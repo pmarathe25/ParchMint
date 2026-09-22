@@ -299,6 +299,7 @@ fn settings_metadata_and_style_edits_keep_stable_ids_and_emit_only_valid_effects
         font_family: Some("Literata".into()),
         font_size_points: Some(12.0),
         weight: Some(500),
+        text_decoration: Some(parchmint_domain::TextDecoration::Underline),
         italic: Some(true),
         alignment: Some(parchmint_domain::TextAlignment::Justify),
         first_line_indent_points: Some(18.0),

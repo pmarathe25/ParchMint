@@ -150,7 +150,11 @@ python3 tests/parchmint-ui-driver/scripts/gnome_remote.py --area 320 214 1280 72
 
 Actions run in order. `text` supports printable ASCII; `key` supports single
 characters and the names in the script's `KEYS` table. `right_click` takes the
-same coordinates as `click` and opens document/tab menus. The helper paces key
+same coordinates as `click` and opens document/tab menus. `move` positions the
+pointer without clicking. `drag` takes a list of at least two area-relative
+coordinates; it presses at the first point, moves through the rest, and releases
+at the last point. Include intermediate points when checking hover targets and
+reordering feedback. The helper paces key
 presses/releases, releases modifiers, stops its temporary session, and refuses
 existing output files. Inspect each screenshot and saved data before continuing.
 These sampled screenshots do not measure frame pacing.
@@ -243,3 +247,52 @@ warnings and errors without copying real user prose.
 Follow the [regression reduction procedure](README.md#reduce-a-ui-failure-to-a-regression)
 for reproducible failures. After a fix, run the regression and repeat the visual
 review. Pixel similarity alone cannot establish usability.
+
+### Compact cards and project menu
+
+Open Projects from the brand icon with Explorer visible and collapsed, and from
+Overview. The adjacent project title opens the same menu. Verify menu dismissal
+with Escape and outside clicks. Check pencil icons in light and dark themes.
+
+Compare document and creation card sizes with long titles, synopsis, and metadata.
+Expand several cards in place, edit fields beyond their previews, collapse one,
+and verify the others stay expanded. Save and reopen to verify the values. Group metadata uses the same muted preview styling. Open Fields and
+check the applicability/type dropdowns and destructive Delete button.
+
+Click breadcrumb search twice to open and close it; opening must focus the input.
+Empty local and global search should show no instructional text. Local search uses
+arrow, case, and whole-word icons, with no Close button; check its tooltips and
+selected option states. In History,
+verify Checkpoint and Current project headings on content and non-content changes,
+with metadata, comments, and synopsis visually distinct from manuscript text.
+
+Check narrow Overview cards with missing fields and several expanded cards.
+Record expansion and collapse; following rows must never overlap a card. Clicking
+a synopsis appends; clicking metadata selects its current value. Open Fields near
+the middle of the window and confirm choices open below when they fit.
+
+Check that each group outline encloses its children, including nested groups and
+creation slots. Scroll past a group's heading and verify the enclosing border
+continues through the visible children. Expand document details and verify group
+borders follow the changing height. Creation slots should remain muted until
+hovered; collapse details and Exit focus should both use four inward arrows.
+
+Drag each splitter, release outside its original hit area, then move the pointer
+and click elsewhere. Pane widths must stay fixed. Click to the right of short,
+empty, and wrapped editor lines; the caret must stay on the clicked visual line.
+Check the bottom-right notification popover without any workspace shift.
+
+### Editing and overview regression checks
+
+Use a copied project to test Backspace at the start of an empty paragraph, deleting
+selected words, deleting a paragraph's last character, Enter at paragraph ends,
+Enter across a selected range, and Tab in text and lists. Undo/redo, save, close,
+and reopen to verify both text and formatting. Select text and test the comment/link
+popover. Choose an internal link through the Document tree, then move or rename its
+destination and follow the link again.
+
+In Overview, collapse a group's children and confirm its full details remain visible.
+Expand multiple document cards: metadata must stay in its column with labels above
+values. Scroll a large outline in both directions and record expansion/scrolling;
+check that group frames, placeholders, and the scroll position remain stable.
+Test dropdown hover highlights and global search disclosure controls in both themes.

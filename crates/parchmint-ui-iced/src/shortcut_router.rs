@@ -185,6 +185,24 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Rendere
                 shell.capture_event();
                 return;
             }
+            // Plain Delete belongs to a focused text editor before the outline.
+            // Let the real widget consume it, including multiline editors whose
+            // focus is not exposed through the text-input operation.
+            if *key == keyboard::Key::Named(keyboard::key::Named::Delete) && modifiers.is_empty() {
+                self.content.as_widget_mut().update(
+                    &mut tree.children[0],
+                    event,
+                    layout,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+                if shell.is_event_captured() {
+                    return;
+                }
+            }
             let pressed = shortcut(key, *modifiers);
             if let Some(command) = resolve(&pressed, self.bindings, self.context) {
                 if !repeat {
@@ -268,6 +286,27 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Rendere
                 return;
             }
         }
+        let select_on_focus = if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+        ) {
+            let mut focus = FocusedTextInput::default();
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut focus,
+            );
+            cursor.position().and_then(|point| {
+                focus
+                    .inputs
+                    .iter()
+                    .find(|bounds| bounds.contains(point) && focus.focused_bounds != Some(**bounds))
+                    .copied()
+            })
+        } else {
+            None
+        };
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -278,6 +317,14 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Rendere
             shell,
             viewport,
         );
+        if let Some(bounds) = select_on_focus {
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                layout,
+                renderer,
+                &mut SelectInputAt(bounds),
+            );
+        }
     }
 
     fn mouse_interaction(
@@ -385,6 +432,7 @@ pub(crate) fn formatting_command(id: &str) -> Option<crate::FormattingCommand> {
 struct FocusedTextInput {
     inputs: Vec<Rectangle>,
     focused: bool,
+    focused_bounds: Option<Rectangle>,
 }
 impl Operation for FocusedTextInput {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
@@ -404,7 +452,27 @@ impl Operation for FocusedTextInput {
         bounds: Rectangle,
         state: &mut dyn iced::advanced::widget::operation::Focusable,
     ) {
-        self.focused |= state.is_focused() && self.inputs.contains(&bounds);
+        if state.is_focused() && self.inputs.contains(&bounds) {
+            self.focused = true;
+            self.focused_bounds = Some(bounds);
+        }
+    }
+}
+
+struct SelectInputAt(Rectangle);
+impl Operation for SelectInputAt {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+    fn text_input(
+        &mut self,
+        _id: Option<&iced::widget::Id>,
+        bounds: Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::TextInput,
+    ) {
+        if bounds == self.0 {
+            state.select_all();
+        }
     }
 }
 
@@ -482,6 +550,72 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn clicking_an_unfocused_input_selects_its_existing_text() {
+        let bindings = Keybindings::new();
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            iced::Size::new(400.0, 80.0),
+            route(
+                iced::widget::text_input("Name", "original")
+                    .id("name")
+                    .on_input(Message::Text)
+                    .into(),
+                &bindings,
+                ShortcutScope::Editor,
+                false,
+                Message::Command,
+                Message::Capture,
+            ),
+        );
+        simulator.click(iced::widget::Id::new("name")).unwrap();
+        simulator.simulate([iced_test::simulator::press_key(
+            keyboard::Key::Character("x".into()),
+            Some("x".into()),
+        )]);
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            vec![Message::Text("x".into())]
+        );
+    }
+
+    #[test]
+    fn plain_delete_edits_focused_text_instead_of_deleting_outline_selection() {
+        let bindings = Keybindings::default();
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            iced::Size::new(400.0, 80.0),
+            route(
+                iced::widget::text_input("Name", "original")
+                    .id("name")
+                    .on_input(Message::Text)
+                    .into(),
+                &bindings,
+                ShortcutScope::Overview,
+                false,
+                Message::Command,
+                Message::Capture,
+            ),
+        );
+        simulator.click(iced::widget::Id::new("name")).unwrap();
+        simulator.simulate([iced_test::simulator::press_key(
+            keyboard::Key::Named(keyboard::key::Named::Delete),
+            None,
+        )]);
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            [Message::Text(String::new())]
+        );
+        assert_eq!(
+            resolve(
+                &Shortcut::new("Delete", 0),
+                &bindings,
+                ShortcutScope::Overview
+            ),
+            Some("outline.delete")
+        );
     }
 
     #[test]

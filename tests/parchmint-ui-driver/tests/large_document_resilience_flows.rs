@@ -353,7 +353,7 @@ fn open_in_both_panes(harness: &DesktopInteractionHarness) {
         .right_click_text(HarnessWindow::Project, LARGE_DOCUMENT_TITLE)
         .expect("reopen large-manuscript context menu");
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .expect("open large manuscript in companion pane");
     assert_eq!(
         harness

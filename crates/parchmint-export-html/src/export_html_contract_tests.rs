@@ -112,7 +112,7 @@ fn inline_fonts_export_as_validated_offline_css() {
 fn export_is_deterministic_golden_html_bytes_and_embeds_project_css() {
     let (first, first_source) = document(1, "Chapter & One", "Hello");
     let (second, second_source) = document(2, "Second", "World");
-    let expected = br#"<!doctype html><html><head><meta charset="utf-8"><style>p { color: #123456; }</style></head><body><h1>Chapter &amp; One</h1><article><h2>Chapter &amp; One</h2><p>Hello</p></article><article><h2>Second</h2><p>World</p></article></body></html>"#;
+    let expected = br#"<!doctype html><html><head><meta charset="utf-8"><style>p { color: #123456; }</style></head><body><h1>Chapter &amp; One</h1><article id="document-01010101010101010101010101010101"><h2>Chapter &amp; One</h2><p>Hello</p></article><article id="document-02020202020202020202020202020202"><h2>Second</h2><p>World</p></article></body></html>"#;
 
     let fixture = plan(
         vec![ExportNode::group(
@@ -302,4 +302,22 @@ fn progress_is_determinate_for_each_planned_semantic_item() {
             parchmint_export_api::ExportProgress::Committing,
         ]
     );
+}
+
+#[test]
+fn internal_links_become_stable_document_anchors() {
+    let (first, first_source) = document(
+        1,
+        "First",
+        "<p><a href=\"parchmint://document/02020202020202020202020202020202\">Next</a></p>",
+    );
+    let (second, second_source) = document(2, "Second", "<p>Destination</p>");
+    let html = render(&plan(
+        vec![first, second],
+        BTreeMap::from([first_source, second_source]),
+        "",
+    ));
+    assert!(html.contains("href=\"#document-02020202020202020202020202020202\""));
+    assert!(html.contains("id=\"document-02020202020202020202020202020202\""));
+    assert!(!html.contains("parchmint://"));
 }

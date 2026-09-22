@@ -27,3 +27,6 @@ Plan construction validates input, so `validate` reports an already-valid plan;
 serialization also sanitizes HTML and CSS. Output is written in small chunks,
 with cancellation checks between them. Render or write failures mark partial
 output incomplete and leave the project unchanged.
+
+Documents have stable `document-<id>` article anchors. Internal ParchMint document
+links become local fragment links to those anchors in the exported HTML.

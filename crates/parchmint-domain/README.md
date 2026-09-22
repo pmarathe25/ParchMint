@@ -29,3 +29,9 @@ application undo. The tree stores ID lookup separately from ordered child lists.
 Errors distinguish invalid input, stale revisions, missing resources, duplicate
 IDs, invalid trees, and cyclic moves. They can include IDs and field names, but
 exclude authored prose. File access and external services belong to other crates.
+
+`catalogs::StyleProperty` is the shared style editing schema. Its declaration
+creates the optional stored fields, display descriptors, parsing, and inheritance
+merging. Built-in roles supply concrete defaults; custom styles resolve their
+parent before applying local overrides. Metadata option labels and available
+choices live on their domain enums.

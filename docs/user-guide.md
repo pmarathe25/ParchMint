@@ -37,8 +37,9 @@ Each project has one writable session; opening it again focuses its existing win
 
 The icon rail on the left opens **Editor**, **Overview**, **History**,
 **Recently Deleted**, **Export**, and **Settings**. Hover an icon for its label.
-The project name at the top of Explorer opens project creation, opening, and
-recent projects. It hides with Explorer. The status bar shows
+The ParchMint logo opens project creation, opening, and recent projects.
+The project name beside it opens the same menu when Explorer is visible.
+The logo remains available when Explorer is collapsed. The status bar shows
 counts, save state, and sidebar controls.
 
 Drag dividers to resize sidebars and panes. Press **F6** to move focus between
@@ -89,22 +90,28 @@ collapse or expand the focused folder. Closing a changed draft
 offers Save, Don’t Save, and Cancel. Empty, unchanged tabs close without creating
 project documents. Drafts receive autosave and recovery protection; their words
 are excluded from manuscript totals and export until filed in Manuscript.
+Choosing **Don’t Save** discards the draft without adding it to Recently Deleted.
 
 Overview has its own Manuscript/Research switch and group disclosures. Collapsing
 Explorer groups does not hide cards. Explorer hides while Overview is open.
-Document cards sit beside each other when space permits; indentation and group
-headings show their nesting. Click synopsis or metadata text to edit it, drag a title
+Document cards sit beside each other when space permits. Each group is a larger
+card enclosing its nested groups and documents. Click synopsis or metadata text to edit it, drag a title
 to reorganize, or double-click a document title to open Editor.
-Cards show the full synopsis with applicable metadata in a narrow column beside
-it. Narrow layouts stack the fields. Their word counts come
-from document text; groups total their descendants, including collapsed groups.
+Collapsed cards have a fixed size, with a synopsis preview and the fields chosen for
+collapsed cards beside it; missing values appear as dashes. **Expand details**
+grows the card vertically to show the full synopsis and every field. Metadata stays
+in its separate column with field names above values. Several cards can stay expanded
+at once; each expands smoothly in place. Creation placeholders match the card size
+with muted icons and dashed outlines. Card word counts come from document text;
+groups total their descendants, including collapsed groups.
 
 After naming a new card, focus moves to its synopsis. While writing a synopsis,
 press the primary modifier plus **Enter** to add the next document in the same
 group; add **Shift** to create a group.
 
-Click a group heading to expand or collapse it. Its synopsis and metadata sit
-above its children inside the expanded group.
+Click a group heading to expand or collapse its children. Its synopsis and metadata
+always remain fully visible above the children. Wide groups arrange metadata in up
+to three columns beside the synopsis; narrower groups use fewer columns.
 Drag onto the left or right half of a document card to insert before or after it.
 In a single column, use the upper or lower half. A group’s upper and lower edges
 place items before or after it; its middle accepts items inside the group and expands it.
@@ -140,22 +147,33 @@ shows all manuscript document text; Research is excluded. Synopsis and metadata 
 
 Create and edit paragraph styles from **Manage Styles** at the bottom of the style dropdown.
 Manage metadata with **Fields…** in Overview; new fields appear on outline rows.
-Settings contains appearance and dictionary controls. Style changes apply throughout
-the project. Typography, spacing, and
-pagination have separate groups. Click outside a field or press **Enter** to save its value;
-leave it blank to inherit. Dropdowns control inheritance, alignment, and on/off
-properties. The metadata editor also controls field display order and applicability.
+Settings contains appearance and dictionary controls. In the Styles and Fields dialogs,
+**Save** applies your changes; **Cancel** asks before discarding changes only when
+the dialog has changes to lose. Editing a field
+or pressing **Enter** updates the dialog's draft. The style preview remains visible
+while the properties scroll. Built-in styles show effective values and have a separate
+**Reset to defaults** button. Custom styles inherit from their selected parent;
+**Reset** beside an overridden property restores inheritance. Use **+ New** to add
+an entry and the trash icon to delete a custom style or metadata field. The metadata
+editor also controls field order and applicability. Drag fields across the divider
+between **Shown on collapsed cards** and **Hidden until expanded** to change their
+card visibility. New fields start in the hidden section. Expanded cards show all fields.
 
 ## Comment on writing
 
-Select text or place the cursor, then click the speech-bubble icon (**Add comment**) in the toolbar or
-**Add Comment** in the editor context menu. The card beside the text supports
+Select text, then click the speech-bubble-plus icon (**Add comment**) in the small
+toolbar below the selection. You can also use **Add Comment** in the editor context
+menu or its keyboard shortcut at a selection or cursor. The card beside the text supports
 replies, message edits and deletion, resolving or reopening, and thread deletion.
+**Enter** adds a new comment; **Shift+Enter** or **Alt+Enter** inserts a line break.
+Link and comment popovers stay beside their text. Hovered link destinations appear
+in the status bar; document links show their `>`-separated location.
 The Comments panel lists comments for the selected document. Selecting a group
 includes comments from all documents nested inside it, labeled by document title.
-Select a comment to open its document and reveal its location.
-Right-click a thread for Reply, Resolve/Reopen, or Delete thread. Reply opens
-the thread's editing card; deleting a thread asks for confirmation there.
+Select a comment to open its document, reveal its location, and expand its thread
+in the Comments panel. Reply, edit, resolve, or delete there without leaving the
+panel. Right-click an unselected thread for those actions. Deleting a thread asks
+for confirmation in its card.
 Comments stay in the project and are excluded from export.
 
 A draft stays attached to its original document and selection while you consult
@@ -190,7 +208,8 @@ Choose **History** in the navigation rail to open project history.
 For one document, right-click its Explorer entry or Overview card and choose
 **History**. The page names the document and its location; switching panes does not change that target.
 Document timelines include project milestones. The scope dropdown above the
-timeline selects **Entire project** or a single document. Opening History does
+timeline opens an expandable tree to select **Entire project**, a group, or a document.
+Group views show changes within that branch; select a document or the whole project to restore. Opening History does
 not save a draft.
 
 Selecting a checkpoint compares that saved version with the current project,
@@ -206,12 +225,13 @@ planning details, other documents, and project settings stay unchanged. Both
 actions ask for confirmation and create a new History entry. A document cannot
 be restored from a version that predates it.
 
-Notification banners can be dismissed and expire after five seconds. Errors stay
-available in **Notifications** until dismissed or cleared.
+Notifications appear at the bottom right without moving the workspace. Popovers
+can be dismissed and expire after five seconds. Errors stay available in
+**Notifications** until dismissed or cleared.
 
 ## Restore deleted or interrupted work
 
-Delete removes an item from the outline. Use Undo immediately, or open
+Delete removes an item from the outline. Ctrl/Cmd+Shift+Delete deletes the selected documents or groups. Use Undo immediately, or open
 **Recently Deleted** to preview and restore it later.
 
 After an interrupted session, ParchMint offers recovery when it finds edits newer
@@ -277,3 +297,13 @@ standard field navigation remain available. The table below lists common default
 | Bold / italic / underline | Ctrl+B / Ctrl+I / Ctrl+U | Command+B / Command+I / Command+U |
 | Add or edit a link | Ctrl+K | Command+K |
 | Move between workspace regions | F6 | F6 |
+
+Additional configurable shortcuts include Ctrl/Cmd+Alt+Enter to open the selected
+document beside the editor, Ctrl/Cmd+Shift+\ to move a tab to the other pane,
+and Ctrl/Cmd+G / Ctrl/Cmd+Shift+G for the next/previous local search match.
+Ctrl/Cmd+Alt+F opens Fields.
+
+Select manuscript text to add a comment or link from the small toolbar below it.
+Links can point to a web address or a document chosen from the project tree. Internal
+links follow documents through renames and moves. Search result headings collapse
+or expand each document's matches; their breadcrumb shows where the document lives.

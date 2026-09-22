@@ -29,7 +29,7 @@ use crate::{
     },
     focus, harness_target, hierarchy_drag,
     iced_editor_surface::EditorCenterMessage,
-    icons::{Icon, icon, icon_sized},
+    icons::{Icon, icon_sized},
     right_click, stationary_tooltip,
 };
 
@@ -74,9 +74,9 @@ pub(crate) fn metadata_field_name_input_id() -> iced::widget::Id {
 // Divider lines belong to the adjacent sidebar's reference width; they must
 // not shrink the manuscript allocation between the 280 px Explorer and 320 px
 // Inspector columns.
-const SIDEBAR_SPLITTER_WIDTH: u32 = 1;
-const HIERARCHY_CONTEXT_MENU_WIDTH: f32 = 168.0;
-const CONTEXT_ACTION_HEIGHT: f32 = 32.0;
+const SIDEBAR_SPLITTER_WIDTH: u32 = 4;
+const HIERARCHY_CONTEXT_MENU_WIDTH: f32 = 240.0;
+const CONTEXT_ACTION_HEIGHT: f32 = 28.0;
 
 /// Deterministic first-frame center allocation for reference verification.
 ///
@@ -181,6 +181,10 @@ fn project_surface_with_layout<'a>(
     inspector_expansion: [bool; 3],
 ) -> Element<'a, ProjectSurfaceMessage> {
     let mut effective_layout = layout.clone();
+    if destination == RibbonDestination::Cards {
+        effective_layout.set_explorer_visible(false);
+        effective_layout.set_inspector_visible(false);
+    }
     if destination == RibbonDestination::Editor && workspace.editor().expanded_pane().is_some() {
         effective_layout.set_explorer_visible(false);
         effective_layout.set_inspector_visible(false);
@@ -195,8 +199,13 @@ fn project_surface_with_layout<'a>(
     );
     let center = column![
         ribbon,
-        center_view(workspace, destination, theme, editor_child)
+        center_view(workspace, destination, theme, editor_child, layout)
     ];
+    let center: Element<'a, ProjectSurfaceMessage> = if destination == RibbonDestination::Cards {
+        center.into()
+    } else {
+        crate::motion::enter(format!("{destination:?}"), center)
+    };
     let recovering = matches!(workspace.content_state(), ContentState::Recovery);
     let shows_explorer = !recovering
         && matches!(
@@ -221,7 +230,7 @@ fn project_surface_with_layout<'a>(
     } else {
         layout.explorer().width()
     };
-    let body = crate::motion::row(vec![
+    let body_slots = vec![
         crate::motion::slot(
             row![
                 left_rail(
@@ -236,11 +245,7 @@ fn project_surface_with_layout<'a>(
             Length::Fixed(rail_width as f32),
             shows_explorer && layout.explorer_is_visible(),
         ),
-        crate::motion::slot(
-            crate::motion::enter(format!("{destination:?}"), center),
-            Length::Fill,
-            true,
-        ),
+        crate::motion::slot(center, Length::Fill, true),
         crate::motion::slot(
             row![
                 sidebar_splitter(SidebarPanel::Inspector, theme),
@@ -257,7 +262,12 @@ fn project_surface_with_layout<'a>(
             Length::Fixed(layout.inspector().width() as f32),
             shows_inspector && layout.inspector_is_visible(),
         ),
-    ]);
+    ];
+    let body = if destination == RibbonDestination::Cards {
+        crate::motion::row_instant(body_slots)
+    } else {
+        crate::motion::row(body_slots)
+    };
     let mut content = column![body]
         .spacing(0)
         .width(Length::Fill)
@@ -286,6 +296,24 @@ fn project_surface_with_layout<'a>(
         .height(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Application, Interaction::Rest))
         .into();
+    let base = stack![
+        base,
+        container(crate::motion::reveal(
+            !focused,
+            project_selector(
+                project_title,
+                shows_explorer && layout.explorer_is_visible(),
+                rail_width,
+                theme
+            )
+        ))
+        .padding(iced::Padding {
+            top: 8.0,
+            left: 6.0,
+            ..iced::Padding::ZERO
+        })
+    ];
+    let base: Element<'a, ProjectSurfaceMessage> = base.into();
     let base = if let Some(source) = workspace.hierarchy_drag_source()
         && !workspace.hierarchy_drag_is_card()
         && let Some(item) = workspace.explorer().row(source)
@@ -308,11 +336,7 @@ fn project_surface_with_layout<'a>(
         .into()
     } else if destination == RibbonDestination::Cards {
         if let Some(source) = workspace.hierarchy_drag_source()
-            && let Some(item) = workspace
-                .cards()
-                .items()
-                .into_iter()
-                .find(|item| item.node_id == source)
+            && let Some(item) = workspace.cards().item_by_id(source)
         {
             stack![
                 base,
@@ -375,23 +399,53 @@ fn project_surface_with_layout<'a>(
         .height(Length::Fill)
         .into()
     } else if let Some(modal) = workspace.modal() {
-        stack![
-            focus::input_scope(base, false),
-            opaque(
-                container(crate::motion::enter(
-                    "dialog",
-                    modal_view(modal, workspace, theme)
-                ))
+        let static_settings = matches!(&modal, ProjectModal::ManageSettings(_));
+        let dragged_field = matches!(
+            &modal,
+            ProjectModal::ManageSettings(SettingsCategory::Metadata)
+        )
+        .then(|| workspace.settings().metadata_drag_source())
+        .flatten()
+        .and_then(|id| workspace.settings().metadata_field(id))
+        .map(|field| field.label.to_owned());
+        let dialog = modal_view(modal, workspace, theme);
+        let dialog = if static_settings {
+            dialog
+        } else {
+            crate::motion::enter("dialog", dialog)
+        };
+        let scoped_base = focus::input_scope(base, false);
+        let modal_layer = opaque(
+            container(dialog)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(iced::alignment::Horizontal::Center)
                 .align_y(iced::alignment::Vertical::Center)
-                .style(move |_| components::scrim(theme))
+                .style(move |_| components::scrim(theme)),
+        );
+        if let Some(label) = dragged_field {
+            let ghost = container(
+                row![icon_sized(Icon::ReorderGrip, 18), text(label).size(14)]
+                    .spacing(8)
+                    .align_y(iced::alignment::Vertical::Center),
             )
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+            .padding([9, 12])
+            .width(220)
+            .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Focused));
+            stack![
+                scoped_base,
+                modal_layer,
+                crate::drag_ghost::floating(ghost.into(), Point::new(16.0, 12.0), 220.0)
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            stack![scoped_base, modal_layer]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        }
     } else {
         base
     }
@@ -401,41 +455,81 @@ fn sidebar_splitter(
     panel: SidebarPanel,
     theme: ParchMintTheme,
 ) -> Element<'static, ProjectSurfaceMessage> {
-    mouse_area(
-        container(Space::new().width(1).height(Length::Fill))
-            .width(SIDEBAR_SPLITTER_WIDTH)
+    mouse_area(panel_divider(theme))
+        .on_press(ProjectSurfaceMessage::BeginResize(panel))
+        .interaction(iced::mouse::Interaction::ResizingHorizontally)
+        .into()
+}
+
+fn panel_divider(theme: ParchMintTheme) -> Element<'static, ProjectSurfaceMessage> {
+    container(
+        container(Space::new())
+            .width(1)
             .height(Length::Fill)
             .style(move |_| iced::widget::container::Style {
                 background: Some(Background::Color(theme.palette().divider)),
                 ..Default::default()
             }),
     )
-    .on_press(ProjectSurfaceMessage::BeginResize(panel))
-    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+    .width(SIDEBAR_SPLITTER_WIDTH)
+    .height(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Center)
     .into()
+}
+
+fn static_divider(theme: ParchMintTheme) -> Element<'static, ProjectSurfaceMessage> {
+    container(Space::new())
+        .width(1)
+        .height(Length::Fill)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(Background::Color(theme.palette().divider)),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn project_selector<'a>(
     title: &'a str,
+    expanded: bool,
+    width: u32,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    harness_target::target(
-        HarnessTarget::ProjectMenu,
-        button(
-            row![
-                icon(Icon::Project),
-                text(title).size(14).width(Length::Fill),
-                icon_sized(Icon::ChevronDown, 12)
-            ]
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center),
-        )
-        .width(Length::Fill)
-        .padding([8, 6])
-        .on_press(ProjectSurfaceMessage::ShowProjectChooser)
-        .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-        }),
+    let label = row![
+        text(title).size(14).width(Length::Fill),
+        icon_sized(Icon::ChevronDown, 12)
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center);
+    let contents = crate::motion::row(vec![
+        crate::motion::slot(crate::icons::brand(36), Length::Fixed(36.0), true),
+        crate::motion::slot(
+            container(label)
+                .padding(iced::Padding {
+                    left: 12.0,
+                    ..iced::Padding::ZERO
+                })
+                .center_y(36)
+                .clip(true),
+            Length::Fixed(width.saturating_sub(12) as f32),
+            expanded,
+        ),
+    ]);
+    stationary_tooltip::tooltip(
+        harness_target::target(
+            HarnessTarget::ProjectMenu,
+            button(
+                container(contents)
+                    .width(if expanded { 24.0 + width as f32 } else { 36.0 })
+                    .height(36),
+            )
+            .padding(0)
+            .on_press(ProjectSurfaceMessage::ShowProjectChooser)
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            }),
+        ),
+        components::muted_label("Projects"),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
 }
 
@@ -443,7 +537,7 @@ fn navigation_rail<'a>(
     destination: RibbonDestination,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    let mut items = column![crate::icons::brand(36), Space::new().height(8)].spacing(6);
+    let mut items = column![Space::new().height(36), Space::new().height(8)].spacing(6);
     for (page, symbol, label) in [
         (RibbonDestination::Editor, Icon::Editor, "Editor"),
         (RibbonDestination::Cards, Icon::Overview, "Overview"),
@@ -459,7 +553,7 @@ fn navigation_rail<'a>(
         items = items.push(stationary_tooltip::tooltip(
             harness_target::target(
                 HarnessTarget::Ribbon(page),
-                button(container(icon_sized(symbol, 20)).center(36))
+                button(container(icon_sized(symbol, 24)).center(36))
                     .padding(0)
                     .on_press(ProjectSurfaceMessage::Navigate(page))
                     .style(move |_, status| {
@@ -481,11 +575,25 @@ fn navigation_rail<'a>(
     }
     focus::f6_region(
         F6Region::ModeSwitch,
-        container(items)
-            .padding([8, 6])
-            .width(48)
-            .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+        row![
+            container(items)
+                .padding(iced::Padding {
+                    top: 8.0,
+                    bottom: 8.0,
+                    left: 5.0,
+                    right: 6.0,
+                })
+                .width(47)
+                .height(Length::Fill)
+                .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
+            container(Space::new())
+                .width(1)
+                .height(Length::Fill)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(Background::Color(theme.palette().divider)),
+                    ..Default::default()
+                }),
+        ],
     )
 }
 
@@ -556,12 +664,17 @@ fn mode_switch_button_style(
     status: iced::widget::button::Status,
     selected: bool,
 ) -> iced::widget::button::Style {
-    components::button_style(theme, ButtonKind::Quiet, interaction(status, selected))
+    let mut style =
+        components::button_style(theme, ButtonKind::Quiet, interaction(status, selected));
+    if !selected && status != iced::widget::button::Status::Disabled {
+        style.text_color = theme.palette().primary_text;
+    }
+    style
 }
 
 fn left_rail<'a>(
     workspace: &'a ProjectWorkspace,
-    project_title: &'a str,
+    _project_title: &'a str,
     theme: ParchMintTheme,
     width: u32,
     inline_rename: bool,
@@ -570,7 +683,7 @@ fn left_rail<'a>(
         SidebarSurface::Explorer => explorer_rail_with_rename(workspace, theme, inline_rename),
         SidebarSurface::GlobalSearch => global_search_rail(workspace, theme),
     };
-    container(column![project_selector(project_title, theme), content].spacing(8))
+    container(column![Space::new().height(36), content].spacing(8))
         .padding(iced::Padding {
             top: 6.0,
             ..iced::Padding::new(SPACING_12)
@@ -603,29 +716,41 @@ fn explorer_rail_with_rename<'a>(
         .fold(column![].spacing(SPACING_4), |column, item| {
             let depth = hierarchy_depth(explorer, item.parent_id);
             let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Root => {
-                    button(text(if item.expanded { "▾" } else { "▸" }).size(16))
-                        .padding(SPACING_4)
-                        .width(20)
-                        .on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-                        ))
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                interaction(status, false),
-                            )
-                        })
-                        .into()
-                }
-                HierarchyRowKind::Group => {
-                    container(text(if item.expanded { "▾" } else { "▸" }).size(16))
-                        .width(20)
-                        .align_x(iced::alignment::Horizontal::Center)
-                        .into()
-                }
-                HierarchyRowKind::Document => Space::new().width(20).into(),
+                HierarchyRowKind::Root => button(icon_sized(
+                    if item.expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    18,
+                ))
+                .padding(SPACING_4)
+                .width(26)
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                ))
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                })
+                .into(),
+                HierarchyRowKind::Group => button(icon_sized(
+                    if item.expanded {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    },
+                    18,
+                ))
+                .width(26)
+                .padding(4)
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                ))
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                })
+                .into(),
+                HierarchyRowKind::Document => Space::new().width(26).into(),
             };
             let title = if item.cut_pending {
                 format!("{}  (cut)", item.title)
@@ -812,7 +937,7 @@ fn explorer_rail_with_rename<'a>(
     };
     let rail = column![
         row![
-            text("Explorer").size(12),
+            components::muted_label("Explorer"),
             Space::new().width(Length::Fill),
             harness_target::target(
                 HarnessTarget::ExplorerSearch,
@@ -1027,7 +1152,7 @@ fn hierarchy_context_overlay<'a>(
             container(opaque(hierarchy_drag::commit_on_click_away(
                 container(actions)
                     .padding(6)
-                    .width(200)
+                    .width(260)
                     .style(move |_| components::surface(
                         theme,
                         Surface::Elevated,
@@ -1036,7 +1161,7 @@ fn hierarchy_context_overlay<'a>(
                 ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
             )))
             .padding(iced::Padding {
-                left: point.x().min(window_width - 208.0).max(8.0),
+                left: point.x().min(window_width - 268.0).max(8.0),
                 top: point.y().min(window_height - 84.0).max(8.0),
                 right: 0.0,
                 bottom: 0.0,
@@ -1062,7 +1187,7 @@ fn hierarchy_context_overlay<'a>(
                 theme,
             ))
             .push(context_menu_button(
-                "Open in companion",
+                "Open beside",
                 ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNodeInCompanion(
                     id.clone(),
                 )),
@@ -1181,7 +1306,7 @@ fn comment_anchor_summary(anchor: &CommentAnchor) -> String {
     }
 }
 
-fn hierarchy_row_is_visible<'a>(
+pub(crate) fn hierarchy_row_is_visible<'a>(
     explorer: &'a crate::ExplorerState,
     mut parent_id: Option<&'a str>,
 ) -> bool {
@@ -1197,7 +1322,7 @@ fn hierarchy_row_is_visible<'a>(
     true
 }
 
-fn hierarchy_depth<'a>(
+pub(crate) fn hierarchy_depth<'a>(
     explorer: &'a crate::ExplorerState,
     mut parent_id: Option<&'a str>,
 ) -> usize {
@@ -1221,21 +1346,21 @@ fn global_search_rail<'a>(
         })
         .padding([7, 8])
         .style(move |_, status| components::field_style(theme, field_interaction(status)));
-    let controls = row![
+    let controls = row![stationary_tooltip::tooltip(
+        button(text("←  Search").size(u32::from(UI_LABEL.size)))
+            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer))
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                interaction(status, false)
+            )),
+        container(text("Back to Explorer").size(12)).padding([4, 6]),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
+    ),];
+    let options = row![
         stationary_tooltip::tooltip(
-            button(text("←  Search").size(u32::from(UI_HEADING.size)))
-                .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer))
-                .style(move |_, status| components::button_style(
-                    theme,
-                    ButtonKind::Quiet,
-                    interaction(status, false)
-                )),
-            container(text("Back to Explorer").size(12)).padding([4, 6]),
-            components::surface(theme, Surface::Elevated, Interaction::Rest),
-        ),
-        Space::new().width(Length::Fill),
-        stationary_tooltip::tooltip(
-            button(text("Case").size(12))
+            button(icon_sized(Icon::MatchCase, 20))
+                .padding(2)
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::SetGlobalSearchOptions {
                         case_sensitive: !search.case_sensitive(),
@@ -1251,7 +1376,8 @@ fn global_search_rail<'a>(
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         ),
         stationary_tooltip::tooltip(
-            button(text("Word").size(12))
+            button(icon_sized(Icon::WholeWords, 20))
+                .padding(2)
                 .on_press(ProjectSurfaceMessage::Project(
                     ProjectMessage::SetGlobalSearchOptions {
                         case_sensitive: search.case_sensitive(),
@@ -1268,7 +1394,7 @@ fn global_search_rail<'a>(
         ),
     ]
     .align_y(iced::alignment::Vertical::Center)
-    .spacing(SPACING_8);
+    .spacing(2);
     let document_count = search.document_count();
     let results = search.windowed_rows().fold(column![], |column, row| {
         let content: Element<'a, ProjectSurfaceMessage> = match row {
@@ -1280,19 +1406,51 @@ fn global_search_rail<'a>(
                     .explorer()
                     .title_for_document(document_id)
                     .unwrap_or("Unavailable document");
-                container(
+                let breadcrumb = workspace
+                    .explorer()
+                    .breadcrumb_for_document(document_id)
+                    .map(|mut parts| {
+                        parts.pop();
+                        parts.join(" > ")
+                    })
+                    .unwrap_or_default();
+                button(
                     row![
-                        text(title)
-                            .size(u32::from(UI_LABEL.size))
-                            .width(Length::Fill),
-                        text(search_match_count_label(matches))
-                            .size(u32::from(UI_COMPACT.size))
-                            .color(theme.palette().secondary_text),
+                        icon_sized(
+                            if search.is_collapsed(document_id) {
+                                Icon::ChevronRight
+                            } else {
+                                Icon::ChevronDown
+                            },
+                            18
+                        ),
+                        column![
+                            row![
+                                text(title)
+                                    .size(u32::from(UI_LABEL.size))
+                                    .width(Length::Fill),
+                                text(search_match_count_label(matches))
+                                    .size(u32::from(UI_COMPACT.size))
+                                    .color(theme.palette().secondary_text)
+                            ],
+                            text(breadcrumb)
+                                .size(11)
+                                .color(theme.palette().secondary_text)
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill)
                     ]
+                    .spacing(4)
                     .align_y(iced::alignment::Vertical::Center),
                 )
-                .padding([5, 3])
-                .center_y(Length::Fill)
+                .width(Length::Fill)
+                .padding([4, 3])
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ToggleSearchDocument(document_id.to_owned()),
+                ))
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                })
                 .into()
             }
             GlobalSearchRow::Match(index) => {
@@ -1373,7 +1531,7 @@ fn global_search_rail<'a>(
     });
     let result_count = search.results().len();
     let results = if search.query().is_empty() {
-        results.push(text("Search text, titles, synopsis, and metadata.").size(12))
+        results
     } else {
         column![
             Space::new().height(search.result_window_start() as f32 * SEARCH_ROW_HEIGHT),
@@ -1409,9 +1567,9 @@ fn global_search_rail<'a>(
         .on_press_maybe((search.is_complete() && replacement_count > 0).then_some(
             ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
         ))
-        .padding([7, 14])
+        .padding([5, 7])
         .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Primary, interaction(status, false))
+            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
         }),
     );
     let active_trail: Element<'a, ProjectSurfaceMessage> = search
@@ -1429,40 +1587,46 @@ fn global_search_rail<'a>(
                 .into()
         })
         .unwrap_or_else(|| Space::new().height(0).into());
-    let mut content = column![controls, query].spacing(SPACING_12);
-    if !search.query().is_empty() {
+    let mut content = column![
+        controls,
+        row![query, options]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center)
+    ]
+    .spacing(8);
+    {
         if !workspace.replacement_preview().uses_middle_pane() {
             content = content.push(harness_target::target(
                 HarnessTarget::GlobalReplaceToggle,
-                button(
-                    text(if search.replace_visible() {
-                        "▾ Replace"
-                    } else {
-                        "▸ Replace"
-                    })
-                    .size(13),
-                )
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::ToggleGlobalReplace,
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                }),
+                button(text("Replace…").size(13))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleGlobalReplace,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
             ));
             if search.replace_visible() {
                 content = content.push(column![replace, replace_action].spacing(8));
             }
         }
-        content = content.push(
-            text(if let Some(error) = search.error() {
-                error.to_owned()
-            } else if !search.is_complete() {
-                "Searching…".to_owned()
-            } else {
-                global_search_result_count_label(result_count, document_count)
-            })
-            .size(12),
-        );
+        if !search.query().is_empty() {
+            content = content.push(
+                text(if let Some(error) = search.error() {
+                    error.to_owned()
+                } else if !search.is_complete() {
+                    "Searching…".to_owned()
+                } else {
+                    global_search_result_count_label(result_count, document_count)
+                })
+                .size(12)
+                .color(theme.palette().secondary_text),
+            );
+        }
     }
     content
         .push(
@@ -1512,6 +1676,7 @@ fn center_view<'a>(
     destination: RibbonDestination,
     theme: ParchMintTheme,
     editor_child: Element<'a, ProjectSurfaceMessage>,
+    layout: &ShellLayout,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let content = match workspace.content_state() {
         ContentState::Loading => {
@@ -1525,7 +1690,14 @@ fn center_view<'a>(
             }
             RibbonDestination::Editor => editor_child,
             RibbonDestination::Cards => {
-                focus::f6_region(F6Region::FocusedEditor, cards_center(workspace, theme))
+                let width = (layout.center().width().saturating_sub(48 + 32) as f32
+                    - crate::cards_layout::SCROLLBAR_GUTTER)
+                    .max(1.0);
+                let height = layout.center().height().saturating_sub(16) as f32;
+                focus::f6_region(
+                    F6Region::FocusedEditor,
+                    cards_center(workspace, theme, Some((width, height))),
+                )
             }
             RibbonDestination::GlobalSearch => editor_child,
             RibbonDestination::History => history_center(workspace, theme),
@@ -1562,15 +1734,23 @@ fn overview_add<'a>(
         iced::widget::tooltip(
             button(
                 container(
-                    row![icon(symbol), text("+").size(18)]
-                        .spacing(6)
-                        .align_y(iced::alignment::Vertical::Center),
+                    row![icon_sized(symbol, 28).style(move |_, status| {
+                        let mut color = theme.palette().pencil_icon;
+                        color.a = if matches!(status, iced::widget::svg::Status::Hovered) {
+                            1.0
+                        } else {
+                            0.65
+                        };
+                        iced::widget::svg::Style { color: Some(color) }
+                    })]
+                    .spacing(6)
+                    .align_y(iced::alignment::Vertical::Center),
                 )
                 .center_x(Length::Fill)
                 .center_y(Length::Fill),
             )
             .width(Length::FillPortion(1))
-            .height(56)
+            .height(crate::cards_layout::CARD_HEIGHT)
             .on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::RequestCreateHierarchy {
                     parent_id: parent.to_owned(),
@@ -1585,10 +1765,13 @@ fn overview_add<'a>(
         )
         .into()
     };
-    let document: Element<'a, ProjectSurfaceMessage> =
-        half(HierarchyItemKind::Document, Icon::Editor, "New document");
+    let document: Element<'a, ProjectSurfaceMessage> = half(
+        HierarchyItemKind::Document,
+        Icon::NewDocument,
+        "New document",
+    );
     let group: Element<'a, ProjectSurfaceMessage> =
-        half(HierarchyItemKind::Group, Icon::ExplorerPane, "New group");
+        half(HierarchyItemKind::Group, Icon::NewGroup, "New group");
     let document = harness_target::target_id(
         if root {
             HarnessTarget::OverviewAdd.id()
@@ -1598,14 +1781,18 @@ fn overview_add<'a>(
         document,
     );
     let group = harness_target::target_id(
-        iced::widget::Id::from(format!("overview-group-{parent}")),
+        if root {
+            HarnessTarget::OverviewAddGroup.id()
+        } else {
+            iced::widget::Id::from(format!("overview-group-{parent}"))
+        },
         group,
     );
     row![
         container(document).width(Length::FillPortion(1)),
         container(Space::new().width(1).height(32)).style(move |_| {
             iced::widget::container::Style {
-                background: Some(theme.palette().divider.into()),
+                background: Some(theme.palette().divider.scale_alpha(0.45).into()),
                 ..Default::default()
             }
         }),
@@ -1618,18 +1805,31 @@ fn overview_add<'a>(
 fn cards_center<'a>(
     workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
+    size: Option<(f32, f32)>,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    right_click::right_click_area(
-        container(responsive(move |available| {
+    let grid: Element<'a, ProjectSurfaceMessage> = if let Some((width, height)) = size {
+        cards_grid(workspace, theme, width, height)
+    } else {
+        responsive(move |available| {
             cards_grid(
                 workspace,
                 theme,
                 (available.width - crate::cards_layout::SCROLLBAR_GUTTER).max(1.0),
+                available.height,
             )
-        }))
-        .padding(SPACING_16)
-        .width(Length::Fill)
-        .height(Length::Fill),
+        })
+        .into()
+    };
+    right_click::right_click_area(
+        container(grid)
+            .padding(iced::Padding {
+                top: 16.0,
+                right: 16.0,
+                bottom: 0.0,
+                left: 16.0,
+            })
+            .width(Length::Fill)
+            .height(Length::Fill),
         move |point| {
             ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyContextMenu {
                 node_id: workspace.cards().section_id().to_owned(),
@@ -1639,45 +1839,89 @@ fn cards_center<'a>(
     )
 }
 
-fn cards_grid<'a>(
+pub(crate) fn cards_grid<'a>(
     workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
     width: f32,
+    height: f32,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let cards = workspace.cards();
     let targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
-    let window = cards.item_window(columns, width);
+    let window = cards.viewport_window(columns, width, height);
     let visible = cards.items_in_window(&window);
     workspace
         .card_positions
         .retain(&visible.iter().map(|item| item.node_id).collect::<Vec<_>>());
     let generation = cards.motion_generation();
     let mut items = visible.into_iter().peekable();
+    let mut frames: Vec<crate::card_frames::GroupFrame> = Vec::new();
+    let mut frame_ids = std::collections::BTreeMap::new();
     let mut grid = column![Space::new().height(window.top_padding)].spacing(0);
-    for grid_row in &window.rows {
+    for (row_index, grid_row) in window.rows.iter().enumerate() {
+        // Iced omits a zero-height spacer from the column's child list.
+        let row_index = row_index + usize::from(window.top_padding > 0.0);
+        let closes_group = grid_row
+            .add_to
+            .as_deref()
+            .is_some_and(|id| id != cards.section_id());
+        let trailing = if closes_group {
+            crate::cards_layout::GROUP_GAP + 12.0
+        } else {
+            0.0
+        };
+        let first =
+            (grid_row.start < grid_row.end).then(|| items.peek().expect("projected grid row"));
+        let own_group = first
+            .filter(|item| item.kind == HierarchyRowKind::Group && item.expanded)
+            .map(|item| item.node_id);
+        let mut current = first
+            .map(|item| item.node_id)
+            .or(grid_row.add_to.as_deref());
+        let mut ancestors = Vec::new();
+        while let Some(id) = current {
+            let Some(node) = workspace.displayed_explorer().row(id) else {
+                break;
+            };
+            if node.kind == HierarchyRowKind::Group {
+                ancestors.push(id);
+            }
+            current = node.parent_id;
+        }
+        ancestors.reverse();
+        for (depth, id) in ancestors.into_iter().enumerate() {
+            if first.is_some_and(|item| item.node_id == id) && own_group != Some(id) {
+                continue;
+            }
+            let index = *frame_ids.entry(id.to_owned()).or_insert_with(|| {
+                frames.push(crate::card_frames::GroupFrame {
+                    depth,
+                    first_row: row_index,
+                    last_row: row_index,
+                    starts_here: own_group == Some(id),
+                    ends_here: false,
+                });
+                frames.len() - 1
+            });
+            frames[index].last_row = row_index;
+            frames[index].ends_here = grid_row.add_to.as_deref() == Some(id);
+        }
         let add_control = |parent: &str, depth: usize| {
-            let indent = (depth as f32 * 32.0).min(width * 0.3);
-            container(overview_add(parent, parent == cards.section_id(), theme))
-                .width((width - indent - (columns - 1) as f32 * 12.0) / columns as f32)
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(theme.palette().panel.into()),
-                    border: Border {
-                        color: theme.palette().divider,
-                        width: 1.0,
-                        radius: 5.0.into(),
-                    },
-                    ..Default::default()
-                })
+            let indent = crate::cards_layout::grid_indent(depth, width);
+            crate::card_frames::placeholder(
+                container(overview_add(parent, parent == cards.section_id(), theme))
+                    .width((width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32),
+                theme,
+            )
         };
         if let Some(parent) = &grid_row.add_to
             && grid_row.start == grid_row.end
         {
-            let indent = (grid_row.depth as f32 * 32.0).min(width * 0.3);
+            let indent = crate::cards_layout::grid_indent(grid_row.depth, width);
             let control = add_control(parent, grid_row.depth);
             grid = grid.push(
                 container(row![Space::new().width(indent), control]).padding(iced::Padding {
-                    bottom: crate::project_workspace::CARDS_ROW_GAP,
+                    bottom: crate::project_workspace::CARDS_ROW_GAP + trailing,
                     ..iced::Padding::ZERO
                 }),
             );
@@ -1721,7 +1965,10 @@ fn cards_grid<'a>(
             },
         );
         grid = grid.push(hierarchy_drag::target(
-            body,
+            container(body).padding(iced::Padding {
+                bottom: trailing,
+                ..iced::Padding::ZERO
+            }),
             None,
             &targets,
             move |bounds, point| {
@@ -1776,7 +2023,7 @@ fn cards_grid<'a>(
         .align_y(iced::alignment::Vertical::Center),
         hierarchy_drag::surface(
             right_click::right_click_area(
-                scrollable(grid)
+                scrollable(crate::card_frames::groups(grid, frames, theme))
                     .id(HarnessTarget::CardsList.id())
                     .width(Length::Fill)
                     .on_scroll(|viewport| ProjectSurfaceMessage::Project(
@@ -1869,9 +2116,9 @@ fn outline_card<'a>(
                         } else {
                             Icon::ChevronRight
                         },
-                        12
+                        18
                     ))
-                    .center(24)
+                    .center(26)
                 )
                 .padding(0)
                 .on_press(ProjectSurfaceMessage::Project(
@@ -1918,16 +2165,55 @@ fn outline_card<'a>(
     } else {
         heading
     };
-    let mut details = column![heading].spacing(6);
-    if !group || item.expanded {
-        details = details.push(outline_fields(
+    let expand = stationary_tooltip::tooltip(
+        harness_target::target_id(
+            iced::widget::Id::from(format!("card-details-{node_id}")),
+            button(icon_sized(
+                if item.details_expanded {
+                    Icon::RestoreLayout
+                } else {
+                    Icon::FocusWriting
+                },
+                16,
+            ))
+            .padding(3)
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleCardDetails(node_id.clone()),
+            ))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            }),
+        ),
+        text(if item.details_expanded {
+            "Collapse details"
+        } else {
+            "Expand details"
+        })
+        .size(12),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
+    );
+    let mut header = row![
+        container(heading)
+            .width(Length::Fill)
+            .height(item.heading_height(width))
+            .clip(true)
+    ]
+    .spacing(4);
+    if !group && (item.details_expanded || item.needs_expansion(width)) {
+        header = header.push(expand);
+    }
+    let details = column![
+        header,
+        outline_fields(
             workspace,
             item.node_id,
             theme,
             width,
             item.synopsis_height(width),
-        ));
-    }
+            group || item.details_expanded,
+        )
+    ]
+    .spacing(6);
     let card_content: Element<'a, ProjectSurfaceMessage> = details.into();
     let middle_active =
         drag_destination.as_ref() == Some(&DragDestination::IntoGroup(node_id.clone()));
@@ -1942,55 +2228,54 @@ fn outline_card<'a>(
     } else {
         card_content
     };
-    let card = container(card_content)
-        .clip(true)
-        .padding(SPACING_12)
-        .width(Length::Fill)
-        .style(move |_| {
-            let mut style = iced::widget::container::Style {
-                background: Some(
-                    if group {
-                        theme.palette().application
-                    } else {
-                        theme.palette().panel
-                    }
-                    .into(),
-                ),
-                border: Border {
-                    color: if group {
-                        Color::TRANSPARENT
-                    } else {
-                        theme.palette().divider
-                    },
-                    width: 1.0,
-                    radius: 5.0.into(),
+    let card = container(crate::motion::resize_height(
+        node_id.clone(),
+        container(card_content)
+            .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0)
+            .clip(true),
+    ))
+    .clip(true)
+    .padding(SPACING_12)
+    .width(Length::Fill)
+    .style(move |_| {
+        let mut style = iced::widget::container::Style {
+            background: (!(group && item.expanded && !floating))
+                .then_some(theme.palette().panel.into()),
+            border: Border {
+                color: theme.palette().divider,
+                width: if group && item.expanded && !floating {
+                    0.0
+                } else {
+                    1.0
                 },
-                ..Default::default()
+                radius: 5.0.into(),
+            },
+            ..Default::default()
+        };
+        if !floating && !group && (item.selected || source_active || middle_active) {
+            style.border.color = theme.palette().accent;
+            style.border.width = 1.0;
+        }
+        if group && item.selected {
+            style.background = Some(theme.palette().control_hover.into());
+        }
+        if group && middle_active {
+            style.border.color = Color::TRANSPARENT;
+        }
+        if !floating && (source_active || middle_active) {
+            style.background = Some(theme.palette().accent_subtle.into());
+        }
+        if floating {
+            style.background = Some(theme.palette().control_hover.into());
+            style.border.color = theme.palette().strong_border;
+            style.shadow = iced::Shadow {
+                color: theme.palette().scrim.scale_alpha(0.4),
+                offset: iced::Vector::new(2.0, 4.0),
+                blur_radius: 10.0,
             };
-            if !floating && !group && (item.selected || source_active || middle_active) {
-                style.border.color = theme.palette().accent;
-                style.border.width = 1.0;
-            }
-            if group && item.selected {
-                style.background = Some(theme.palette().control_hover.into());
-            }
-            if group && middle_active {
-                style.border.color = Color::TRANSPARENT;
-            }
-            if !floating && (source_active || middle_active) {
-                style.background = Some(theme.palette().accent_subtle.into());
-            }
-            if floating {
-                style.background = Some(theme.palette().control_hover.into());
-                style.border.color = theme.palette().strong_border;
-                style.shadow = iced::Shadow {
-                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.16),
-                    offset: iced::Vector::new(2.0, 4.0),
-                    blur_radius: 10.0,
-                };
-            }
-            style
-        });
+        }
+        style
+    });
     if floating {
         return card.into();
     }
@@ -2010,7 +2295,7 @@ fn outline_card<'a>(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
-        !source_active,
+        workspace.hierarchy_drag_source().is_none() && !source_active,
         card,
     );
     let card = hierarchy_drag::target_with_zone(card, None, targets, move |bounds, point| {
@@ -2398,6 +2683,7 @@ fn history_center<'a>(
     };
     let restore: Element<'a, ProjectSurfaceMessage> = history
         .selected_checkpoint_id()
+        .filter(|_| history.group_filter.is_none())
         .and_then(|checkpoint_id| {
             history
                 .checkpoints()
@@ -2489,9 +2775,9 @@ fn history_center<'a>(
                 .into()
         }
         None if history.selected_checkpoint_id().is_some() => {
-            text("Loading version comparison…").size(12).into()
+            components::muted_label("Loading version comparison…").into()
         }
-        None => text("Select a version.").size(12).into(),
+        None => components::muted_label("Select a version.").into(),
     };
     let comparison = if let Some(changes) = history
         .preview()
@@ -2515,11 +2801,21 @@ fn history_center<'a>(
             .size(13),
         ]
         .spacing(12);
+        let changes = changes
+            .iter()
+            .filter(|change| {
+                history
+                    .group_filter
+                    .as_ref()
+                    .is_none_or(|group| change.path.iter().any(|heading| &heading.id == group))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if changes.is_empty() {
             content = content.push(text("No changes since this version."));
         }
         content = content.push(crate::history_diff::tree_view(
-            changes,
+            &changes,
             &history.collapsed_sections,
             theme,
         ));
@@ -2556,25 +2852,49 @@ fn history_center<'a>(
         .size(12)
         .into(),
     };
-    let mut filter_options = vec![(
-        "Entire project".to_owned(),
-        ProjectSurfaceMessage::Project(ProjectMessage::SetHistoryDocumentFilter(None)),
-    )];
-    for (document, title) in workspace.history_document_choices() {
-        filter_options.push((
-            title.to_owned(),
-            ProjectSurfaceMessage::Project(ProjectMessage::SetHistoryDocumentFilter(Some(
-                document.to_owned(),
-            ))),
+    let mut locations = column![
+        button(text("Entire project").size(13))
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::SetHistoryDocumentFilter(None)
+            ))
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                interaction(status, false)
+            ))
+    ];
+    for item in workspace
+        .explorer()
+        .rows()
+        .into_iter()
+        .filter(|item| hierarchy_row_is_visible(workspace.explorer(), item.parent_id))
+    {
+        let id = item.id.to_owned();
+        let is_group = item.kind != HierarchyRowKind::Document;
+        let selected = item.document_id == history.active_document_filter() && !is_group
+            || history.group_filter.as_deref() == Some(item.id);
+        let select = if let Some(document) = item.document_id {
+            ProjectMessage::SetHistoryDocumentFilter(Some(document.to_owned()))
+        } else {
+            ProjectMessage::SetHistoryGroupFilter(id.clone())
+        };
+        locations = locations.push(components::location_row(
+            item.title.to_owned(),
+            hierarchy_depth(workspace.explorer(), item.parent_id),
+            is_group.then_some(item.expanded),
+            selected,
+            ProjectSurfaceMessage::Project(ProjectMessage::ToggleHierarchyExpanded(id)),
+            ProjectSurfaceMessage::Project(select),
+            theme,
         ));
     }
-    let filter = crate::action_menu::anchored_menu(
+    let filter = crate::action_menu::panel(
         button(
             row![
                 text(workspace.history_scope_label())
                     .size(13)
                     .width(Length::Fill),
-                icon_sized(Icon::ChevronDown, 16)
+                icon_sized(Icon::ChevronDown, 18)
             ]
             .spacing(8),
         )
@@ -2585,9 +2905,11 @@ fn history_center<'a>(
             components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
         })
         .into(),
-        filter_options,
+        container(scrollable(locations).height(Length::Shrink))
+            .max_height(360)
+            .into(),
         theme,
-        260.0,
+        320.0,
     );
     let list = column![
         heading,
@@ -2624,13 +2946,7 @@ fn history_center<'a>(
             .width(280)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
-            .width(SIDEBAR_SPLITTER_WIDTH)
-            .height(Length::Fill)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Background::Color(theme.palette().divider)),
-                ..Default::default()
-            }),
+        panel_divider(theme),
         container(detail)
             .padding(SPACING_24)
             .width(Length::Fill)
@@ -2682,7 +2998,7 @@ fn deleted_center<'a>(
         )
     });
     let list = if items.is_empty() {
-        rows.push(text("No deleted items").size(14))
+        rows.push(components::muted_label("No deleted items"))
     } else {
         rows
     };
@@ -3096,7 +3412,7 @@ fn export_center<'a>(
                         .color(theme.palette().secondary_text),
                 ]
                 .spacing(8),
-                column![text("Destination").size(12), output_file].spacing(8),
+                column![components::muted_label("Destination"), output_file].spacing(8),
                 output_controls,
                 state,
                 row![
@@ -3184,18 +3500,12 @@ fn settings_center<'a>(
                 )
             });
     row![
-        container(column![text("Settings").size(12), navigation,].spacing(SPACING_12),)
+        container(column![components::muted_label("Settings"), navigation,].spacing(SPACING_12),)
             .padding([SPACING_16, SPACING_12])
             .width(280)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        container(Space::new().width(SIDEBAR_SPLITTER_WIDTH))
-            .width(SIDEBAR_SPLITTER_WIDTH)
-            .height(Length::Fill)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Background::Color(theme.palette().divider)),
-                ..Default::default()
-            }),
+        panel_divider(theme),
         container(crate::motion::enter(
             format!("{category:?}"),
             settings_content(workspace, category, theme)
@@ -3207,6 +3517,35 @@ fn settings_center<'a>(
     ]
     .height(Length::Fill)
     .into()
+}
+
+fn metadata_section_heading(
+    label: &'static str,
+    target_index: usize,
+    visible_on_cards: bool,
+    active_target: Option<(usize, bool)>,
+    targets: &hierarchy_drag::HoverTargets<(usize, bool)>,
+    theme: ParchMintTheme,
+) -> Element<'static, ProjectSurfaceMessage> {
+    let indicator = (active_target == Some((target_index, visible_on_cards))).then_some(
+        hierarchy_drag::DropIndicator {
+            position: hierarchy_drag::DropIndicatorPosition::Into,
+            color: theme.palette().selection_border,
+        },
+    );
+    hierarchy_drag::target(
+        container(components::muted_label(label))
+            .padding([10, 4])
+            .width(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+        indicator,
+        targets,
+        move |bounds, point| {
+            bounds
+                .contains(point)
+                .then_some((target_index, visible_on_cards))
+        },
+    )
 }
 
 fn settings_content<'a>(
@@ -3383,7 +3722,7 @@ fn settings_content<'a>(
                     page_title("Appearance"),
                     container(choices).width(Length::Fill).max_width(540),
                     row![
-                        text("Application zoom").size(14),
+                        components::muted_label("Application zoom"),
                         pick_list(
                             ["75%", "90%", "100%", "110%", "125%", "150%"].map(str::to_owned),
                             Some(format!("{}%", settings.ui_zoom_percent())),
@@ -3413,109 +3752,151 @@ fn settings_content<'a>(
             .into()
         }
         SettingsCategory::Metadata => {
-            let metadata = settings.metadata_fields().into_iter().enumerate().fold(
+            let targets = hierarchy_drag::targets();
+            let active_target = settings.metadata_drag_target();
+            let mut fields: Vec<_> = settings.metadata_fields().into_iter().enumerate().collect();
+            fields.sort_by_key(|(_, field)| !field.visible_on_cards);
+            let shown_count = fields
+                .iter()
+                .filter(|(_, field)| field.visible_on_cards)
+                .count();
+            let shown_end = fields
+                .get(shown_count)
+                .map_or(fields.len(), |(index, _)| *index);
+            let field_count = fields.len();
+            let metadata = fields.into_iter().enumerate().fold(
                 column![
                     row![
-                        text("Fields").size(16),
                         Space::new().width(Length::Fill),
-                        button(text("+ New field").size(12))
-                            .on_press(ProjectSurfaceMessage::Project(
-                                ProjectMessage::CreateMetadataField
-                            ))
-                            .style(move |_, status| {
-                                components::button_style(
-                                    theme,
-                                    ButtonKind::Primary,
-                                    interaction(status, false),
-                                )
-                            }),
+                        harness_target::target(
+                            HarnessTarget::CreateMetadataField,
+                            button(text("+ New").size(13))
+                                .on_press(ProjectSurfaceMessage::Project(
+                                    ProjectMessage::CreateMetadataField
+                                ))
+                                .style(move |_, status| {
+                                    components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false),
+                                    )
+                                })
+                        ),
                     ]
                     .align_y(iced::alignment::Vertical::Center),
+                    metadata_section_heading(
+                        "Shown on collapsed cards",
+                        0,
+                        true,
+                        active_target,
+                        &targets,
+                        theme,
+                    ),
                 ]
                 .spacing(SPACING_8),
-                |column, (index, field)| {
+                |mut column, (display_index, (index, field))| {
+                    if display_index == shown_count {
+                        column = column.push(metadata_section_heading(
+                            "Hidden until expanded",
+                            shown_end,
+                            false,
+                            active_target,
+                            &targets,
+                            theme,
+                        ));
+                    }
                     let id = field.id.to_owned();
                     let selected = matches!(
                         settings.selected_detail(),
                         Some(SettingsDetail::MetadataField(selected_id)) if selected_id == field.id
                     );
-                    let summary = format!(
-                        "{} · {}{}",
-                        metadata_applicability_label(field.applicability),
-                        match field.text_kind {
-                            MetadataFieldTextKind::SingleLine => "Single line",
-                            MetadataFieldTextKind::Multiline => "Multiline",
-                        },
-                        if field.visible_on_cards {
-                            " · Outline"
-                        } else {
-                            ""
-                        },
-                    );
                     let dragging = settings.metadata_drag_source() == Some(field.id);
-                    let target = settings.metadata_drag_target() == Some(index);
-                    let drag_handle = stationary_tooltip::tooltip(
-                        mouse_area(
-                            container(text("⠿").size(16))
-                                .width(22)
-                                .align_x(iced::alignment::Horizontal::Center),
+                    let drag_id = id.clone();
+                    let entry = hierarchy_drag::source(
+                        format!("metadata-{id}"),
+                        container(
+                            row![
+                                icon_sized(Icon::ReorderGrip, 18),
+                                text(field.label).size(14),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::alignment::Vertical::Center),
                         )
-                        .on_press(ProjectSurfaceMessage::Project(
-                            ProjectMessage::BeginMetadataFieldDrag(id.clone()),
-                        ))
-                        .on_release(ProjectSurfaceMessage::Project(
-                            ProjectMessage::CommitMetadataFieldDrag,
-                        ))
-                        .interaction(iced::mouse::Interaction::Grabbing),
-                        container(text("Drag to reorder").size(12)).padding([4, 6]),
-                        components::surface(theme, Surface::Elevated, Interaction::Rest),
-                    );
-                    let mut label = column![
-                        text(field.label).size(14),
-                        text(summary).size(12).color(theme.palette().secondary_text)
-                    ]
-                    .spacing(SPACING_4);
-                    if let Some(description) = field.description.filter(|text| !text.is_empty()) {
-                        label = label.push(
-                            text(description)
-                                .size(12)
-                                .color(theme.palette().secondary_text),
-                        );
-                    }
-                    let row = row![
-                        drag_handle,
-                        button(label)
-                            .width(Length::Fill)
-                            .padding(SPACING_8)
-                            .on_press(ProjectSurfaceMessage::Project(
-                                ProjectMessage::SelectMetadataField(id)
-                            ))
-                            .style(move |_, status| {
-                                components::button_style(
-                                    theme,
-                                    ButtonKind::Quiet,
-                                    interaction(status, selected),
-                                )
-                            }),
-                    ]
-                    .spacing(SPACING_8);
-                    column.push(
-                        mouse_area(container(row).width(Length::Fill).style(move |_| {
-                            if target || dragging {
+                        .padding(SPACING_8)
+                        .width(Length::Fill)
+                        .style(move |_| {
+                            if selected || dragging {
                                 components::surface(theme, Surface::Panel, Interaction::Selected)
                             } else {
                                 iced::widget::container::Style::default()
                             }
-                        }))
-                        .on_enter(ProjectSurfaceMessage::Project(
-                            ProjectMessage::SetMetadataFieldDragTarget(index),
-                        ))
-                        .on_release(ProjectSurfaceMessage::Project(
-                            ProjectMessage::CommitMetadataFieldDrag,
+                        }),
+                        ProjectSurfaceMessage::Project(ProjectMessage::SelectMetadataField(
+                            id.clone(),
                         )),
-                    )
+                        None,
+                        ProjectSurfaceMessage::Project(ProjectMessage::BeginMetadataFieldDrag(
+                            drag_id,
+                        )),
+                    );
+                    let row = row![
+                        container(entry).width(Length::Fill),
+                        harness_target::target(
+                            HarnessTarget::DeleteMetadataField(index),
+                            button(icon_sized(Icon::RecentlyDeleted, 16))
+                                .padding(5)
+                                .on_press(ProjectSurfaceMessage::Project(
+                                    ProjectMessage::RequestDeleteMetadataField(id.clone())
+                                ))
+                                .style(move |_, status| components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, false)
+                                ))
+                        ),
+                    ]
+                    .spacing(SPACING_8);
+                    let before = active_target == Some((index, field.visible_on_cards));
+                    let after = active_target == Some((index + 1, field.visible_on_cards));
+                    let indicator = (before || after).then_some(hierarchy_drag::DropIndicator {
+                        position: if before {
+                            hierarchy_drag::DropIndicatorPosition::Before
+                        } else {
+                            hierarchy_drag::DropIndicatorPosition::After
+                        },
+                        color: theme.palette().selection_border,
+                    });
+                    column.push(hierarchy_drag::target_with_zone(
+                        container(row).width(Length::Fill),
+                        indicator,
+                        &targets,
+                        move |bounds, point| {
+                            if !bounds.contains(point) {
+                                return None;
+                            }
+                            let before = point.y < bounds.center_y();
+                            let zone = iced::Rectangle {
+                                y: if before { bounds.y } else { bounds.center_y() },
+                                height: bounds.height * 0.5,
+                                ..bounds
+                            };
+                            Some(((index + usize::from(!before), field.visible_on_cards), zone))
+                        },
+                    ))
                 },
             );
+            let metadata = if shown_count == field_count {
+                metadata.push(metadata_section_heading(
+                    "Hidden until expanded",
+                    field_count,
+                    false,
+                    active_target,
+                    &targets,
+                    theme,
+                ))
+            } else {
+                metadata
+            };
             let detail = match settings.selected_detail() {
                 Some(SettingsDetail::MetadataField(id)) => settings
                     .metadata_field(id)
@@ -3534,10 +3915,21 @@ fn settings_content<'a>(
                 .size(13)
                 .into()
             });
+            let metadata = hierarchy_drag::surface(
+                scrollable(metadata).height(Length::Fill),
+                targets,
+                settings.metadata_drag_source().is_some(),
+                true,
+                |destination| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetMetadataFieldDragTarget(
+                        destination,
+                    ))
+                },
+                ProjectSurfaceMessage::Project(ProjectMessage::CancelMetadataFieldDrag),
+            );
             column![
-                page_title("Metadata fields"),
                 row![
-                    container(scrollable(metadata).height(Length::Fill))
+                    container(metadata)
                         .padding(12)
                         .style(move |_| components::surface(
                             theme,
@@ -3546,10 +3938,11 @@ fn settings_content<'a>(
                         ))
                         .width(256)
                         .height(Length::Fill),
+                    static_divider(theme),
                     container(column![scrollable(detail).height(Length::Fill)].spacing(10),)
-                        .padding(0)
+                        .padding(12)
                         .width(Length::Fill)
-                        .max_width(720)
+                        .max_width(920)
                         .height(Length::Fill)
                         .style(move |_| components::surface(
                             theme,
@@ -3557,7 +3950,7 @@ fn settings_content<'a>(
                             Interaction::Rest
                         )),
                 ]
-                .spacing(SPACING_24)
+                .spacing(0)
                 .height(Length::Fill),
             ]
             .spacing(SPACING_12)
@@ -3565,36 +3958,37 @@ fn settings_content<'a>(
             .into()
         }
         SettingsCategory::Styles => {
+            let mut last_custom = None;
             let styles = settings.styles().into_iter().fold(
-                column![
-                    button(text("Create custom style").size(13))
-                        .width(Length::Fill)
-                        .padding([8, 10])
+                column![harness_target::target(
+                    HarnessTarget::CreateStyle,
+                    button(text("+ New").size(13))
+                        .width(80)
+                        .height(32)
+                        .padding(4)
                         .style(move |_, status| components::button_style(
                             theme,
-                            ButtonKind::Secondary,
+                            ButtonKind::Quiet,
                             interaction(status, false)
                         ))
                         .on_press(ProjectSurfaceMessage::Project(ProjectMessage::CreateStyle))
-                ]
+                ),]
                 .spacing(6),
                 |column, style| {
+                    let custom = !style.role.is_reserved();
+                    let column = if last_custom != Some(custom) {
+                        last_custom = Some(custom);
+                        column.push(components::muted_label(if custom {
+                            "Custom"
+                        } else {
+                            "Built-in"
+                        }))
+                    } else {
+                        column
+                    };
                     let selected = matches!(settings.selected_detail(),
                         Some(SettingsDetail::Style(id)) if id == style.id);
-                    column.push(
-                        button(
-                            column![
-                                text(style.display_name).size(14),
-                                text(if style.role.is_reserved() {
-                                    "Built-in"
-                                } else {
-                                    "Custom"
-                                })
-                                .size(11)
-                                .color(theme.palette().secondary_text)
-                            ]
-                            .spacing(3),
-                        )
+                    let entry = button(text(style.display_name).size(14))
                         .width(Length::Fill)
                         .padding(SPACING_8)
                         .on_press(ProjectSurfaceMessage::Project(ProjectMessage::SelectStyle(
@@ -3606,8 +4000,27 @@ fn settings_content<'a>(
                                 ButtonKind::Quiet,
                                 interaction(status, selected),
                             )
-                        }),
-                    )
+                        });
+                    let mut line = row![entry].align_y(iced::alignment::Vertical::Center);
+                    if !style.role.is_reserved() {
+                        line = line.push(stationary_tooltip::tooltip(
+                            button(icon_sized(Icon::RecentlyDeleted, 18))
+                                .padding(5)
+                                .on_press(ProjectSurfaceMessage::Project(
+                                    ProjectMessage::RequestDeleteStyle(style.id.to_owned()),
+                                ))
+                                .style(move |_, status| {
+                                    components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false),
+                                    )
+                                }),
+                            text("Delete style").size(12),
+                            components::surface(theme, Surface::Elevated, Interaction::Rest),
+                        ));
+                    }
+                    column.push(line)
                 },
             );
             let detail = match settings.selected_detail() {
@@ -3616,9 +4029,8 @@ fn settings_content<'a>(
                     .map(|style| style_detail(settings, style, theme)),
                 _ => None,
             }
-            .unwrap_or_else(|| text("Select a style.").size(12).into());
+            .unwrap_or_else(|| components::muted_label("Select a style.").into());
             column![
-                page_title("Styles"),
                 row![
                     container(scrollable(styles).height(Length::Fill))
                         .padding(12)
@@ -3629,10 +4041,11 @@ fn settings_content<'a>(
                         ))
                         .width(232)
                         .height(Length::Fill),
-                    container(column![scrollable(detail).height(Length::Fill)].spacing(10))
-                        .padding(0)
+                    static_divider(theme),
+                    container(detail)
+                        .padding(12)
                         .width(Length::Fill)
-                        .max_width(720)
+                        .max_width(920)
                         .height(Length::Fill)
                         .style(move |_| components::surface(
                             theme,
@@ -3640,7 +4053,7 @@ fn settings_content<'a>(
                             Interaction::Rest
                         )),
                 ]
-                .spacing(SPACING_24)
+                .spacing(0)
                 .height(Length::Fill),
             ]
             .spacing(SPACING_12)
@@ -3756,14 +4169,6 @@ fn settings_content<'a>(
     }
 }
 
-fn metadata_applicability_label(value: MetadataFieldApplicability) -> &'static str {
-    match value {
-        MetadataFieldApplicability::Groups => "Groups",
-        MetadataFieldApplicability::Documents => "Documents",
-        MetadataFieldApplicability::GroupsAndDocuments => "Groups and documents",
-    }
-}
-
 fn metadata_field_creation_detail<'a>(
     label: &'a str,
     theme: ParchMintTheme,
@@ -3818,22 +4223,6 @@ fn metadata_field_detail<'a>(
     field: crate::MetadataFieldSummary<'a>,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    let make_update = |label: String,
-                       description: Option<String>,
-                       applicability,
-                       text_kind,
-                       default_value,
-                       visible_on_cards| {
-        ProjectMessage::UpdateMetadataField {
-            field_id: field.id.to_owned(),
-            label,
-            description,
-            applicability,
-            text_kind,
-            default_value,
-            visible_on_cards,
-        }
-    };
     let id = field.id.to_owned();
     let description = field.description.unwrap_or_default().to_owned();
     let default_value = field.default_value.unwrap_or_default().to_owned();
@@ -3899,90 +4288,58 @@ fn metadata_field_detail<'a>(
                 })
             }
         });
-    let applicability = [
-        MetadataFieldApplicability::Groups,
-        MetadataFieldApplicability::Documents,
-        MetadataFieldApplicability::GroupsAndDocuments,
-    ]
-    .into_iter()
-    .fold(row![].spacing(5), |row, applicability| {
-        let label = label.clone();
-        let description = description.clone();
-        let default_value = default_value.clone();
-        let selected = field.applicability == applicability;
-        row.push(
-            button(text(metadata_applicability_label(applicability)).size(12))
-                .padding([7, 9])
-                .on_press(ProjectSurfaceMessage::Project(make_update(
-                    label,
-                    (!description.is_empty()).then_some(description),
-                    applicability,
-                    field.text_kind,
-                    (!default_value.is_empty()).then_some(default_value),
-                    field.visible_on_cards,
-                )))
-                .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Secondary,
-                        interaction(status, selected),
-                    )
-                }),
-        )
-    });
-    let kind = [
-        MetadataFieldTextKind::SingleLine,
-        MetadataFieldTextKind::Multiline,
-    ]
-    .into_iter()
-    .fold(row![].spacing(5), |row, text_kind| {
-        let label = label.clone();
-        let description = description.clone();
-        let default_value = default_value.clone();
-        let selected = field.text_kind == text_kind;
-        row.push(
-            button(text(match text_kind {
-                MetadataFieldTextKind::SingleLine => "Single line",
-                MetadataFieldTextKind::Multiline => "Multiline",
-            }))
-            .on_press(ProjectSurfaceMessage::Project(make_update(
-                label,
-                (!description.is_empty()).then_some(description),
-                field.applicability,
-                text_kind,
-                (!default_value.is_empty()).then_some(default_value),
-                field.visible_on_cards,
-            )))
-            .style(move |_, status| {
-                components::button_style(
-                    theme,
-                    ButtonKind::Secondary,
-                    interaction(status, selected),
-                )
-            }),
-        )
-    });
+    let applicability = components::anchored_select(
+        MetadataFieldApplicability::ALL.to_vec(),
+        Some(field.applicability),
+        {
+            let label = label.clone();
+            let description = description.clone();
+            let default_value = default_value.clone();
+            let id = id.clone();
+            move |choice| {
+                ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
+                    field_id: id.clone(),
+                    label: label.clone(),
+                    description: (!description.is_empty()).then_some(description.clone()),
+                    applicability: choice,
+                    text_kind: field.text_kind,
+                    default_value: (!default_value.is_empty()).then_some(default_value.clone()),
+                    visible_on_cards: field.visible_on_cards,
+                })
+            }
+        },
+        theme,
+    );
+    let kind = components::anchored_select(
+        MetadataFieldTextKind::ALL.to_vec(),
+        Some(field.text_kind),
+        {
+            let id = id.clone();
+            move |choice| {
+                ProjectSurfaceMessage::Project(ProjectMessage::UpdateMetadataField {
+                    field_id: id.clone(),
+                    label: label.clone(),
+                    description: (!description.is_empty()).then_some(description.clone()),
+                    applicability: field.applicability,
+                    text_kind: choice,
+                    default_value: (!default_value.is_empty()).then_some(default_value.clone()),
+                    visible_on_cards: field.visible_on_cards,
+                })
+            }
+        },
+        theme,
+    );
     column![
-        text("Field name").size(12),
+        components::muted_label("Field name"),
         label_input,
-        text("Description · optional").size(12),
+        components::muted_label("Description · optional"),
         description_input,
-        text("Default value · optional").size(12),
+        components::muted_label("Default value · optional"),
         default_input,
-        text("Applies to").size(12),
+        components::muted_label("Applies to"),
         applicability,
-        text("Text format").size(12),
+        components::muted_label("Text format"),
         kind,
-        button(text("Delete metadata field").size(12))
-            .padding([7, 10])
-            .style(move |_, status| components::button_style(
-                theme,
-                ButtonKind::Quiet,
-                interaction(status, false)
-            ))
-            .on_press(ProjectSurfaceMessage::Project(
-                ProjectMessage::RequestDeleteMetadataField(id)
-            )),
     ]
     .spacing(8)
     .into()
@@ -4039,12 +4396,32 @@ fn style_detail<'a>(
         })
         .width(Length::Fill)
         .text_size(13)
-        .padding([7, 10]),
+        .padding([5, 8]),
     );
+    let reset: Element<'a, ProjectSurfaceMessage> = if style.role.is_reserved() {
+        button(text("Reset to defaults").size(12))
+            .padding([5, 8])
+            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::ResetStyle(
+                style_id.clone(),
+            )))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Secondary, interaction(status, false))
+            })
+            .into()
+    } else {
+        Space::new().into()
+    };
     let mut content = column![
-        text("Style name").size(12),
+        row![
+            text("Style name")
+                .size(12)
+                .color(theme.palette().secondary_text),
+            Space::new().width(Length::Fill),
+            reset
+        ]
+        .align_y(iced::alignment::Vertical::Center),
         text_input("Display name", style.display_name)
-            .padding([7, 10])
+            .padding([5, 8])
             .size(14)
             .style(move |_, status| components::field_style(theme, field_interaction(status)))
             .on_input({
@@ -4056,108 +4433,51 @@ fn style_detail<'a>(
                     })
                 }
             }),
-        text(if style.role.is_reserved() {
-            "Built-in style"
-        } else {
-            "Custom style"
-        })
-        .size(12)
-        .color(theme.palette().secondary_text),
-        text("Inherits from").size(12),
+        components::muted_label("Inherits from"),
         inheritance,
     ]
     .spacing(8);
-    for (heading, properties) in [
-        (
-            "Typography",
-            &[
-                StyleProperty::FontFamily,
-                StyleProperty::FontSizePoints,
-                StyleProperty::Weight,
-                StyleProperty::Italic,
-                StyleProperty::Alignment,
-            ][..],
-        ),
-        (
-            "Spacing",
-            &[
-                StyleProperty::FirstLineIndentPoints,
-                StyleProperty::LeftIndentPoints,
-                StyleProperty::RightIndentPoints,
-                StyleProperty::LineSpacing,
-                StyleProperty::SpaceBeforePoints,
-                StyleProperty::SpaceAfterPoints,
-            ][..],
-        ),
-        (
-            "Pagination",
-            &[StyleProperty::KeepWithNext, StyleProperty::PageBreakBefore][..],
-        ),
-    ] {
+    let mut groups = Vec::new();
+    for property in StyleProperty::ALL {
+        if !groups.contains(&property.group()) {
+            groups.push(property.group());
+        }
+    }
+    for heading in groups {
         content = content
             .push(Space::new().height(8))
             .push(text(heading).size(16));
         let mut fields = Vec::new();
-        for &property in properties {
-            let saved = style_property_value(style.properties, property);
+        for &property in StyleProperty::ALL
+            .iter()
+            .filter(|property| property.group() == heading)
+        {
+            let saved = style_property_value(&properties, property);
             let draft = settings.style_property_draft(&style_id, property);
             let value = draft.unwrap_or(&saved);
             let id = style_id.clone();
-            let control: Element<'a, ProjectSurfaceMessage> = if matches!(
-                property,
-                StyleProperty::Italic
-                    | StyleProperty::KeepWithNext
-                    | StyleProperty::PageBreakBefore
-            ) {
-                let selected = match value {
-                    "true" => "On",
-                    "false" => "Off",
-                    _ => "Inherit",
-                };
-                pick_list(["Inherit", "On", "Off"], Some(selected), move |choice| {
+            let options = property.input().choices();
+            let control: Element<'a, ProjectSurfaceMessage> = if !options.is_empty() {
+                let choices = options
+                    .iter()
+                    .map(|(value, label)| StyleChoice {
+                        id: Some((*value).into()),
+                        label: (*label).into(),
+                    })
+                    .collect::<Vec<_>>();
+                let selected = choices
+                    .iter()
+                    .find(|choice| choice.id.as_deref() == Some(value))
+                    .cloned();
+                pick_list(choices, selected, move |choice: StyleChoice| {
                     ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
                         style_id: id.clone(),
                         property,
-                        value: match choice {
-                            "On" => "true",
-                            "Off" => "false",
-                            _ => "",
-                        }
-                        .into(),
+                        value: choice.id.unwrap_or_default(),
                     })
                 })
                 .text_size(13)
-                .padding([7, 10])
-                .width(Length::Fill)
-                .into()
-            } else if property == StyleProperty::Alignment {
-                let selected = match value {
-                    "Start" => "Left",
-                    "Center" => "Center",
-                    "End" => "Right",
-                    "Justify" => "Justified",
-                    _ => "Inherit",
-                };
-                pick_list(
-                    ["Inherit", "Left", "Center", "Right", "Justified"],
-                    Some(selected),
-                    move |choice| {
-                        ProjectSurfaceMessage::Project(ProjectMessage::SetStyleProperty {
-                            style_id: id.clone(),
-                            property,
-                            value: match choice {
-                                "Left" => "Start",
-                                "Center" => "Center",
-                                "Right" => "End",
-                                "Justified" => "Justify",
-                                _ => "",
-                            }
-                            .into(),
-                        })
-                    },
-                )
-                .text_size(13)
-                .padding([7, 10])
+                .padding([5, 8])
                 .width(Length::Fill)
                 .into()
             } else {
@@ -4166,10 +4486,10 @@ fn style_detail<'a>(
                     property,
                     value: value.to_owned(),
                 });
-                let field = text_input("Inherit", value)
+                let field = text_input("Default", value)
                     .id(format!("style-property-{property:?}"))
                     .size(14)
-                    .padding([7, 10])
+                    .padding([5, 8])
                     .style(move |_, status| {
                         components::field_style(theme, field_interaction(status))
                     })
@@ -4183,18 +4503,33 @@ fn style_detail<'a>(
                     .on_submit(commit.clone());
                 hierarchy_drag::commit_on_click_away_maybe(field, draft.is_some().then_some(commit))
             };
-            fields.push(
-                container(
-                    column![
-                        text(property.label())
-                            .size(12)
-                            .color(theme.palette().secondary_text),
-                        control
-                    ]
-                    .spacing(5),
-                )
-                .width(Length::Fill),
-            );
+            let mut label = row![
+                text(property.label())
+                    .size(12)
+                    .color(theme.palette().secondary_text)
+            ]
+            .align_y(iced::alignment::Vertical::Center);
+            if !style.role.is_reserved() && !property.value(style.properties).is_empty() {
+                label = label.push(Space::new().width(Length::Fill)).push(
+                    button(text("Reset").size(11))
+                        .padding([0, 4])
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetStyleProperty {
+                                style_id: style_id.clone(),
+                                property,
+                                value: String::new(),
+                            },
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+            fields.push(container(column![label, control].spacing(5)).width(Length::Fill));
         }
         let mut fields = fields.into_iter();
         while let Some(left) = fields.next() {
@@ -4214,110 +4549,63 @@ fn style_detail<'a>(
     };
     let preview = container(
         column![
-            text("Preview").size(12),
-            text("The light reached the last page.")
-                .font(Font {
-                    weight: if properties.weight.unwrap_or(400) >= 600 {
-                        font::Weight::Bold
-                    } else {
-                        font::Weight::Normal
-                    },
-                    style: if properties.italic.unwrap_or(false) {
-                        font::Style::Italic
-                    } else {
-                        font::Style::Normal
-                    },
-                    ..Font::with_name(family)
-                })
-                .size(
-                    properties
-                        .font_size_points
-                        .unwrap_or(18.0)
-                        .clamp(10.0, 36.0)
-                ),
+            components::muted_label("Preview"),
+            iced::widget::rich_text::<(), _, _, _>([iced::widget::span(
+                "The light reached the last page."
+            )
+            .underline(
+                properties
+                    .text_decoration
+                    .is_some_and(|value| value.underline())
+            )
+            .strikethrough(
+                properties
+                    .text_decoration
+                    .is_some_and(|value| value.strikethrough())
+            )
+            .font(Font {
+                weight: if properties.weight.unwrap_or(400) >= 600 {
+                    font::Weight::Bold
+                } else {
+                    font::Weight::Normal
+                },
+                style: if properties.italic.unwrap_or(false) {
+                    font::Style::Italic
+                } else {
+                    font::Style::Normal
+                },
+                ..Font::with_name(family)
+            })
+            .size(
+                properties
+                    .font_size_points
+                    .unwrap_or(18.0)
+                    .clamp(10.0, 36.0)
+            )]),
         ]
         .spacing(10),
     )
-    .padding(16)
+    .padding(10)
     .width(Length::Fill)
     .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest));
-    let content = column![preview, content].spacing(18);
-    let mut content = content;
-    if !style.role.is_reserved() {
-        content = content.push(
-            button(text("Delete custom style").size(12))
-                .padding([7, 10])
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                })
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::RequestDeleteStyle(style_id),
-                )),
-        );
-    }
-    container(content)
-        .padding(iced::Padding {
+    column![
+        preview,
+        scrollable(container(content).padding(iced::Padding {
             right: 16.0,
             ..iced::Padding::ZERO
-        })
-        .into()
+        }))
+        .height(Length::Fill)
+    ]
+    .spacing(8)
+    .height(Length::Fill)
+    .into()
 }
 
 fn style_property_value(
     properties: &parchmint_domain::StyleProperties,
     property: StyleProperty,
 ) -> String {
-    match property {
-        StyleProperty::FontFamily => properties.font_family.clone().unwrap_or_default(),
-        StyleProperty::FontSizePoints => properties
-            .font_size_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::Weight => properties
-            .weight
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::Italic => properties
-            .italic
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::Alignment => properties
-            .alignment
-            .map(|value| format!("{value:?}"))
-            .unwrap_or_default(),
-        StyleProperty::FirstLineIndentPoints => properties
-            .first_line_indent_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::LeftIndentPoints => properties
-            .left_indent_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::RightIndentPoints => properties
-            .right_indent_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::LineSpacing => properties
-            .line_spacing
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::SpaceBeforePoints => properties
-            .space_before_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::SpaceAfterPoints => properties
-            .space_after_points
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::KeepWithNext => properties
-            .keep_with_next
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-        StyleProperty::PageBreakBefore => properties
-            .page_break_before
-            .map(|value| value.to_string())
-            .unwrap_or_default(),
-    }
+    property.value(properties)
 }
 
 fn recovery_modal<'a>(
@@ -4462,7 +4750,7 @@ fn inline_outline_field<'a>(
                 .line_height(iced::Pixels(if size == 14 { 20.0 } else { 18.0 }))
                 .wrapping(text::Wrapping::WordOrGlyph)
                 .width(Length::Fill)
-                .color(if value.is_empty() {
+                .color(if value.is_empty() || field.is_some() {
                     theme.palette().secondary_text
                 } else {
                     theme.palette().primary_text
@@ -4475,7 +4763,14 @@ fn inline_outline_field<'a>(
             ProjectMessage::BeginOutlineField { node_id, field_id },
         ))
         .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            let mut style =
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false));
+            if matches!(status, iced::widget::button::Status::Active) {
+                let mut tint = theme.palette().secondary_text;
+                tint.a = 0.022;
+                style.background = Some(tint.into());
+            }
+            style
         })
         .into()
     }
@@ -4487,29 +4782,34 @@ fn outline_fields<'a>(
     theme: ParchMintTheme,
     width: f32,
     synopsis_height: f32,
+    full: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let selected_id = selected.to_owned();
     let inspector = workspace.inspector();
-    let metadata_items = inspector.metadata_items(selected);
+    let metadata_items = inspector
+        .metadata_items(selected)
+        .into_iter()
+        .filter(|item| full || item.visible_on_cards)
+        .collect::<Vec<_>>();
     let has_metadata = !metadata_items.is_empty();
-    let details_width = crate::cards_layout::fields_width(width, has_metadata);
-    let field_width = (if width >= 340.0 { 144.0 } else { details_width } - 64.0).max(30.0);
-    let horizontal_metadata = crate::cards_layout::horizontal_metadata(
-        workspace
-            .explorer()
-            .row(selected)
-            .is_some_and(|node| node.kind == HierarchyRowKind::Group),
-        width,
-        metadata_items.len(),
-    );
-    let metadata_count = metadata_items.len();
+    let group = workspace
+        .explorer()
+        .row(selected)
+        .is_some_and(|row| row.kind == HierarchyRowKind::Group);
+    let metadata_columns =
+        crate::cards_layout::metadata_columns(width, group, metadata_items.len());
+    let field_width = crate::cards_layout::metadata_width(width);
     let metadata = metadata_items
         .into_iter()
         .map(|item| {
             let node_id = selected_id.clone();
             let field_id = item.field_id.to_owned();
             let value = item.effective_value.unwrap_or_default();
-            let height = crate::cards_layout::metadata_height(value, field_width);
+            let height = if full {
+                crate::cards_layout::metadata_height(value, field_width)
+            } else {
+                22.0
+            };
             let multiline = item.text_kind == MetadataFieldTextKind::Multiline;
             let done = ProjectSurfaceMessage::Project(ProjectMessage::EndOutlineField {
                 node_id: selected.to_owned(),
@@ -4559,43 +4859,40 @@ fn outline_fields<'a>(
                 editor,
                 theme,
             );
-            container(
-                row![
-                    container(
-                        text(item.label)
-                            .size(12)
-                            .font(crate::cards_layout::CARD_FONT)
-                            .width(56)
-                    )
-                    .padding(iced::Padding {
-                        top: 3.0,
-                        ..iced::Padding::ZERO
-                    }),
-                    harness_target::target_id(
-                        format!("metadata-{selected}-{}", item.field_id).into(),
-                        value
-                    )
-                ]
-                .spacing(8)
-                .align_y(iced::alignment::Vertical::Top),
-            )
-            .width(if horizontal_metadata {
-                Length::Fixed(144.0)
-            } else {
-                Length::Fill
-            })
+            let value = harness_target::target_id(
+                format!("metadata-{selected}-{}", item.field_id).into(),
+                value,
+            );
+            column![
+                container(
+                    text(item.label)
+                        .size(12)
+                        .color(theme.palette().secondary_text)
+                )
+                .height(if full {
+                    Length::Shrink
+                } else {
+                    Length::Fixed(16.0)
+                })
+                .clip(true),
+                value,
+            ]
+            .spacing(2)
             .into()
         })
         .collect::<Vec<Element<'a, ProjectSurfaceMessage>>>();
-    let metadata: Element<'a, ProjectSurfaceMessage> = if horizontal_metadata {
-        iced::widget::Row::with_children(metadata)
-            .spacing(12)
-            .into()
-    } else {
-        iced::widget::Column::with_children(metadata)
-            .spacing(4)
-            .into()
-    };
+    let mut metadata_rows = column![].spacing(6);
+    let mut fields = metadata.into_iter().peekable();
+    while fields.peek().is_some() {
+        let mut line = row![].spacing(8);
+        for field in fields.by_ref().take(metadata_columns) {
+            line = line.push(container(field).width(field_width));
+        }
+        metadata_rows = metadata_rows.push(line);
+    }
+    let metadata = metadata_rows;
+    let metadata_width =
+        field_width * metadata_columns as f32 + (metadata_columns - 1) as f32 * 8.0;
     let synopsis_id = selected_id.clone();
     let done = ProjectSurfaceMessage::Project(ProjectMessage::EndOutlineField {
         node_id: selected.to_owned(),
@@ -4639,19 +4936,18 @@ fn outline_fields<'a>(
         theme,
     );
     let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
-    if has_metadata && width >= 340.0 {
+    if has_metadata {
         row![
-            container(synopsis).width(Length::FillPortion(1)),
-            container(metadata).width(if horizontal_metadata {
-                metadata_count as f32 * 156.0 - 12.0
-            } else {
-                144.0
-            })
+            container(synopsis)
+                .padding(iced::Padding {
+                    top: if group { 18.0 } else { 0.0 },
+                    ..Default::default()
+                })
+                .width(Length::FillPortion(1)),
+            container(metadata).width(metadata_width)
         ]
         .spacing(12)
         .into()
-    } else if has_metadata {
-        column![synopsis, metadata].spacing(4).into()
     } else {
         synopsis
     }
@@ -4670,24 +4966,49 @@ fn inspector<'a>(
         let title: Element<'a, ProjectSurfaceMessage> = if compact {
             text(format!("Comments · {title}")).size(12).into()
         } else {
-            harness_target::target(HarnessTarget::InspectorTitle, text(title).size(14))
+            harness_target::target(
+                HarnessTarget::InspectorTitle,
+                column![
+                    text("Comments").size(14).font(Font {
+                        weight: font::Weight::Semibold,
+                        ..Font::DEFAULT
+                    }),
+                    components::muted_label(title),
+                ]
+                .spacing(2),
+            )
         };
         let editor = workspace.editor();
         let mut comments = column![].spacing(SPACING_8);
         let threads = editor.inspector_comments();
+        let document_choices = matches!(
+            editor.inspector_context(),
+            crate::InspectorContext::Group { .. }
+        )
+        .then(|| workspace.history_document_choices());
         for thread in threads {
             let thread_id = thread.id().to_owned();
             let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
-            let state = if thread.resolved() {
-                "Resolved"
-            } else {
-                "Unresolved"
-            };
-            let state_color = if thread.resolved() {
-                theme.palette().comment_resolved
-            } else {
-                theme.palette().comment_active
-            };
+            if selected_thread {
+                comments = comments.push(
+                    container(
+                        crate::iced_editor_surface::comment_thread_card(
+                            "",
+                            comment_anchor_summary(thread.anchor()),
+                            thread,
+                            editor,
+                            theme,
+                        )
+                        .map(ProjectSurfaceMessage::EditorCenter),
+                    )
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(move |_| {
+                        components::surface(theme, Surface::Panel, Interaction::Selected)
+                    }),
+                );
+                continue;
+            }
             let root_body = thread
                 .messages()
                 .first()
@@ -4695,37 +5016,31 @@ fn inspector<'a>(
             let summary = row![
                 column![
                     text(root_body).size(u32::from(UI_BODY.size)),
-                    text(
-                        if matches!(
-                            editor.inspector_context(),
-                            crate::InspectorContext::Group { .. }
-                        ) {
-                            format!(
-                                "{} · {}",
-                                workspace
-                                    .history_document_choices()
-                                    .into_iter()
-                                    .find(|(id, _)| *id == thread.document_id())
-                                    .map(|(_, title)| title)
-                                    .unwrap_or("Document"),
-                                comment_anchor_summary(thread.anchor())
-                            )
-                        } else {
+                    text(if let Some(document_choices) = &document_choices {
+                        format!(
+                            "{} · {}",
+                            document_choices
+                                .iter()
+                                .find(|(id, _)| *id == thread.document_id())
+                                .map(|(_, title)| *title)
+                                .unwrap_or("Document"),
                             comment_anchor_summary(thread.anchor())
-                        }
-                    )
+                        )
+                    } else {
+                        comment_anchor_summary(thread.anchor())
+                    })
                     .size(u32::from(UI_COMPACT.size))
                     .color(theme.palette().secondary_text),
                 ]
                 .spacing(SPACING_4)
                 .width(Length::Fill),
-                text(state)
+                text(if thread.resolved() { "Resolved" } else { "" })
                     .size(u32::from(UI_LABEL.size))
                     .font(Font {
                         weight: font::Weight::Semibold,
                         ..Font::DEFAULT
                     })
-                    .color(state_color),
+                    .color(theme.palette().comment_resolved),
             ]
             .spacing(SPACING_8);
             let context_id = thread_id.clone();
@@ -4778,8 +5093,8 @@ fn inspector<'a>(
             .height(Length::Fill)
     } else {
         column![
-            text("Comments").size(12),
-            text("Open a document to view its comments.").size(12),
+            components::muted_label("Comments"),
+            components::muted_label("Open a document to view its comments."),
         ]
         .spacing(10)
     };
@@ -4800,6 +5115,22 @@ fn status_bar<'a>(
     inspector_visible: bool,
     show_companion: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    let link_label = workspace
+        .editor()
+        .hovered_link
+        .as_deref()
+        .filter(|_| show_companion)
+        .map(|target| {
+            if let Some(id) = target.strip_prefix("parchmint://document/") {
+                workspace
+                    .explorer()
+                    .breadcrumb_for_document(id)
+                    .map(|path| path.join(" > "))
+                    .unwrap_or_else(|| "Unavailable document".into())
+            } else {
+                target.to_owned()
+            }
+        });
     let label = match workspace.save().state() {
         SaveState::SavedThrough(_) => "Saved".to_owned(),
         SaveState::Dirty { .. } => "Unsaved changes".to_owned(),
@@ -4865,7 +5196,24 @@ fn status_bar<'a>(
             ))
             .size(12),
         )
-        .push(Space::new().width(Length::Fill))
+        .push(
+            container(
+                iced::widget::rich_text::<(), _, _, _>([
+                    iced::widget::span(link_label.clone().unwrap_or_default())
+                        .color(theme.palette().accent)
+                        .underline(true),
+                    iced::widget::span(if link_label.is_some() {
+                        "   Ctrl+click to follow"
+                    } else {
+                        ""
+                    })
+                    .color(theme.palette().secondary_text),
+                ])
+                .size(12),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        )
         .push(text(label).size(12));
     let content = if show_companion {
         content.push(comments_control)
@@ -4874,12 +5222,21 @@ fn status_bar<'a>(
     };
     focus::f6_region(
         F6Region::StatusBar,
-        container(content)
-            .padding([2, if show_companion { 12 } else { 16 }])
-            .width(Length::Fill)
-            .height(Length::Fixed(f32::from(STATUS_HEIGHT)))
-            .align_y(iced::alignment::Vertical::Center)
-            .style(move |_| components::surface(theme, Surface::Status, Interaction::Rest)),
+        column![
+            container(Space::new())
+                .width(Length::Fill)
+                .height(1)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(Background::Color(theme.palette().divider)),
+                    ..Default::default()
+                }),
+            container(content)
+                .padding([2, if show_companion { 12 } else { 16 }])
+                .width(Length::Fill)
+                .height(Length::Fixed(f32::from(STATUS_HEIGHT) - 1.0))
+                .align_y(iced::alignment::Vertical::Center)
+                .style(move |_| components::surface(theme, Surface::Status, Interaction::Rest)),
+        ],
     )
 }
 
@@ -4896,7 +5253,7 @@ fn status_pane_button<'a>(
             target,
             button(container(icon_sized(icon, 18)).center(Length::Fill))
                 .width(32)
-                .height(24)
+                .height(22)
                 .padding(0)
                 .on_press_maybe(message)
                 .style(move |_, status| {
@@ -4963,6 +5320,49 @@ fn modal_view<'a>(
         .into();
     }
     if let ProjectModal::ManageSettings(category) = modal {
+        let action = |label: &'static str, message, kind| {
+            button(text(label).size(13))
+                .padding([6, 16])
+                .style(move |_, status| {
+                    components::button_style(theme, kind, interaction(status, false))
+                })
+                .on_press(ProjectSurfaceMessage::Project(message))
+        };
+        if workspace.settings_cancel_pending {
+            return container(
+                column![
+                    text("Discard changes?").size(18),
+                    text("Your changes in this dialog will be discarded.")
+                        .size(13)
+                        .color(theme.palette().secondary_text),
+                    row![
+                        Space::new().width(Length::Fill),
+                        focus::region(
+                            focus::modal_cancel_id(),
+                            action(
+                                "Keep editing",
+                                ProjectMessage::KeepEditingSettings,
+                                ButtonKind::Secondary
+                            )
+                        ),
+                        focus::region(
+                            focus::modal_confirm_id(),
+                            action(
+                                "Discard",
+                                ProjectMessage::ConfirmDiscardSettings,
+                                ButtonKind::Primary
+                            )
+                        ),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(12),
+            )
+            .padding(16)
+            .width(400)
+            .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Rest))
+            .into();
+        }
         return container(
             column![
                 settings_content(workspace, category, theme),
@@ -4970,24 +5370,30 @@ fn modal_view<'a>(
                     Space::new().width(Length::Fill),
                     focus::region(
                         focus::modal_cancel_id(),
-                        button(text("Done").size(13))
-                            .padding([8, 20])
-                            .style(move |_, status| components::button_style(
-                                theme,
-                                ButtonKind::Primary,
-                                interaction(status, false)
-                            ))
-                            .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal))
-                    )
+                        action(
+                            "Cancel",
+                            ProjectMessage::DismissModal,
+                            ButtonKind::Secondary
+                        )
+                    ),
+                    focus::region(
+                        focus::modal_confirm_id(),
+                        action(
+                            "Save",
+                            ProjectMessage::SaveSettingsManager,
+                            ButtonKind::Primary
+                        )
+                    ),
                 ]
+                .spacing(8)
                 .align_y(iced::alignment::Vertical::Center),
             ]
-            .spacing(16),
+            .spacing(8),
         )
-        .padding(24)
-        .width(1000)
-        .height(600)
-        .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
+        .padding(10)
+        .width(1160)
+        .height(660)
+        .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Rest))
         .into();
     }
     if let ProjectModal::SaveBeforeClosing { title, .. } = &modal {
@@ -5052,53 +5458,20 @@ fn modal_view<'a>(
             column![].spacing(2),
             |rows, (index, (id, label, depth, has_children, expanded))| {
                 let selected = id == *parent_id;
-                let disclosure: Element<'a, ProjectSurfaceMessage> = if has_children {
-                    button(icon_sized(
-                        if expanded {
-                            Icon::ChevronDown
-                        } else {
-                            Icon::ChevronRight
-                        },
-                        16,
-                    ))
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ToggleDraftFolder(id.clone()),
-                    ))
-                    .padding(4)
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            interaction(status, false),
-                        )
-                    })
-                    .into()
-                } else {
-                    Space::new().width(24).into()
-                };
-                rows.push(
-                    row![
-                        Space::new().width(depth as f32 * 18.0),
-                        disclosure,
-                        focus::region(
-                            iced::widget::Id::from(format!("draft-location-{index}")),
-                            button(text(label).size(13))
-                                .width(Length::Fill)
-                                .padding([8, 10])
-                                .on_press(ProjectSurfaceMessage::Project(
-                                    ProjectMessage::SetDraftParent(id),
-                                ))
-                                .style(move |_, status| {
-                                    components::button_style(
-                                        theme,
-                                        ButtonKind::Quiet,
-                                        interaction(status, selected),
-                                    )
-                                }),
-                        )
-                    ]
-                    .align_y(iced::alignment::Vertical::Center),
-                )
+                rows.push(focus::region(
+                    iced::widget::Id::from(format!("draft-location-{index}")),
+                    components::location_row(
+                        label,
+                        depth,
+                        has_children.then_some(expanded),
+                        selected,
+                        ProjectSurfaceMessage::Project(ProjectMessage::ToggleDraftFolder(
+                            id.clone(),
+                        )),
+                        ProjectSurfaceMessage::Project(ProjectMessage::SetDraftParent(id)),
+                        theme,
+                    ),
+                ))
             },
         );
         return container(
@@ -5117,7 +5490,7 @@ fn modal_view<'a>(
                         theme,
                         field_interaction(status)
                     )),
-                text("Location").size(12),
+                components::muted_label("Location"),
                 container(scrollable(locations).height(Length::Shrink)).max_height(220),
                 row![
                     Space::new().width(Length::Fill),
@@ -5277,7 +5650,7 @@ fn modal_view<'a>(
     )
     .padding(16)
     .width(Length::Fixed(520.0))
-    .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Focused))
+    .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Rest))
     .into()
 }
 
@@ -5354,12 +5727,16 @@ mod tests {
     }
 
     #[test]
-    fn cards_show_synopsis_and_labelled_metadata_without_requiring_selection() {
+    fn cards_show_labeled_metadata_in_the_compact_column() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
             Size::new(1_440.0, 900.0),
-            cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+            cards_center(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                None,
+            ),
         );
 
         assert!(simulator.find("Point of view").is_ok());
@@ -5378,13 +5755,109 @@ mod tests {
     }
 
     #[test]
+    fn creation_placeholder_matches_a_standard_document_card() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let mut surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1440.0, 1200.0),
+            cards_center(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                None,
+            ),
+        );
+        let card = surface
+            .find(harness_target::card_id("chapter-three"))
+            .unwrap()
+            .bounds();
+        let half = surface
+            .find(HarnessTarget::OverviewAdd.id())
+            .unwrap()
+            .bounds();
+        assert_eq!(half.height, card.height);
+        assert!((half.width * 2.0 + 1.0 - card.width).abs() < 1.0);
+    }
+
+    #[test]
+    fn brand_opens_projects_with_or_without_the_explorer() {
+        for expanded in [false, true] {
+            let mut surface = Simulator::with_size(
+                Settings::default(),
+                Size::new(320.0, 60.0),
+                project_selector(
+                    "Project",
+                    expanded,
+                    240,
+                    ParchMintTheme::new(ResolvedAppearance::Dark),
+                ),
+            );
+            surface.click(HarnessTarget::ProjectMenu.id()).unwrap();
+            assert!(
+                surface
+                    .into_messages()
+                    .any(|message| message == ProjectSurfaceMessage::ShowProjectChooser)
+            );
+        }
+    }
+
+    #[test]
+    fn cards_expand_independently_in_place_and_keep_all_fields_editable() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let generation = workspace.cards().motion_generation();
+        for id in ["chapter-one", "chapter-two"] {
+            workspace.update(ProjectMessage::ToggleCardDetails(id.into()));
+        }
+        assert_eq!(workspace.cards().motion_generation(), generation);
+        assert!(workspace.modal().is_none());
+        let items = workspace.cards().items();
+        for id in ["chapter-one", "chapter-two"] {
+            let item = items.iter().find(|item| item.node_id == id).unwrap();
+            assert!(item.details_expanded);
+            assert!(item.row_height(420.0) > crate::cards_layout::CARD_HEIGHT);
+        }
+        let mut surface = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1280.0, 1200.0),
+            cards_center(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                None,
+            ),
+        );
+        assert!(surface.find("Point of view").is_ok());
+        surface
+            .click(iced::widget::Id::from("card-details-chapter-one"))
+            .unwrap();
+        assert!(surface.into_messages().any(|message| message
+            == ProjectSurfaceMessage::Project(ProjectMessage::ToggleCardDetails(
+                "chapter-one".into()
+            ))));
+        workspace.update(ProjectMessage::ToggleCardDetails("chapter-one".into()));
+        let items = workspace.cards().items();
+        assert!(
+            !items
+                .iter()
+                .find(|item| item.node_id == "chapter-one")
+                .unwrap()
+                .details_expanded
+        );
+        assert!(
+            items
+                .iter()
+                .find(|item| item.node_id == "chapter-two")
+                .unwrap()
+                .details_expanded
+        );
+    }
+
+    #[test]
     fn group_heading_toggles_while_synopsis_click_edits_only_that_field() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let mut simulator = Simulator::with_size(
             Settings::default(),
             Size::new(840.0, 900.0),
-            cards_center(&workspace, theme),
+            cards_center(&workspace, theme, None),
         );
         simulator.click("Part One").unwrap();
         assert_eq!(
@@ -5396,7 +5869,7 @@ mod tests {
         let mut simulator = Simulator::with_size(
             Settings::default(),
             Size::new(840.0, 900.0),
-            cards_center(&workspace, theme),
+            cards_center(&workspace, theme, None),
         );
         simulator
             .click(iced::widget::Id::from("synopsis-part-one".to_owned()))
@@ -5456,7 +5929,11 @@ mod tests {
             let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
                 Settings::default(),
                 Size::new(width, 250.0),
-                cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+                cards_center(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    None,
+                ),
             );
             let group = simulator.find(harness_target::card_id("part-one")).unwrap();
             assert!((group.bounds().width - group.visible_bounds().unwrap().width).abs() < 1.0);
@@ -5470,7 +5947,11 @@ mod tests {
             let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
                 Settings::default(),
                 Size::new(width, 900.0),
-                cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+                cards_center(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    None,
+                ),
             );
             let mut bounds = |id| {
                 simulator
@@ -5527,7 +6008,11 @@ mod tests {
             let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
                 Settings::default(),
                 Size::new(420.0, 900.0),
-                cards_center(workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+                cards_center(
+                    workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    None,
+                ),
             );
             ["chapter-one", "chapter-two", "chapter-three"].map(|id| {
                 simulator
@@ -5549,7 +6034,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_fit_the_complete_synopsis_and_metadata_after_edits() {
+    fn cards_keep_standard_geometry_after_long_field_edits() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let before = workspace.cards().item_window(2, 792.0).rows[1].height;
         let synopsis = format!(
@@ -5568,7 +6053,10 @@ mod tests {
             field_id: "field-17".into(),
             value: value.clone(),
         });
-        assert!(workspace.cards().item_window(2, 792.0).rows[1].height > before);
+        assert_eq!(
+            workspace.cards().item_window(2, 792.0).rows[1].height,
+            before
+        );
         for (width, appearance) in [
             (420.0, ResolvedAppearance::Light),
             (840.0, ResolvedAppearance::Light),
@@ -5578,7 +6066,7 @@ mod tests {
             let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
                 Settings::default(),
                 Size::new(width, 900.0),
-                cards_center(&workspace, theme),
+                cards_center(&workspace, theme, None),
             );
             let synopsis_bounds = simulator
                 .find(iced::widget::Id::from("synopsis-chapter-one".to_owned()))
@@ -5596,11 +6084,8 @@ mod tests {
                 .bounds();
             assert!(synopsis_bounds.height > 40.0);
             assert!(metadata_bounds.height > 18.0);
-            if card.width >= 340.0 {
-                assert!(metadata_bounds.x >= synopsis_bounds.x + synopsis_bounds.width);
-            } else {
-                assert!(metadata_bounds.y >= synopsis_bounds.y + synopsis_bounds.height);
-            }
+            assert_eq!(card.height, crate::cards_layout::CARD_HEIGHT);
+            assert!(metadata_bounds.x >= synopsis_bounds.x + synopsis_bounds.width);
             assert!(metadata_bounds.y + metadata_bounds.height <= card.y + card.height - SPACING_8);
             if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
                 simulator
@@ -5641,7 +6126,11 @@ mod tests {
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
             Size::new(840.0, 700.0),
-            cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+            cards_center(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                None,
+            ),
         );
         let bounds = simulator
             .find(harness_target::card_id("chapter-one"))
@@ -5679,7 +6168,7 @@ mod tests {
         );
         for label in [
             "Open",
-            "Open in companion",
+            "Open beside",
             "History",
             "Rename",
             "Copy",
@@ -5727,7 +6216,11 @@ mod tests {
             let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
                 Settings::default(),
                 Size::new(840.0, 700.0),
-                cards_center(&workspace, ParchMintTheme::new(ResolvedAppearance::Light)),
+                cards_center(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    None,
+                ),
             );
             let bounds = simulator
                 .find(harness_target::card_id("chapter-one"))
@@ -5736,7 +6229,7 @@ mod tests {
                 .unwrap();
             let point = match region {
                 0 => iced::Point::new(17.0, bounds.center_y()),
-                1 => iced::Point::new(800.0, 650.0),
+                1 => iced::Point::new(832.0, 650.0),
                 _ => iced::Point::new(1.0, 1.0),
             };
             simulator.point_at(point);
@@ -5803,7 +6296,7 @@ mod tests {
         let layout = ShellLayout::for_window(1_440, 900);
 
         assert_eq!(layout.ribbon().height(), 44);
-        assert_eq!(layout.status_bar().height(), 32);
+        assert_eq!(layout.status_bar().height(), 26);
         assert_eq!(layout.explorer().width(), 280);
         assert_eq!(layout.inspector().width(), 0);
         assert_eq!(layout.center().width(), 1_160);
@@ -5908,12 +6401,7 @@ mod tests {
             ),
         );
 
-        for content in ["Chapter One", "Point of view", "Location"] {
-            assert!(
-                simulator.find(content).is_ok(),
-                "Selected card shows {content}"
-            );
-        }
+        assert!(simulator.find("Chapter One").is_ok());
     }
 
     #[test]
@@ -6077,11 +6565,8 @@ mod tests {
             .find("A long selected comment that must leave room for its unresolved status")
             .unwrap()
             .bounds();
-        let status = simulator.find("Unresolved").unwrap().bounds();
-        assert!(comment.x + comment.width <= status.x);
-        assert!(status.x + status.width <= 1_440.0);
-        assert!(simulator.find("Edit message").is_err());
-        assert!(simulator.find("Reply to thread").is_err());
+        assert!(comment.x + comment.width <= 1_440.0);
+        assert!(simulator.find(HarnessTarget::CommentReply.id()).is_ok());
     }
 
     #[test]
@@ -6391,8 +6876,8 @@ mod tests {
                 text("Mounted editor child").into(),
             ),
         );
-        assert!(simulator.find("Saved version").is_ok());
-        assert!(simulator.find("Current").is_ok());
+        assert!(simulator.find("Checkpoint").is_ok());
+        assert!(simulator.find("Current project").is_ok());
         assert!(simulator.find("− 1").is_ok());
         assert!(simulator.find("+ 1").is_ok());
         assert!(simulator.find("The blue house").is_ok());
@@ -6516,7 +7001,7 @@ mod tests {
         );
         assert!(simulator.find("New document").is_ok());
         assert!(simulator.find("New group").is_ok());
-        assert!(simulator.find("Open in companion").is_err());
+        assert!(simulator.find("Open beside").is_err());
         assert!(simulator.find("Rename").is_ok());
         assert!(simulator.find("Rename item").is_err());
         assert!(simulator.find("Copy").is_ok());

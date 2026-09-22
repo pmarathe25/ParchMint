@@ -18,6 +18,7 @@ outside the repository.
 
 - **Build, test, and lint:** [Repository README](../README.md#development).
 - **Understand ownership and find a crate:** [Architecture](architecture/architecture.md).
+- **Keep the interface consistent:** [Visual language](design-language.md).
 - **Run editor benchmarks:** [Benchmark guide](../plans/implemented/editor-benchmark-guide.md).
 - **Follow repository instructions:** [AGENTS.md](../AGENTS.md).
 - **Build and publish installers:** [Release packaging](../packaging/README.md).

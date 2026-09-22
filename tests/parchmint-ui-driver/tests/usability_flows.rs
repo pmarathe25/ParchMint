@@ -163,14 +163,14 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .unwrap();
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Create custom style")
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CreateStyle)
             .unwrap()
     );
     capture(&harness, "styles-context-light");
     harness
-        .click_text(HarnessWindow::Project, "Create custom style")
+        .click_target(HarnessWindow::Project, HarnessTarget::CreateStyle)
         .unwrap();
-    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    harness.click_text(HarnessWindow::Project, "Save").unwrap();
     assert_eq!(harness.active_editor_body().unwrap(), formatted);
 
     // Caret controls change future typing, not the paragraph's shared style.
@@ -243,10 +243,10 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
 
     let title = harness.active_editor_tab_title().unwrap();
     harness
-        .right_click_text(HarnessWindow::Project, title)
+        .right_click_text(HarnessWindow::Project, &title)
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Open in companion")
+        .click_text(HarnessWindow::Project, "Open beside")
         .unwrap();
     harness
         .select_editor_text(HarnessWindow::Project, EditorPane::Companion, "ordinary")
@@ -302,7 +302,7 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "+ New field")
+        .click_target(HarnessWindow::Project, HarnessTarget::CreateMetadataField)
         .unwrap();
     harness
         .type_into_target(
@@ -315,12 +315,32 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .click_text(HarnessWindow::Project, "Add field")
         .unwrap();
     capture(&harness, "metadata-context-dark-compact");
-    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    harness.click_text(HarnessWindow::Project, "Save").unwrap();
+    assert!(
+        !harness
+            .text_is_visible(HarnessWindow::Project, "Viewpoint")
+            .unwrap(),
+        "new fields should stay out of collapsed cards"
+    );
+    let card = harness.hierarchy_node(&title).unwrap();
+    harness
+        .toggle_card_details(HarnessWindow::Project, card.clone())
+        .unwrap();
     assert!(
         harness
             .text_is_visible(HarnessWindow::Project, "Viewpoint")
             .unwrap()
     );
+    harness.click_text(HarnessWindow::Project, "—").unwrap();
+    harness
+        .type_focused(HarnessWindow::Project, "Planning viewpoint marker")
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .unwrap();
+    harness
+        .toggle_card_details(HarnessWindow::Project, card)
+        .unwrap();
     route(&harness, RibbonDestination::Editor);
     let saved = harness.active_editor_body().unwrap();
     harness.close(HarnessWindow::Project).unwrap();
@@ -328,6 +348,11 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
     let reopened =
         DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
     assert_eq!(reopened.active_editor_body().unwrap(), saved);
+    assert!(
+        std::fs::read_to_string(project.join("project.toml"))
+            .unwrap()
+            .contains("Planning viewpoint marker")
+    );
     assert!(
         std::fs::read_to_string(project.join("project.toml"))
             .unwrap()
@@ -465,13 +490,13 @@ fn creation_has_one_primary_entry_and_keeps_writing_controls_usable() {
         .click_target(HarnessWindow::Project, HarnessTarget::ManageStyles)
         .unwrap();
     capture(&harness, "styles-dark-compact");
-    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    harness.click_text(HarnessWindow::Project, "Save").unwrap();
     route(&harness, RibbonDestination::Cards);
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ManageMetadata)
         .unwrap();
     capture(&harness, "metadata-dark-compact");
-    harness.click_text(HarnessWindow::Project, "Done").unwrap();
+    harness.click_text(HarnessWindow::Project, "Save").unwrap();
     route(&harness, RibbonDestination::Export);
     capture(&harness, "export-dark-compact");
     route(&harness, RibbonDestination::Cards);
@@ -626,8 +651,8 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
             .unwrap()
     );
     for text in [
-        "Saved version",
-        "Current",
+        "Checkpoint",
+        "Current project",
         "Early draft",
         "Revised draft",
         "New ending",
@@ -644,7 +669,7 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     }
     assert!(
         harness
-            .text_is_visible(HarnessWindow::Project, "Saved version")
+            .text_is_visible(HarnessWindow::Project, "Checkpoint")
             .unwrap()
     );
     route(&harness, RibbonDestination::Editor);
@@ -697,7 +722,7 @@ fn a_failed_history_action_is_reported_and_its_banner_expires() {
         "an expired error banner must leave the workspace"
     );
     harness
-        .click_text(HarnessWindow::Project, "Notifications 1")
+        .click_text(HarnessWindow::Project, "Notifications")
         .unwrap();
     capture(&harness, "error-drawer");
     assert!(

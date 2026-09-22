@@ -91,3 +91,11 @@ not include a license file. The official Iced license text is available at
 
 Remove this patch and its workspace Cargo override when the selected upstream
 version includes these fixes.
+
+## SVG cache and tint
+
+Partial repaints retain parsed SVGs and rasterized icon sizes instead of evicting
+icons outside the damaged area. The cache caps parsed trees at 128, raster variants
+at 512, and raster storage at 8 MiB; exceeding a cap first removes entries unused
+in the current paint pass. Icon tint alpha multiplies source alpha, so muted and
+disabled icon colors retain their intended transparency. Vector tests cover both.

@@ -486,13 +486,18 @@ where
         viewport: &Rectangle,
         renderer: &Renderer,
     ) -> mouse::Interaction {
-        self.content.as_widget().mouse_interaction(
+        let child = self.content.as_widget().mouse_interaction(
             &tree.children[0],
             layout,
             cursor,
             viewport,
             renderer,
-        )
+        );
+        if child == mouse::Interaction::default() && cursor.is_over(layout.bounds()) {
+            mouse::Interaction::Pointer
+        } else {
+            child
+        }
     }
 
     fn operate(

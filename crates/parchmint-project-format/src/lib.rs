@@ -2455,7 +2455,7 @@ fn validate_annotation_value(value: serde_json::Value) -> Result<serde_json::Val
             }
             serde_json::Value::String(text) => text
                 .chars()
-                .all(|character| character == '\n' || !character.is_control()),
+                .all(|character| matches!(character, '\n' | '\t') || !character.is_control()),
             serde_json::Value::Array(values) => values.iter().all(check),
             serde_json::Value::Object(values) => {
                 values.keys().all(|key| !key.is_empty()) && values.values().all(check)
@@ -2578,6 +2578,9 @@ fn encode_style_properties(properties: &StyleProperties) -> BTreeMap<String, Str
             if value { "italic" } else { "normal" }.into(),
         );
     }
+    if let Some(value) = properties.text_decoration {
+        declarations.insert("text-decoration-line".into(), value.to_string());
+    }
     if let Some(value) = properties.alignment {
         declarations.insert(
             "text-align".into(),
@@ -2639,6 +2642,11 @@ fn decode_style_properties(
                         ));
                     }
                 })
+            }
+            "text-decoration-line" => {
+                properties.text_decoration = Some(value.parse().map_err(|_| {
+                    FormatError::InvalidStyles("unsupported text decoration".into())
+                })?);
             }
             "text-align" => {
                 properties.alignment = Some(match value.as_str() {
@@ -2825,6 +2833,7 @@ fn is_supported_style_property(property: &str) -> bool {
             | "font-size"
             | "font-weight"
             | "font-style"
+            | "text-decoration-line"
             | "text-align"
             | "text-indent"
             | "margin-left"
@@ -3188,6 +3197,12 @@ fn validate_html_attribute(tag: &str, name: &str, value: &str) -> Result<(), For
 }
 
 fn is_safe_href(value: &str) -> bool {
+    if value
+        .strip_prefix("parchmint://document/")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return true;
+    }
     if value.is_empty()
         || value.starts_with(['/', '\\'])
         || value.starts_with("//")
@@ -3358,6 +3373,23 @@ mod tests {
     }
 
     #[test]
+    fn internal_document_links_are_valid_canonical_content() {
+        let html =
+            "<p><a href=\"parchmint://document/01010101010101010101010101010101\">Chapter</a></p>";
+        assert!(codec().decode_document(html.as_bytes()).is_ok());
+        for target in [
+            "parchmint://document/../../outside",
+            "parchmint://run/01010101010101010101010101010101",
+        ] {
+            assert!(
+                codec()
+                    .decode_document(format!("<p><a href=\"{target}\">link</a></p>").as_bytes())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn document_word_counts_exclude_markup_and_join_inline_text() {
         for (html, expected) in [
             ("<p></p>", 0),
@@ -3516,8 +3548,8 @@ mod tests {
             "id":"02020202020202020202020202020202",
             "resolved":false,
             "future":{"author":"kept"},
-            "messages":[{"id":"03030303030303030303030303030303","body":"note","display":"kept"}],
-            "anchor":{"kind":"range","block_id":"04040404040404040404040404040404","start":1,"end":3,"quote":"bc","context_before":"a","context_after":"d","orphaned":false,"confidence":1}
+            "messages":[{"id":"03030303030303030303030303030303","body":"note\twith a tab","display":"kept"}],
+            "anchor":{"kind":"range","block_id":"04040404040404040404040404040404","start":1,"end":3,"quote":"b\t","context_before":"a","context_after":"d","orphaned":false,"confidence":1}
           }]
         }"#;
         let decoded = codec().decode_annotations(bytes).unwrap();
@@ -3579,6 +3611,7 @@ mod tests {
             font_size_points: Some(12.5),
             weight: Some(450),
             italic: Some(false),
+            text_decoration: Some(parchmint_domain::TextDecoration::UnderlineAndStrikethrough),
             alignment: Some(TextAlignment::Justify),
             first_line_indent_points: Some(18.0),
             left_indent_points: Some(0.0),

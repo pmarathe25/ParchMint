@@ -10,6 +10,7 @@ use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
+    rc::Rc,
 };
 
 use iced::widget::text_editor;
@@ -19,7 +20,7 @@ use parchmint_domain::{
     MetadataApplicability as DomainMetadataApplicability, MetadataFieldDefinition, MetadataFieldId,
     MetadataTextKind as DomainMetadataTextKind, NodeKind, Project, ProjectExportSetting,
     ProjectExportSettings, ProjectSection, StyleCatalog, StyleDefinition, StyleId, StyleProperties,
-    StyleRole, TextAlignment,
+    StyleRole,
 };
 use parchmint_editor_api::{CanonicalDocumentLoad, SemanticDocument};
 use parchmint_editor_core::EditorCoreSession;
@@ -223,7 +224,7 @@ pub struct ExplorerState {
 }
 
 impl ExplorerState {
-    fn fixture() -> Self {
+    pub(crate) fn fixture() -> Self {
         let mut nodes = BTreeMap::new();
         for node in [
             HierarchyNode::new(
@@ -312,7 +313,7 @@ impl ExplorerState {
         }
     }
 
-    fn from_project(project: &Project) -> Self {
+    pub(crate) fn from_project(project: &Project) -> Self {
         let mut nodes = BTreeMap::new();
         for (id, node) in project.nodes.iter() {
             let id = stable_id_string(id.as_bytes());
@@ -366,7 +367,7 @@ impl ExplorerState {
         }
     }
 
-    fn reconcile_project(&mut self, project: &Project) {
+    pub(crate) fn reconcile_project(&mut self, project: &Project) {
         let mut authoritative = Self::from_project(project);
         authoritative.expanded = self
             .expanded
@@ -675,7 +676,7 @@ impl ExplorerState {
         self.normalize_selection();
     }
 
-    fn toggle_expanded(&mut self, node_id: &str) {
+    pub(crate) fn toggle_expanded(&mut self, node_id: &str) {
         let is_container = self.nodes.get(node_id).is_some_and(|node| {
             matches!(
                 node.kind,
@@ -820,10 +821,12 @@ fn synopsis_editors(explorer: &ExplorerState) -> BTreeMap<String, text_editor::C
 pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
     expanded: &'a BTreeSet<String>,
+    details_expanded: &'a BTreeSet<String>,
     section_id: &'a str,
     word_counts: BTreeMap<String, usize>,
     scroll_offset: f32,
     measurements: &'a RefCell<BTreeMap<String, (u64, f32)>>,
+    grid_cache: &'a RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
@@ -844,6 +847,22 @@ pub(crate) struct CardsWindow {
     pub top_padding: f32,
     pub bottom_padding: f32,
     pub rows: Vec<CardsGridRow>,
+    ids: Rc<Vec<String>>,
+}
+
+#[derive(Debug)]
+struct CardsGridLayout {
+    rows: Vec<CardsGridRow>,
+    ids: Rc<Vec<String>>,
+    offsets: Vec<f32>,
+}
+
+impl std::ops::Deref for CardsGridLayout {
+    type Target = [CardsGridRow];
+
+    fn deref(&self) -> &Self::Target {
+        &self.rows
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -859,6 +878,7 @@ pub(crate) struct CardsGridRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardItem<'a> {
     pub(crate) editable_metadata: Vec<(&'a str, &'a str)>,
+    pub(crate) has_hidden_metadata: bool,
     pub node_id: &'a str,
     pub document_id: Option<&'a str>,
     pub title: &'a str,
@@ -867,6 +887,7 @@ pub struct CardItem<'a> {
     pub kind: HierarchyRowKind,
     pub depth: usize,
     pub expanded: bool,
+    pub details_expanded: bool,
     pub visible: bool,
     pub selected: bool,
     pub metadata: Vec<(&'a str, &'a str, Option<&'a str>)>,
@@ -906,6 +927,8 @@ impl<'a> CardsState<'a> {
         let mut hash = DefaultHasher::new();
         self.section_id.hash(&mut hash);
         self.expanded.hash(&mut hash);
+        // Detail expansion changes row height immediately. Reserve positional
+        // reflow for hierarchy changes so later rows cannot cross enlarged cards.
         for id in self.explorer.preorder_ids() {
             id.hash(&mut hash);
             self.explorer.nodes[id].parent.hash(&mut hash);
@@ -942,7 +965,22 @@ impl<'a> CardsState<'a> {
             .count()
     }
 
-    fn grid_rows(&self, columns: usize, width: f32) -> Vec<CardsGridRow> {
+    fn grid_rows(&self, columns: usize, width: f32) -> Rc<CardsGridLayout> {
+        let mut hash = DefaultHasher::new();
+        (
+            columns,
+            width.to_bits(),
+            self.section_id,
+            self.expanded,
+            self.details_expanded,
+        )
+            .hash(&mut hash);
+        let signature = hash.finish();
+        if let Some((previous, rows)) = self.grid_cache.borrow().as_ref()
+            && *previous == signature
+        {
+            return Rc::clone(rows);
+        }
         let ids = self
             .explorer
             .preorder_ids()
@@ -961,7 +999,7 @@ impl<'a> CardsState<'a> {
                 rows.push(CardsGridRow {
                     start: index,
                     end: index,
-                    height: 56.0 + CARDS_ROW_GAP,
+                    height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
                     add_to: Some(parent),
                     depth: depth + 1,
                 });
@@ -977,9 +1015,10 @@ impl<'a> CardsState<'a> {
                 item.title,
                 item.synopsis,
                 item.kind == HierarchyRowKind::Group,
-                &item.metadata,
                 item.words,
                 item.expanded,
+                item.details_expanded,
+                item.has_hidden_metadata,
                 &item.editable_metadata,
             )
                 .hash(&mut hasher);
@@ -1021,7 +1060,7 @@ impl<'a> CardsState<'a> {
             rows.push(CardsGridRow {
                 start: ids.len(),
                 end: ids.len(),
-                height: 56.0 + CARDS_ROW_GAP,
+                height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
                 add_to: Some(parent),
                 depth: depth + 1,
             });
@@ -1029,7 +1068,7 @@ impl<'a> CardsState<'a> {
         rows.push(CardsGridRow {
             start: ids.len(),
             end: ids.len(),
-            height: 56.0 + CARDS_ROW_GAP,
+            height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
             add_to: Some(self.section_id.to_owned()),
             depth: 0,
         });
@@ -1050,25 +1089,72 @@ impl<'a> CardsState<'a> {
                 compact.push(row);
             }
         }
-        compact
+        for row in &mut compact {
+            if row
+                .add_to
+                .as_deref()
+                .is_some_and(|id| id != self.section_id)
+            {
+                row.height += crate::cards_layout::GROUP_GAP + 12.0;
+            }
+        }
+        let mut offsets = Vec::with_capacity(compact.len() + 1);
+        offsets.push(0.0);
+        for row in &compact {
+            offsets.push(offsets.last().copied().unwrap_or_default() + row.height);
+        }
+        let layout = Rc::new(CardsGridLayout {
+            rows: compact,
+            ids: Rc::new(ids.into_iter().map(str::to_owned).collect()),
+            offsets,
+        });
+        *self.grid_cache.borrow_mut() = Some((signature, Rc::clone(&layout)));
+        layout
     }
 
     pub(crate) fn item_window(&self, columns: usize, width: f32) -> CardsWindow {
         let rows = self.grid_rows(columns, width);
-        let mut top_padding = 0.0;
         let maximum_start = rows.len().saturating_sub(CARDS_WINDOW_SIZE);
-        let mut start = 0;
-        while start < maximum_start && top_padding + rows[start].height <= self.scroll_offset {
-            top_padding += rows[start].height;
-            start += 1;
-        }
+        let start = rows
+            .offsets
+            .partition_point(|offset| *offset <= self.scroll_offset)
+            .saturating_sub(1)
+            .min(maximum_start);
         let end = (start + CARDS_WINDOW_SIZE).min(rows.len());
         CardsWindow {
             start: rows.get(start).map_or(0, |row| row.start),
             end: rows.get(end.saturating_sub(1)).map_or(0, |row| row.end),
-            top_padding,
-            bottom_padding: rows[end..].iter().map(|row| row.height).sum(),
+            top_padding: rows.offsets[start],
+            bottom_padding: (rows.offsets[rows.len()] - rows.offsets[end]).max(0.0),
             rows: rows[start..end].to_vec(),
+            ids: Rc::clone(&rows.ids),
+        }
+    }
+
+    /// Mount only the viewport plus one screen of overscan. A fixed 48-row
+    /// window can otherwise mount hundreds of offscreen cards on wide displays.
+    pub(crate) fn viewport_window(&self, columns: usize, width: f32, height: f32) -> CardsWindow {
+        let rows = self.grid_rows(columns, width);
+        let total = rows.offsets[rows.len()];
+        let scroll_offset = self.scroll_offset.min((total - height).max(0.0));
+        let overscan = (height * 0.5).max(240.0);
+        let start = rows
+            .offsets
+            .partition_point(|offset| *offset < (scroll_offset - overscan * 0.5).max(0.0))
+            .saturating_sub(1)
+            .min(rows.len().saturating_sub(1));
+        let end = rows
+            .offsets
+            .partition_point(|offset| *offset < scroll_offset + height + overscan)
+            .max(start)
+            .min(rows.len());
+        CardsWindow {
+            start: rows.get(start).map_or(0, |row| row.start),
+            end: rows.get(end.saturating_sub(1)).map_or(0, |row| row.end),
+            top_padding: rows.offsets[start],
+            bottom_padding: (total - rows.offsets[end]).max(0.0),
+            rows: rows[start..end].to_vec(),
+            ids: Rc::clone(&rows.ids),
         }
     }
 
@@ -1078,14 +1164,21 @@ impl<'a> CardsState<'a> {
     }
 
     pub(crate) fn items_in_window(&self, window: &CardsWindow) -> Vec<CardItem<'a>> {
-        self.explorer
-            .preorder_ids()
-            .into_iter()
-            .filter(|node_id| self.is_visible_item(node_id))
-            .skip(window.start)
-            .take(window.end.saturating_sub(window.start))
+        window.ids[window.start..window.end]
+            .iter()
             .filter_map(|node_id| self.item(node_id))
             .collect()
+    }
+
+    pub(crate) fn item_by_id(&self, node_id: &str) -> Option<CardItem<'a>> {
+        if node_id == self.section_id
+            || self.explorer.nodes.get(node_id)?.section_id != self.section_id
+        {
+            return None;
+        }
+        let mut item = self.item(node_id)?;
+        item.visible = self.is_visible_item(node_id);
+        Some(item)
     }
 
     fn is_visible_item(&self, node_id: &str) -> bool {
@@ -1102,41 +1195,51 @@ impl<'a> CardsState<'a> {
                 .all(|id| self.expanded.contains(*id))
     }
 
-    fn item(&self, node_id: &'a str) -> Option<CardItem<'a>> {
-        let node = self.explorer.nodes.get(node_id)?;
-        let metadata = self
+    fn item(&self, node_id: &str) -> Option<CardItem<'a>> {
+        let (node_id, node) = self.explorer.nodes.get_key_value(node_id)?;
+        let node_id = node_id.as_str();
+        let node_key = node_id.to_owned();
+        let metadata_with_visibility: Vec<_> = self
             .field_order
             .iter()
             .filter_map(|field_id| {
                 let definition = self.definitions.get(field_id)?;
-                (definition.applicability.applies_to(node.kind)).then(|| {
+                (definition.applicability.applies_to_outline(node.kind)).then(|| {
                     // Defaults are copied when a node is created. Existing
                     // nodes without a stored value stay empty; a later
                     // definition edit must never rewrite their cards.
                     let value = self
                         .values
-                        .get(&(node_id.to_owned(), field_id.clone()))
+                        .get(&(node_key.clone(), field_id.clone()))
                         .map(String::as_str);
-                    (field_id.as_str(), definition.label.as_str(), value)
+                    (
+                        field_id.as_str(),
+                        definition.label.as_str(),
+                        value,
+                        definition.visible_on_cards,
+                    )
                 })
             })
             .collect();
-        Some(CardItem {
-            editable_metadata: self
-                .field_order
+        let details_expanded =
+            node.kind == HierarchyNodeKind::Group || self.details_expanded.contains(node_id);
+        let has_hidden_metadata = !details_expanded
+            && metadata_with_visibility
                 .iter()
-                .filter_map(|id| {
-                    let field = self.definitions.get(id)?;
-                    field.applicability.applies_to(node.kind).then(|| {
-                        (
-                            field.label.as_str(),
-                            self.values
-                                .get(&(node_id.to_owned(), id.clone()))
-                                .map_or("", String::as_str),
-                        )
-                    })
-                })
-                .collect(),
+                .any(|(_, _, _, visible)| !visible);
+        let editable_metadata = metadata_with_visibility
+            .iter()
+            .filter(|(_, _, _, visible)| details_expanded || *visible)
+            .map(|(_, label, value, _)| (*label, value.unwrap_or_default()))
+            .collect();
+        let metadata = metadata_with_visibility
+            .into_iter()
+            .map(|(id, label, value, _)| (id, label, value))
+            .collect();
+        Some(CardItem {
+            details_expanded,
+            has_hidden_metadata,
+            editable_metadata,
             node_id,
             document_id: node.document_id.as_deref(),
             title: &node.title,
@@ -1156,62 +1259,15 @@ impl<'a> CardsState<'a> {
     }
 }
 
-/// Which live hierarchy node kinds expose a metadata field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataFieldApplicability {
-    Groups,
-    Documents,
-    GroupsAndDocuments,
+pub use parchmint_domain::{
+    MetadataApplicability as MetadataFieldApplicability, MetadataTextKind as MetadataFieldTextKind,
+    StyleProperty,
+};
+trait OutlineApplicability {
+    fn applies_to_outline(self, kind: HierarchyNodeKind) -> bool;
 }
-
-/// The text editor shape required by a metadata definition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetadataFieldTextKind {
-    SingleLine,
-    Multiline,
-}
-
-/// One editable Settings style property. The UI intentionally names every
-/// persisted property so no formatting control silently disappears.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum StyleProperty {
-    FontFamily,
-    FontSizePoints,
-    Weight,
-    Italic,
-    Alignment,
-    FirstLineIndentPoints,
-    LeftIndentPoints,
-    RightIndentPoints,
-    LineSpacing,
-    SpaceBeforePoints,
-    SpaceAfterPoints,
-    KeepWithNext,
-    PageBreakBefore,
-}
-
-impl StyleProperty {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::FontFamily => "Font family",
-            Self::FontSizePoints => "Font size (pt)",
-            Self::Weight => "Weight",
-            Self::Italic => "Italic",
-            Self::Alignment => "Alignment",
-            Self::FirstLineIndentPoints => "First-line indent (pt)",
-            Self::LeftIndentPoints => "Left indent (pt)",
-            Self::RightIndentPoints => "Right indent (pt)",
-            Self::LineSpacing => "Line spacing",
-            Self::SpaceBeforePoints => "Space before (pt)",
-            Self::SpaceAfterPoints => "Space after (pt)",
-            Self::KeepWithNext => "Keep with next",
-            Self::PageBreakBefore => "Page break before",
-        }
-    }
-}
-
-impl MetadataFieldApplicability {
-    const fn applies_to(self, kind: HierarchyNodeKind) -> bool {
+impl OutlineApplicability for MetadataFieldApplicability {
+    fn applies_to_outline(self, kind: HierarchyNodeKind) -> bool {
         matches!(
             (self, kind),
             (Self::Groups, HierarchyNodeKind::Group)
@@ -1224,7 +1280,7 @@ impl MetadataFieldApplicability {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct MetadataDefinition {
     label: String,
     description: Option<String>,
@@ -1252,6 +1308,7 @@ pub struct InspectorMetadataItem<'a> {
     pub effective_value: Option<&'a str>,
     pub applicability: MetadataFieldApplicability,
     pub text_kind: MetadataFieldTextKind,
+    pub visible_on_cards: bool,
 }
 
 impl<'a> InspectorState<'a> {
@@ -1281,7 +1338,7 @@ impl<'a> InspectorState<'a> {
         };
         self.definitions
             .get(field_id)
-            .is_some_and(|definition| definition.applicability.applies_to(node.kind))
+            .is_some_and(|definition| definition.applicability.applies_to_outline(node.kind))
     }
 
     pub fn visible_field_ids(&self, node_id: &str) -> Vec<&str> {
@@ -1304,7 +1361,7 @@ impl<'a> InspectorState<'a> {
             .iter()
             .filter_map(|field_id| {
                 let definition = definitions.get(field_id)?;
-                if !definition.applicability.applies_to(kind) {
+                if !definition.applicability.applies_to_outline(kind) {
                     return None;
                 }
                 let stored_value = values
@@ -1320,6 +1377,7 @@ impl<'a> InspectorState<'a> {
                     effective_value: stored_value,
                     applicability: definition.applicability,
                     text_kind: definition.text_kind,
+                    visible_on_cards: definition.visible_on_cards,
                 })
             })
             .collect()
@@ -1531,7 +1589,7 @@ pub struct SettingsState {
     selected_detail: Option<SettingsDetail>,
     selected_category: SettingsCategory,
     metadata_drag_source: Option<String>,
-    metadata_drag_target: Option<usize>,
+    metadata_drag_target: Option<(usize, bool)>,
 }
 
 impl SettingsState {
@@ -1769,7 +1827,7 @@ impl SettingsState {
         self.metadata_drag_source.as_deref()
     }
 
-    pub const fn metadata_drag_target(&self) -> Option<usize> {
+    pub const fn metadata_drag_target(&self) -> Option<(usize, bool)> {
         self.metadata_drag_target
     }
 
@@ -1842,6 +1900,7 @@ pub struct GlobalSearchState {
     whole_word: bool,
     results: Vec<GlobalSearchResult>,
     groups: BTreeMap<String, Vec<usize>>,
+    collapsed: BTreeSet<String>,
     query_generation: u64,
     complete: bool,
     error: Option<String>,
@@ -1898,6 +1957,10 @@ impl GlobalSearchState {
         &self.results
     }
 
+    pub(crate) fn is_collapsed(&self, document: &str) -> bool {
+        self.collapsed.contains(document)
+    }
+
     pub fn document_count(&self) -> usize {
         self.groups.len()
     }
@@ -1929,7 +1992,16 @@ impl GlobalSearchState {
     }
 
     fn row_count(&self) -> usize {
-        self.results.len() + self.groups.len()
+        self.groups
+            .iter()
+            .map(|(id, matches)| {
+                1 + if self.collapsed.contains(id) {
+                    0
+                } else {
+                    matches.len()
+                }
+            })
+            .sum()
     }
 
     pub(crate) fn windowed_rows(&self) -> impl Iterator<Item = GlobalSearchRow<'_>> {
@@ -1939,14 +2011,19 @@ impl GlobalSearchState {
             .flat_map(move |(document_id, matches)| {
                 // Skip whole groups by size, then slice directly to the first
                 // match. Scrolling never walks all preceding matches.
-                let start = skip.min(matches.len() + 1);
-                skip = skip.saturating_sub(matches.len() + 1);
+                let visible = if self.collapsed.contains(document_id) {
+                    &matches[..0]
+                } else {
+                    &matches[..]
+                };
+                let start = skip.min(visible.len() + 1);
+                skip = skip.saturating_sub(visible.len() + 1);
                 let heading = (start == 0).then_some(GlobalSearchRow::Document {
                     document_id,
                     matches: matches.len(),
                 });
                 heading.into_iter().chain(
-                    matches[start.saturating_sub(1)..]
+                    visible[start.saturating_sub(1)..]
                         .iter()
                         .copied()
                         .map(GlobalSearchRow::Match),
@@ -2619,6 +2696,7 @@ fn comparison_line_word_count(line: &HistoryComparisonTextLine) -> usize {
 pub struct HistoryState {
     checkpoints: Vec<HistoryCheckpointRow>,
     active_document_filter: Option<String>,
+    pub(crate) group_filter: Option<String>,
     selected_checkpoint_id: Option<String>,
     preview: Option<HistoryPreviewData>,
     current_document: Option<HistoryCurrentDocument>,
@@ -3925,6 +4003,7 @@ pub enum ProjectMessage {
     },
     ToggleHierarchyExpanded(String),
     ToggleCardsExpanded(String),
+    ToggleCardDetails(String),
     SetCardsSection(String),
     SelectAndToggleHierarchyExpanded(String),
     NavigateExplorer(ExplorerNavigation),
@@ -3995,7 +4074,7 @@ pub enum ProjectMessage {
         target_index: usize,
     },
     BeginMetadataFieldDrag(String),
-    SetMetadataFieldDragTarget(usize),
+    SetMetadataFieldDragTarget(Option<(usize, bool)>),
     CommitMetadataFieldDrag,
     CancelMetadataFieldDrag,
     RequestDeleteMetadataField(String),
@@ -4025,6 +4104,7 @@ pub enum ProjectMessage {
         value: String,
     },
     RequestDeleteStyle(String),
+    ResetStyle(String),
     ConfirmDeleteStyle,
     ActivateCard(String),
     SetCardsScroll(f32),
@@ -4075,6 +4155,7 @@ pub enum ProjectMessage {
     },
     SetGlobalSearchQuery(String),
     ToggleGlobalReplace,
+    ToggleSearchDocument(String),
     OpenCommentDetails(String),
     SetGlobalReplacement(String),
     SetGlobalSearchOptions {
@@ -4091,6 +4172,7 @@ pub enum ProjectMessage {
     CloseReplacementPreview,
     ApplyReplacement,
     SetHistoryDocumentFilter(Option<String>),
+    SetHistoryGroupFilter(String),
     ToggleHistorySection(String),
     SetHistoryScroll(f32),
     SelectHistoryCheckpoint(String),
@@ -4105,6 +4187,9 @@ pub enum ProjectMessage {
     HistoryMaintenanceLoaded(HistoryMaintenanceStatus),
     HistoryReinitialized(String),
     DismissModal,
+    SaveSettingsManager,
+    ConfirmDiscardSettings,
+    KeepEditingSettings,
     SelectRecentlyDeleted(String),
     RestoreDeleted(String),
     SetAppearance(AppearanceMode),
@@ -4179,6 +4264,7 @@ pub enum ProjectEffect {
         title: String,
     },
     DeleteHierarchy(Vec<String>),
+    DiscardDraft(String),
     MoveHierarchy {
         node_ids: Vec<String>,
         destination: DragDestination,
@@ -4286,9 +4372,11 @@ pub struct ProjectWorkspace {
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
     cards_expanded: BTreeSet<String>,
+    card_details_expanded: BTreeSet<String>,
     cards_scroll_offset: f32,
     pub(crate) card_positions: crate::motion::Positions,
     cards_measurements: RefCell<BTreeMap<String, (u64, f32)>>,
+    cards_grid_cache: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
     cards_drag_destination: Option<DragDestination>,
     pointer_drag: Option<HierarchyPointerDrag>,
     drop_preview: Option<ExplorerState>,
@@ -4322,6 +4410,9 @@ pub struct ProjectWorkspace {
     recovery: RecoveryState,
     modal: Option<ProjectModal>,
     settings_manager: Option<SettingsCategory>,
+    settings_baseline: Option<SettingsState>,
+    settings_effects: Vec<ProjectEffect>,
+    pub(crate) settings_cancel_pending: bool,
     close_after_filing: Option<(EditorPane, String)>,
     close_after_promotion: Option<(EditorPane, String)>,
     editor: EditorWorkspace,
@@ -4383,12 +4474,14 @@ impl ProjectWorkspace {
             project_title: "The Glass Harbor".to_owned(),
             sidebar,
             cards_expanded: explorer.nodes.keys().cloned().collect(),
+            card_details_expanded: BTreeSet::new(),
             explorer,
             tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
             cards_scroll_offset: 0.0,
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
+            cards_grid_cache: RefCell::default(),
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
@@ -4433,6 +4526,9 @@ impl ProjectWorkspace {
             },
             modal: None,
             settings_manager: None,
+            settings_baseline: None,
+            settings_effects: Vec::new(),
+            settings_cancel_pending: false,
             close_after_filing: None,
             close_after_promotion: None,
             editor: EditorWorkspace::from_fixture(EditorFixture::DualPane),
@@ -4460,12 +4556,14 @@ impl ProjectWorkspace {
             project_title: snapshot.project.display_title.clone(),
             sidebar: SidebarSurface::Explorer,
             cards_expanded: explorer.nodes.keys().cloned().collect(),
+            card_details_expanded: BTreeSet::new(),
             explorer,
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_scroll_offset: 0.0,
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
+            cards_grid_cache: RefCell::default(),
             cards_drag_destination: None,
             pointer_drag: None,
             drop_preview: None,
@@ -4519,6 +4617,9 @@ impl ProjectWorkspace {
             },
             modal: None,
             settings_manager: None,
+            settings_baseline: None,
+            settings_effects: Vec::new(),
+            settings_cancel_pending: false,
             close_after_filing: None,
             close_after_promotion: None,
             editor: EditorWorkspace::from_snapshot(snapshot),
@@ -4536,11 +4637,14 @@ impl ProjectWorkspace {
     }
 
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
+        self.cards_grid_cache.get_mut().take();
         self.drop_preview = None;
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
         self.project_title = snapshot.project.display_title.clone();
         self.explorer.reconcile_project(&snapshot.project);
+        self.card_details_expanded
+            .retain(|id| self.explorer.nodes.contains_key(id));
         self.cards_expanded
             .retain(|id| self.explorer.nodes.contains_key(id));
         self.cards_expanded.extend(
@@ -4579,7 +4683,18 @@ impl ProjectWorkspace {
         let shortcuts_busy = self.settings.shortcuts_busy;
         let ui_zoom_percent = self.settings.ui_zoom_percent;
         let style_property_drafts = std::mem::take(&mut self.settings.style_property_drafts);
+        let settings_draft = self
+            .settings_baseline
+            .as_ref()
+            .map(|_| self.settings.clone());
         self.settings = SettingsState::from_project(&snapshot.project, self.settings.appearance);
+        if let Some(draft) = settings_draft {
+            self.settings_baseline = Some(self.settings.clone());
+            self.settings.metadata_definitions = draft.metadata_definitions;
+            self.settings.metadata_order = draft.metadata_order;
+            self.settings.style_definitions = draft.style_definitions;
+            self.settings.style_order = draft.style_order;
+        }
         self.settings.keybindings = keybindings;
         self.settings.shortcut_recording = shortcut_recording;
         self.settings.shortcut_query = shortcut_query;
@@ -5020,6 +5135,7 @@ impl ProjectWorkspace {
             .map(|field| field.label.as_str())
             .collect();
         CardsState {
+            details_expanded: &self.card_details_expanded,
             explorer: self.displayed_explorer(),
             expanded: self
                 .pointer_drag
@@ -5032,6 +5148,7 @@ impl ProjectWorkspace {
             word_counts: self.outline_word_counts(),
             scroll_offset: self.cards_scroll_offset,
             measurements: &self.cards_measurements,
+            grid_cache: &self.cards_grid_cache,
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
@@ -5196,12 +5313,19 @@ impl ProjectWorkspace {
     }
 
     pub fn history_scope_label(&self) -> String {
+        if let Some(group) = &self.history.group_filter {
+            return self
+                .explorer
+                .row(group)
+                .map_or("Unavailable group", |row| row.title)
+                .to_owned();
+        }
         self.history.active_document_filter().map_or_else(
             || "Project history".to_owned(),
             |id| {
                 self.explorer
                     .breadcrumb_for_document(id)
-                    .map(|parts| parts.join(" / "))
+                    .map(|parts| parts.join(" > "))
                     .unwrap_or_else(|| "Unavailable document".to_owned())
             },
         )
@@ -5437,7 +5561,7 @@ impl ProjectWorkspace {
                     parent = ancestor.parent.as_deref();
                 }
                 path.reverse();
-                Some((id.to_owned(), path.join(" › ")))
+                Some((id.to_owned(), path.join(" > ")))
             })
             .collect()
     }
@@ -5880,6 +6004,74 @@ impl ProjectWorkspace {
     }
 
     pub fn update(&mut self, message: ProjectMessage) -> Vec<ProjectEffect> {
+        let effects = self.update_inner(message);
+        if self.settings_baseline.is_none() {
+            return effects;
+        }
+        let mut immediate = Vec::new();
+        for effect in effects {
+            if matches!(
+                effect,
+                ProjectEffect::UpsertStyle(_)
+                    | ProjectEffect::DeleteStyle(_)
+                    | ProjectEffect::UpsertMetadataField(_)
+                    | ProjectEffect::DeleteMetadataField(_)
+                    | ProjectEffect::ReorderMetadataField { .. }
+            ) {
+                // Keep only the latest definition while typing. Save should
+                // apply one update per edited definition, not one per keystroke.
+                let previous = self
+                    .settings_effects
+                    .iter()
+                    .position(|old| match (old, &effect) {
+                        (ProjectEffect::UpsertStyle(a), ProjectEffect::UpsertStyle(b)) => {
+                            a.id == b.id
+                        }
+                        (
+                            ProjectEffect::UpsertMetadataField(a),
+                            ProjectEffect::UpsertMetadataField(b),
+                        ) => a.id == b.id,
+                        _ => false,
+                    });
+                if let Some(index) = previous {
+                    self.settings_effects[index] = effect;
+                } else {
+                    self.settings_effects.push(effect);
+                }
+            } else {
+                immediate.push(effect);
+            }
+        }
+        immediate
+    }
+
+    fn settings_has_pending_changes(&self) -> bool {
+        let Some(baseline) = &self.settings_baseline else {
+            return false;
+        };
+        self.settings.metadata_definitions != baseline.metadata_definitions
+            || self.settings.metadata_order != baseline.metadata_order
+            || self.settings.style_definitions != baseline.style_definitions
+            || self.settings.style_order != baseline.style_order
+            || self.settings.style_property_drafts != baseline.style_property_drafts
+            || self
+                .settings
+                .new_metadata_field
+                .as_ref()
+                .is_some_and(|field| !field.label.is_empty())
+    }
+
+    fn update_inner(&mut self, message: ProjectMessage) -> Vec<ProjectEffect> {
+        if self.settings.metadata_drag_source.is_none()
+            && matches!(
+                message,
+                ProjectMessage::SetMetadataFieldDragTarget(_)
+                    | ProjectMessage::CommitMetadataFieldDrag
+                    | ProjectMessage::CancelMetadataFieldDrag
+            )
+        {
+            return Vec::new();
+        }
         if self.pointer_drag.is_none()
             && matches!(
                 message,
@@ -5891,6 +6083,23 @@ impl ProjectWorkspace {
             )
         {
             return Vec::new();
+        }
+        if !matches!(
+            message,
+            ProjectMessage::SetCardsScroll(_)
+                | ProjectMessage::SelectHierarchy { .. }
+                | ProjectMessage::OpenHierarchyContextMenu { .. }
+                | ProjectMessage::CloseHierarchyContextMenu
+                | ProjectMessage::PreviewHierarchyDrop { .. }
+                | ProjectMessage::ManageSettings(_)
+                | ProjectMessage::DismissModal
+                | ProjectMessage::KeepEditingSettings
+                | ProjectMessage::ConfirmDiscardSettings
+                | ProjectMessage::BeginMetadataFieldDrag(_)
+                | ProjectMessage::SetMetadataFieldDragTarget(_)
+                | ProjectMessage::CancelMetadataFieldDrag
+        ) {
+            self.cards_grid_cache.get_mut().take();
         }
         if !matches!(
             &message,
@@ -5954,7 +6163,7 @@ impl ProjectWorkspace {
                 else {
                     return Vec::new();
                 };
-                vec![ProjectEffect::DeleteHierarchy(vec![node_id])]
+                vec![ProjectEffect::DiscardDraft(node_id)]
             }
             ProjectMessage::SetDraftTitle(value) => {
                 if let Some(ProjectModal::FileDraft { title, .. }) = &mut self.modal {
@@ -6019,6 +6228,14 @@ impl ProjectWorkspace {
                 if self.explorer.roots.contains(&section) {
                     self.cards_section = section;
                     self.cards_scroll_offset = 0.0;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleCardDetails(node_id) => {
+                if self.explorer.row(&node_id).is_some()
+                    && !self.card_details_expanded.remove(&node_id)
+                {
+                    self.card_details_expanded.insert(node_id);
                 }
                 Vec::new()
             }
@@ -6196,8 +6413,15 @@ impl ProjectWorkspace {
             }
             ProjectMessage::BeginOutlineField { node_id, field_id } => {
                 if self.explorer.nodes.contains_key(&node_id) {
-                    self.outline_field = Some((node_id, field_id));
+                    self.outline_field = Some((node_id.clone(), field_id.clone()));
                     self.sync_metadata_editors();
+                    if let Some(field) = field_id {
+                        if let Some(editor) = self.metadata_editors.get_mut(&(node_id, field)) {
+                            editor.perform(text_editor::Action::SelectAll);
+                        }
+                    } else if let Some(editor) = self.synopsis_editors.get_mut(&node_id) {
+                        editor.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                    }
                 }
                 Vec::new()
             }
@@ -6332,7 +6556,7 @@ impl ProjectWorkspace {
                     applicability: MetadataFieldApplicability::Documents,
                     text_kind: MetadataFieldTextKind::SingleLine,
                     default_value: None,
-                    visible_on_cards: self.settings_manager == Some(SettingsCategory::Metadata),
+                    visible_on_cards: false,
                 });
                 self.settings.selected_detail = Some(SettingsDetail::NewMetadataField);
                 Vec::new()
@@ -6425,10 +6649,14 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
-            ProjectMessage::SetMetadataFieldDragTarget(target_index) => {
-                if self.settings.metadata_drag_source.is_some() {
-                    self.settings.metadata_drag_target =
-                        Some(target_index.min(self.settings.metadata_order.len()));
+            ProjectMessage::SetMetadataFieldDragTarget(target) => {
+                if self.settings.metadata_drag_source.is_some()
+                    && let Some((target_index, visible_on_cards)) = target
+                {
+                    self.settings.metadata_drag_target = Some((
+                        target_index.min(self.settings.metadata_order.len()),
+                        visible_on_cards,
+                    ));
                 }
                 Vec::new()
             }
@@ -6436,13 +6664,30 @@ impl ProjectWorkspace {
                 let source = self.settings.metadata_drag_source.take();
                 let target = self.settings.metadata_drag_target.take();
                 match (source, target) {
-                    (Some(field_id), Some(target_index))
+                    (Some(field_id), Some((target_index, visible_on_cards)))
                         if self.settings.metadata_definitions.contains_key(&field_id) =>
                     {
-                        self.update(ProjectMessage::ReorderMetadataField {
-                            field_id,
+                        let source_index = self
+                            .settings
+                            .metadata_order
+                            .iter()
+                            .position(|candidate| candidate == &field_id)
+                            .expect("dragged metadata field exists in its order");
+                        let target_index =
+                            target_index.saturating_sub(usize::from(source_index < target_index));
+                        let mut effects = self.update(ProjectMessage::ReorderMetadataField {
+                            field_id: field_id.clone(),
                             target_index,
-                        })
+                        });
+                        if let Some(field) = self.settings.metadata_definitions.get_mut(&field_id)
+                            && field.visible_on_cards != visible_on_cards
+                        {
+                            field.visible_on_cards = visible_on_cards;
+                            if let Some(effect) = self.metadata_effect(&field_id) {
+                                effects.push(effect);
+                            }
+                        }
+                        effects
                     }
                     _ => Vec::new(),
                 }
@@ -6466,12 +6711,14 @@ impl ProjectWorkspace {
                 self.settings
                     .metadata_order
                     .retain(|candidate| candidate != &field_id);
-                self.metadata_values
-                    .retain(|(_, candidate), _| candidate != &field_id);
-                self.metadata_drafts
-                    .retain(|(_, candidate), _| candidate != &field_id);
-                self.metadata_editors
-                    .retain(|(_, candidate), _| candidate != &field_id);
+                if self.settings_baseline.is_none() {
+                    self.metadata_values
+                        .retain(|(_, candidate), _| candidate != &field_id);
+                    self.metadata_drafts
+                        .retain(|(_, candidate), _| candidate != &field_id);
+                    self.metadata_editors
+                        .retain(|(_, candidate), _| candidate != &field_id);
+                }
                 vec![ProjectEffect::DeleteMetadataField(field_id)]
             }
             ProjectMessage::SelectStyle(style_id) => {
@@ -6573,6 +6820,24 @@ impl ProjectWorkspace {
                     return Vec::new();
                 }
                 vec![ProjectEffect::UpsertStyle(definition.clone())]
+            }
+            ProjectMessage::ResetStyle(style_id) => {
+                let Some(style) = self.settings.style_definitions.get(&style_id) else {
+                    return Vec::new();
+                };
+                let Some(default) = parchmint_domain::StyleCatalog::default()
+                    .get(style.id)
+                    .cloned()
+                else {
+                    return Vec::new();
+                };
+                self.settings
+                    .style_definitions
+                    .insert(style_id.clone(), default.clone());
+                self.settings
+                    .style_property_drafts
+                    .retain(|(id, _), _| id != &style_id);
+                vec![ProjectEffect::UpsertStyle(default)]
             }
             ProjectMessage::RequestDeleteStyle(style_id) => {
                 if self
@@ -6689,6 +6954,7 @@ impl ProjectWorkspace {
                 }) {
                     return Vec::new();
                 }
+                self.cards_grid_cache.get_mut().take();
                 let preview = if surface == HierarchySurface::Cards {
                     destination
                         .as_ref()
@@ -6893,6 +7159,13 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
+            ProjectMessage::ToggleSearchDocument(id) => {
+                if !self.global_search.collapsed.remove(&id) {
+                    self.global_search.collapsed.insert(id);
+                }
+                self.global_search.scroll_offset = 0.0;
+                Vec::new()
+            }
             ProjectMessage::ToggleGlobalReplace => {
                 self.global_search.replace_visible = !self.global_search.replace_visible;
                 Vec::new()
@@ -6979,7 +7252,13 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
+            ProjectMessage::SetHistoryGroupFilter(group) => {
+                self.update(ProjectMessage::SetHistoryDocumentFilter(None));
+                self.history.group_filter = Some(group);
+                Vec::new()
+            }
             ProjectMessage::SetHistoryDocumentFilter(document_id) => {
+                self.history.group_filter = None;
                 if self.history.active_document_filter == document_id {
                     return Vec::new();
                 }
@@ -7132,25 +7411,54 @@ impl ProjectWorkspace {
                     self.editor
                         .update(crate::EditorMessage::CancelDeleteCommentThread);
                 }
-                let mut effects = Vec::new();
-                if self.settings_manager == Some(SettingsCategory::Styles) && self.modal.is_none() {
-                    let drafts = self.settings.style_property_drafts.clone();
-                    for ((style_id, property), value) in drafts {
-                        effects.extend(self.update(ProjectMessage::SetStyleProperty {
-                            style_id,
-                            property,
-                            value,
-                        }));
+                if self.settings_manager.is_some() && self.modal.is_none() {
+                    if self.settings_cancel_pending {
+                        self.settings_cancel_pending = false;
+                    } else if self.settings_has_pending_changes() {
+                        self.settings_cancel_pending = true;
+                    } else {
+                        self.update(ProjectMessage::ConfirmDiscardSettings);
                     }
-                    if self.modal.is_some() {
-                        return effects;
-                    }
+                    return Vec::new();
                 }
+                let effects = Vec::new();
                 self.close_after_filing = None;
                 if self.modal.take().is_none() {
                     self.settings_manager = None;
                 }
                 effects
+            }
+            ProjectMessage::SaveSettingsManager => {
+                let drafts = self.settings.style_property_drafts.clone();
+                for ((style_id, property), value) in drafts {
+                    self.update(ProjectMessage::SetStyleProperty {
+                        style_id,
+                        property,
+                        value,
+                    });
+                }
+                if self.modal.is_some() {
+                    return Vec::new();
+                }
+                self.settings_baseline = None;
+                self.settings_manager = None;
+                self.settings_cancel_pending = false;
+                std::mem::take(&mut self.settings_effects)
+            }
+            ProjectMessage::ConfirmDiscardSettings => {
+                if let Some(baseline) = self.settings_baseline.take() {
+                    self.settings = baseline;
+                }
+                self.settings_effects.clear();
+                self.settings_manager = None;
+                self.settings_cancel_pending = false;
+                self.modal = None;
+                self.sync_metadata_editors();
+                Vec::new()
+            }
+            ProjectMessage::KeepEditingSettings => {
+                self.settings_cancel_pending = false;
+                Vec::new()
             }
             ProjectMessage::SelectRecentlyDeleted(node_id) => {
                 self.recently_deleted.select(node_id);
@@ -7173,6 +7481,11 @@ impl ProjectWorkspace {
                     category,
                     SettingsCategory::Styles | SettingsCategory::Metadata
                 ) {
+                    if self.settings_baseline.is_none() {
+                        self.settings_baseline = Some(self.settings.clone());
+                        self.settings_effects.clear();
+                    }
+                    self.settings_cancel_pending = false;
                     self.settings_manager = Some(category);
                     if category == SettingsCategory::Styles
                         && let Some((id, _)) =
@@ -8181,84 +8494,7 @@ fn set_style_property(
     property: StyleProperty,
     value: &str,
 ) -> bool {
-    match property {
-        StyleProperty::FontFamily => {
-            properties.font_family = optional_trimmed(value).map(str::to_owned)
-        }
-        StyleProperty::FontSizePoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.font_size_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::Weight => match optional_trimmed(value).map(str::parse).transpose() {
-            Ok(value) => properties.weight = value,
-            Err(_) => return false,
-        },
-        StyleProperty::Italic => match optional_trimmed(value).map(str::parse).transpose() {
-            Ok(value) => properties.italic = value,
-            Err(_) => return false,
-        },
-        StyleProperty::Alignment => {
-            properties.alignment = match optional_trimmed(value) {
-                None => None,
-                Some("Start") => Some(TextAlignment::Start),
-                Some("Center") => Some(TextAlignment::Center),
-                Some("End") => Some(TextAlignment::End),
-                Some("Justify") => Some(TextAlignment::Justify),
-                Some(_) => return false,
-            };
-        }
-        StyleProperty::FirstLineIndentPoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.first_line_indent_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::LeftIndentPoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.left_indent_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::RightIndentPoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.right_indent_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::LineSpacing => match optional_trimmed(value).map(str::parse).transpose() {
-            Ok(value) => properties.line_spacing = value,
-            Err(_) => return false,
-        },
-        StyleProperty::SpaceBeforePoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.space_before_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::SpaceAfterPoints => {
-            match optional_trimmed(value).map(str::parse).transpose() {
-                Ok(value) => properties.space_after_points = value,
-                Err(_) => return false,
-            }
-        }
-        StyleProperty::KeepWithNext => match optional_trimmed(value).map(str::parse).transpose() {
-            Ok(value) => properties.keep_with_next = value,
-            Err(_) => return false,
-        },
-        StyleProperty::PageBreakBefore => match optional_trimmed(value).map(str::parse).transpose()
-        {
-            Ok(value) => properties.page_break_before = value,
-            Err(_) => return false,
-        },
-    }
-    style_properties_are_finite(properties)
-}
-
-fn optional_trimmed(value: &str) -> Option<&str> {
-    let value = value.trim();
-    (!value.is_empty()).then_some(value)
+    property.set(properties, value) && style_properties_are_finite(properties)
 }
 
 fn style_properties_are_finite(properties: &StyleProperties) -> bool {
@@ -8549,16 +8785,22 @@ mod tests {
     }
 
     #[test]
-    fn contextual_metadata_manager_survives_nested_confirmation_and_keeps_fields_visible() {
+    fn contextual_metadata_manager_survives_nested_confirmation_and_closes_after_reverting() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
         workspace.update(ProjectMessage::CreateMetadataField);
         workspace.update(ProjectMessage::SetNewMetadataFieldLabel("Viewpoint".into()));
         let effects = workspace.update(ProjectMessage::CommitNewMetadataField);
-        let [ProjectEffect::UpsertMetadataField(definition)] = effects.as_slice() else {
+        assert!(
+            effects.is_empty(),
+            "dialog edits must not write the project"
+        );
+        let [ProjectEffect::UpsertMetadataField(definition)] =
+            workspace.settings_effects.as_slice()
+        else {
             panic!("new metadata field");
         };
-        assert!(definition.visible_on_cards);
+        assert!(!definition.visible_on_cards);
         let id = workspace.settings.metadata_order.last().unwrap().clone();
         workspace.update(ProjectMessage::RequestDeleteMetadataField(id.clone()));
         assert!(matches!(
@@ -8572,18 +8814,204 @@ mod tests {
         );
         assert!(workspace.settings.metadata_definitions.contains_key(&id));
         workspace.update(ProjectMessage::RequestDeleteMetadataField(id));
-        assert!(matches!(
+        assert!(
             workspace
                 .update(ProjectMessage::ConfirmDeleteMetadataField)
-                .as_slice(),
-            [ProjectEffect::DeleteMetadataField(_)]
+                .is_empty()
+        );
+        assert!(matches!(
+            workspace.settings_effects.last(),
+            Some(ProjectEffect::DeleteMetadataField(_))
         ));
         assert_eq!(
             workspace.modal(),
             Some(ProjectModal::ManageSettings(SettingsCategory::Metadata))
         );
         workspace.update(ProjectMessage::DismissModal);
+        assert!(!workspace.settings_cancel_pending);
         assert_eq!(workspace.modal(), None);
+        assert!(workspace.settings_effects.is_empty());
+    }
+
+    #[test]
+    fn settings_dialog_save_and_cancel_are_transactional() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let before = workspace.settings.style_definitions.clone();
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Styles));
+        assert!(workspace.update(ProjectMessage::CreateStyle).is_empty());
+        assert_eq!(workspace.settings.style_definitions.len(), before.len() + 1);
+        workspace.update(ProjectMessage::DismissModal);
+        assert!(workspace.settings_cancel_pending);
+        workspace.update(ProjectMessage::KeepEditingSettings);
+        assert!(!workspace.settings_cancel_pending);
+        assert_eq!(workspace.settings.style_definitions.len(), before.len() + 1);
+        workspace.update(ProjectMessage::DismissModal);
+        workspace.update(ProjectMessage::ConfirmDiscardSettings);
+        assert_eq!(workspace.settings.style_definitions, before);
+        assert!(workspace.settings_effects.is_empty());
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Styles));
+        workspace.update(ProjectMessage::CreateStyle);
+        assert!(matches!(
+            workspace
+                .update(ProjectMessage::SaveSettingsManager)
+                .as_slice(),
+            [ProjectEffect::UpsertStyle(_)]
+        ));
+        assert_eq!(workspace.modal(), None);
+    }
+
+    #[test]
+    fn cancelling_unchanged_settings_closes_without_a_discard_prompt() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Styles));
+        workspace.update(ProjectMessage::DismissModal);
+        assert_eq!(workspace.modal(), None);
+        assert!(!workspace.settings_cancel_pending);
+
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
+        workspace.update(ProjectMessage::CreateMetadataField);
+        workspace.update(ProjectMessage::DismissModal);
+        assert_eq!(workspace.modal(), None);
+        assert!(!workspace.settings_cancel_pending);
+    }
+
+    #[test]
+    fn moving_a_metadata_field_to_hidden_only_removes_it_from_collapsed_cards() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
+        workspace.update(ProjectMessage::BeginMetadataFieldDrag("field-17".into()));
+        workspace.update(ProjectMessage::SetMetadataFieldDragTarget(Some((2, false))));
+        workspace.update(ProjectMessage::CommitMetadataFieldDrag);
+
+        assert!(!workspace.settings.metadata_definitions["field-17"].visible_on_cards);
+        let card = workspace
+            .cards()
+            .items()
+            .into_iter()
+            .find(|item| item.node_id == "chapter-one")
+            .unwrap();
+        assert!(card.has_hidden_metadata);
+        assert!(
+            !card
+                .editable_metadata
+                .iter()
+                .any(|(label, _)| *label == "Point of view")
+        );
+
+        workspace.update(ProjectMessage::ToggleCardDetails("chapter-one".into()));
+        let card = workspace
+            .cards()
+            .items()
+            .into_iter()
+            .find(|item| item.node_id == "chapter-one")
+            .unwrap();
+        assert!(
+            card.editable_metadata
+                .iter()
+                .any(|(label, _)| *label == "Point of view")
+        );
+
+        workspace.update(ProjectMessage::ToggleCardDetails("chapter-one".into()));
+        workspace.update(ProjectMessage::BeginMetadataFieldDrag("field-17".into()));
+        workspace.update(ProjectMessage::SetMetadataFieldDragTarget(Some((0, true))));
+        workspace.update(ProjectMessage::CommitMetadataFieldDrag);
+        assert!(workspace.settings.metadata_definitions["field-17"].visible_on_cards);
+        let card = workspace
+            .cards()
+            .items()
+            .into_iter()
+            .find(|item| item.node_id == "chapter-one")
+            .unwrap();
+        assert!(
+            card.editable_metadata
+                .iter()
+                .any(|(label, _)| *label == "Point of view")
+        );
+    }
+
+    #[test]
+    fn metadata_drag_inserts_before_or_after_the_indicated_field() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
+        for label in ["Setting", "Draft status"] {
+            workspace.update(ProjectMessage::CreateMetadataField);
+            workspace.update(ProjectMessage::SetNewMetadataFieldLabel(label.into()));
+            workspace.update(ProjectMessage::CommitNewMetadataField);
+        }
+        let initial = workspace.settings.metadata_order.clone();
+        assert!(initial.len() >= 3);
+
+        workspace.update(ProjectMessage::BeginMetadataFieldDrag(initial[0].clone()));
+        workspace.update(ProjectMessage::SetMetadataFieldDragTarget(Some((2, false))));
+        workspace.update(ProjectMessage::CommitMetadataFieldDrag);
+        let mut after_first = initial.clone();
+        after_first.swap(0, 1);
+        assert_eq!(workspace.settings.metadata_order, after_first);
+        assert!(!workspace.settings.metadata_definitions[&initial[0]].visible_on_cards);
+
+        let last = initial.last().unwrap().clone();
+        workspace.update(ProjectMessage::BeginMetadataFieldDrag(last.clone()));
+        workspace.update(ProjectMessage::SetMetadataFieldDragTarget(Some((1, true))));
+        workspace.update(ProjectMessage::CommitMetadataFieldDrag);
+        after_first.pop();
+        after_first.insert(1, last.clone());
+        assert_eq!(workspace.settings.metadata_order, after_first);
+        assert!(workspace.settings.metadata_definitions[&last].visible_on_cards);
+    }
+
+    #[test]
+    fn unchanged_card_preview_and_settings_modal_keep_the_measured_grid() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.cards().viewport_window(3, 900.0, 700.0);
+        let cached = workspace
+            .cards_grid_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .1
+            .clone();
+        workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Styles));
+        workspace.update(ProjectMessage::DismissModal);
+        assert!(Rc::ptr_eq(
+            &cached,
+            &workspace.cards_grid_cache.borrow().as_ref().unwrap().1
+        ));
+
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-one".into(),
+            grab_offset: Point::new(8.0, 8.0),
+            width: 300.0,
+        });
+        workspace.cards().viewport_window(3, 900.0, 700.0);
+        let cached = workspace
+            .cards_grid_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .1
+            .clone();
+        let destination = Some(DragDestination::BeforeSibling("chapter-two".into()));
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: destination.clone(),
+        });
+        workspace.cards().viewport_window(3, 900.0, 700.0);
+        let preview_cache = workspace
+            .cards_grid_cache
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .1
+            .clone();
+        assert!(!Rc::ptr_eq(&cached, &preview_cache));
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination,
+        });
+        assert!(Rc::ptr_eq(
+            &preview_cache,
+            &workspace.cards_grid_cache.borrow().as_ref().unwrap().1
+        ));
     }
 
     #[test]
@@ -10192,6 +10620,58 @@ mod tests {
     }
 
     #[test]
+    fn collapsing_search_documents_preserves_matches_and_window_geometry() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+        workspace.global_search.begin_query();
+        workspace.global_search.append_results(
+            (0..200)
+                .map(|i| GlobalSearchResult {
+                    document_id: format!("document-{}", i % 2),
+                    match_id: format!("m{i}"),
+                    prefix: String::new(),
+                    matching_text: "river".into(),
+                    suffix: String::new(),
+                    indexed_revision: 1,
+                })
+                .collect(),
+        );
+        workspace.update(ProjectMessage::ToggleSearchDocument("document-0".into()));
+        let search = workspace.global_search();
+        assert_eq!(search.results().len(), 200);
+        assert_eq!(search.document_count(), 2);
+        assert_eq!(search.row_count(), 102);
+        assert!(
+            search
+                .windowed_results()
+                .all(|item| item.document_id == "document-1")
+        );
+        workspace.update(ProjectMessage::ToggleSearchDocument("document-1".into()));
+        assert_eq!(workspace.global_search().windowed_rows().count(), 2);
+        assert_eq!(workspace.global_search().windowed_results().count(), 0);
+        workspace.update(ProjectMessage::ToggleSearchDocument("document-0".into()));
+        assert_eq!(workspace.global_search().row_count(), 102);
+    }
+
+    #[test]
+    fn collapsed_groups_keep_full_details_without_revealing_children() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let items = workspace.cards().items();
+        let group = items
+            .iter()
+            .find(|item| item.node_id == "part-one")
+            .unwrap();
+        assert!(!group.expanded);
+        assert!(group.details_expanded);
+        assert!(
+            items
+                .iter()
+                .filter(|item| item.node_id == "chapter-one")
+                .all(|item| !item.visible)
+        );
+    }
+
+    #[test]
     fn search_rows_preserve_all_matches_and_global_counts_across_windows() {
         let mut search = GlobalSearchState::default();
         let results: Vec<_> = (0..200)
@@ -10275,6 +10755,9 @@ mod tests {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         for index in 0..350 {
             let id = format!("bulk-card-{index}");
+            workspace
+                .synopsis_editors
+                .insert(id.clone(), text_editor::Content::new());
             workspace.explorer.nodes.insert(
                 id.clone(),
                 HierarchyNode::new(
@@ -10294,6 +10777,73 @@ mod tests {
                 .push(id);
         }
 
+        let viewport = workspace.cards().viewport_window(5, 1840.0, 800.0);
+        let old_window = workspace.cards().item_window(5, 1840.0);
+        assert!(viewport.rows.len() < 12);
+        assert!(viewport.end - viewport.start < old_window.end - old_window.start);
+        let total =
+            viewport.rows.iter().map(|row| row.height).sum::<f32>() + viewport.bottom_padding;
+        workspace.cards_scroll_offset = total * 0.5;
+        let middle = workspace.cards().viewport_window(5, 1840.0, 800.0);
+        assert!(middle.top_padding <= workspace.cards_scroll_offset);
+        assert!(
+            middle.top_padding + middle.rows.iter().map(|row| row.height).sum::<f32>()
+                >= workspace.cards_scroll_offset + 800.0
+        );
+        workspace.cards_scroll_offset = 0.0;
+        if std::env::var_os("PARCHMINT_MEASURE_CARDS").is_some() {
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                std::hint::black_box(workspace.cards().viewport_window(5, 1840.0, 800.0));
+            }
+            eprintln!(
+                "OVERVIEW layout_100_ms={} mounted_items={} prior_fixed_window_items={}",
+                start.elapsed().as_secs_f64() * 1000.0,
+                viewport.end - viewport.start,
+                old_window.end - old_window.start
+            );
+            workspace.update(ProjectMessage::BeginCardDrag {
+                source_id: "bulk-card-0".into(),
+                grab_offset: Point::new(20.0, 20.0),
+                width: 320.0,
+            });
+            let mut update_ms = 0.0;
+            let mut layout_ms = 0.0;
+            let mut ghost_ms = 0.0;
+            let mut view_ms = 0.0;
+            for index in 0..40 {
+                let destination = DragDestination::BeforeSibling(format!(
+                    "bulk-card-{}",
+                    if index % 2 == 0 { 20 } else { 30 }
+                ));
+                let start = std::time::Instant::now();
+                workspace.update(ProjectMessage::PreviewHierarchyDrop {
+                    surface: HierarchySurface::Cards,
+                    destination: Some(destination),
+                });
+                update_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let start = std::time::Instant::now();
+                std::hint::black_box(workspace.cards().viewport_window(5, 1840.0, 800.0));
+                layout_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let start = std::time::Instant::now();
+                std::hint::black_box(workspace.cards().item_by_id("bulk-card-0"));
+                ghost_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let start = std::time::Instant::now();
+                std::hint::black_box(crate::iced_project_surface::cards_grid(
+                    &workspace,
+                    crate::design_tokens::ParchMintTheme::new(
+                        parchmint_preferences::ResolvedAppearance::Dark,
+                    ),
+                    1840.0,
+                    800.0,
+                ));
+                view_ms += start.elapsed().as_secs_f64() * 1000.0;
+            }
+            eprintln!(
+                "OVERVIEW drag_40_update_ms={update_ms} drag_40_layout_ms={layout_ms} drag_40_ghost_lookup_ms={ghost_ms} drag_40_view_ms={view_ms}"
+            );
+            workspace.update(ProjectMessage::CancelHierarchyDrag);
+        }
         assert!(workspace.cards().is_virtualized());
         assert_eq!(workspace.cards().visible_item_count(), 354);
         assert_eq!(workspace.cards().windowed_items().len(), 47);
@@ -11091,6 +11641,53 @@ mod tests {
             ExplorerNavigation::CollapseOrParent,
         ));
         assert_eq!(workspace.explorer().selected_ids(), ["part-one"]);
+    }
+
+    #[test]
+    fn opening_outline_fields_prepares_append_or_replacement() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::SetSynopsis {
+            node_id: "chapter-one".into(),
+            synopsis: "Existing synopsis".into(),
+        });
+        workspace.update(ProjectMessage::BeginOutlineField {
+            node_id: "chapter-one".into(),
+            field_id: None,
+        });
+        workspace.update(ProjectMessage::EditSynopsis {
+            node_id: "chapter-one".into(),
+            action: text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+        });
+        assert_eq!(
+            workspace.explorer().synopsis("chapter-one"),
+            Some("Existing synopsis!")
+        );
+        workspace.update(ProjectMessage::SetMetadataValue {
+            node_id: "chapter-one".into(),
+            field_id: "field-17".into(),
+            value: "Original".into(),
+        });
+        workspace.update(ProjectMessage::BeginOutlineField {
+            node_id: "chapter-one".into(),
+            field_id: Some("field-17".into()),
+        });
+        assert_eq!(
+            workspace
+                .metadata_editor("chapter-one", "field-17")
+                .unwrap()
+                .selection()
+                .as_deref(),
+            Some("Original")
+        );
+    }
+
+    #[test]
+    fn history_tree_group_filter_clears_when_selecting_a_document_or_project() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::SetHistoryGroupFilter("part-one".into()));
+        assert_eq!(workspace.history.group_filter.as_deref(), Some("part-one"));
+        workspace.update(ProjectMessage::SetHistoryDocumentFilter(None));
+        assert!(workspace.history.group_filter.is_none());
     }
 
     #[test]

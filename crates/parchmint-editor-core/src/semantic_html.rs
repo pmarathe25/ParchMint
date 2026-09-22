@@ -667,6 +667,9 @@ pub(super) fn parse_attributes(
 }
 
 fn is_safe_href(value: &str) -> bool {
+    if crate::is_internal_link_target(value) {
+        return true;
+    }
     if value.is_empty()
         || value.starts_with(['/', '\\'])
         || value.starts_with("//")
