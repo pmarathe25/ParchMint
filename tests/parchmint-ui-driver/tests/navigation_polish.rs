@@ -146,3 +146,162 @@ fn reassigned_formatting_uses_the_default_command_and_survives_reopening() {
     );
     reopened.shutdown().unwrap();
 }
+
+#[test]
+fn search_shortcuts_focus_queries_and_escape_dismisses_them() {
+    let run = IsolatedRun::new("search-focus").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Search focus");
+    create_document(&harness, "Manuscript", "Chapter");
+    harness
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Original prose")
+        .unwrap();
+    let body = harness.active_editor_body().unwrap();
+    harness.press_command_key(WINDOW, 'f').unwrap();
+    assert!(
+        harness
+            .target_is_focused(
+                WINDOW,
+                HarnessTarget::LocalFind(parchmint_desktop::EditorPane::Primary)
+            )
+            .unwrap()
+    );
+    harness.type_focused(WINDOW, "prose").unwrap();
+    harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
+    assert!(
+        !harness
+            .target_is_visible(
+                WINDOW,
+                HarnessTarget::LocalFind(parchmint_desktop::EditorPane::Primary)
+            )
+            .unwrap()
+    );
+    harness.press_command_shift_key(WINDOW, 'f').unwrap();
+    assert!(
+        harness
+            .target_is_focused(WINDOW, HarnessTarget::GlobalSearchQuery)
+            .unwrap()
+    );
+    harness.type_focused(WINDOW, "Original").unwrap();
+    harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
+    assert!(
+        !harness
+            .target_is_visible(WINDOW, HarnessTarget::GlobalSearchQuery)
+            .unwrap()
+    );
+    assert_eq!(harness.active_editor_body().unwrap(), body);
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn failed_close_can_exit_without_retrying_the_save() {
+    use parchmint_desktop::{ProductionFaultKind, ProductionFaultPoint};
+    let run = IsolatedRun::new("exit-without-save").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Failed close");
+    create_document(&harness, "Manuscript", "Chapter");
+    harness
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Unsaved text")
+        .unwrap();
+    harness.fail_next(ProductionFaultPoint::FinalSave, ProductionFaultKind::Io);
+    harness.close(WINDOW).expect_err("save fails");
+    harness.click_text(WINDOW, "Exit without saving").unwrap();
+    assert!(!harness.has_window(WINDOW).unwrap());
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn group_comments_include_nested_documents_after_reopening() {
+    use parchmint_ui_driver::create_group;
+    let run = IsolatedRun::new("group-comments").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Group comments");
+    create_group(&harness, "Manuscript", "Act");
+    create_group(&harness, "Act", "Nested");
+    for (parent, title, comment) in [
+        ("Act", "First", "First comment"),
+        ("Nested", "Second", "Second comment"),
+    ] {
+        create_document(&harness, parent, title);
+        harness
+            .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Commented prose")
+            .unwrap();
+        harness
+            .select_editor_text(WINDOW, parchmint_desktop::EditorPane::Primary, "Commented")
+            .unwrap();
+        harness
+            .click_target(WINDOW, HarnessTarget::AddComment)
+            .unwrap();
+        harness.type_focused(WINDOW, comment).unwrap();
+        harness.click_text(WINDOW, "Add comment").unwrap();
+        harness.press_command_key(WINDOW, 's').unwrap();
+    }
+    harness.shutdown().unwrap();
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    let act = harness.hierarchy_node("Act").unwrap();
+    harness.click_hierarchy_node(WINDOW, act).unwrap();
+    harness
+        .click_target(WINDOW, HarnessTarget::ToggleInspector)
+        .unwrap();
+    assert!(harness.contains_text(WINDOW, "First comment").unwrap());
+    assert!(harness.contains_text(WINDOW, "Second comment").unwrap());
+    harness.click_text(WINDOW, "First comment").unwrap();
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("Commented prose")
+    );
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn secondary_click_outside_context_menu_closes_it() {
+    let run = IsolatedRun::new("context-dismiss").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Context dismissal");
+    create_document(&harness, "Manuscript", "Chapter");
+    let chapter = harness.hierarchy_node("Chapter").unwrap();
+    harness.right_click_hierarchy_node(WINDOW, chapter).unwrap();
+    assert!(harness.contains_text(WINDOW, "Delete").unwrap());
+    harness
+        .right_click_target(WINDOW, HarnessTarget::Ribbon(RibbonDestination::Settings))
+        .unwrap();
+    assert!(!harness.contains_text(WINDOW, "Delete").unwrap());
+    harness
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Context text")
+        .unwrap();
+    harness
+        .right_click_target(WINDOW, HarnessTarget::EditorPrimary)
+        .unwrap();
+    assert!(harness.contains_text(WINDOW, "Copy").unwrap());
+    harness
+        .right_click_target(WINDOW, HarnessTarget::Ribbon(RibbonDestination::Settings))
+        .unwrap();
+    assert!(!harness.contains_text(WINDOW, "Copy").unwrap());
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn page_break_with_a_selection_preserves_selected_text() {
+    let run = IsolatedRun::new("selected-break").unwrap();
+    let project = run.root().join("novel.parchmint");
+    let harness = create_project(&run, &project, "Break insertion");
+    create_document(&harness, "Manuscript", "Chapter");
+    harness
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Keep these words")
+        .unwrap();
+    harness
+        .select_editor_text(WINDOW, parchmint_desktop::EditorPane::Primary, "these")
+        .unwrap();
+    harness
+        .click_target(WINDOW, HarnessTarget::BreakMenu)
+        .unwrap();
+    harness.press_key(WINDOW, HarnessKey::ArrowDown).unwrap();
+    harness.press_key(WINDOW, HarnessKey::Enter).unwrap();
+    let body = harness.active_editor_body().unwrap();
+    assert!(body.contains("Keep these"), "{body}");
+    assert!(body.contains("page-break"), "{body}");
+    harness.shutdown().unwrap();
+}

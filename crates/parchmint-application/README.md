@@ -31,7 +31,10 @@ behind mutexes; storage services perform file, History, and index work on worker
 `EditorPersistenceCoordinator` sends document snapshots to recovery and save,
 tracks which revisions have reached durable storage, and publishes Saved,
 Dirty, or Error status. It owns journal and save handles and combines repeated
-pending save requests.
+pending save requests. Structural saves merge new document bases into the recovery
+frontier without rewinding newer edits. Lazy-loaded documents register their saved
+revision and hash before entering this path, including loads for History and export;
+registering an existing document never replaces its live recovery hash.
 
 ## Undo and failure handling
 

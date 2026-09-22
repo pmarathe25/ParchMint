@@ -523,6 +523,16 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
         )
         .unwrap();
     harness.elapse_autosave_idle().unwrap();
+    create_group(&harness, "Manuscript", "Early draft");
+    create_document(&harness, "Early draft", "Unchanged chapter");
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::EditorPrimary,
+            "Unchanged prose",
+        )
+        .unwrap();
+    harness.elapse_autosave_idle().unwrap();
     route(&harness, RibbonDestination::History);
     let baseline = harness.history_checkpoints().unwrap()[0].id.clone();
     harness
@@ -541,7 +551,15 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
     harness
         .click_text(HarnessWindow::Project, "Delete")
         .unwrap();
-    create_group(&harness, "Manuscript", "Revised draft");
+    harness
+        .right_click_text(HarnessWindow::Project, "Early draft")
+        .unwrap();
+    harness
+        .click_text(HarnessWindow::Project, "Rename")
+        .unwrap();
+    harness
+        .replace_text_and_submit(HarnessWindow::Project, "Early draft", "Revised draft")
+        .unwrap();
     create_document(&harness, "Revised draft", "New ending");
     harness
         .type_into_target(
@@ -602,12 +620,18 @@ fn history_compares_the_project_including_added_deleted_and_unsaved_documents() 
         "reading History must not save an unsaved draft"
     );
     capture(&harness, "history-project-changes");
+    assert!(
+        !harness
+            .contains_text(HarnessWindow::Project, "Unchanged prose")
+            .unwrap()
+    );
     for text in [
         "Saved version",
         "Current",
-        "Project outline and settings",
-        "Added document · New ending",
-        "Deleted document · Old ending",
+        "Early draft",
+        "Revised draft",
+        "New ending",
+        "Old ending",
         "The lantern was blue.",
         "The lantern was green.",
         "They sailed away.",

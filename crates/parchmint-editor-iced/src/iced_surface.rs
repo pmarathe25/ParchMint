@@ -1129,7 +1129,10 @@ fn apply_surface_message(
                 EditorCommandOrigin::new(view),
                 EditorCommand::new(
                     revision,
-                    EditorCommandKind::InsertAtomicBlock { selection, kind },
+                    EditorCommandKind::InsertAtomicBlock {
+                        selection: EditorSelection::new(selection.end(), selection.end()),
+                        kind,
+                    },
                 ),
             )
         }

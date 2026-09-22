@@ -1041,7 +1041,7 @@ fn editor_pane_surface<'a>(
             }),
         workspace.tab_drag_source(pane),
         workspace.tab_drag_target(pane),
-        breadcrumb,
+        breadcrumb.clone(),
         theme,
     );
     let search = workspace.local_search(state.view());
@@ -1128,6 +1128,34 @@ fn editor_pane_surface<'a>(
     };
     let content = column![
         crate::motion::reveal(workspace.expanded_pane().is_none(), tabs),
+        crate::motion::reveal(
+            workspace.expanded_pane().is_none(),
+            container(
+                row![
+                    text(breadcrumb.join(" › "))
+                        .size(12)
+                        .color(theme.palette().secondary_text)
+                        .width(Length::Fill),
+                    stationary_tooltip::tooltip(
+                        button(icon_sized(Icon::Search, 16))
+                            .padding(3)
+                            .on_press(EditorCenterMessage::PaneWorkspace {
+                                pane,
+                                message: EditorMessage::OpenLocalFind
+                            })
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                button_interaction(status, false)
+                            )),
+                        text("Find in document").size(12),
+                        components::surface(theme, Surface::Elevated, Interaction::Rest)
+                    )
+                ]
+                .align_y(Vertical::Center)
+            )
+            .padding([2, 12])
+        ),
         crate::motion::reveal(
             search.is_open(),
             container(local_search_bar(search, pane, theme, slots)).padding([6, 0])
@@ -3295,7 +3323,7 @@ mod tests {
                     let x = index % 960;
                     let y = index / 960;
                     (20..350).contains(&x)
-                        && (70..160).contains(&y)
+                        && (30..160).contains(&y)
                         && pixel[0] < 150
                         && pixel[1] < 150
                         && pixel[2] < 150

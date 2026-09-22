@@ -46,11 +46,12 @@ workspace regions.
 
 ## Organize documents
 
-In Overview, use the **+** placeholder after a group’s documents or at the end
-of the section to create a document or group there. Enter confirms its name;
-Escape discards the new item before it is created. Then write its synopsis. Click any synopsis or
-metadata value to edit it; click elsewhere or press Escape to finish. Right-click a group’s header or the space around its cards to create items
-inside it; right-click the Overview background to create at the section root.
+In Overview, each creation placeholder has two halves: the document icon creates
+a document; the group icon creates a group in that location. Enter confirms its
+name; Escape discards the new item before it is created. Then write its synopsis.
+Click any synopsis or metadata value to edit it; click elsewhere or press Escape
+to finish. Right-click a group’s header or the space around its cards to create
+items inside it; right-click the Overview background to create at the section root.
 Explorer’s right-click menu also supports creation. Groups can contain groups
 and documents. Choose **Rename** from an item’s context menu or press **F2**;
 Enter confirms and Escape cancels.
@@ -71,8 +72,10 @@ It keeps its tabs when hidden; the first opening creates an empty tab.
 Drag tabs between panes, or drop an Explorer document into either pane to open it.
 Tabs fit their titles; the overflow button lists documents that do not fit.
 Each pane’s upper-right button expands that pane into a temporary focus view.
-Focus view hides the window titlebar, navigation rail, tabs, second-pane control,
-sidebars, and status bar. **F11** also toggles focus view.
+Focus view hides the navigation rail, tabs, breadcrumbs, second-pane control,
+sidebars, and status bar. The native titlebar also hides when the window is
+maximized; a floating window keeps its titlebar. Fullscreen remains fullscreen.
+**F11** also toggles focus view.
 Choose **Exit focus** in the top bar or press **Escape** to restore the layout.
 When both panes show the same document, edits,
 comments, undo, saves, and word counts are shared; cursors, selections, scrolling,
@@ -80,17 +83,20 @@ and local searches remain independent.
 
 Each editor pane has a **+** button for a new tab (primary modifier plus **T**).
 Start writing before choosing a location. **Save** (primary modifier plus **S**)
-asks for a name and a location in Manuscript or Research. Closing a changed draft
+asks for a name and a location in Manuscript or Research. Expand folders in the
+location tree to choose a parent. Tab moves between locations; Left and Right
+collapse or expand the focused folder. Closing a changed draft
 offers Save, Don’t Save, and Cancel. Empty, unchanged tabs close without creating
 project documents. Drafts receive autosave and recovery protection; their words
 are excluded from manuscript totals and export until filed in Manuscript.
 
 Overview has its own Manuscript/Research switch and group disclosures. Collapsing
-Explorer groups does not hide cards. Documents use wide rows; indentation shows their parent group. Group headings
-remain separate from their documents. Click synopsis or metadata text to edit it, drag a title
+Explorer groups does not hide cards. Explorer hides while Overview is open.
+Document cards sit beside each other when space permits; indentation and group
+headings show their nesting. Click synopsis or metadata text to edit it, drag a title
 to reorganize, or double-click a document title to open Editor.
-Cards show the full synopsis with all applicable metadata beside it when space
-permits. Narrow layouts stack the fields. Their word counts come
+Cards show the full synopsis with applicable metadata in a narrow column beside
+it. Narrow layouts stack the fields. Their word counts come
 from document text; groups total their descendants, including collapsed groups.
 
 After naming a new card, focus moves to its synopsis. While writing a synopsis,
@@ -145,7 +151,9 @@ properties. The metadata editor also controls field display order and applicabil
 Select text or place the cursor, then click the speech-bubble icon (**Add comment**) in the toolbar or
 **Add Comment** in the editor context menu. The card beside the text supports
 replies, message edits and deletion, resolving or reopening, and thread deletion.
-The Comments panel lists document comments; select one to reveal its location.
+The Comments panel lists comments for the selected document. Selecting a group
+includes comments from all documents nested inside it, labeled by document title.
+Select a comment to open its document and reveal its location.
 Right-click a thread for Reply, Resolve/Reopen, or Delete thread. Reply opens
 the thread's editing card; deleting a thread asks for confirmation there.
 Comments stay in the project and are excluded from export.
@@ -158,7 +166,9 @@ on the last focused editor; click that pane's text to edit it.
 ## Search and replace
 
 Press the primary modifier plus **F** for Find in the focused pane. **Enter** and
-**Shift+Enter** move between matches; **Escape** closes Find.
+**Shift+Enter** move between matches; **Escape** closes Find. The search button
+beside the breadcrumbs below the tabs also opens Find. Both local and global
+search focus their query box immediately; Escape dismisses either search.
 
 Open **Global Search** in the Explorer header or press the primary modifier plus
 **Shift+F**. Results are grouped by document; select a result to reveal its match.
@@ -172,16 +182,23 @@ matches remain searchable but are excluded from replacement.
 ParchMint saves after editing becomes idle and during longer writing sessions.
 Structural changes request a save immediately. The status bar shows unsaved,
 saving, saved, or failed state. Choose **Save** or press the primary modifier
-plus **S** to request a save now.
+plus **S** to request a save now. If saving fails while closing, choose **Keep
+working**, **Try again**, or **Exit without saving**. Exiting skips the final save;
+existing recovery records remain available on reopening.
 
-Choose **Project history** in the project title menu to open project history.
-For one document, right-click its Explorer entry or Overview card and choose **History**. The page names the
-document and its location; switching panes does not change that target.
-Document timelines include project milestones. Use **Project history** to return
-to the project timeline and create milestones. Opening History does not save a draft.
+Choose **History** in the navigation rail to open project history.
+For one document, right-click its Explorer entry or Overview card and choose
+**History**. The page names the document and its location; switching panes does not change that target.
+Document timelines include project milestones. The scope dropdown above the
+timeline selects **Entire project** or a single document. Opening History does
+not save a draft.
 
-Comparisons show the saved version on the left and current writing on the right,
-with matching paragraphs aligned as you scroll. Changed words are highlighted.
+Selecting a checkpoint compares that saved version with the current project,
+including unsaved writing. Changed documents and groups appear in collapsible
+sections matching the outline. Renames strike through the old title. Unchanged
+items and lines are omitted. Content appears side by side, with changed words
+highlighted; metadata, synopsis, comments, and export changes have separate compact
+sections.
 Formatting-only changes show HTML differences; project style changes show CSS.
 **Restore project** replaces the whole project. **Restore document** replaces
 only the selected document's text, formatting, and comments; its name, location,

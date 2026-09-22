@@ -382,7 +382,7 @@ pub struct ShellLayout {
 
 impl ShellLayout {
     pub const MIN_WINDOW_SIZE: (u32, u32) = (1280, 720);
-    pub const RIBBON_HEIGHT: u32 = 52;
+    pub const RIBBON_HEIGHT: u32 = 44;
     pub const STATUS_BAR_HEIGHT: u32 = 32;
     pub const MIN_HIT_TARGET: u32 = 32;
     const DEFAULT_EXPLORER_WIDTH: u32 = 280;

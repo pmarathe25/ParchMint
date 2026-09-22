@@ -384,6 +384,21 @@ impl NativeProjectEffectExecutor {
                     snapshot,
                 )))
             }
+            ProjectEffect::LoadCommentDocuments(documents) => {
+                for document in documents {
+                    let document = resolvers.document(&document)?;
+                    if !current
+                        .documents
+                        .iter()
+                        .any(|loaded| loaded.document_id == document)
+                    {
+                        self.ports.load_document(document).await?;
+                    }
+                }
+                Ok(ProjectEffectCompletion::RefreshedSnapshot(Box::new(
+                    self.ports.snapshot().await?,
+                )))
+            }
             ProjectEffect::ApplyAppearanceToAllWindows(mode) => {
                 let theme = self.ports.set_appearance(mode).await?;
                 Ok(ProjectEffectCompletion::ApplyAppearance(theme))
@@ -1014,6 +1029,7 @@ fn project_effect_name(effect: &ProjectEffect) -> &'static str {
         ProjectEffect::RevealExportResult(_) => "reveal-export-result",
         ProjectEffect::SaveThroughRevision(_) => "save-through-revision",
         ProjectEffect::FocusRecoveredEditor => "focus-recovered-editor",
+        ProjectEffect::LoadCommentDocuments(_) => "load-group-comments",
         ProjectEffect::ReconcileRecovery => "reconcile-recovery",
         ProjectEffect::DiscardRecovery => "discard-recovery",
     }

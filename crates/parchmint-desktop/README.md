@@ -18,7 +18,9 @@ must acquire the same project lock to write.
 
 Startup service work runs away from the UI loop. Async results carry their window
 and session generation. Closing waits for the final save; failure leaves the
-window and draft open.
+window and draft open with retry, keep-working, and exit-without-saving choices.
+Exiting without saving releases the project lease and preserves existing recovery
+records.
 
 ## Test controls and diagnostics
 

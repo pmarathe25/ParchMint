@@ -1033,7 +1033,24 @@ impl<'a> CardsState<'a> {
             add_to: Some(self.section_id.to_owned()),
             depth: 0,
         });
-        rows
+        let mut compact: Vec<CardsGridRow> = Vec::new();
+        for row in rows {
+            if let Some(parent) = &row.add_to
+                && let Some(previous) = compact.last_mut()
+                && previous.add_to.is_none()
+                && previous.end > previous.start
+                && previous.end - previous.start < columns.max(1)
+                && let Some(first) = self.explorer.nodes.get(ids[previous.start])
+                && first.kind == HierarchyNodeKind::Document
+                && first.parent.as_ref() == Some(parent)
+            {
+                previous.add_to = row.add_to;
+                previous.height = previous.height.max(row.height);
+            } else {
+                compact.push(row);
+            }
+        }
+        compact
     }
 
     pub(crate) fn item_window(&self, columns: usize, width: f32) -> CardsWindow {
@@ -2530,10 +2547,20 @@ pub struct HistoryChangeSummary {
     pub modified_lines: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryHeading {
+    pub id: String,
+    pub before_title: Option<String>,
+    pub title: Option<String>,
+    pub group: bool,
+    pub order: usize,
+}
+
 /// Read-only comparison of one exact checkpoint document with its loaded
 /// current counterpart. It carries no mutation or persistence semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryComparison {
+    pub path: Vec<HistoryHeading>,
     pub checkpoint_id: String,
     pub document_id: String,
     pub document_title: String,
@@ -2604,6 +2631,7 @@ pub struct HistoryState {
     scroll_offset: f32,
     maintenance: HistoryMaintenanceStatus,
     maintenance_message: Option<String>,
+    pub(crate) collapsed_sections: BTreeSet<String>,
 }
 
 pub(crate) const HISTORY_CHECKPOINT_ROW_HEIGHT: f32 = 72.0;
@@ -2838,6 +2866,7 @@ pub(crate) fn compare_history_documents(
     let after_lines = semantic_lines(&after.semantic, &after_text);
     let edits = history_line_edits(&before_lines, &after_lines);
     HistoryComparison {
+        path: Vec::new(),
         checkpoint_id: checkpoint_id.to_owned(),
         document_id: before.document_id.clone(),
         document_title: after.title.clone(),
@@ -2852,6 +2881,7 @@ pub(crate) fn compare_history_text(
     after: &str,
 ) -> HistoryComparison {
     HistoryComparison {
+        path: Vec::new(),
         checkpoint_id: checkpoint_id.to_owned(),
         document_id: String::new(),
         document_title: title.to_owned(),
@@ -3883,6 +3913,7 @@ pub enum ProjectMessage {
     },
     SetDraftTitle(String),
     SetDraftParent(String),
+    ToggleDraftFolder(String),
     ConfirmFileDraft,
     SaveClosingDraft,
     DiscardClosingDraft,
@@ -4060,6 +4091,7 @@ pub enum ProjectMessage {
     CloseReplacementPreview,
     ApplyReplacement,
     SetHistoryDocumentFilter(Option<String>),
+    ToggleHistorySection(String),
     SetHistoryScroll(f32),
     SelectHistoryCheckpoint(String),
     SetNamedSnapshotDraft(String),
@@ -4129,6 +4161,7 @@ pub enum ProjectMessage {
 /// Integration effects translated into application/service calls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectEffect {
+    LoadCommentDocuments(Vec<String>),
     CreateDraft {
         pane: EditorPane,
         scratch_id: String,
@@ -4266,6 +4299,7 @@ pub struct ProjectWorkspace {
     hierarchy_rename: Option<HierarchyRename>,
     outline_field: Option<(String, Option<String>)>,
     pending_hierarchy_creation: Option<PendingHierarchyCreation>,
+    draft_expanded: BTreeSet<String>,
     completed_hierarchy_creation: Option<(String, bool)>,
     open_created_after_rename: Option<String>,
     last_activated_document: Option<String>,
@@ -4367,6 +4401,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             outline_field: None,
             pending_hierarchy_creation: None,
+            draft_expanded: BTreeSet::new(),
             completed_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
@@ -4441,6 +4476,7 @@ impl ProjectWorkspace {
             hierarchy_rename: None,
             outline_field: None,
             pending_hierarchy_creation: None,
+            draft_expanded: BTreeSet::new(),
             completed_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
@@ -5406,6 +5442,93 @@ impl ProjectWorkspace {
             .collect()
     }
 
+    pub(crate) fn node_for_document(&self, document: &str) -> Option<String> {
+        self.explorer
+            .nodes
+            .values()
+            .find(|node| node.document_id.as_deref() == Some(document))
+            .map(|node| node.id.clone())
+    }
+
+    pub(crate) fn history_document_choices(&self) -> Vec<(&str, &str)> {
+        self.explorer
+            .preorder_ids()
+            .into_iter()
+            .filter_map(|id| {
+                let node = &self.explorer.nodes[id];
+                node.document_id
+                    .as_deref()
+                    .map(|document| (document, node.title.as_str()))
+            })
+            .collect()
+    }
+
+    fn group_comment_effects(&self) -> Vec<ProjectEffect> {
+        let InspectorContext::Group { group_id } = self.editor.inspector_context() else {
+            return Vec::new();
+        };
+        let documents = self.descendant_documents(group_id);
+        if documents.is_empty() {
+            Vec::new()
+        } else {
+            vec![ProjectEffect::LoadCommentDocuments(documents)]
+        }
+    }
+
+    fn descendant_documents(&self, group: &str) -> Vec<String> {
+        let mut pending = vec![group.to_owned()];
+        let mut documents = Vec::new();
+        while let Some(id) = pending.pop() {
+            if let Some(node) = self.explorer.nodes.get(&id) {
+                documents.extend(node.document_id.iter().cloned());
+                pending.extend(node.children.iter().cloned());
+            }
+        }
+        documents
+    }
+
+    pub(crate) fn draft_tree(&self) -> Vec<(String, String, usize, bool, bool)> {
+        fn visit(
+            workspace: &ProjectWorkspace,
+            id: &str,
+            depth: usize,
+            rows: &mut Vec<(String, String, usize, bool, bool)>,
+        ) {
+            let node = &workspace.explorer.nodes[id];
+            if node.kind == HierarchyNodeKind::Document {
+                return;
+            }
+            let children = node
+                .children
+                .iter()
+                .filter(|id| workspace.explorer.nodes[*id].kind != HierarchyNodeKind::Document)
+                .cloned()
+                .collect::<Vec<_>>();
+            let expanded = workspace.draft_expanded.contains(id);
+            rows.push((
+                id.to_owned(),
+                node.title.clone(),
+                depth,
+                !children.is_empty(),
+                expanded,
+            ));
+            if expanded {
+                for child in children {
+                    visit(workspace, &child, depth + 1, rows);
+                }
+            }
+        }
+        let mut rows = Vec::new();
+        for id in &self.explorer.roots {
+            if self.explorer.nodes[id].section_id
+                != stable_id_string(ProjectSection::Unfiled.root_id().as_bytes())
+            {
+                visit(self, id, 0, &mut rows);
+            }
+        }
+        rows
+    }
+
     pub fn modal(&self) -> Option<ProjectModal> {
         self.modal
             .clone()
@@ -5635,6 +5758,8 @@ impl ProjectWorkspace {
                     .expect("document hierarchy nodes have document ids"),
             },
             HierarchyNodeKind::Root | HierarchyNodeKind::Group => {
+                self.editor
+                    .set_group_comment_documents(self.descendant_documents(&node_id));
                 InspectorContext::Group { group_id: node_id }
             }
         };
@@ -5837,6 +5962,12 @@ impl ProjectWorkspace {
                 }
                 Vec::new()
             }
+            ProjectMessage::ToggleDraftFolder(id) => {
+                if !self.draft_expanded.remove(&id) {
+                    self.draft_expanded.insert(id);
+                }
+                Vec::new()
+            }
             ProjectMessage::SetDraftParent(value) => {
                 if self.draft_destinations().iter().any(|(id, _)| id == &value)
                     && let Some(ProjectModal::FileDraft { parent_id, .. }) = &mut self.modal
@@ -5882,7 +6013,7 @@ impl ProjectWorkspace {
             ProjectMessage::SelectHierarchy { node_id, gesture } => {
                 self.explorer.select(&node_id, gesture);
                 self.sync_selection_context();
-                Vec::new()
+                self.group_comment_effects()
             }
             ProjectMessage::SetCardsSection(section) => {
                 if self.explorer.roots.contains(&section) {
@@ -5908,13 +6039,13 @@ impl ProjectWorkspace {
                 self.explorer.select(&node_id, SelectionGesture::Replace);
                 self.sync_selection_context();
                 self.explorer.toggle_expanded(&node_id);
-                Vec::new()
+                self.group_comment_effects()
             }
             ProjectMessage::NavigateExplorer(navigation) => {
                 if self.explorer.navigate_visible(navigation) {
                     self.sync_selection_context();
                 }
-                Vec::new()
+                self.group_comment_effects()
             }
             ProjectMessage::RequestCreateHierarchy { parent_id, kind } => {
                 let can_contain_children =
@@ -6841,6 +6972,12 @@ impl ProjectWorkspace {
                         .collect(),
                     replacement: self.global_search.replacement.clone(),
                 }]
+            }
+            ProjectMessage::ToggleHistorySection(id) => {
+                if !self.history.collapsed_sections.remove(&id) {
+                    self.history.collapsed_sections.insert(id);
+                }
+                Vec::new()
             }
             ProjectMessage::SetHistoryDocumentFilter(document_id) => {
                 if self.history.active_document_filter == document_id {
@@ -8874,6 +9011,7 @@ mod tests {
             }),
         };
         let comparison = HistoryComparison {
+            path: Vec::new(),
             checkpoint_id: checkpoint.checkpoint_id.clone(),
             document_id: "chapter-one".to_owned(),
             document_title: "Chapter One".to_owned(),
@@ -10205,6 +10343,11 @@ mod tests {
             assert_eq!(initial.rows[0].end, 1, "groups occupy their own row");
             assert_eq!(initial.rows[1].start, 1);
             assert_eq!(initial.rows[1].end, 3, "only siblings share a row");
+            assert_eq!(
+                initial.rows[1].add_to.is_some(),
+                columns > 2,
+                "the creation placeholder uses the next free card cell"
+            );
             workspace.update(ProjectMessage::SetCardsScroll(1_000_000.0));
             let last = workspace.cards().item_window(columns, 840.0);
             assert_eq!(last.end, 354);

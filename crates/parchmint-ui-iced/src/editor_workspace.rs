@@ -975,7 +975,7 @@ pub enum InspectorContext {
 
 impl InspectorContext {
     pub const fn comments_available(&self) -> bool {
-        matches!(self, Self::Document { .. })
+        !matches!(self, Self::None)
     }
 }
 
@@ -1013,6 +1013,9 @@ pub struct CommentThreadView {
 }
 
 impl CommentThreadView {
+    pub fn document_id(&self) -> &str {
+        &self.document_id
+    }
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1477,6 +1480,7 @@ pub struct EditorWorkspace {
     last_focused_view: BTreeMap<String, ViewId>,
     comments: BTreeMap<String, CommentAnchor>,
     comment_threads: BTreeMap<String, CommentThreadView>,
+    group_comment_documents: BTreeSet<String>,
     hovered_comment: Option<CommentHover>,
     comment_actions_open: bool,
     comment_composer: Option<CommentComposer>,
@@ -1694,6 +1698,7 @@ impl EditorWorkspace {
             last_focused_view,
             comments: BTreeMap::new(),
             comment_threads: BTreeMap::new(),
+            group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
             comment_actions_open: false,
             comment_composer: None,
@@ -1803,6 +1808,7 @@ impl EditorWorkspace {
             last_focused_view,
             comments: snapshot_comment_anchors(snapshot),
             comment_threads: snapshot_comment_threads(snapshot),
+            group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
             comment_actions_open: false,
             comment_composer: None,
@@ -2146,14 +2152,21 @@ impl EditorWorkspace {
         &self.inspector
     }
 
+    pub(crate) fn set_group_comment_documents(&mut self, documents: Vec<String>) {
+        self.group_comment_documents = documents.into_iter().collect();
+    }
+
     pub fn inspector_comments(&self) -> Vec<&CommentThreadView> {
-        let InspectorContext::Document { document_id } = &self.inspector else {
-            return Vec::new();
-        };
         let mut threads = self
             .comment_threads
             .values()
-            .filter(|thread| &thread.document_id == document_id)
+            .filter(|thread| match &self.inspector {
+                InspectorContext::Document { document_id } => &thread.document_id == document_id,
+                InspectorContext::Group { .. } => {
+                    self.group_comment_documents.contains(&thread.document_id)
+                }
+                InspectorContext::None => false,
+            })
             .collect::<Vec<_>>();
         let selected = self.selected_comment.as_deref();
         threads.sort_by_key(|thread| selected != Some(thread.id()));

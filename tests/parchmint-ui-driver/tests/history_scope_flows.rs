@@ -114,12 +114,12 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
     capture(&harness, "history-document-light");
     assert!(
         harness
-            .contains_text(HarnessWindow::Project, "Document · Chapter")
+            .contains_text(HarnessWindow::Project, "Content")
             .unwrap()
     );
     assert!(
         !harness
-            .contains_text(HarnessWindow::Project, "Document · Notes")
+            .contains_text(HarnessWindow::Project, "Unrelated notes must stay.")
             .unwrap()
     );
     assert!(

@@ -48,7 +48,7 @@ impl Default for EditorLayoutMetrics {
             // chrome. These values are shared by painting, hit testing,
             // selection, scrolling, and virtualization.
             inset_x: 54.0,
-            inset_y: 62.0,
+            inset_y: 32.0,
             scalar_width: 9.0,
             line_height: 29.0,
             caret_width: 1.0,

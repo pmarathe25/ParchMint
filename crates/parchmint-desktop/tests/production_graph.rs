@@ -770,6 +770,42 @@ fn lazy_multi_document_export_materializes_every_manuscript_body() {
     let html = fs::read_to_string(output).unwrap();
     assert!(html.contains("hello"));
     assert!(html.contains("second lazy export body"));
+    let hydrated = access
+        .snapshot(|query| query.snapshot_with_documents())
+        .unwrap()
+        .unwrap();
+    let lazy = hydrated
+        .documents
+        .iter()
+        .find(|document| document.body.contains("second lazy export body"))
+        .unwrap();
+    access
+        .persistence(|persistence| {
+            persistence.persist_editor_projection(CanonicalProjection::new(
+                lazy.document_id,
+                lazy.revision.next(),
+                "<p>Edited after History or export hydration</p>",
+                Vec::new(),
+                Vec::new(),
+                0,
+            ))
+        })
+        .unwrap()
+        .expect("hydrated documents must have a registered recovery base");
+    // Repeated reads must not overwrite a newer recovery hash with the loader's
+    // original on-disk hash.
+    access
+        .snapshot(|query| query.snapshot_with_documents())
+        .unwrap()
+        .unwrap();
+    let (handle, _) = access
+        .persistence(|persistence| persistence.request_save(ProjectSaveKind::Explicit))
+        .unwrap()
+        .unwrap();
+    access
+        .persistence(|persistence| persistence.await_save(handle))
+        .unwrap()
+        .expect("save after lazy hydration");
 }
 
 #[test]

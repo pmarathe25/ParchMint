@@ -313,8 +313,18 @@ fn a_new_tab_can_be_written_before_choosing_its_name_and_group() {
     harness
         .type_focused(HarnessWindow::Project, "The beginning")
         .unwrap();
+    // The location picker starts collapsed; expand Manuscript, then choose Act One.
     harness
-        .click_text(HarnessWindow::Project, "Manuscript › Act One")
+        .press_key(HarnessWindow::Project, HarnessKey::Tab)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::ArrowRight)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Tab)
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
         .unwrap();
     if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
         harness
@@ -325,6 +335,24 @@ fn a_new_tab_can_be_written_before_choosing_its_name_and_group() {
         .click_target(HarnessWindow::Project, HarnessTarget::ModalConfirm)
         .unwrap();
     assert_eq!(harness.active_editor_tab_title().unwrap(), "The beginning");
+    let manifest = parchmint_project_format::ProjectFormatCodec::default()
+        .decode_manifest(&std::fs::read(project.join("project.toml")).unwrap())
+        .unwrap();
+    let nodes = manifest.value()["parchmint-structure"]["nodes"]
+        .as_array()
+        .unwrap();
+    let act = nodes
+        .iter()
+        .find(|node| node["title"].as_str() == Some("Act One"))
+        .unwrap();
+    let chapter = nodes
+        .iter()
+        .find(|node| node["title"].as_str() == Some("The beginning"))
+        .unwrap();
+    assert_eq!(
+        chapter["parent"], act["id"],
+        "the focused tree location must be selected by Enter"
+    );
     assert!(
         harness
             .contains_text(HarnessWindow::Project, "Manuscript · 5 words")
@@ -515,6 +543,10 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
         harness
             .click_text(HarnessWindow::Project, "New document")
             .unwrap();
+        // Naming is a local draft until confirmed, even while recovery is pending.
+        harness
+            .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Next chapter")
+            .unwrap();
         harness
             .type_into_target(
                 HarnessWindow::Project,
@@ -523,9 +555,6 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
             )
             .unwrap();
         harness.release_completions(newest_first).unwrap();
-        harness
-            .replace_text_and_submit(HarnessWindow::Project, "Untitled", "Next chapter")
-            .unwrap();
         harness
             .type_into_target(
                 HarnessWindow::Project,

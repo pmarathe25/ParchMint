@@ -2436,6 +2436,23 @@ fn duplicate_does_not_create_an_annotation_sidecar_for_the_fresh_document() {
             .iter()
             .any(|write| write.path == format!("annotations/{fresh_text}.json"))
     );
+    drop(requests);
+    coordinator
+        .persist_editor_projection(CanonicalProjection::new(
+            fresh_document,
+            EditorRevision::from(1),
+            "<p>Edited duplicate</p>",
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+        .expect("a newly duplicated document must have a recovery base before its first autosave");
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator
+        .await_save(handle)
+        .expect("edited duplicate saves normally");
 }
 
 #[test]

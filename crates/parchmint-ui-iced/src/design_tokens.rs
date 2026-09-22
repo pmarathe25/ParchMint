@@ -11,7 +11,7 @@ use parchmint_editor_iced::{EditorSurfaceColor, EditorSurfaceTheme};
 use parchmint_preferences::ResolvedAppearance;
 
 /// Fixed desktop metrics from the native design source.
-pub const RIBBON_HEIGHT: u16 = 52;
+pub const RIBBON_HEIGHT: u16 = 44;
 pub const STATUS_HEIGHT: u16 = 32;
 pub const COMPACT_CONTROL_HEIGHT: u16 = 28;
 pub const CONTROL_HEIGHT: u16 = 36;

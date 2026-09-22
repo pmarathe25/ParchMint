@@ -64,7 +64,9 @@ alignment. Check nested menus, Escape, and clicking back into the document; save
 and reopen to confirm the formatting persists.
 
 Check **Focus document** in each pane: tabs, the companion control, sidebars, and
-the status bar, navigation rail, and native window titlebar should disappear. Type and undo, then use **Exit focus** and
+the status bar and navigation rail should disappear. The native titlebar should
+hide only when maximized or fullscreen. Check that the maximized window still
+reaches the bottom of the display; a floating window must retain its titlebar. Type and undo, then use **Exit focus** and
 **Escape** to restore the prior layout. F6 should skip the hidden controls.
 Check that Export opens from the navigation rail and that style choices have
 the same readable contrast as other enabled menu items.
@@ -78,6 +80,19 @@ must remove the placeholder without creating a Recently Deleted entry. Enter
 must create exactly one item with its final name.
 Repeat creation with its keyboard shortcut while the document has focus; typing
 the name must not change the document body, whether confirmed or cancelled.
+
+Check Overview at wide and narrow widths: cards should share rows when space
+allows, metadata should occupy a narrow column, and Explorer should be hidden.
+Use both halves of the creation placeholder. Save a new tab inside a nested
+group using the expandable location tree.
+
+In History, compare a checkpoint with the current project. Verify nested group
+headers, struck-through renamed titles, changed-only content, and separate compact
+metadata/comment changes. Filter to one document and back to Entire project.
+Select a group in Explorer and check comments from its nested documents; selecting
+a comment must open the correct document. Open each search and type immediately,
+then dismiss it with Escape. Open an editor or Explorer context menu and
+right-click outside its area; the old menu must disappear.
 
 To check persistence, close the app and reopen the same copied project with the
 same isolated settings (do not rerun the helper, which creates a fresh fixture):

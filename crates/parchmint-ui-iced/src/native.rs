@@ -896,6 +896,13 @@ enum Message {
         result: Result<ResolvedAppearance, String>,
     },
     RetryClose(window::Id),
+    ExitWithoutSaving(window::Id),
+    FocusWindowState {
+        window: window::Id,
+        focused: bool,
+        maximized: bool,
+    },
+    BeforeRightClick(window::Id),
     CancelClose(window::Id),
     ProjectCloseFinished {
         window: window::Id,
@@ -1251,6 +1258,7 @@ struct NativeProjectState {
     /// A created Explorer row must first be rendered before Iced can focus its
     /// inline text field. The surface consumes this one-shot request on show.
     pending_hierarchy_rename_focus: Option<String>,
+    focus_titlebar_hidden: bool,
     pending_metadata_field_creation_focus: bool,
     /// Sidebar visibility before the author explicitly focuses a dual-pane
     /// comparison. The command restores exactly this state on its next use.
@@ -2316,7 +2324,7 @@ impl NativeDesktop {
         let task = self.update_inner(message);
         let decorations = self.windows.iter().filter_map(|(&id, window)| {
             let focused = matches!(window, NativeWindow::Project(state) if state.shell.destination() == RibbonDestination::Editor && state.workspace.as_ref().is_some_and(|workspace| workspace.editor().expanded_pane().is_some()));
-            (focused != focused_windows.contains(&id)).then(|| window::toggle_decorations(id))
+            (focused != focused_windows.contains(&id)).then(|| window::is_maximized(id).map(move |maximized| Message::FocusWindowState { window: id, focused, maximized }))
         }).collect::<Vec<_>>();
         let task = if decorations.is_empty() {
             task
@@ -3871,6 +3879,71 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            Message::BeforeRightClick(id) => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) {
+                    state.suppress_next_context_menu_dismissal = false;
+                }
+                self.dismiss_context_menus(id)
+            }
+            Message::FocusWindowState {
+                window: id,
+                focused,
+                maximized,
+            } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
+                    return Task::none();
+                };
+                let now = state.shell.destination() == RibbonDestination::Editor
+                    && state
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|w| w.editor().expanded_pane().is_some());
+                if now != focused {
+                    return Task::none();
+                }
+                let hide = focused && maximized;
+                if hide == state.focus_titlebar_hidden {
+                    return Task::none();
+                }
+                state.focus_titlebar_hidden = hide;
+                let decorations = window::toggle_decorations(id);
+                if maximized {
+                    // Wayland client decorations keep the old inner size until the
+                    // compositor issues a new maximize configure. Reasserting true
+                    // alone is a no-op on Mutter; queue both requests together.
+                    decorations
+                        .chain(window::maximize(id, false))
+                        .chain(window::maximize(id, true))
+                } else {
+                    decorations
+                }
+            }
+            Message::ExitWithoutSaving(id) => {
+                let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
+                    return Task::none();
+                };
+                if !self.close_failures.contains_key(&state.project.window) {
+                    return Task::none();
+                }
+                let project = state.project.project.clone();
+                let callbacks = Arc::clone(&self.callbacks);
+                self.closing_windows.insert(id);
+                Task::perform(
+                    Self::run_blocking_operation("exit without saving", move || {
+                        callbacks.close_clean_project(project)
+                    }),
+                    move |result| Message::ProjectCloseFinished {
+                        window: id,
+                        result: Ok(ProjectionRun {
+                            projected: BTreeMap::new(),
+                            result: result.map(|_| CloseCompletion {
+                                snapshot: None,
+                                result: Ok(()),
+                            }),
+                        }),
+                    },
+                )
+            }
             Message::RetryClose(window) => self.close_window(window),
             Message::CancelClose(window) => {
                 self.closing_windows.remove(&window);
@@ -3950,7 +4023,9 @@ impl NativeDesktop {
             _ => parchmint_preferences::ShortcutScope::Global,
         };
         crate::shortcut_router::route(
-            self.view_content(id),
+            crate::right_click::before_right_click(self.view_content(id), move |_| {
+                Message::BeforeRightClick(id)
+            }),
             &self.keybindings,
             context,
             recording,
@@ -4868,6 +4943,12 @@ impl NativeDesktop {
             // and can discard its command before it reaches the reducer.
             return Task::none();
         }
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right))
+        ) {
+            return Task::none();
+        }
         if matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_))) {
             // Let the widget tree consume this press first: a context-menu
             // action or a new secondary-click must not be preempted by the
@@ -4942,6 +5023,34 @@ impl NativeDesktop {
                         .update(crate::EditorMessage::CancelTabDrag);
                 }
                 return Task::none();
+            }
+            if accelerator_fallback
+                && matches!(key, keyboard::Key::Named(keyboard::key::Named::Enter))
+            {
+                let action = self.windows.get(&id).and_then(|window| {
+                    let NativeWindow::Project(state) = window else {
+                        return None;
+                    };
+                    let workspace = state.workspace.as_ref()?;
+                    if !matches!(
+                        workspace.modal(),
+                        Some(crate::ProjectModal::FileDraft { .. })
+                    ) {
+                        return None;
+                    }
+                    match state.modal_focus {
+                        ModalFocus::Draft(index) if index > 0 => workspace
+                            .draft_tree()
+                            .get(index - 1)
+                            .map(|row| ProjectMessage::SetDraftParent(row.0.clone())),
+                        ModalFocus::Confirm => Some(ProjectMessage::ConfirmFileDraft),
+                        ModalFocus::Cancel => Some(ProjectMessage::DismissModal),
+                        _ => None,
+                    }
+                });
+                if let Some(action) = action {
+                    return self.update_project_surface(id, ProjectSurfaceMessage::Project(action));
+                }
             }
             let explorer_navigation = {
                 let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
@@ -5033,6 +5142,9 @@ impl NativeDesktop {
                     ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyRename(node_id)),
                 );
             }
+            if matches!(key, keyboard::Key::Named(keyboard::key::Named::Escape)) && self.windows.get(&id).is_some_and(|w| matches!(w, NativeWindow::Project(state) if state.shell.global_search_is_open())) {
+                return self.update_project_surface(id, ProjectSurfaceMessage::Project(ProjectMessage::ShowExplorer));
+            }
             let local_find_open = self.windows.get(&id).is_some_and(|window| {
                 let NativeWindow::Project(state) = window else {
                     return false;
@@ -5068,6 +5180,29 @@ impl NativeDesktop {
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
+        if let Event::Keyboard(keyboard::Event::KeyPressed {
+            key:
+                keyboard::Key::Named(
+                    direction
+                    @ (keyboard::key::Named::ArrowLeft | keyboard::key::Named::ArrowRight),
+                ),
+            ..
+        }) = &event
+            && let Some(workspace) = state.workspace.as_mut()
+            && matches!(
+                workspace.modal(),
+                Some(crate::ProjectModal::FileDraft { .. })
+            )
+            && let ModalFocus::Draft(index) = state.modal_focus
+            && index > 0
+            && let Some((node, _, _, children, expanded)) =
+                workspace.draft_tree().get(index - 1).cloned()
+        {
+            if children && expanded != (*direction == keyboard::key::Named::ArrowRight) {
+                workspace.update(ProjectMessage::ToggleDraftFolder(node));
+            }
+            return Task::none();
+        }
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.modifiers = modifiers;
@@ -5095,7 +5230,7 @@ impl NativeDesktop {
                         Some(crate::ProjectModal::FileDraft { .. })
                     )
                 {
-                    let locations = workspace.draft_destinations().len();
+                    let locations = workspace.draft_tree().len();
                     let current = match state.modal_focus {
                         ModalFocus::Draft(index) => index,
                         ModalFocus::Cancel | ModalFocus::Discard => locations + 1,
@@ -5276,6 +5411,20 @@ impl NativeDesktop {
                     .shell
                     .layout_mut()
                     .resize_window(size.width as u32, size.height as u32);
+                let focused = state.shell.destination() == RibbonDestination::Editor
+                    && state
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| workspace.editor().expanded_pane().is_some());
+                if focused || state.focus_titlebar_hidden {
+                    return window::is_maximized(id).map(move |maximized| {
+                        Message::FocusWindowState {
+                            window: id,
+                            focused,
+                            maximized,
+                        }
+                    });
+                }
             }
             _ => {}
         }
@@ -5554,10 +5703,12 @@ impl NativeDesktop {
         let modal: Option<Element<'a, Message>> = if close_failure.is_some() {
             Some(Self::native_error_modal(
                 "Couldn't save before closing",
-                "Your project is still open. Try saving again or keep working.",
+                "Your project is still open. Exiting without saving discards changes that have not been saved.",
                 row![
                     button(components::button_label("Keep working"))
                         .on_press(Message::CancelClose(id)),
+                    button(components::button_label("Exit without saving"))
+                        .on_press(Message::ExitWithoutSaving(id)),
                     button(components::button_label("Try again")).on_press(Message::RetryClose(id)),
                 ]
                 .spacing(8)
@@ -5620,6 +5771,44 @@ impl NativeDesktop {
         if matches!(self.windows.get(&id), Some(NativeWindow::Project(state)) if state.history_restore_is_busy())
         {
             return Task::none();
+        }
+        if let ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+            crate::EditorMessage::SelectComment(thread),
+        )) = &message
+        {
+            let node = self.windows.get(&id).and_then(|window| {
+                let NativeWindow::Project(state) = window else {
+                    return None;
+                };
+                let workspace = state.workspace.as_ref()?;
+                let document = workspace.editor().comment_thread(thread)?.document_id();
+                if workspace
+                    .editor()
+                    .pane(workspace.editor().focused_pane())
+                    .active_document()
+                    == Some(document)
+                {
+                    return None;
+                }
+                workspace
+                    .explorer()
+                    .rows()
+                    .into_iter()
+                    .find(|row| row.document_id == Some(document))
+                    .map(|row| row.id.to_owned())
+                    .or_else(|| workspace.node_for_document(document))
+            });
+            if let Some(node) = node {
+                return self
+                    .update_project_surface(
+                        id,
+                        ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(node)),
+                    )
+                    .chain(Task::done(Message::ProjectSurface {
+                        window: id,
+                        message,
+                    }));
+            }
         }
         if matches!(message, ProjectSurfaceMessage::ShowProjectChooser) {
             self.project_chooser = Some(id);
@@ -6160,6 +6349,13 @@ impl NativeDesktop {
                     ));
                 } else if restores_search_scroll {
                     tasks.push(restore_search_scroll(workspace));
+                    state.shell.focus(crate::FocusTarget::None);
+                    for binding in state.editor_bindings.values() {
+                        let _ = binding.host().blur();
+                    }
+                    tasks.push(iced::widget::operation::focus(
+                        crate::iced_project_surface::global_search_query_input_id(),
+                    ));
                 }
                 if keep_explorer_focus {
                     for binding in state.editor_bindings.values() {
@@ -7074,6 +7270,10 @@ impl NativeDesktop {
                     ));
                     return Task::none();
                 }
+                let opens_find = message
+                    .workspace_messages()
+                    .iter()
+                    .any(|message| matches!(message, crate::EditorMessage::OpenLocalFind));
                 let restore_pane_focus = matches!(
                     &message,
                     EditorCenterMessage::Workspace(
@@ -7120,7 +7320,15 @@ impl NativeDesktop {
                             .focus(crate::FocusTarget::EditorDocument(document.to_owned()));
                     }
                 }
-                let pane_focus_task = if restore_pane_focus {
+                let pane_focus_task = if opens_find {
+                    state.shell.focus(crate::FocusTarget::None);
+                    for binding in state.editor_bindings.values() {
+                        let _ = binding.host().blur();
+                    }
+                    iced::widget::operation::focus(
+                        crate::HarnessTarget::LocalFind(workspace.editor().focused_pane()).id(),
+                    )
+                } else if restore_pane_focus {
                     crate::focus::region_id(crate::F6Region::FocusedEditor)
                         .map_or_else(Task::none, iced::widget::operation::focus)
                 } else {
@@ -8852,7 +9060,19 @@ impl NativeDesktop {
                     && let Some((node_id, open)) = workspace.take_completed_hierarchy_creation()
                 {
                     if open {
-                        reopen.extend(workspace.update(ProjectMessage::OpenHierarchyNode(node_id)));
+                        let effects = workspace.update(ProjectMessage::OpenHierarchyNode(node_id));
+                        if let Some(document) = effects.iter().find_map(|effect| match effect {
+                            ProjectEffect::OpenDocumentInPrimary(document)
+                            | ProjectEffect::OpenDocumentInCompanion(document) => {
+                                Some(document.clone())
+                            }
+                            _ => None,
+                        }) {
+                            state
+                                .shell
+                                .focus(crate::FocusTarget::EditorDocument(document));
+                        }
+                        reopen.extend(effects);
                     } else {
                         created_outline = Some(node_id.clone());
                         workspace.update(ProjectMessage::BeginOutlineField {
@@ -10155,13 +10375,13 @@ impl NativeDesktop {
             }
             crate::EditorCommand::InsertSceneBreak => {
                 execute(EditorCommandKind::InsertAtomicBlock {
-                    selection,
+                    selection: EditorSelection::new(selection.end(), selection.end()),
                     kind: AtomicBlockKind::SceneBreak,
                 })?;
             }
             crate::EditorCommand::InsertPageBreak => {
                 execute(EditorCommandKind::InsertAtomicBlock {
-                    selection,
+                    selection: EditorSelection::new(selection.end(), selection.end()),
                     kind: AtomicBlockKind::PageBreak,
                 })?;
             }
@@ -11403,6 +11623,7 @@ impl NativeDesktop {
                 mounted_documents,
                 retained_editor_sessions,
                 pending_hierarchy_rename_focus: None,
+                focus_titlebar_hidden: false,
                 pending_metadata_field_creation_focus: false,
                 effect_executor,
                 synopsis_commits: SynopsisCommitQueue::default(),

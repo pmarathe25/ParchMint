@@ -428,6 +428,30 @@ impl EditorPersistenceCoordinator {
             .discard_through(parchmint_recovery_api::DurableRevisionVector::new(
                 base.revisions.clone(),
             ))?;
+        // Structural saves can introduce documents without an editor projection
+        // (duplicates and filed drafts). Their first edit needs the saved base.
+        // Never rewind a document whose recovery records are newer than this save.
+        let mut frontier = self
+            .frontier
+            .lock()
+            .map_err(|_| EditorPersistenceError::StateUnavailable)?;
+        for (document, revision) in &base.revisions.documents {
+            let resource = document_resource_id(*document);
+            if frontier
+                .revisions
+                .documents
+                .get(document)
+                .is_none_or(|known| known <= revision)
+                && let Some(hash) = base.hashes.get(&resource)
+            {
+                frontier.revisions.documents.insert(*document, *revision);
+                frontier.hashes.insert(resource, *hash);
+            }
+        }
+        frontier.revisions.project_revision = frontier
+            .revisions
+            .project_revision
+            .max(base.revisions.project_revision);
         Ok(())
     }
 
@@ -533,16 +557,16 @@ impl EditorPersistenceCoordinator {
         document: parchmint_domain::DocumentId,
         revision: parchmint_recovery_api::DocumentRevision,
         hash: parchmint_recovery_api::ContentHash,
-    ) -> Result<(), EditorPersistenceError> {
+    ) -> Result<bool, EditorPersistenceError> {
         let mut frontier = self
             .frontier
             .lock()
             .map_err(|_| EditorPersistenceError::StateUnavailable)?;
         let resource = document_resource_id(document);
-        if let Some(existing) = frontier.hashes.get(&resource) {
-            return (*existing == hash)
-                .then_some(())
-                .ok_or(EditorPersistenceError::RevisionMismatch);
+        if frontier.hashes.contains_key(&resource) {
+            // A lazy loader may still hold the original disk hash after edits
+            // or a newer save. Register once; never replace a live frontier.
+            return Ok(false);
         }
         if frontier
             .revisions
@@ -554,7 +578,7 @@ impl EditorPersistenceCoordinator {
         }
         frontier.revisions.documents.insert(document, revision);
         frontier.hashes.insert(resource, hash);
-        Ok(())
+        Ok(true)
     }
 
     fn persist_projection_record(

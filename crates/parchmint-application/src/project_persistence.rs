@@ -305,8 +305,12 @@ impl ProjectPersistenceCoordinator {
         hash: parchmint_recovery_api::ContentHash,
     ) -> Result<(), ProjectPersistenceError> {
         let revision = parchmint_recovery_api::DocumentRevision::from(revision.value());
-        self.editor
-            .register_document_base(document, revision, hash)?;
+        if !self
+            .editor
+            .register_document_base(document, revision, hash)?
+        {
+            return Ok(());
+        }
         let mut base = self
             .recovery_base
             .lock()

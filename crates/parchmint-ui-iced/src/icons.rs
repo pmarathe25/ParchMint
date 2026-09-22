@@ -83,7 +83,7 @@ pub(crate) fn icon_sized(icon: Icon, size: u16) -> Svg<'static> {
         })
 }
 
-/// User-supplied ParchMint artwork, embedded unchanged for offline installations.
+/// Transparent vector typewriter drawn from the supplied ParchMint artwork.
 pub(crate) fn brand<'a>(size: u16) -> Svg<'a> {
     svg(Handle::from_memory(
         include_bytes!("../assets/parchmint-brand.svg").as_slice(),

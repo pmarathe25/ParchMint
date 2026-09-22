@@ -109,5 +109,5 @@ binding. Settings records combinations, validates conflicts, and applies changes
 only after durable preference storage succeeds. Context menus use the effective
 bindings for their labels.
 
-`assets/parchmint-brand.svg` embeds the supplied ParchMint JPEG unchanged. The
+`assets/parchmint-brand.svg` is a transparent vector interpretation of the supplied typewriter artwork. The
 navigation rail and launcher render the same artwork without an external path.

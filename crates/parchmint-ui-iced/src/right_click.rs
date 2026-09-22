@@ -20,14 +20,28 @@ where
     Message: 'a,
 {
     RightClickArea {
+        before_children: false,
         content: content.into(),
         on_right_press: Box::new(on_right_press),
     }
     .into()
 }
 
+pub(crate) fn before_right_click<'a, Message: 'a>(
+    content: Element<'a, Message>,
+    on_right_press: impl Fn(Point) -> Message + 'a,
+) -> Element<'a, Message> {
+    RightClickArea {
+        content,
+        on_right_press: Box::new(on_right_press),
+        before_children: true,
+    }
+    .into()
+}
+
 struct RightClickArea<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
+    before_children: bool,
     on_right_press: Box<dyn Fn(Point) -> Message + 'a>,
 }
 
@@ -83,6 +97,16 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if self.before_children
+            && matches!(
+                event,
+                Event::Mouse(iced::mouse::Event::ButtonPressed(
+                    iced::mouse::Button::Right
+                ))
+            )
+        {
+            shell.publish((self.on_right_press)(cursor.position().unwrap_or_default()));
+        }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -103,7 +127,8 @@ where
             Event::Mouse(iced::mouse::Event::ButtonPressed(
                 iced::mouse::Button::Right
             ))
-        ) && !shell.is_event_captured()
+        ) && !self.before_children
+            && !shell.is_event_captured()
             && let Some(point) = cursor
                 .position_over(layout.bounds())
                 .filter(|point| viewport.contains(*point))

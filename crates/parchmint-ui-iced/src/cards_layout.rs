@@ -13,17 +13,21 @@ use crate::{
 pub(crate) const CARD_FONT: Font = Font::with_name("Source Sans 3");
 pub(crate) const SCROLLBAR_GUTTER: f32 = 12.0;
 
-pub(crate) fn column_count(_width: f32) -> usize {
-    1
+pub(crate) fn column_count(width: f32) -> usize {
+    ((width + 12.0) / 420.0).floor().max(1.0) as usize
 }
 
 pub(crate) fn fields_width(width: f32, has_metadata: bool) -> f32 {
     let inner = (width - 24.0).max(1.0);
-    if has_metadata && width >= 560.0 {
-        (inner - 20.0) / 2.0
+    if has_metadata && width >= 340.0 {
+        (inner - 144.0 - 12.0).max(80.0)
     } else {
         inner
     }
+}
+
+pub(crate) fn horizontal_metadata(group: bool, width: f32, count: usize) -> bool {
+    group && count > 0 && width >= 360.0 + count as f32 * 156.0
 }
 
 impl CardItem<'_> {
@@ -62,7 +66,16 @@ impl CardItem<'_> {
     pub(crate) fn synopsis_height(&self, width: f32) -> f32 {
         (text_height(
             self.synopsis,
-            (fields_width(width, !self.editable_metadata.is_empty()) - 6.0).max(1.0),
+            (if horizontal_metadata(
+                self.kind == HierarchyRowKind::Group,
+                width,
+                self.editable_metadata.len(),
+            ) {
+                width - 24.0 - self.editable_metadata.len() as f32 * 156.0
+            } else {
+                fields_width(width, !self.editable_metadata.is_empty())
+            } - 6.0)
+                .max(1.0),
             14,
             20.0,
             CARD_FONT,
@@ -93,20 +106,30 @@ impl CardItem<'_> {
             .max(24.0);
         if !group || self.expanded {
             let synopsis = self.synopsis_height(width);
-            let field_width = fields_width(width, !self.editable_metadata.is_empty());
-            let metadata = self
+            let field_width = if width >= 340.0 {
+                144.0
+            } else {
+                fields_width(width, false)
+            };
+            let horizontal = horizontal_metadata(group, width, self.editable_metadata.len());
+            let metadata_heights = self
                 .editable_metadata
                 .iter()
                 .map(|(label, value)| {
-                    metadata_height(value, (field_width - 96.0).max(30.0))
-                        .max(text_height(label, 88.0, 12, 15.6, CARD_FONT) + 3.0)
+                    metadata_height(value, (field_width - 64.0).max(30.0))
+                        .max(text_height(label, 56.0, 12, 15.6, CARD_FONT) + 3.0)
                         + 4.0
                 })
-                .sum::<f32>()
-                .max(4.0)
+                .collect::<Vec<_>>();
+            let metadata = if horizontal {
+                metadata_heights.into_iter().fold(0.0, f32::max)
+            } else {
+                metadata_heights.into_iter().sum::<f32>()
+            }
+            .max(4.0)
                 - 4.0;
             height += 6.0
-                + if width >= 560.0 {
+                + if width >= 340.0 {
                     synopsis.max(metadata)
                 } else {
                     synopsis + if metadata > 0.0 { 4.0 + metadata } else { 0.0 }

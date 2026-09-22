@@ -62,6 +62,28 @@ pub(super) struct ProductionProjectQuery {
     pub(super) search: Arc<ControlledSearch>,
 }
 
+impl ProductionProjectQuery {
+    fn register_recovery_bases(
+        &self,
+        documents: &[DocumentSnapshot],
+    ) -> Result<(), ProjectQueryError> {
+        for document in documents {
+            if let Some(hash) = self.document_loader.recovery_hash(document.document_id) {
+                let revision = self
+                    .document_loader
+                    .hydrated_summary(document.document_id)
+                    .map_or(document.revision, |summary| {
+                        parchmint_editor_api::EditorRevision::from(summary.revision)
+                    });
+                self.persistence
+                    .register_loaded_document_base(document.document_id, revision, hash)
+                    .map_err(map_project_query_error)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ProjectSnapshotQuery for ProductionProjectQuery {
     fn snapshot(&self) -> Result<UiProjectSnapshot, ProjectQueryError> {
         // The dispatcher captures tree and document state under one operation
@@ -73,6 +95,7 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
             .map_err(map_project_query_error)?;
         let project = authored.project;
         let documents = authored.documents;
+        self.register_recovery_bases(&documents)?;
         let loaded = documents
             .iter()
             .map(|document| (document.document_id, document))
@@ -146,11 +169,7 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
             let _ = self.search.delete_document(document, revision);
             map_project_query_error(error)
         })?;
-        if let Some(hash) = self.document_loader.recovery_hash(document) {
-            self.persistence
-                .register_loaded_document_base(document, snapshot.revision, hash)
-                .map_err(map_project_query_error)?;
-        }
+        self.register_recovery_bases(std::slice::from_ref(&snapshot))?;
         Ok(snapshot)
     }
 
@@ -160,6 +179,7 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
             .documents
             .snapshots()
             .map_err(map_project_query_error)?;
+        self.register_recovery_bases(&snapshot.documents)?;
         Ok(snapshot)
     }
 }

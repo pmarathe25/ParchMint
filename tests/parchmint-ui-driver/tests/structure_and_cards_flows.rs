@@ -834,12 +834,6 @@ fn cards_virtual_window_keeps_a_long_outline_navigable_and_draggable() {
         .click_target(HarnessWindow::Project, HarnessTarget::OverviewAdd)
         .unwrap();
     harness
-        .press_key(HarnessWindow::Project, HarnessKey::ArrowDown)
-        .unwrap();
-    harness
-        .press_key(HarnessWindow::Project, HarnessKey::Enter)
-        .unwrap();
-    harness
         .type_focused(HarnessWindow::Project, "A new ending")
         .unwrap();
     harness

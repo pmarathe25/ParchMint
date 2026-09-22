@@ -1,5 +1,5 @@
 //! Project-wide History comparison. Runs entirely on the service worker.
-use parchmint_domain::{NodeId, NodeKind, Project, ProjectExportSetting, ProjectSection};
+use parchmint_domain::{NodeId, NodeKind, Project, ProjectExportSetting};
 
 use super::*;
 use parchmint_editor_api::{CanonicalCommentAnchor, CanonicalProjection};
@@ -67,17 +67,23 @@ fn compare_scope(
         }
     }
     let mut changes = Vec::new();
-    let mut add = |title: &str, before: &str, after: &str| {
+    let mut add = |title: &str,
+                   before: &str,
+                   after: &str,
+                   path: Vec<crate::project_workspace::HistoryHeading>| {
         if before != after
             || title.starts_with("Added document ·")
             || title.starts_with("Deleted document ·")
+            || title.starts_with("Structure ·")
         {
-            changes.push(crate::project_workspace::compare_history_text(
+            let mut comparison = crate::project_workspace::compare_history_text(
                 &checkpoint_id,
                 title,
                 before,
                 after,
-            ));
+            );
+            comparison.path = path;
+            changes.push(comparison);
         }
     };
     let documents: BTreeSet<_> = before_documents
@@ -89,6 +95,22 @@ fn compare_scope(
         if document_scope.is_some_and(|selected| selected != id) {
             continue;
         }
+        let before_tree = before_project.as_ref().map(|(project, _)| project);
+        let node_id = current
+            .project
+            .nodes
+            .iter()
+            .find_map(|(node_id, node)| (node.kind == NodeKind::Document(id)).then_some(*node_id))
+            .or_else(|| {
+                before_tree.and_then(|p| {
+                    p.nodes.iter().find_map(|(node_id, node)| {
+                        (node.kind == NodeKind::Document(id)).then_some(*node_id)
+                    })
+                })
+            });
+        let path = node_id
+            .map(|node| history_path(before_tree, &current.project, node))
+            .unwrap_or_default();
         let before = load_checkpoint_document(ports, checkpoint, preview, id)?;
         let after = current
             .documents
@@ -121,7 +143,7 @@ fn compare_scope(
             .as_ref()
             .map(|semantic| semantic.plain_text())
             .unwrap_or_default();
-        add(&label, &before_text, &after_text);
+        add(&label, &before_text, &after_text, path.clone());
         // Text-equivalent formatting changes still need visible evidence.
         if before.is_some()
             && after_semantic.is_some()
@@ -139,6 +161,7 @@ fn compare_scope(
                 after
                     .map(|document| document.body.as_str())
                     .unwrap_or_default(),
+                path.clone(),
             );
         }
         let annotation_path = format!("annotations/{}.json", encode_hex(id.as_bytes()));
@@ -162,7 +185,92 @@ fn compare_scope(
                     .map(|document| document.comments.as_slice())
                     .unwrap_or_default(),
             ),
+            path,
         );
+    }
+    if let Some((before, _)) = &before_project {
+        let node_ids: BTreeSet<_> = before
+            .nodes
+            .iter()
+            .chain(current.project.nodes.iter())
+            .map(|(id, _)| *id)
+            .collect();
+        for id in node_ids {
+            let old = before.nodes.get(id);
+            let new = current.project.nodes.get(id);
+            if document_scope.is_some_and(|doc| {
+                old.or(new)
+                    .is_none_or(|n| n.kind != NodeKind::Document(doc))
+            }) {
+                continue;
+            }
+            let path = history_path(Some(before), &current.project, id);
+            if path.is_empty() {
+                continue;
+            }
+            let title = new.or(old).map(|n| n.title.as_str()).unwrap_or_default();
+            if old.map(|n| (&n.title, before.nodes.parent(id)))
+                != new.map(|n| (&n.title, current.project.nodes.parent(id)))
+            {
+                let before_parent = old
+                    .and_then(|_| before.nodes.parent(id))
+                    .and_then(|id| before.nodes.get(id))
+                    .map(|n| n.title.as_str())
+                    .unwrap_or_default();
+                let after_parent = new
+                    .and_then(|_| current.project.nodes.parent(id))
+                    .and_then(|id| current.project.nodes.get(id))
+                    .map(|n| n.title.as_str())
+                    .unwrap_or_default();
+                let moved = old.is_some()
+                    && new.is_some()
+                    && before.nodes.parent(id) != current.project.nodes.parent(id);
+                add(
+                    &format!("Structure · {title}"),
+                    if moved { before_parent } else { "" },
+                    if moved { after_parent } else { "" },
+                    path.clone(),
+                );
+            }
+            add(
+                &format!("Synopsis · {title}"),
+                old.map(|n| n.synopsis.as_str()).unwrap_or_default(),
+                new.map(|n| n.synopsis.as_str()).unwrap_or_default(),
+                path.clone(),
+            );
+            let metadata =
+                |node: Option<&parchmint_domain::ProjectNode>, project: &Project| -> String {
+                    node.map(|node| {
+                        node.metadata
+                            .iter()
+                            .map(|(id, value)| {
+                                format!(
+                                    "{}: {value}",
+                                    project
+                                        .metadata
+                                        .get(*id)
+                                        .map(|f| f.label.as_str())
+                                        .unwrap_or("Field")
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default()
+                };
+            add(
+                &format!("Metadata · {title}"),
+                &metadata(old, before),
+                &metadata(new, &current.project),
+                path.clone(),
+            );
+            add(
+                &format!("Export · {title}"),
+                &export_description(old.map(|n| n.export_settings).unwrap_or_default()),
+                &export_description(new.map(|n| n.export_settings).unwrap_or_default()),
+                path,
+            );
+        }
     }
     if document_scope.is_none() {
         if let Some((before, _)) = &before_project {
@@ -170,6 +278,7 @@ fn compare_scope(
                 "Project outline and settings",
                 &outline(before),
                 &outline(&current.project),
+                Vec::new(),
             );
         }
         add(
@@ -181,15 +290,68 @@ fn compare_scope(
                 .iter()
                 .map(|word| format!("{word}\n"))
                 .collect::<String>(),
+            Vec::new(),
         );
         add(
             "Project styles (CSS)",
             &resource_text(ports, checkpoint, preview, "styles.css")?,
             &current.styles_css,
+            Vec::new(),
         );
     }
-    changes.sort_by(|left, right| left.document_title.cmp(&right.document_title));
+    changes.sort_by(|left, right| {
+        left.path
+            .iter()
+            .map(|p| p.order)
+            .collect::<Vec<_>>()
+            .cmp(&right.path.iter().map(|p| p.order).collect::<Vec<_>>())
+            .then(left.document_title.cmp(&right.document_title))
+    });
     Ok(changes)
+}
+
+fn history_path(
+    before: Option<&Project>,
+    after: &Project,
+    mut id: NodeId,
+) -> Vec<crate::project_workspace::HistoryHeading> {
+    let mut path = Vec::new();
+    loop {
+        let old = before.and_then(|p| p.nodes.get(id));
+        let new = after.nodes.get(id);
+        let Some(node) = new.or(old) else {
+            break;
+        };
+        let owner = if new.is_some() {
+            after
+        } else {
+            before.unwrap()
+        };
+        path.push(crate::project_workspace::HistoryHeading {
+            id: encode_hex(id.as_bytes()),
+            before_title: old.map(|n| n.title.clone()),
+            title: new.map(|n| n.title.clone()),
+            group: node.kind.can_have_children(),
+            order: owner
+                .nodes
+                .parent(id)
+                .map(|parent| {
+                    owner
+                        .nodes
+                        .children(parent)
+                        .iter()
+                        .position(|child| *child == id)
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0),
+        });
+        let Some(parent) = owner.nodes.parent(id) else {
+            break;
+        };
+        id = parent;
+    }
+    path.reverse();
+    path
 }
 
 fn resource_text(
@@ -219,56 +381,12 @@ fn document_titles(project: &Project) -> BTreeMap<DocumentId, String> {
 }
 
 fn outline(project: &Project) -> String {
-    fn visit(project: &Project, parent: NodeId, path: &str, output: &mut String) {
-        for id in project.nodes.children(parent) {
-            let node = project.nodes.get(*id).expect("validated tree");
-            let path = format!("{path} / {}", node.title);
-            output.push_str(&format!(
-                "{path} ({})\n",
-                if node.kind.can_have_children() {
-                    "group"
-                } else {
-                    "document"
-                }
-            ));
-            if !node.synopsis.is_empty() {
-                output.push_str(&format!("Synopsis: {}\n", node.synopsis));
-            }
-            for (field, value) in &node.metadata {
-                let label = project
-                    .metadata
-                    .get(*field)
-                    .map(|field| field.label.as_str())
-                    .unwrap_or("Metadata");
-                output.push_str(&format!("{label}: {value}\n"));
-            }
-            if node.export_settings != Default::default() {
-                output.push_str(&format!(
-                    "Export: {}\n",
-                    export_description(node.export_settings)
-                ));
-            }
-            visit(project, *id, &path, output);
-        }
-    }
     let mut output = format!(
         "Title: {}\nAuthor: {}\nExport: {}\n",
         project.display_title,
         project.author.as_deref().unwrap_or_default(),
         export_description(project.export_settings)
     );
-    for section in ProjectSection::ALL {
-        visit(
-            project,
-            section.root_id(),
-            match section {
-                ProjectSection::Manuscript => "Manuscript",
-                ProjectSection::Research => "Research",
-                ProjectSection::Unfiled => "Unfiled",
-            },
-            &mut output,
-        );
-    }
     for field in project.metadata.iter() {
         output.push_str(&format!(
             "Metadata field: {} · {:?} · {:?} · default {} · Cards {}\n",
