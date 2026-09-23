@@ -31,7 +31,7 @@ def validate_actions(actions, width, height):
         raise ValueError("Actions must be a JSON list")
     for action in actions:
         if not isinstance(action, dict) or len(action) != 1:
-            raise ValueError("Each action must contain one of click, right_click, move, drag, key, text")
+            raise ValueError("Each action must contain one of click, right_click, move, scroll, drag, key, text")
         kind, value = next(iter(action.items()))
         if kind in ("click", "right_click", "move"):
             if (not isinstance(value, list) or len(value) != 2
@@ -45,6 +45,11 @@ def validate_actions(actions, width, height):
                            or not (0 <= point[0] < width and 0 <= point[1] < height)
                            for point in value)):
                 raise ValueError("Drag must be at least two [x, y] points inside the capture area")
+        elif kind == "scroll":
+            if (not isinstance(value, list) or len(value) != 3
+                    or not all(isinstance(v, (int, float)) for v in value)
+                    or not (0 <= value[0] < width and 0 <= value[1] < height)):
+                raise ValueError("Scroll must be [x, y, vertical pixels] inside the capture area")
         elif kind == "key":
             if not isinstance(value, str) or not all(keysyms(value)):
                 raise ValueError("Unknown key chord")
@@ -120,6 +125,9 @@ def run(area, actions, output):
                         time.sleep(0.05)
                 finally:
                     remote.NotifyPointerButton(272, False)
+            elif kind == "scroll":
+                remote.NotifyPointerMotionAbsolute(str(stream), value[0], value[1])
+                remote.NotifyPointerAxis(0.0, float(value[2]), 0)
             else:
                 chords = [keysyms(value)] if kind == "key" else [[ord(c)] for c in value]
                 for chord in chords:
@@ -132,7 +140,7 @@ def run(area, actions, output):
                             remote.NotifyKeyboardKeysym(key, False)
                             time.sleep(0.03)
                     time.sleep(0.03)
-            time.sleep(0.2)
+            time.sleep(0.02 if kind == "scroll" else 0.2)
 
         pipeline = Gst.parse_launch(
             f"pipewiresrc path={nodes[0]} ! videoconvert ! pngenc ! "

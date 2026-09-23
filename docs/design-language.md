@@ -1,8 +1,11 @@
 # Visual language
 
-**Purpose:** Keep the writing workspace quiet and predictable. Content has the
-strongest contrast; navigation, settings, and review tools use the same colors,
-type, spacing, and control states in light and dark appearances.
+**Purpose:** Document ParchMint's shared visual language for contributors.
+
+The design language uses surface hierarchy, type, spacing, controls, and
+interaction states to make the writing workspace quiet and predictable. Content
+has the strongest contrast; navigation, settings, and review tools use the same
+cues in light and dark appearances.
 
 ## Surfaces and separation
 

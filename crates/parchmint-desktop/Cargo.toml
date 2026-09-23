@@ -8,8 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-default = ["diagnostics"]
+default = ["diagnostics", "gpu-renderer"]
 diagnostics = ["dep:parchmint-diagnostics", "parchmint-ui-iced/diagnostics"]
+gpu-renderer = ["parchmint-ui-iced/gpu-renderer"]
 interaction-harness = ["diagnostics", "parchmint-diagnostics/capture", "parchmint-platform-native/interaction-harness", "parchmint-ui-iced/interaction-harness"]
 renderer-verification = ["parchmint-ui-iced/renderer-verification"]
 

@@ -5616,16 +5616,25 @@ impl NativeDesktop {
         notification_drawer_open: bool,
     ) -> Element<'a, Message> {
         let theme = ParchMintTheme::new(appearance);
-        let breadcrumbs = workspace.active_editor_breadcrumbs();
-        let editor = crate::iced_editor_surface::editor_center_surface_with_breadcrumbs(
-            workspace.editor(),
-            theme,
-            editor_hosts,
-            spelling_menu,
-            &breadcrumbs,
-            workspace.hierarchy_drag_source().is_some(),
-        )
-        .map(ProjectSurfaceMessage::EditorCenter);
+        // Other destinations do not mount the editor. Building both panes here
+        // still projects their documents on every Overview scroll event.
+        let editor: Element<'a, ProjectSurfaceMessage> = if matches!(
+            destination,
+            RibbonDestination::Editor | RibbonDestination::GlobalSearch
+        ) {
+            let breadcrumbs = workspace.active_editor_breadcrumbs();
+            crate::iced_editor_surface::editor_center_surface_with_breadcrumbs(
+                workspace.editor(),
+                theme,
+                editor_hosts,
+                spelling_menu,
+                &breadcrumbs,
+                workspace.hierarchy_drag_source().is_some(),
+            )
+            .map(ProjectSurfaceMessage::EditorCenter)
+        } else {
+            Space::new().into()
+        };
         let surface = workspace_surface(
             workspace,
             destination,

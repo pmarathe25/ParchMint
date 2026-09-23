@@ -19,6 +19,10 @@ Use the pinned toolchain in [rust-toolchain.toml](rust-toolchain.toml):
 cargo run --locked -j 1 -p parchmint-desktop --bin parchmint
 ```
 
+The desktop uses GPU rendering when a compatible adapter is available and
+falls back to software rendering otherwise. Set `ICED_BACKEND=tiny-skia` to
+force the software renderer for troubleshooting.
+
 Build an optimized executable with:
 
 ```console

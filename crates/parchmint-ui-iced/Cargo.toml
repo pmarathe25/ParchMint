@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = []
 diagnostics = ["dep:parchmint-diagnostics"]
+gpu-renderer = ["iced/wgpu", "iced/web-colors"]
 interaction-harness = ["diagnostics", "parchmint-diagnostics/capture", "dep:iced_test"]
 visual-verification = ["dep:iced_test"]
 renderer-verification = ["dep:iced_tiny_skia", "iced_tiny_skia/damage-verification"]

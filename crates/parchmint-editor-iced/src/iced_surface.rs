@@ -291,6 +291,7 @@ impl MountedEditorUpdate {
 #[derive(Clone)]
 struct EditorSurface {
     content: Arc<Mutex<SurfaceContent>>,
+    paint_background: bool,
 }
 
 #[derive(Clone)]
@@ -329,7 +330,8 @@ impl SurfaceDrawingCache {
         renderer: &Renderer,
         size: Size,
         content: &SurfaceContent,
-    ) -> (canvas::Geometry, Vec<canvas::Geometry>) {
+        paint_background: bool,
+    ) -> (Option<canvas::Geometry>, Vec<canvas::Geometry>) {
         if self.theme != Some(content.theme) {
             self.background.clear();
             for (_, cache) in &self.lines {
@@ -337,11 +339,13 @@ impl SurfaceDrawingCache {
             }
             self.theme = Some(content.theme);
         }
-        let background = self.background.draw(renderer, size, |frame| {
-            frame.fill(
-                &Path::rectangle(Point::ORIGIN, size),
-                content.theme.manuscript().iced(),
-            );
+        let background = paint_background.then(|| {
+            self.background.draw(renderer, size, |frame| {
+                frame.fill(
+                    &Path::rectangle(Point::ORIGIN, size),
+                    content.theme.manuscript().iced(),
+                );
+            })
         });
         let scalars = content.geometry.shared_draw_scalars();
         let mut geometry = Vec::new();
@@ -642,10 +646,12 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
         let content = self.content();
-        let (background, text) = state
-            .drawing
-            .borrow_mut()
-            .draw(renderer, bounds.size(), &content);
+        let (background, text) = state.drawing.borrow_mut().draw(
+            renderer,
+            bounds.size(),
+            &content,
+            self.paint_background,
+        );
         let mut frame = Frame::new(renderer, bounds.size());
         let overlay = Frame::new(renderer, bounds.size());
 
@@ -755,7 +761,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         });
 
         let mut geometry = Vec::with_capacity(text.len() + 3);
-        geometry.push(background);
+        geometry.extend(background);
         geometry.push(frame.into_geometry());
         geometry.extend(text);
         geometry.push(overlay.into_geometry());
@@ -928,6 +934,13 @@ impl SurfaceHandle {
     }
 
     fn element(&self) -> Element<'static, MountedEditorMessage> {
+        self.element_with_background(true)
+    }
+
+    fn element_with_background(
+        &self,
+        paint_background: bool,
+    ) -> Element<'static, MountedEditorMessage> {
         let viewport = self
             .content
             .lock()
@@ -936,6 +949,7 @@ impl SurfaceHandle {
         editor_surface(
             Arc::clone(&self.content),
             Size::new(viewport.width, viewport.height),
+            paint_background,
         )
     }
 }
@@ -943,11 +957,15 @@ impl SurfaceHandle {
 fn editor_surface(
     content: Arc<Mutex<SurfaceContent>>,
     _size: Size,
+    paint_background: bool,
 ) -> Element<'static, MountedEditorMessage> {
-    Canvas::new(EditorSurface { content })
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    Canvas::new(EditorSurface {
+        content,
+        paint_background,
+    })
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 fn mounted_surface(
@@ -1496,6 +1514,12 @@ impl MountedEditorHost {
         self.surface.element()
     }
 
+    /// Builds an editor for a pane that already paints the manuscript surface.
+    /// Standalone hosts keep their own background through [`Self::element`].
+    pub fn element_on_manuscript_surface(&self) -> Element<'static, MountedEditorMessage> {
+        self.surface.element_with_background(false)
+    }
+
     /// Routes a Canvas interaction through the shared editor session.
     ///
     /// `document_changed` tells the outer UI whether it should schedule its
@@ -1833,8 +1857,8 @@ mod tests {
                 comments: vec![],
             };
             let size = Size::new(viewport.width, viewport.height);
-            let (_, lines) = cache.draw(&renderer, size, &content);
-            let (_, fresh) = SurfaceDrawingCache::default().draw(&renderer, size, &content);
+            let (_, lines) = cache.draw(&renderer, size, &content, true);
+            let (_, fresh) = SurfaceDrawingCache::default().draw(&renderer, size, &content, true);
             assert_eq!(lines.len(), fresh.len());
             for (line, fresh) in lines.iter().zip(&fresh) {
                 let (
@@ -2333,6 +2357,7 @@ mod tests {
                 spellcheck: vec![],
                 comments: vec![],
             })),
+            paint_background: true,
         };
         let mut state = SurfaceState::default();
         let bounds = Rectangle::with_size(Size::new(300.0, 120.0));
@@ -2444,6 +2469,7 @@ mod tests {
         }));
         let surface = EditorSurface {
             content: Arc::clone(&content),
+            paint_background: true,
         };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0));
         let mut state = SurfaceState::default();
@@ -2535,7 +2561,10 @@ mod tests {
             spellcheck: Vec::new(),
             comments: Vec::new(),
         }));
-        let surface = EditorSurface { content };
+        let surface = EditorSurface {
+            content,
+            paint_background: true,
+        };
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0));
         let cursor = mouse::Cursor::Available(Point::new(beta.x, beta.y));
         let mut state = SurfaceState::default();
@@ -3086,6 +3115,7 @@ mod tests {
                 spellcheck: Vec::new(),
                 comments: Vec::new(),
             })),
+            paint_background: true,
         };
         assert!(surface.draws_focused_caret(&SurfaceState::default(), &surface.content()));
 

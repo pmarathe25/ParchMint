@@ -2308,7 +2308,7 @@ fn pane_body(
         .map(|host| {
             let view = state.view();
             let mount_generation = state.mount_generation();
-            host.element()
+            host.element_on_manuscript_surface()
                 .map(move |message| EditorCenterMessage::Mounted {
                     pane,
                     view,

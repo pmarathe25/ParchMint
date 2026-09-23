@@ -5,7 +5,7 @@ use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
     widget::{Operation, Tree},
 };
-use iced::{Border, Element, Event, Length, Rectangle, Size, Vector};
+use iced::{Element, Event, Length, Rectangle, Size, Vector};
 
 pub(crate) struct GroupFrame {
     pub depth: usize,
@@ -97,7 +97,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
         viewport: &Rectangle,
     ) {
         use renderer::Renderer;
-        // Keep the backdrop and its content in one ordered clipping layer.
+        // Keep the group surface and its content in one ordered clipping layer.
         renderer.with_layer(*viewport, |renderer| {
             let palette = self.theme.palette();
             if let Some(frames) = &self.frames {
@@ -114,23 +114,59 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
                         } else {
                             -12.0
                         };
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: first.x + indent,
-                                y: top,
-                                width: layout.bounds().width - 2.0 * indent,
-                                height: bottom - top,
+                    let bounds = Rectangle {
+                        x: first.x + indent,
+                        y: top,
+                        width: layout.bounds().width - 2.0 * indent,
+                        height: bottom - top,
+                    };
+                    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                        continue;
+                    }
+                    // Every descendant has the same panel color. Paint it only
+                    // for the outer group, then draw inexpensive one-pixel lines
+                    // to preserve the nested hierarchy.
+                    if frame.depth == 0 {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds,
+                                ..Default::default()
                             },
-                            border: Border {
-                                color: palette.divider,
-                                width: 1.0,
-                                radius: 5.0.into(),
+                            palette.panel,
+                        );
+                    }
+                    let mut line = |bounds| {
+                        renderer.fill_quad(
+                            renderer::Quad {
+                                bounds,
+                                ..Default::default()
                             },
-                            ..Default::default()
-                        },
-                        palette.panel,
-                    );
+                            palette.divider,
+                        );
+                    };
+                    line(Rectangle {
+                        x: bounds.x,
+                        width: 1.0,
+                        ..bounds
+                    });
+                    line(Rectangle {
+                        x: bounds.x + bounds.width - 1.0,
+                        width: 1.0,
+                        ..bounds
+                    });
+                    if frame.starts_here {
+                        line(Rectangle {
+                            height: 1.0,
+                            ..bounds
+                        });
+                    }
+                    if frame.ends_here {
+                        line(Rectangle {
+                            y: bounds.y + bounds.height - 1.0,
+                            height: 1.0,
+                            ..bounds
+                        });
+                    }
                 }
             } else {
                 let bounds = layout.bounds();

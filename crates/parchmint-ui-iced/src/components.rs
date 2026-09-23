@@ -403,9 +403,16 @@ pub fn button_style(
         _ => (base_border, 1.0),
     };
     button::Style {
-        background: Some(Background::Color(background)),
+        background: (background.a > 0.0).then_some(Background::Color(background)),
         text_color,
-        border: outlined(border_color, border_width),
+        border: outlined(
+            border_color,
+            if border_color.a > 0.0 {
+                border_width
+            } else {
+                0.0
+            },
+        ),
         shadow: Shadow::default(),
         snap: true,
     }
@@ -576,12 +583,14 @@ mod tests {
     }
 
     #[test]
-    fn disabled_quiet_controls_stay_unboxed_and_menus_share_popup_surfaces() {
+    fn resting_and_disabled_quiet_controls_draw_no_box() {
         for appearance in [ResolvedAppearance::Light, ResolvedAppearance::Dark] {
             let theme = ParchMintTheme::new(appearance);
-            let disabled = button_style(theme, ButtonKind::Quiet, Interaction::Disabled);
-            assert_eq!(disabled.background, Some(Color::TRANSPARENT.into()));
-            assert_eq!(disabled.border.width, 0.0);
+            for interaction in [Interaction::Rest, Interaction::Disabled] {
+                let style = button_style(theme, ButtonKind::Quiet, interaction);
+                assert_eq!(style.background, None);
+                assert_eq!(style.border.width, 0.0);
+            }
             let popup = surface(theme, Surface::Elevated, Interaction::Rest);
             assert_eq!(popup.background, Some(menu_style(theme).background));
         }

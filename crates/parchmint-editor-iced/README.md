@@ -58,7 +58,9 @@ group containing widths, wrap offsets, and chunk data. Positions, spans, and mar
 refresh on every update. Text or style changes invalidate a line; viewport width
 or metric changes invalidate the full height index.
 
-The canvas reuses background and visible-line drawing data. Carets, selections,
+The canvas reuses background and visible-line drawing data. An editor embedded in
+an already painted manuscript pane omits its own full-viewport fill; standalone
+hosts retain that fill. Carets, selections,
 and annotations update independently. Cache keys compare painted geometry and
 styles, ignoring shifted document positions; theme, size, and scroll changes
 invalidate affected drawings. Only visible lines are retained.

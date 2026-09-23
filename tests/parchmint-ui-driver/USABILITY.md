@@ -151,7 +151,9 @@ python3 tests/parchmint-ui-driver/scripts/gnome_remote.py --area 320 214 1280 72
 Actions run in order. `text` supports printable ASCII; `key` supports single
 characters and the names in the script's `KEYS` table. `right_click` takes the
 same coordinates as `click` and opens document/tab menus. `move` positions the
-pointer without clicking. `drag` takes a list of at least two area-relative
+pointer without clicking. `scroll` takes `[x, y, vertical_pixels]` and sends a
+wheel event at an area-relative position; consecutive scrolls use a short pause
+for responsiveness checks. `drag` takes a list of at least two area-relative
 coordinates; it presses at the first point, moves through the rest, and releases
 at the last point. Include intermediate points when checking hover targets and
 reordering feedback. The helper paces key

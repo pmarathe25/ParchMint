@@ -2254,7 +2254,7 @@ fn outline_card<'a>(
     .width(Length::Fill)
     .style(move |_| {
         let mut style = iced::widget::container::Style {
-            background: (!(group && item.expanded && !floating))
+            background: (!(group && item.expanded && !floating) && (item.depth == 0 || floating))
                 .then_some(theme.palette().panel.into()),
             border: Border {
                 color: theme.palette().divider,
@@ -2962,11 +2962,11 @@ fn history_center<'a>(
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
         panel_divider(theme),
+        // center_view already paints the History canvas as Manuscript.
         container(detail)
             .padding(SPACING_24)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
+            .height(Length::Fill),
     ]
     .height(Length::Fill)
     .into()
@@ -3523,7 +3523,7 @@ fn settings_center<'a>(
         panel_divider(theme),
         container(crate::motion::enter(
             format!("{category:?}"),
-            settings_content(workspace, category, theme)
+            settings_content(workspace, category, theme, true)
         ))
         .padding([SPACING_24, SPACING_24])
         .width(Length::Fill)
@@ -3567,6 +3567,7 @@ fn settings_content<'a>(
     workspace: &'a ProjectWorkspace,
     category: SettingsCategory,
     theme: ParchMintTheme,
+    already_on_panel: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let settings = workspace.settings();
     match category {
@@ -3959,11 +3960,14 @@ fn settings_content<'a>(
                         .width(Length::Fill)
                         .max_width(920)
                         .height(Length::Fill)
-                        .style(move |_| components::surface(
-                            theme,
-                            Surface::Panel,
-                            Interaction::Rest
-                        )),
+                        .style(move |_| {
+                            // The Settings page already paints this entire region as Panel.
+                            if already_on_panel {
+                                iced::widget::container::Style::default()
+                            } else {
+                                components::surface(theme, Surface::Panel, Interaction::Rest)
+                            }
+                        }),
                 ]
                 .spacing(0)
                 .height(Length::Fill),
@@ -4062,11 +4066,14 @@ fn settings_content<'a>(
                         .width(Length::Fill)
                         .max_width(920)
                         .height(Length::Fill)
-                        .style(move |_| components::surface(
-                            theme,
-                            Surface::Panel,
-                            Interaction::Rest
-                        )),
+                        .style(move |_| {
+                            // The modal is Elevated, so its detail still needs a Panel fill.
+                            if already_on_panel {
+                                iced::widget::container::Style::default()
+                            } else {
+                                components::surface(theme, Surface::Panel, Interaction::Rest)
+                            }
+                        }),
                 ]
                 .spacing(0)
                 .height(Length::Fill),
@@ -4778,14 +4785,7 @@ fn inline_outline_field<'a>(
             ProjectMessage::BeginOutlineField { node_id, field_id },
         ))
         .style(move |_, status| {
-            let mut style =
-                components::button_style(theme, ButtonKind::Quiet, interaction(status, false));
-            if matches!(status, iced::widget::button::Status::Active) {
-                let mut tint = theme.palette().secondary_text;
-                tint.a = 0.022;
-                style.background = Some(tint.into());
-            }
-            style
+            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
         })
         .into()
     }
@@ -5001,6 +5001,7 @@ fn inspector<'a>(
         let editor = workspace.editor();
         let mut comments = column![].spacing(SPACING_8);
         let threads = editor.inspector_comments();
+        let has_threads = !threads.is_empty();
         let document_choices = matches!(
             editor.inspector_context(),
             crate::InspectorContext::Group { .. }
@@ -5099,7 +5100,7 @@ fn inspector<'a>(
                 },
             ));
         }
-        let sections = if editor.inspector_comment_count() == 0 {
+        let sections = if !has_threads {
             column![
                 text("No comments")
                     .size(13)
@@ -5385,7 +5386,7 @@ fn modal_view<'a>(
         }
         return container(
             column![
-                settings_content(workspace, category, theme),
+                settings_content(workspace, category, theme, false),
                 row![
                     Space::new().width(Length::Fill),
                     focus::region(

@@ -12,7 +12,9 @@ controls, typography, spacing, and icons.
 lifecycle callbacks use ParchMint values; Iced events and window IDs stay internal.
 `interaction-harness` exposes `NativeDesktopHarness` for headless input;
 `visual-verification` enables deterministic `capture_visual` PNGs. Normal desktop
-builds enable neither feature.
+builds enable neither feature. The desktop selects Iced's GPU renderer when
+available and keeps `tiny-skia` as a fallback. Headless drivers select
+`tiny-skia` for deterministic captures.
 
 ## Source map
 

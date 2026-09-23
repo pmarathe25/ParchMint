@@ -148,7 +148,11 @@ impl Engine {
         // at overlapping fills and borders.
         let clip_mask = Some(clip_mask as &_);
 
-        pixels.fill_path(
+        // A border-only container uses a transparent background. Rasterizing
+        // its full interior cannot change any pixels and is especially costly
+        // for large Overview cards.
+        if !matches!(background, Background::Color(color) if color.a == 0.0) {
+            pixels.fill_path(
             &path,
             &tiny_skia::Paint {
                 shader: match background {
@@ -203,7 +207,8 @@ impl Engine {
             tiny_skia::FillRule::EvenOdd,
             transform,
             clip_mask,
-        );
+            );
+        }
 
         if border_width > 0.0 {
             // Border path is offset by half the border width

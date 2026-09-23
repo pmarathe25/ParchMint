@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-parchmint-desktop = { path = "../../crates/parchmint-desktop", features = ["interaction-harness"] }
+parchmint-desktop = { path = "../../crates/parchmint-desktop", default-features = false, features = ["interaction-harness"] }
 serde.workspace = true
 serde_json.workspace = true
 

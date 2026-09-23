@@ -31,11 +31,15 @@ Normal startup disables fault controls and observations; disabled paths take no
 locks and construct no observations.
 
 The default `diagnostics` feature records warnings and errors. Debug and harness
-builds also record traces and timing summaries. Build with `--no-default-features`
-to omit logging. See [diagnostics](../parchmint-diagnostics/README.md) for limits.
+builds also record traces and timing summaries. The default `gpu-renderer`
+feature tries Iced's GPU renderer and falls back to `tiny-skia` when no adapter
+is available. Set `ICED_BACKEND=tiny-skia` to select software rendering.
+Build with `--no-default-features --features gpu-renderer` to omit logging while
+retaining GPU rendering. See [diagnostics](../parchmint-diagnostics/README.md)
+for limits.
 
-The opt-in `renderer-verification` feature checks every native frame for stale
-pixels; see the [renderer guide](../../third_party/iced_tiny_skia-0.14.0/README.md#verify-the-patch).
+The opt-in `renderer-verification` feature checks every native software-rendered
+frame for stale pixels; see the [renderer guide](../../third_party/iced_tiny_skia-0.14.0/README.md#verify-the-patch).
 Use it for visual checks, not benchmarks.
 
 Logs use `logs/parchmint-debug.log` below these application-data directories:

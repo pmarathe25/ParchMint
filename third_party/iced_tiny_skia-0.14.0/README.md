@@ -46,6 +46,8 @@ only the corner rows. Temporary masks are limited to those rows. Fractional
 layouts, borders, shadows, gradients, and translucent fills keep the original
 path. Pixel tests compare both paths at 1×, 1.25×, 1.5×, and 2×.
 Pixel-aligned opaque Canvas rectangles also fill their clipped area without a mask.
+Border-only quads skip their fully transparent interior fill while keeping the
+border and shadow. This avoids rasterizing large empty card interiors.
 
 ## Incremental painting
 
@@ -77,7 +79,8 @@ cargo build --release --locked -j 1 -p parchmint-desktop --features renderer-ver
 ```
 
 Run this binary on a disposable project using the
-[UI-review skill](../../.agents/skills/parchmint-ui-review/SKILL.md). Any pixel
+[UI-review skill](../../.agents/skills/parchmint-ui-review/SKILL.md) with
+`ICED_BACKEND=tiny-skia`. Any pixel
 mismatch beyond one color level of antialias rounding stops the application;
 alpha must match exactly. Set `PARCHMINT_RENDER_FAILURE` to an existing temporary
 directory to save failure images. This diagnostic adds full-frame CPU and memory
