@@ -416,6 +416,10 @@ impl ExplorerState {
             .collect()
     }
 
+    pub(crate) fn root_rows(&self) -> impl Iterator<Item = ExplorerRow<'_>> {
+        self.roots.iter().filter_map(|id| self.row(id))
+    }
+
     fn visible_ids(&self) -> Vec<&str> {
         self.preorder_ids()
             .into_iter()
@@ -823,7 +827,7 @@ pub struct CardsState<'a> {
     expanded: &'a BTreeSet<String>,
     details_expanded: &'a BTreeSet<String>,
     section_id: &'a str,
-    word_counts: BTreeMap<String, usize>,
+    word_counts: Rc<BTreeMap<String, usize>>,
     scroll_offset: f32,
     measurements: &'a RefCell<BTreeMap<String, (u64, f32)>>,
     grid_cache: &'a RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
@@ -847,6 +851,7 @@ pub(crate) struct CardsWindow {
     pub top_padding: f32,
     pub bottom_padding: f32,
     pub rows: Vec<CardsGridRow>,
+    pub generation: u64,
     ids: Rc<Vec<String>>,
 }
 
@@ -855,6 +860,7 @@ struct CardsGridLayout {
     rows: Vec<CardsGridRow>,
     ids: Rc<Vec<String>>,
     offsets: Vec<f32>,
+    generation: u64,
 }
 
 impl std::ops::Deref for CardsGridLayout {
@@ -1107,6 +1113,7 @@ impl<'a> CardsState<'a> {
             rows: compact,
             ids: Rc::new(ids.into_iter().map(str::to_owned).collect()),
             offsets,
+            generation: self.motion_generation(),
         });
         *self.grid_cache.borrow_mut() = Some((signature, Rc::clone(&layout)));
         layout
@@ -1127,6 +1134,7 @@ impl<'a> CardsState<'a> {
             top_padding: rows.offsets[start],
             bottom_padding: (rows.offsets[rows.len()] - rows.offsets[end]).max(0.0),
             rows: rows[start..end].to_vec(),
+            generation: rows.generation,
             ids: Rc::clone(&rows.ids),
         }
     }
@@ -1154,6 +1162,7 @@ impl<'a> CardsState<'a> {
             top_padding: rows.offsets[start],
             bottom_padding: (total - rows.offsets[end]).max(0.0),
             rows: rows[start..end].to_vec(),
+            generation: rows.generation,
             ids: Rc::clone(&rows.ids),
         }
     }
@@ -4377,6 +4386,7 @@ pub struct ProjectWorkspace {
     pub(crate) card_positions: crate::motion::Positions,
     cards_measurements: RefCell<BTreeMap<String, (u64, f32)>>,
     cards_grid_cache: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
+    cards_word_counts_cache: RefCell<Option<Rc<BTreeMap<String, usize>>>>,
     cards_drag_destination: Option<DragDestination>,
     pointer_drag: Option<HierarchyPointerDrag>,
     drop_preview: Option<ExplorerState>,
@@ -4482,6 +4492,7 @@ impl ProjectWorkspace {
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
+            cards_word_counts_cache: RefCell::default(),
             cards_drag_destination: Some(DragDestination::BeforeSibling(
                 "chapter-three".to_owned(),
             )),
@@ -4564,6 +4575,7 @@ impl ProjectWorkspace {
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
+            cards_word_counts_cache: RefCell::default(),
             cards_drag_destination: None,
             pointer_drag: None,
             drop_preview: None,
@@ -4638,6 +4650,7 @@ impl ProjectWorkspace {
 
     pub fn reconcile_snapshot(&mut self, snapshot: &ProjectSnapshot) {
         self.cards_grid_cache.get_mut().take();
+        self.cards_word_counts_cache.get_mut().take();
         self.drop_preview = None;
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
         self.project_revision = snapshot.project.revision.value();
@@ -5117,6 +5130,15 @@ impl ProjectWorkspace {
         counts
     }
 
+    fn cards_word_counts(&self) -> Rc<BTreeMap<String, usize>> {
+        if let Some(counts) = self.cards_word_counts_cache.borrow().as_ref() {
+            return Rc::clone(counts);
+        }
+        let counts = Rc::new(self.outline_word_counts());
+        *self.cards_word_counts_cache.borrow_mut() = Some(Rc::clone(&counts));
+        counts
+    }
+
     pub(crate) fn selected_outline_words(&self) -> usize {
         let counts = self.outline_word_counts();
         self.explorer
@@ -5145,7 +5167,7 @@ impl ProjectWorkspace {
                 .map(|preview| &preview.expanded)
                 .unwrap_or(&self.cards_expanded),
             section_id: &self.cards_section,
-            word_counts: self.outline_word_counts(),
+            word_counts: self.cards_word_counts(),
             scroll_offset: self.cards_scroll_offset,
             measurements: &self.cards_measurements,
             grid_cache: &self.cards_grid_cache,
@@ -5664,6 +5686,8 @@ impl ProjectWorkspace {
     }
 
     pub fn editor_mut(&mut self) -> &mut EditorWorkspace {
+        self.cards_grid_cache.get_mut().take();
+        self.cards_word_counts_cache.get_mut().take();
         &mut self.editor
     }
 
@@ -6100,6 +6124,7 @@ impl ProjectWorkspace {
                 | ProjectMessage::CancelMetadataFieldDrag
         ) {
             self.cards_grid_cache.get_mut().take();
+            self.cards_word_counts_cache.get_mut().take();
         }
         if !matches!(
             &message,
@@ -6955,6 +6980,7 @@ impl ProjectWorkspace {
                     return Vec::new();
                 }
                 self.cards_grid_cache.get_mut().take();
+                self.cards_word_counts_cache.get_mut().take();
                 let preview = if surface == HierarchySurface::Cards {
                     destination
                         .as_ref()
@@ -10908,6 +10934,172 @@ mod tests {
                 total
             );
         }
+    }
+
+    #[test]
+    fn nested_cards_with_metadata_scroll_with_a_bounded_window() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        for field in 0..8 {
+            let id = format!("field-{field}");
+            workspace.settings.metadata_order.push(id.clone());
+            workspace.settings.metadata_definitions.insert(
+                id,
+                MetadataDefinition {
+                    label: format!("Field {field}"),
+                    description: None,
+                    applicability: MetadataFieldApplicability::GroupsAndDocuments,
+                    text_kind: MetadataFieldTextKind::SingleLine,
+                    default_value: None,
+                    visible_on_cards: true,
+                },
+            );
+        }
+        for outer in 0..8 {
+            let outer_id = format!("outer-{outer}");
+            workspace.explorer.nodes.insert(
+                outer_id.clone(),
+                HierarchyNode::new(
+                    &outer_id,
+                    &format!("Part {outer}"),
+                    "manuscript",
+                    Some("manuscript"),
+                    HierarchyNodeKind::Group,
+                ),
+            );
+            workspace
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .unwrap()
+                .children
+                .push(outer_id.clone());
+            workspace.cards_expanded.insert(outer_id.clone());
+            for middle in 0..4 {
+                let middle_id = format!("middle-{outer}-{middle}");
+                workspace.explorer.nodes.insert(
+                    middle_id.clone(),
+                    HierarchyNode::new(
+                        &middle_id,
+                        &format!("Act {middle}"),
+                        "manuscript",
+                        Some(&outer_id),
+                        HierarchyNodeKind::Group,
+                    ),
+                );
+                workspace
+                    .explorer
+                    .nodes
+                    .get_mut(&outer_id)
+                    .unwrap()
+                    .children
+                    .push(middle_id.clone());
+                workspace.cards_expanded.insert(middle_id.clone());
+                for inner in 0..2 {
+                    let inner_id = format!("inner-{outer}-{middle}-{inner}");
+                    workspace.explorer.nodes.insert(
+                        inner_id.clone(),
+                        HierarchyNode::new(
+                            &inner_id,
+                            &format!("Sequence {inner}"),
+                            "manuscript",
+                            Some(&middle_id),
+                            HierarchyNodeKind::Group,
+                        ),
+                    );
+                    workspace
+                        .explorer
+                        .nodes
+                        .get_mut(&middle_id)
+                        .unwrap()
+                        .children
+                        .push(inner_id.clone());
+                    workspace.cards_expanded.insert(inner_id.clone());
+                    for document in 0..16 {
+                        let id = format!("document-{outer}-{middle}-{inner}-{document}");
+                        let mut node = HierarchyNode::new(
+                            &id,
+                            &format!("Chapter {outer}.{middle}.{inner}.{document}"),
+                            "manuscript",
+                            Some(&inner_id),
+                            HierarchyNodeKind::Document,
+                        );
+                        node.synopsis =
+                            "A synopsis with enough text to occupy a line on the card.".to_owned();
+                        workspace.explorer.nodes.insert(id.clone(), node);
+                        workspace
+                            .explorer
+                            .nodes
+                            .get_mut(&inner_id)
+                            .unwrap()
+                            .children
+                            .push(id.clone());
+                        workspace
+                            .synopsis_editors
+                            .insert(id.clone(), text_editor::Content::new());
+                        for field in 0..8 {
+                            workspace.metadata_values.insert(
+                                (id.clone(), format!("field-{field}")),
+                                format!(
+                                    "Value {field} for chapter {outer}.{middle}.{inner}.{document}"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let columns = crate::cards_layout::column_count(1400.0);
+        let first = workspace.cards().viewport_window(columns, 1400.0, 800.0);
+        assert!(first.end - first.start < 30);
+        let counts = workspace.cards().word_counts;
+        let total = first.bottom_padding + first.rows.iter().map(|row| row.height).sum::<f32>();
+        let started = std::time::Instant::now();
+        let mut mounted = 0;
+        for step in 0..120 {
+            workspace.update(ProjectMessage::SetCardsScroll(total * step as f32 / 120.0));
+            let cards = workspace.cards();
+            assert!(Rc::ptr_eq(&counts, &cards.word_counts));
+            let window = cards.viewport_window(columns, 1400.0, 800.0);
+            assert_eq!(window.generation, first.generation);
+            mounted += window.end - window.start;
+            std::hint::black_box(crate::iced_project_surface::cards_grid(
+                &workspace,
+                crate::design_tokens::ParchMintTheme::new(
+                    parchmint_preferences::ResolvedAppearance::Dark,
+                ),
+                1400.0,
+                800.0,
+            ));
+        }
+        if std::env::var_os("PARCHMINT_MEASURE_CARDS").is_some() {
+            eprintln!(
+                "OVERVIEW nested_metadata_scroll_120_views_ms={} average_mounted_items={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                mounted / 120,
+            );
+            let layout = crate::ShellLayout::for_window(1400, 900);
+            let theme = crate::design_tokens::ParchMintTheme::new(
+                parchmint_preferences::ResolvedAppearance::Dark,
+            );
+            let started = std::time::Instant::now();
+            for step in 0..120 {
+                workspace.update(ProjectMessage::SetCardsScroll(total * step as f32 / 120.0));
+                std::hint::black_box(crate::iced_project_surface::native_project_surface(
+                    &workspace,
+                    RibbonDestination::Cards,
+                    theme,
+                    iced::widget::Space::new().into(),
+                    &layout,
+                    [true; 3],
+                ));
+            }
+            eprintln!(
+                "OVERVIEW nested_metadata_scroll_120_full_surfaces_ms={}",
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        workspace.editor_mut();
+        assert!(!Rc::ptr_eq(&counts, &workspace.cards().word_counts));
     }
 
     #[test]

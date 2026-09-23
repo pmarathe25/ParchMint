@@ -3,9 +3,11 @@ use std::{collections::BTreeMap, fs, path::Path, time::Instant};
 
 use parchmint_desktop::{
     DesktopInteractionHarness, EditorPane, HarnessKey, HarnessTarget, HarnessWindow, LaunchRequest,
+    RibbonDestination,
 };
 use parchmint_domain::{
-    DocumentId, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
+    DocumentId, MetadataApplicability, MetadataFieldDefinition, MetadataFieldId, MetadataTextKind,
+    NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
 };
 use parchmint_project_format::{CanonicalProjectPathMap, ProjectFormatCodec};
 use parchmint_ui_driver::IsolatedRun;
@@ -94,6 +96,142 @@ fn seed(path: &Path, chapters: usize, words: usize, formatted: bool) {
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::write(destination, resource.bytes).unwrap();
     }
+}
+
+fn seed_nested_overview(path: &Path) {
+    fs::create_dir(path).unwrap();
+    fs::create_dir(path.join(".parchmint")).unwrap();
+    fs::write(path.join(".parchmint/root-id"), "0000000000000001\n").unwrap();
+    let mut project = Project::new(ProjectId::from_bytes([0x92; 16]));
+    project.display_title = "Nested overview performance".into();
+    for field in 0..6 {
+        project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::upsert_metadata_field(MetadataFieldDefinition {
+                id: MetadataFieldId::from_bytes([field + 1; 16]),
+                label: format!("Field {}", field + 1),
+                description: None,
+                applicability: MetadataApplicability::GroupsAndDocuments,
+                text_kind: MetadataTextKind::SingleLine,
+                default_value: Some(format!("Value for field {}", field + 1)),
+                visible_on_cards: true,
+            }),
+        )
+        .unwrap()
+        .project;
+    }
+    let mut bodies = BTreeMap::new();
+    for outer in 0..2 {
+        let outer_id = NodeId::from_bytes([230 + outer; 16]);
+        project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::create_group(
+                outer_id,
+                NodeId::manuscript_root(),
+                outer as usize,
+                format!("Part {}", outer + 1),
+            ),
+        )
+        .unwrap()
+        .project;
+        for middle in 0..2 {
+            let middle_id = NodeId::from_bytes([232 + outer * 2 + middle; 16]);
+            project = apply_project_command(
+                &project,
+                project.revision,
+                ProjectCommand::create_group(
+                    middle_id,
+                    outer_id,
+                    middle as usize,
+                    format!("Act {}.{}", outer + 1, middle + 1),
+                ),
+            )
+            .unwrap()
+            .project;
+            for inner in 0..5 {
+                let group_index = outer * 10 + middle * 5 + inner;
+                let inner_id = NodeId::from_bytes([236 + group_index; 16]);
+                project = apply_project_command(
+                    &project,
+                    project.revision,
+                    ProjectCommand::create_group(
+                        inner_id,
+                        middle_id,
+                        inner as usize,
+                        format!("Sequence {}.{}.{}", outer + 1, middle + 1, inner + 1),
+                    ),
+                )
+                .unwrap()
+                .project;
+                for document in 0..10 {
+                    let index = group_index * 10 + document;
+                    let id = DocumentId::from_bytes([index + 1; 16]);
+                    project = apply_project_command(
+                        &project,
+                        project.revision,
+                        ProjectCommand::create_document(
+                            NodeId::from_bytes([index + 30; 16]),
+                            id,
+                            inner_id,
+                            document as usize,
+                            format!("Chapter {}", index + 1),
+                        ),
+                    )
+                    .unwrap()
+                    .project;
+                    bodies.insert(
+                        id,
+                        format!("<p>{}</p>", "The harbor lantern shines. ".repeat(20)),
+                    );
+                }
+            }
+        }
+    }
+    let encoded = ProjectFormatCodec::default()
+        .encode_domain_project(
+            &project,
+            &bodies,
+            &BTreeMap::new(),
+            &CanonicalProjectPathMap::default(),
+        )
+        .unwrap();
+    for resource in encoded.resources.into_values() {
+        let destination = path.join(resource.path.as_str());
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(destination, resource.bytes).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "opt-in full-application nested Overview timing; excludes native presentation"]
+fn nested_overview_performance() {
+    require_release_build();
+    let run = IsolatedRun::new("nested-overview-performance").unwrap();
+    let project = run.root().join("nested.parchmint");
+    seed_nested_overview(&project);
+    let harness =
+        DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
+    harness
+        .click_target(WINDOW, HarnessTarget::Ribbon(RibbonDestination::Cards))
+        .unwrap();
+    for _ in 0..4 {
+        harness
+            .scroll_target_by(WINDOW, HarnessTarget::CardsList, -600.0)
+            .unwrap();
+    }
+    let mut step = 0;
+    let scroll = samples(60, || {
+        let delta = if step % 2 == 0 { -600.0 } else { 600.0 };
+        harness
+            .scroll_target_by(WINDOW, HarnessTarget::CardsList, delta)
+            .unwrap();
+        step += 1;
+    });
+    println!("{}", json!({"nested_overview_scroll": scroll}));
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
 }
 
 #[test]

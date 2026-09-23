@@ -230,23 +230,29 @@ fn project_surface_with_layout<'a>(
     } else {
         layout.explorer().width()
     };
-    let body_slots = vec![
-        crate::motion::slot(
+    // Overview never exposes either sidebar. Building the Explorer tree and
+    // Comments inspector here still runs on every scroll event, even though
+    // the instant row excludes both widgets from layout and drawing.
+    let explorer_panel: Element<'a, ProjectSurfaceMessage> =
+        if destination == RibbonDestination::Cards {
+            Space::new().into()
+        } else {
             row![
                 left_rail(
                     workspace,
                     project_title,
                     theme,
                     rail_width.saturating_sub(SIDEBAR_SPLITTER_WIDTH),
-                    destination != RibbonDestination::Cards,
+                    true,
                 ),
                 sidebar_splitter(SidebarPanel::Explorer, theme)
-            ],
-            Length::Fixed(rail_width as f32),
-            shows_explorer && layout.explorer_is_visible(),
-        ),
-        crate::motion::slot(center, Length::Fill, true),
-        crate::motion::slot(
+            ]
+            .into()
+        };
+    let inspector_panel: Element<'a, ProjectSurfaceMessage> =
+        if destination == RibbonDestination::Cards {
+            Space::new().into()
+        } else {
             row![
                 sidebar_splitter(SidebarPanel::Inspector, theme),
                 inspector(
@@ -258,7 +264,18 @@ fn project_surface_with_layout<'a>(
                     inspector_expansion,
                     false
                 )
-            ],
+            ]
+            .into()
+        };
+    let body_slots = vec![
+        crate::motion::slot(
+            explorer_panel,
+            Length::Fixed(rail_width as f32),
+            shows_explorer && layout.explorer_is_visible(),
+        ),
+        crate::motion::slot(center, Length::Fill, true),
+        crate::motion::slot(
+            inspector_panel,
             Length::Fixed(layout.inspector().width() as f32),
             shows_inspector && layout.inspector_is_visible(),
         ),
@@ -1853,7 +1870,7 @@ pub(crate) fn cards_grid<'a>(
     workspace
         .card_positions
         .retain(&visible.iter().map(|item| item.node_id).collect::<Vec<_>>());
-    let generation = cards.motion_generation();
+    let generation = window.generation;
     let mut items = visible.into_iter().peekable();
     let mut frames: Vec<crate::card_frames::GroupFrame> = Vec::new();
     let mut frame_ids = std::collections::BTreeMap::new();
@@ -1988,9 +2005,7 @@ pub(crate) fn cards_grid<'a>(
     }
     let sections = workspace
         .explorer()
-        .rows()
-        .into_iter()
-        .filter(|item| item.kind == HierarchyRowKind::Root)
+        .root_rows()
         .fold(row![].spacing(4), |row, item| {
             let id = item.id.to_owned();
             let selected = cards.section_id() == item.id;
@@ -4816,7 +4831,9 @@ fn outline_fields<'a>(
                 field_id: Some(item.field_id.to_owned()),
             });
             let editor = workspace
-                .metadata_editor(selected, item.field_id)
+                .outline_field_is_editing(selected, Some(item.field_id))
+                .then(|| workspace.metadata_editor(selected, item.field_id))
+                .flatten()
                 .map(|content| {
                     text_editor(content)
                         .id("outline-metadata")
@@ -4898,29 +4915,32 @@ fn outline_fields<'a>(
         node_id: selected.to_owned(),
         field_id: None,
     });
-    let synopsis = text_editor(
-        workspace
-            .synopsis_editor(selected)
-            .expect("every live hierarchy node has a synopsis editor"),
-    )
-    .id(HarnessTarget::InspectorSynopsis.id())
-    .placeholder("What happens here?")
-    .key_binding(move |press| {
-        if press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
-            return Some(text_editor::Binding::Custom(done.clone()));
-        }
-        text_editor::Binding::from_key_press(press)
-    })
-    .on_action(move |action| {
-        ProjectSurfaceMessage::Project(ProjectMessage::EditSynopsis {
-            node_id: synopsis_id.clone(),
-            action,
+    let synopsis_editor = workspace.outline_field_is_editing(selected, None).then(|| {
+        text_editor(
+            workspace
+                .synopsis_editor(selected)
+                .expect("every live hierarchy node has a synopsis editor"),
+        )
+        .id(HarnessTarget::InspectorSynopsis.id())
+        .placeholder("What happens here?")
+        .key_binding(move |press| {
+            if press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) {
+                return Some(text_editor::Binding::Custom(done.clone()));
+            }
+            text_editor::Binding::from_key_press(press)
         })
-    })
-    .padding([2, 3])
-    .size(14)
-    .height(Length::Fixed(synopsis_height))
-    .style(move |_, status| multiline_field_style(theme, status));
+        .on_action(move |action| {
+            ProjectSurfaceMessage::Project(ProjectMessage::EditSynopsis {
+                node_id: synopsis_id.clone(),
+                action,
+            })
+        })
+        .padding([2, 3])
+        .size(14)
+        .height(Length::Fixed(synopsis_height))
+        .style(move |_, status| multiline_field_style(theme, status))
+        .into()
+    });
     let synopsis = inline_outline_field(
         workspace,
         selected,
@@ -4932,7 +4952,7 @@ fn outline_fields<'a>(
         "What happens here?",
         14,
         synopsis_height,
-        Some(synopsis.into()),
+        synopsis_editor,
         theme,
     );
     let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
