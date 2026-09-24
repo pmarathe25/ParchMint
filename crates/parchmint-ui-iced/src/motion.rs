@@ -902,6 +902,19 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             Vector::ZERO
         };
         let correction = desired - (layout.child(0).position() - layout.position());
+        // A settled card needs no extra GPU layer; keep clipping while it moves.
+        if correction == Vector::ZERO {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout.child(0),
+                cursor,
+                viewport,
+            );
+            return;
+        }
         renderer.with_layer(*viewport, |renderer| {
             renderer.with_translation(correction, |renderer| {
                 self.content.as_widget().draw(

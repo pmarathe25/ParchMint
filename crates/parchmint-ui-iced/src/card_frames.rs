@@ -97,136 +97,133 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
         viewport: &Rectangle,
     ) {
         use renderer::Renderer;
-        // Keep the group surface and its content in one ordered clipping layer.
-        renderer.with_layer(*viewport, |renderer| {
-            let palette = self.theme.palette();
-            if let Some(frames) = &self.frames {
-                let rows: Vec<_> = layout.children().collect();
-                for frame in frames {
-                    let first = rows[frame.first_row].bounds();
-                    let last = rows[frame.last_row].bounds();
-                    let indent =
-                        crate::cards_layout::grid_indent(frame.depth, layout.bounds().width);
-                    let top = first.y - if frame.starts_here { 0.0 } else { 12.0 };
-                    let bottom = last.y + last.height
-                        - if frame.ends_here {
-                            crate::cards_layout::GROUP_GAP
-                        } else {
-                            -12.0
-                        };
-                    let bounds = Rectangle {
-                        x: first.x + indent,
-                        y: top,
-                        width: layout.bounds().width - 2.0 * indent,
-                        height: bottom - top,
+        // The containing scrollable already clips the group and its contents.
+        let palette = self.theme.palette();
+        if let Some(frames) = &self.frames {
+            let rows: Vec<_> = layout.children().collect();
+            for frame in frames {
+                let first = rows[frame.first_row].bounds();
+                let last = rows[frame.last_row].bounds();
+                let indent = crate::cards_layout::grid_indent(frame.depth, layout.bounds().width);
+                let top = first.y - if frame.starts_here { 0.0 } else { 12.0 };
+                let bottom = last.y + last.height
+                    - if frame.ends_here {
+                        crate::cards_layout::GROUP_GAP
+                    } else {
+                        -12.0
                     };
-                    if bounds.width <= 0.0 || bounds.height <= 0.0 {
-                        continue;
-                    }
-                    // Every descendant has the same panel color. Paint it only
-                    // for the outer group, then draw inexpensive one-pixel lines
-                    // to preserve the nested hierarchy.
-                    if frame.depth == 0 {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds,
-                                ..Default::default()
-                            },
-                            palette.panel,
-                        );
-                    }
-                    let mut line = |bounds| {
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds,
-                                ..Default::default()
-                            },
-                            palette.divider,
-                        );
-                    };
-                    line(Rectangle {
-                        x: bounds.x,
-                        width: 1.0,
-                        ..bounds
-                    });
-                    line(Rectangle {
-                        x: bounds.x + bounds.width - 1.0,
-                        width: 1.0,
-                        ..bounds
-                    });
-                    if frame.starts_here {
-                        line(Rectangle {
-                            height: 1.0,
-                            ..bounds
-                        });
-                    }
-                    if frame.ends_here {
-                        line(Rectangle {
-                            y: bounds.y + bounds.height - 1.0,
-                            height: 1.0,
-                            ..bounds
-                        });
-                    }
+                let bounds = Rectangle {
+                    x: first.x + indent,
+                    y: top,
+                    width: layout.bounds().width - 2.0 * indent,
+                    height: bottom - top,
+                };
+                if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                    continue;
                 }
-            } else {
-                let bounds = layout.bounds();
-                let mut color = palette.divider;
-                color.a *= if cursor.is_over(bounds) { 1.0 } else { 0.55 };
-                // Short dashes distinguish an empty creation slot from saved content.
-                let mut dash = |bounds| {
+                // Every descendant has the same panel color. Paint it only
+                // for the outer group, then draw inexpensive one-pixel lines
+                // to preserve the nested hierarchy.
+                if frame.depth == 0 {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds,
                             ..Default::default()
                         },
-                        color,
-                    )
-                };
-                let mut x = bounds.x + 5.0;
-                while x < bounds.x + bounds.width - 5.0 {
-                    let width = 5.0_f32.min(bounds.x + bounds.width - 5.0 - x);
-                    dash(Rectangle {
-                        x,
-                        y: bounds.y,
-                        width,
-                        height: 1.0,
-                    });
-                    dash(Rectangle {
-                        x,
-                        y: bounds.y + bounds.height - 1.0,
-                        width,
-                        height: 1.0,
-                    });
-                    x += 10.0;
+                        palette.panel,
+                    );
                 }
-                let mut y = bounds.y + 5.0;
-                while y < bounds.y + bounds.height - 5.0 {
-                    let height = 5.0_f32.min(bounds.y + bounds.height - 5.0 - y);
-                    dash(Rectangle {
-                        x: bounds.x,
-                        y,
-                        width: 1.0,
-                        height,
+                let mut line = |bounds| {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds,
+                            ..Default::default()
+                        },
+                        palette.divider,
+                    );
+                };
+                line(Rectangle {
+                    x: bounds.x,
+                    width: 1.0,
+                    ..bounds
+                });
+                line(Rectangle {
+                    x: bounds.x + bounds.width - 1.0,
+                    width: 1.0,
+                    ..bounds
+                });
+                if frame.starts_here {
+                    line(Rectangle {
+                        height: 1.0,
+                        ..bounds
                     });
-                    dash(Rectangle {
-                        x: bounds.x + bounds.width - 1.0,
-                        y,
-                        width: 1.0,
-                        height,
+                }
+                if frame.ends_here {
+                    line(Rectangle {
+                        y: bounds.y + bounds.height - 1.0,
+                        height: 1.0,
+                        ..bounds
                     });
-                    y += 10.0;
                 }
             }
-            self.content.as_widget().draw(
-                &tree.children[0],
-                renderer,
-                theme,
-                style,
-                layout,
-                cursor,
-                viewport,
-            );
-        });
+        } else {
+            let bounds = layout.bounds();
+            let mut color = palette.divider;
+            color.a *= if cursor.is_over(bounds) { 1.0 } else { 0.55 };
+            // Short dashes distinguish an empty creation slot from saved content.
+            let mut dash = |bounds| {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds,
+                        ..Default::default()
+                    },
+                    color,
+                )
+            };
+            let mut x = bounds.x + 5.0;
+            while x < bounds.x + bounds.width - 5.0 {
+                let width = 5.0_f32.min(bounds.x + bounds.width - 5.0 - x);
+                dash(Rectangle {
+                    x,
+                    y: bounds.y,
+                    width,
+                    height: 1.0,
+                });
+                dash(Rectangle {
+                    x,
+                    y: bounds.y + bounds.height - 1.0,
+                    width,
+                    height: 1.0,
+                });
+                x += 10.0;
+            }
+            let mut y = bounds.y + 5.0;
+            while y < bounds.y + bounds.height - 5.0 {
+                let height = 5.0_f32.min(bounds.y + bounds.height - 5.0 - y);
+                dash(Rectangle {
+                    x: bounds.x,
+                    y,
+                    width: 1.0,
+                    height,
+                });
+                dash(Rectangle {
+                    x: bounds.x + bounds.width - 1.0,
+                    y,
+                    width: 1.0,
+                    height,
+                });
+                y += 10.0;
+            }
+        }
+        self.content.as_widget().draw(
+            &tree.children[0],
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            viewport,
+        );
     }
     fn mouse_interaction(
         &self,
