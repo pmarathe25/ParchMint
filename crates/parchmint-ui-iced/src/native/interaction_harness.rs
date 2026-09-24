@@ -9,7 +9,7 @@ use std::{
 
 use iced::{
     Element, Event, Point as IcedPoint, Rectangle, Size,
-    advanced::{clipboard, widget::Operation},
+    advanced::{clipboard, renderer::Headless, widget::Operation},
     event,
     futures::StreamExt,
     keyboard, mouse, window,
@@ -203,7 +203,12 @@ impl PersistentSurface {
                 .expect("font system lock")
                 .load_font(font);
         }
-        let renderer = Renderer::new(settings.default_font, settings.default_text_size);
+        let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            settings.default_font,
+            settings.default_text_size,
+            Some("tiny-skia"),
+        ))
+        .expect("headless software renderer");
         Self {
             size,
             renderer,
@@ -1157,8 +1162,32 @@ impl NativeDesktopHarness {
             )));
         }
         let position = self.editor_text_position(window, pane, text)?;
-        for _ in 0..clicks {
-            self.dispatch_events(window, Self::click_events(position, mouse::Button::Left))?;
+        // Deliver a multi-click as one input batch. Rebuilding the complete
+        // headless workspace between presses can exceed the editor's native
+        // multi-click interval even though these synthetic clicks are adjacent.
+        self.dispatch_events(
+            window,
+            [Event::Window(window::Event::RedrawRequested(
+                crate::motion::now(),
+            ))],
+        )?;
+        let events = (0..clicks)
+            .flat_map(|_| Self::click_events(position, mouse::Button::Left))
+            .collect::<Vec<_>>();
+        let id = self.window_id(window)?;
+        let (statuses, messages) = {
+            let (desktop, surfaces) = (&self.desktop, &mut self.surfaces);
+            surfaces
+                .get_mut(&id)
+                .expect("surface was created")
+                .dispatch(desktop.view(id), events.iter().cloned())
+        };
+        self.route_messages(messages)?;
+        for (event, status) in events.into_iter().zip(statuses) {
+            if let Some(message) = super::runtime_event(event, status, id) {
+                let task = self.desktop.update(message);
+                self.run_task(task)?;
+            }
         }
         self.record(
             window,
@@ -2317,7 +2346,6 @@ impl NativeDesktopHarness {
         window: HarnessWindow,
         path: impl AsRef<Path>,
     ) -> Result<(), HarnessError> {
-        use iced::advanced::renderer::Headless;
         use iced::widget::theme::Base;
         self.redraw(window)?;
         let id = self.window_id(window)?;

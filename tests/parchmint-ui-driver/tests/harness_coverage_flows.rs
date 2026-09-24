@@ -187,6 +187,14 @@ fn native_triple_click_selects_a_paragraph_for_formatting() {
         .multi_click_editor_text(HarnessWindow::Project, EditorPane::Primary, "Second", 3)
         .expect("select the second paragraph with native triple-click");
     harness
+        .press_command_key(HarnessWindow::Project, 'c')
+        .expect("copy the triple-click selection");
+    assert_eq!(
+        harness.clipboard_contents().0.as_deref(),
+        Some("Second paragraph."),
+        "triple-click must select the complete second paragraph"
+    );
+    harness
         .press_command_key(HarnessWindow::Project, 'i')
         .expect("format the triple-click paragraph");
     harness
@@ -449,7 +457,7 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
             .unwrap()
     );
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::FormattingMenu)
+        .click_target(HarnessWindow::Project, HarnessTarget::ParagraphStyle)
         .unwrap();
     harness
         .press_key(HarnessWindow::Project, HarnessKey::Escape)
@@ -458,7 +466,7 @@ fn author_can_expand_either_pane_and_restore_the_split_and_sidebars() {
         harness
             .text_is_visible(HarnessWindow::Project, "Exit focus")
             .unwrap(),
-        "Escape closes Format before leaving focus mode"
+        "Escape closes the style menu before leaving focus mode"
     );
     harness
         .click_target(

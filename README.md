@@ -47,6 +47,9 @@ cargo clippy --workspace --all-targets --locked -j 1 -- -D warnings
 cargo fmt --all --check
 ```
 
+`.cargo/config.toml` selects the software backend for deterministic UI tests;
+the installed application still chooses the available GPU renderer.
+
 ## Documentation
 
 - **Use ParchMint:** [User guide](docs/user-guide.md).

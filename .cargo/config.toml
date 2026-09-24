@@ -1,0 +1,2 @@
+[env]
+ICED_TEST_BACKEND = { value = "tiny-skia", force = false }

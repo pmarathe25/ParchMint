@@ -1431,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn production_cards_target_renders_synopsis_and_metadata_inline() {
+    fn production_cards_target_renders_synopsis_and_visible_metadata_inline() {
         let target = VisualTarget::Cards;
         let appearance = VisualAppearance::Light;
         let spec = visual_target_spec(target);
@@ -1449,14 +1449,14 @@ mod tests {
             "The harbor has fallen silent, and Mara must decide whom to trust.",
             "POV",
             "Mara",
-            "Status",
-            "Draft",
         ] {
             assert!(
                 simulator.find(content).is_ok(),
                 "production Cards show {content}"
             );
         }
+        assert!(simulator.find("Status").is_err());
+        assert!(simulator.find("Draft").is_err());
     }
 
     #[test]
@@ -1569,8 +1569,8 @@ mod tests {
             Size::new(spec.width as f32, spec.height as f32),
             production_element(VisualTarget::History, VisualAppearance::Light),
         );
-        assert!(simulator.find("Saved version").is_ok());
-        assert!(simulator.find("Current").is_ok());
+        assert!(simulator.find("Checkpoint").is_ok());
+        assert!(simulator.find("Current project").is_ok());
         assert!(
             simulator
                 .find("Mara turned the unopened letter in her fingers.")

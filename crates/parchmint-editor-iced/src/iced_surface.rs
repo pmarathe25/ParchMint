@@ -322,6 +322,8 @@ struct SurfaceDrawingCache {
     background: canvas::Cache,
     scalars: Arc<[EditorScalarGeometry]>,
     lines: Vec<(Range<usize>, canvas::Cache)>,
+    #[cfg(test)]
+    repaint_counts: Vec<u64>,
 }
 
 impl SurfaceDrawingCache {
@@ -359,20 +361,34 @@ impl SurfaceDrawingCache {
             let index = geometry.len();
             if index == self.lines.len() {
                 self.lines.push((0..0, canvas::Cache::new()));
+                #[cfg(test)]
+                self.repaint_counts.push(0);
             }
             let (previous, cache) = &mut self.lines[index];
             if !same_paint(&self.scalars[previous.clone()], &scalars[start..end]) {
                 cache.clear();
             }
+            #[cfg(test)]
+            let mut repainted = false;
             geometry.push(cache.draw(renderer, size, |frame| {
+                #[cfg(test)]
+                {
+                    repainted = true;
+                }
                 for scalar in &scalars[start..end] {
                     draw_scalar_text(frame, scalar, content.theme);
                 }
             }));
+            #[cfg(test)]
+            if repainted {
+                self.repaint_counts[index] += 1;
+            }
             *previous = start..end;
             start = end;
         }
         self.lines.truncate(geometry.len());
+        #[cfg(test)]
+        self.repaint_counts.truncate(geometry.len());
         self.scalars = scalars;
         (background, geometry)
     }
@@ -1802,7 +1818,7 @@ mod tests {
     use std::{borrow::Cow, path::PathBuf};
 
     use iced::{Settings, Size, Theme};
-    use iced_test::{Simulator, simulator::Snapshot};
+    use iced_test::{Simulator, core::renderer::Headless, simulator::Snapshot};
     use parchmint_editor_api::{CanonicalComment, CanonicalDocumentLoad, CommentId, DocumentId};
 
     use super::*;
@@ -1821,7 +1837,12 @@ mod tests {
 
     #[test]
     fn drawing_cache_reuses_unchanged_lines_and_invalidates_paint_changes() {
-        let renderer = Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0));
+        let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .expect("headless software renderer");
         let mut cache = SurfaceDrawingCache::default();
         let mut prior_text = None;
         for step in 0..7 {
@@ -1861,33 +1882,24 @@ mod tests {
             let (_, fresh) = SurfaceDrawingCache::default().draw(&renderer, size, &content, true);
             assert_eq!(lines.len(), fresh.len());
             for (line, fresh) in lines.iter().zip(&fresh) {
-                let (
-                    canvas::Geometry::<Renderer>::Cache(line),
-                    canvas::Geometry::<Renderer>::Cache(fresh),
-                ) = (line, fresh)
-                else {
-                    panic!("cached geometry")
-                };
-                assert_eq!(line.text, fresh.text, "stale text at step {step}");
-                assert_eq!(line.clip_bounds, fresh.clip_bounds);
+                assert_eq!(
+                    format!("{line:?}"),
+                    format!("{fresh:?}"),
+                    "stale cached paint at step {step}"
+                );
             }
-            let canvas::Geometry::<Renderer>::Cache(last) = lines.last().unwrap() else {
-                panic!("cached line")
-            };
+            let last = *cache.repaint_counts.last().expect("visible line");
             if let Some(prior) = prior_text {
                 if step <= 3 {
-                    assert!(
-                        Arc::ptr_eq(&prior, &last.text),
+                    assert_eq!(
+                        prior, last,
                         "unchanged last line was rebuilt at step {step}"
                     );
                 } else {
-                    assert!(
-                        !Arc::ptr_eq(&prior, &last.text),
-                        "paint change was missed at step {step}"
-                    );
+                    assert!(prior < last, "paint change was missed at step {step}");
                 }
             }
-            prior_text = Some(Arc::clone(&last.text));
+            prior_text = Some(last);
         }
         assert_eq!(cache.lines.len(), 2, "retain only visible lines");
     }
