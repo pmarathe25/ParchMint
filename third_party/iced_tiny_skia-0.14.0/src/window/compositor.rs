@@ -20,6 +20,7 @@ pub struct Surface {
     >,
     clip_mask: tiny_skia::Mask,
     history: FrameHistory,
+    latest_pixels: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -128,6 +129,7 @@ impl crate::graphics::Compositor for Compositor {
             window,
             clip_mask: tiny_skia::Mask::new(1, 1).expect("Create clip mask"),
             history: FrameHistory::default(),
+            latest_pixels: Vec::new(),
         };
 
         if width > 0 && height > 0 {
@@ -154,6 +156,7 @@ impl crate::graphics::Compositor for Compositor {
         surface.clip_mask =
             tiny_skia::Mask::new(width, height).expect("Create clip mask");
         surface.history.clear();
+        surface.latest_pixels = Vec::new();
     }
 
     fn information(&self) -> Information {
@@ -209,23 +212,42 @@ pub fn present(
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
     let physical_size = viewport.physical_size();
-
+    let same_scene = if !surface.latest_pixels.is_empty() {
+        surface.history.frames.front().and_then(|last| {
+            (last.background == background_color
+                && last.size == physical_size
+                && last.scale == viewport.scale_factor())
+                .then(|| renderer.damage(&last.layers, viewport.scale_factor()).is_empty())
+        })
+    } else {
+        None
+    } == Some(true);
     let mut buffer = surface.window.buffer_mut().map_err(|_| {
         surface.history.clear();
+        surface.latest_pixels.clear();
         compositor::SurfaceError::Lost
     })?;
 
     let age = buffer.age();
-    let damage =
+    // A repeated scene can land in an older softbuffer back buffer. Copy the
+    // last presented pixels instead of traversing and rasterizing every layer.
+    let reuse_pixels = same_scene
+        && surface.latest_pixels.len() == buffer.len()
+        && age != 1;
+    if reuse_pixels {
+        buffer.copy_from_slice(&surface.latest_pixels);
+    }
+    let damage = if same_scene && (age == 1 || reuse_pixels) {
+        Vec::new()
+    } else {
         surface
             .history
-            .damage(renderer, age, viewport, background_color);
+            .damage(renderer, age, viewport, background_color)
+    };
 
     if !damage.is_empty() {
-        let damage = damage::group(
-            damage,
-            Rectangle::with_size(viewport.logical_size()),
-        );
+        let viewport_bounds = Rectangle::with_size(viewport.logical_size());
+        let damage = choose_damage(damage::group(damage, viewport_bounds), viewport_bounds);
 
         let mut pixels = tiny_skia::PixmapMut::from_bytes(
             bytemuck::cast_slice_mut(&mut buffer),
@@ -246,17 +268,34 @@ pub fn present(
     #[cfg(feature = "damage-verification")]
     verify_frame(renderer, &buffer, viewport, background_color);
 
+    if !same_scene || surface.latest_pixels.len() != buffer.len() {
+        surface.latest_pixels.clear();
+        surface.latest_pixels.extend_from_slice(&buffer);
+    }
+
     on_pre_present();
     buffer.present().map_err(|_| {
         // A failed presentation may have modified a reused buffer without
         // advancing its age. Its pixels are no longer represented by history.
         surface.history.clear();
+        surface.latest_pixels.clear();
         compositor::SurfaceError::Lost
     })?;
     surface
         .history
         .presented(renderer, age, viewport, background_color);
     Ok(())
+}
+
+fn choose_damage(regions: Vec<Rectangle>, viewport: Rectangle) -> Vec<Rectangle> {
+    // Grouping can leave overlapping rectangles. If visiting them would cover
+    // more area than the entire window, one full repaint is cheaper and visits
+    // each pixel only once.
+    if regions.iter().map(Rectangle::area).sum::<f32>() >= viewport.area() {
+        vec![viewport]
+    } else {
+        regions
+    }
 }
 
 // Opt-in native diagnostic: check every buffer before presentation, including
@@ -370,6 +409,30 @@ mod tests {
     use crate::core::{Font, Pixels, Renderer as _, renderer::Quad};
 
     #[test]
+    fn overlapping_damage_uses_one_full_repaint() {
+        let viewport = Rectangle::with_size(Size::new(100.0, 100.0));
+        let overlapping = vec![
+            Rectangle {
+                width: 80.0,
+                ..viewport
+            },
+            Rectangle {
+                x: 20.0,
+                width: 80.0,
+                ..viewport
+            },
+        ];
+        assert_eq!(choose_damage(overlapping, viewport), vec![viewport]);
+
+        let small = vec![Rectangle {
+            width: 10.0,
+            height: 10.0,
+            ..viewport
+        }];
+        assert_eq!(choose_damage(small.clone(), viewport), small);
+    }
+
+    #[test]
     #[cfg(feature = "damage-verification")]
     #[should_panic(expected = "incremental frame differs from full repaint")]
     fn verification_detects_corrupted_pixels() {
@@ -417,8 +480,13 @@ mod tests {
             );
             let (pixels, last_step) = &mut buffers[step % 3];
             let age = last_step.map_or(0, |last| (step - last) as u8);
-            let dirty =
-                history.damage(&mut renderer, age, &viewport, background);
+            let dirty = choose_damage(
+                damage::group(
+                    history.damage(&mut renderer, age, &viewport, background),
+                    bounds,
+                ),
+                bounds,
+            );
             renderer.draw(
                 &mut pixels.as_mut(),
                 &mut mask,

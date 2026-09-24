@@ -64,6 +64,24 @@ to dirty, on-screen pixels. Reused window buffers retain their own background an
 scale; resize and presentation failures invalidate their history.
 Antialiased vector edges use consistent blending in full and partial repaints.
 
+Grouped dirty regions can still overlap. When their summed area reaches the
+viewport area, the compositor instead paints the whole viewport once. This
+avoids repeatedly traversing and painting the same layers during Overview
+scrolling; smaller updates continue to use partial repainting.
+Repeated presentations of an unchanged scene reuse the last completed pixels
+when softbuffer supplies an older back buffer. This keeps normal presentation
+and frame scheduling while avoiding another raster pass. The cache holds one
+window-sized pixel buffer and is cleared on resize or presentation failure.
+
+On the nested `Manual-Test-Project-Ready.parchmint` Overview at a 1280×720
+viewport, one scroll produced 147 raw dirty rectangles. Grouping left 16
+regions totaling 1.45 million pixels, compared with 0.92 million viewport
+pixels. In a 20-step alternating scroll run, the median software raster pass
+fell from about 30 ms to 10 ms after the full-repaint choice. An unchanged
+second presentation then used a roughly 1 ms pixel copy instead of another
+roughly 10 ms raster pass. These timings are machine-specific; they explain the
+choice rather than define a performance contract.
+
 ## Verify the patch
 
 From the workspace root:
