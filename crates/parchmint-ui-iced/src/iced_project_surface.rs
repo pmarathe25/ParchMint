@@ -5,7 +5,7 @@ use crate::components::{
     semantic_pick_list as pick_list, word_count_label,
 };
 
-use crate::project_workspace::{GlobalSearchRow, SEARCH_ROW_HEIGHT};
+use crate::project_workspace::{EXPLORER_ROW_EXTENT, GlobalSearchRow, SEARCH_ROW_HEIGHT};
 use iced::widget::{
     Space, checkbox, column, container, mouse_area, opaque, responsive, rich_text, row, scrollable,
     sensor, span, stack, text, text_editor,
@@ -244,6 +244,7 @@ fn project_surface_with_layout<'a>(
                     theme,
                     rail_width.saturating_sub(SIDEBAR_SPLITTER_WIDTH),
                     true,
+                    layout.requested_height as f32,
                 ),
                 sidebar_splitter(SidebarPanel::Explorer, theme)
             ]
@@ -695,9 +696,15 @@ fn left_rail<'a>(
     theme: ParchMintTheme,
     width: u32,
     inline_rename: bool,
+    initial_viewport_upper_bound: f32,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let content = match workspace.sidebar_surface() {
-        SidebarSurface::Explorer => explorer_rail_with_rename(workspace, theme, inline_rename),
+        SidebarSurface::Explorer => explorer_rail_with_rename(
+            workspace,
+            theme,
+            inline_rename,
+            initial_viewport_upper_bound,
+        ),
         SidebarSurface::GlobalSearch => global_search_rail(workspace, theme),
     };
     container(column![Space::new().height(36), content].spacing(8))
@@ -716,199 +723,217 @@ fn explorer_rail<'a>(
     workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    explorer_rail_with_rename(workspace, theme, true)
+    explorer_rail_with_rename(workspace, theme, true, 720.0)
 }
 
-fn explorer_rail_with_rename<'a>(
+pub(crate) fn explorer_rail_with_rename<'a>(
     workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
     inline_rename: bool,
+    initial_viewport_upper_bound: f32,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let explorer = workspace.explorer();
     let targets = hierarchy_drag::targets();
-    let rows = explorer
-        .rows()
-        .into_iter()
-        .filter(|item| hierarchy_row_is_visible(explorer, item.parent_id))
-        .fold(column![].spacing(SPACING_4), |column, item| {
-            let depth = hierarchy_depth(explorer, item.parent_id);
-            let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-                HierarchyRowKind::Root => button(icon_sized(
-                    if item.expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    18,
-                ))
-                .padding(SPACING_4)
-                .width(26)
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                })
-                .into(),
-                HierarchyRowKind::Group => button(icon_sized(
-                    if item.expanded {
-                        Icon::ChevronDown
-                    } else {
-                        Icon::ChevronRight
-                    },
-                    18,
-                ))
-                .width(26)
-                .padding(4)
-                .on_press(ProjectSurfaceMessage::Project(
-                    ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                })
-                .into(),
-                HierarchyRowKind::Document => Space::new().width(26).into(),
-            };
-            let title = if item.cut_pending {
-                format!("{}  (cut)", item.title)
-            } else {
-                item.title.to_owned()
-            };
-            let is_renaming = inline_rename
-                && workspace
-                    .hierarchy_rename()
-                    .is_some_and(|(node_id, _)| node_id == item.id);
-            let hierarchy_press = (!is_renaming
-                && matches!(
-                    item.kind,
-                    HierarchyRowKind::Group | HierarchyRowKind::Document
-                ))
-            .then(|| match item.kind {
-                HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
-                    ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
-                ),
-                HierarchyRowKind::Group => ProjectSurfaceMessage::Project(
-                    ProjectMessage::SelectAndToggleHierarchyExpanded(item.id.to_owned()),
-                ),
-                HierarchyRowKind::Root => unreachable!("roots retain their disclosure control"),
-            });
-            let select: Element<'a, ProjectSurfaceMessage> = if is_renaming {
-                let draft = workspace
-                    .hierarchy_rename()
-                    .map(|(_, draft)| draft)
-                    .unwrap_or(item.title);
-                hierarchy_drag::commit_on_click_away(
-                    sensor(
-                        text_input("Rename", draft)
-                            .id(hierarchy_rename_input_id(item.id))
-                            .on_input(|title| {
-                                ProjectSurfaceMessage::Project(
-                                    ProjectMessage::SetHierarchyRenameDraft(title),
-                                )
-                            })
-                            .on_submit(ProjectSurfaceMessage::Project(
-                                ProjectMessage::CommitHierarchyRename,
-                            ))
-                            .padding([5, 6])
-                            .width(Length::Fill),
-                    )
-                    .key(item.id.to_owned())
-                    .on_show({
-                        let node_id = item.id.to_owned();
-                        move |_| ProjectSurfaceMessage::HierarchyRenameShown(node_id.clone())
-                    }),
-                    ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyRename),
-                )
-            } else {
-                let row = mouse_area(
-                    container(text(title).size(u32::from(UI_TAB.size)))
-                        .padding([SPACING_4, SPACING_8])
-                        .width(Length::Fill)
-                        .style(move |_| {
-                            if item.selected {
-                                iced::widget::container::Style {
-                                    background: Some(Background::Color(
-                                        theme.palette().accent_subtle,
-                                    )),
-                                    ..Default::default()
-                                }
-                            } else {
-                                iced::widget::container::Style::default()
-                            }
-                        }),
-                )
-                .interaction(iced::mouse::Interaction::Pointer);
-                if item.kind == HierarchyRowKind::Root {
-                    hierarchy_drag::source(
-                        item.id,
-                        row,
-                        ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
-                            node_id: item.id.to_owned(),
-                            gesture: SelectionGesture::Replace,
-                        }),
-                        None,
-                        ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
-                            source_id: item.id.to_owned(),
-                            gesture: SelectionGesture::Replace,
-                        }),
-                    )
+    let force_full = workspace.hierarchy_rename().is_some();
+    let window = explorer.visible_row_window(
+        workspace.explorer_scroll_offset(),
+        workspace.explorer_viewport_height(initial_viewport_upper_bound),
+        force_full,
+    );
+    let current_scroll_offset = workspace.explorer_scroll_offset();
+    let current_viewport_height = workspace.explorer_viewport_height(initial_viewport_upper_bound);
+    let current_window_range =
+        explorer.window_range(current_scroll_offset, current_viewport_height);
+    let mut rows = column![].spacing(0.0);
+    if !force_full && window.top_padding > 0.0 {
+        rows = rows.push(Space::new().height(window.top_padding));
+    }
+    let rows = window.rows.into_iter().fold(rows, |column, item| {
+        let depth = hierarchy_depth(explorer, item.parent_id);
+        let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
+            HierarchyRowKind::Root => button(icon_sized(
+                if item.expanded {
+                    Icon::ChevronDown
                 } else {
-                    row.into()
-                }
-            };
-            let item_row: Element<'a, ProjectSurfaceMessage> =
-                row![Space::new().width((depth * 14) as f32), disclosure, select]
-                    .spacing(1)
-                    .align_y(iced::alignment::Vertical::Center)
-                    .into();
-            let item_row = match hierarchy_press {
-                Some(on_press) => hierarchy_drag::source(
-                    item.id,
-                    item_row,
-                    on_press,
-                    (item.kind == HierarchyRowKind::Document).then(|| {
-                        ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(
-                            item.id.to_owned(),
+                    Icon::ChevronRight
+                },
+                18,
+            ))
+            .padding(SPACING_4)
+            .width(26)
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+            ))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            })
+            .into(),
+            HierarchyRowKind::Group => button(icon_sized(
+                if item.expanded {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronRight
+                },
+                18,
+            ))
+            .width(26)
+            .padding(4)
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+            ))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            })
+            .into(),
+            HierarchyRowKind::Document => Space::new().width(26).into(),
+        };
+        let title = if item.cut_pending {
+            format!("{}  (cut)", item.title)
+        } else {
+            item.title.to_owned()
+        };
+        let is_renaming = inline_rename
+            && workspace
+                .hierarchy_rename()
+                .is_some_and(|(node_id, _)| node_id == item.id);
+        let hierarchy_press = (!is_renaming
+            && matches!(
+                item.kind,
+                HierarchyRowKind::Group | HierarchyRowKind::Document
+            ))
+        .then(|| match item.kind {
+            HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
+                ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
+            ),
+            HierarchyRowKind::Group => ProjectSurfaceMessage::Project(
+                ProjectMessage::SelectAndToggleHierarchyExpanded(item.id.to_owned()),
+            ),
+            HierarchyRowKind::Root => unreachable!("roots retain their disclosure control"),
+        });
+        let select: Element<'a, ProjectSurfaceMessage> = if is_renaming {
+            let draft = workspace
+                .hierarchy_rename()
+                .map(|(_, draft)| draft)
+                .unwrap_or(item.title);
+            hierarchy_drag::commit_on_click_away(
+                sensor(
+                    text_input("Rename", draft)
+                        .id(hierarchy_rename_input_id(item.id))
+                        .on_input(|title| {
+                            ProjectSurfaceMessage::Project(ProjectMessage::SetHierarchyRenameDraft(
+                                title,
+                            ))
+                        })
+                        .on_submit(ProjectSurfaceMessage::Project(
+                            ProjectMessage::CommitHierarchyRename,
                         ))
+                        .padding([5, 6])
+                        .width(Length::Fill),
+                )
+                .key(item.id.to_owned())
+                .on_show({
+                    let node_id = item.id.to_owned();
+                    move |_| ProjectSurfaceMessage::HierarchyRenameShown(node_id.clone())
+                }),
+                ProjectSurfaceMessage::Project(ProjectMessage::CommitHierarchyRename),
+            )
+        } else {
+            let row = mouse_area(
+                container(text(title).size(u32::from(UI_TAB.size)))
+                    .padding([SPACING_4, SPACING_8])
+                    .width(Length::Fill)
+                    .style(move |_| {
+                        if item.selected {
+                            iced::widget::container::Style {
+                                background: Some(Background::Color(theme.palette().accent_subtle)),
+                                ..Default::default()
+                            }
+                        } else {
+                            iced::widget::container::Style::default()
+                        }
                     }),
+            )
+            .interaction(iced::mouse::Interaction::Pointer);
+            if item.kind == HierarchyRowKind::Root {
+                hierarchy_drag::source(
+                    item.id,
+                    row,
+                    ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                        node_id: item.id.to_owned(),
+                        gesture: SelectionGesture::Replace,
+                    }),
+                    None,
                     ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                         source_id: item.id.to_owned(),
                         gesture: SelectionGesture::Replace,
                     }),
-                ),
-                None => item_row,
-            };
-            let node_id = item.id.to_owned();
-            let drag_destination = workspace.hierarchy_drag_destination();
-            let indicator = hierarchy_row_indicator(item.kind, &node_id, drag_destination, theme);
-            let kind = item.kind;
-            let target_id = node_id.clone();
-            let row_body = hierarchy_drag::target(
-                container(item_row).width(Length::Fill).style(move |_| {
+                )
+            } else {
+                row.into()
+            }
+        };
+        let item_row: Element<'a, ProjectSurfaceMessage> =
+            row![Space::new().width((depth * 14) as f32), disclosure, select]
+                .spacing(1)
+                .align_y(iced::alignment::Vertical::Center)
+                .into();
+        let item_row = match hierarchy_press {
+            Some(on_press) => hierarchy_drag::source(
+                item.id,
+                item_row,
+                on_press,
+                (item.kind == HierarchyRowKind::Document).then(|| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(
+                        item.id.to_owned(),
+                    ))
+                }),
+                ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
+                    source_id: item.id.to_owned(),
+                    gesture: SelectionGesture::Replace,
+                }),
+            ),
+            None => item_row,
+        };
+        let node_id = item.id.to_owned();
+        let drag_destination = workspace.hierarchy_drag_destination();
+        let indicator = hierarchy_row_indicator(item.kind, &node_id, drag_destination, theme);
+        let kind = item.kind;
+        let target_id = node_id.clone();
+        let row_body = hierarchy_drag::target(
+            container(item_row)
+                .width(Length::Fill)
+                .height(Length::Fixed(EXPLORER_ROW_EXTENT))
+                .align_y(iced::alignment::Vertical::Center)
+                .style(move |_| {
                     if indicator.is_some() {
                         components::surface(theme, Surface::Panel, Interaction::Selected)
                     } else {
                         iced::widget::container::Style::default()
                     }
                 }),
-                indicator,
-                &targets,
-                move |bounds, point| {
-                    let destination = hierarchy_row_destination(kind, &target_id, bounds, point)?;
-                    workspace.preview_destination(&target_id, destination)
-                },
-            );
-            let row_target = harness_target::target_id(
-                harness_target::explorer_row_id(&node_id),
-                right_click::right_click_area(row_body, move |point| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyContextMenu {
-                        node_id: node_id.clone(),
-                        point: Point::new(point.x, point.y),
-                    })
-                }),
-            );
-            column.push(row_target)
-        });
+            indicator,
+            &targets,
+            move |bounds, point| {
+                let destination = hierarchy_row_destination(kind, &target_id, bounds, point)?;
+                workspace.preview_destination(&target_id, destination)
+            },
+        );
+        let row_target = harness_target::target_id(
+            harness_target::explorer_row_id(&node_id),
+            right_click::right_click_area(row_body, move |point| {
+                ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyContextMenu {
+                    node_id: node_id.clone(),
+                    point: Point::new(point.x, point.y),
+                })
+            }),
+        );
+        column.push(row_target)
+    });
+    let rows = if !force_full && window.bottom_padding > 0.0 {
+        rows.push(Space::new().height(window.bottom_padding))
+    } else {
+        rows
+    };
     let selection_shelf: Element<'a, ProjectSurfaceMessage> = {
         let selected_count = explorer.selected_ids().len();
         if selected_count > 1 {
@@ -986,10 +1011,20 @@ fn explorer_rail_with_rename<'a>(
     } else {
         rail
     };
+    let scrollable = scrollable(Element::from(rows).map(Some))
+        .id(explorer_scroll_id())
+        .on_scroll(move |viewport| {
+            let offset = viewport.absolute_offset().y;
+            let height = viewport.bounds().height;
+            (explorer.window_range(offset, height) != current_window_range
+                || (height - current_viewport_height).abs() >= 1.0)
+                .then_some(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetExplorerViewport { offset, height },
+                ))
+        })
+        .height(Length::Fill);
     let rail = rail.push(hierarchy_drag::surface(
-        scrollable(rows)
-            .id(explorer_scroll_id())
-            .height(Length::Fill),
+        crate::scroll_gate::drop_none(scrollable),
         targets,
         workspace.hierarchy_drag_source().is_some(),
         false,
@@ -2621,109 +2656,109 @@ fn history_center<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let history = workspace.history();
-    let checkpoint_window = history.checkpoint_window();
-    let checkpoints = history
-        .visible_checkpoints()
-        .skip(checkpoint_window.start)
-        .take(
-            checkpoint_window
-                .end
-                .saturating_sub(checkpoint_window.start),
-        )
-        .fold(column![], |column, checkpoint| {
-            let checkpoint_id = checkpoint.checkpoint_id.clone();
-            let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
-            let word_delta = history
-                .comparison()
-                .filter(|comparison| comparison.checkpoint_id == checkpoint_id)
-                .map(|comparison| {
-                    let delta = comparison.word_count_delta();
-                    format!(
-                        " · {delta:+} {}",
-                        if delta == 1 || delta == -1 {
-                            "word"
-                        } else {
-                            "words"
-                        }
-                    )
-                })
-                .unwrap_or_default();
-            let column = if let Some(heading) = history.timeline_heading(&checkpoint_id) {
-                column.push(
-                    container(text(heading).size(11).color(theme.palette().secondary_text))
-                        .height(Length::Fixed(
-                            crate::project_workspace::HISTORY_TIMELINE_HEADING_HEIGHT,
-                        ))
-                        .align_y(iced::alignment::Vertical::Center),
-                )
-            } else {
-                column
-            };
-            column
-                .push(harness_target::target_id(
-                    harness_target::history_checkpoint_id(&checkpoint_id),
-                    button(
-                        column![
-                            text(if checkpoint.name.is_some() {
-                                checkpoint.label()
-                            } else if checkpoint.affected_document_ids.len() == 1 {
-                                let document = &checkpoint.affected_document_ids[0];
-                                let title = workspace
-                                    .explorer()
-                                    .node_id_for_document(document)
-                                    .and_then(|id| workspace.explorer().title(id))
-                                    .unwrap_or("Document");
-                                format!("{} · {title}", checkpoint.label())
-                            } else if checkpoint.affected_document_ids.is_empty() {
-                                checkpoint.label()
+    let timeline = history.timeline_window();
+    let checkpoint_window = timeline.window;
+    let checkpoints =
+        timeline
+            .checkpoints
+            .into_iter()
+            .fold(column![], |column, (checkpoint, heading)| {
+                let checkpoint_id = checkpoint.checkpoint_id.clone();
+                let selected = history.selected_checkpoint_id() == Some(checkpoint_id.as_str());
+                let word_delta = history
+                    .comparison()
+                    .filter(|comparison| comparison.checkpoint_id == checkpoint_id)
+                    .map(|comparison| {
+                        let delta = comparison.word_count_delta();
+                        format!(
+                            " · {delta:+} {}",
+                            if delta == 1 || delta == -1 {
+                                "word"
                             } else {
-                                format!(
-                                    "{} · {}",
-                                    checkpoint.label(),
-                                    checkpoint.affected_summary()
-                                )
-                            })
-                            .size(u32::from(UI_BODY.size))
-                            .wrapping(text::Wrapping::None),
-                            text(format!(
-                                "{}{}",
-                                checkpoint
-                                    .recorded_at_unix_millis
-                                    .map(crate::project_workspace::local_version_time)
-                                    .unwrap_or_else(|| format!("Version {}", checkpoint.sequence)),
-                                word_delta
-                            ))
-                            .size(u32::from(UI_COMPACT.size))
-                            .color(theme.palette().secondary_text),
-                        ]
-                        .spacing(SPACING_4),
-                    )
-                    .padding(SPACING_8)
-                    .width(Length::Fill)
-                    .height(crate::project_workspace::HISTORY_CHECKPOINT_ROW_HEIGHT)
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::SelectHistoryCheckpoint(checkpoint_id),
-                    ))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            interaction(status, selected),
+                                "words"
+                            }
                         )
-                    }),
-                ))
-                .push(
-                    container(
-                        Space::new()
-                            .height(crate::project_workspace::HISTORY_TIMELINE_DIVIDER_HEIGHT),
+                    })
+                    .unwrap_or_default();
+                let column = if let Some(heading) = heading {
+                    column.push(
+                        container(text(heading).size(11).color(theme.palette().secondary_text))
+                            .height(Length::Fixed(
+                                crate::project_workspace::HISTORY_TIMELINE_HEADING_HEIGHT,
+                            ))
+                            .align_y(iced::alignment::Vertical::Center),
                     )
-                    .width(Length::Fill)
-                    .style(move |_| iced::widget::container::Style {
-                        background: Some(Background::Color(theme.palette().divider)),
-                        ..Default::default()
-                    }),
-                )
-        });
+                } else {
+                    column
+                };
+                column
+                    .push(harness_target::target_id(
+                        harness_target::history_checkpoint_id(&checkpoint_id),
+                        button(
+                            column![
+                                text(if checkpoint.name.is_some() {
+                                    checkpoint.label()
+                                } else if checkpoint.affected_document_ids.len() == 1 {
+                                    let document = &checkpoint.affected_document_ids[0];
+                                    let title = workspace
+                                        .explorer()
+                                        .node_id_for_document(document)
+                                        .and_then(|id| workspace.explorer().title(id))
+                                        .unwrap_or("Document");
+                                    format!("{} · {title}", checkpoint.label())
+                                } else if checkpoint.affected_document_ids.is_empty() {
+                                    checkpoint.label()
+                                } else {
+                                    format!(
+                                        "{} · {}",
+                                        checkpoint.label(),
+                                        checkpoint.affected_summary()
+                                    )
+                                })
+                                .size(u32::from(UI_BODY.size))
+                                .wrapping(text::Wrapping::None),
+                                text(format!(
+                                    "{}{}",
+                                    checkpoint
+                                        .recorded_at_unix_millis
+                                        .map(crate::project_workspace::local_version_time)
+                                        .unwrap_or_else(|| format!(
+                                            "Version {}",
+                                            checkpoint.sequence
+                                        )),
+                                    word_delta
+                                ))
+                                .size(u32::from(UI_COMPACT.size))
+                                .color(theme.palette().secondary_text),
+                            ]
+                            .spacing(SPACING_4),
+                        )
+                        .padding(SPACING_8)
+                        .width(Length::Fill)
+                        .height(crate::project_workspace::HISTORY_CHECKPOINT_ROW_HEIGHT)
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SelectHistoryCheckpoint(checkpoint_id),
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, selected),
+                            )
+                        }),
+                    ))
+                    .push(
+                        container(
+                            Space::new()
+                                .height(crate::project_workspace::HISTORY_TIMELINE_DIVIDER_HEIGHT),
+                        )
+                        .width(Length::Fill)
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(Background::Color(theme.palette().divider)),
+                            ..Default::default()
+                        }),
+                    )
+            });
     let checkpoints = if history.visible_checkpoints().next().is_none() {
         column![
             text("No saved versions")
@@ -7028,6 +7063,22 @@ mod tests {
             );
             let title = simulator.find("Explorer").unwrap().bounds();
             assert!(simulator.find("+ New").is_err());
+            let root_row = simulator
+                .find(harness_target::explorer_row_id("manuscript"))
+                .unwrap()
+                .bounds();
+            let first_document = simulator
+                .find(harness_target::explorer_row_id("chapter-one"))
+                .unwrap()
+                .bounds();
+            let second_document = simulator
+                .find(harness_target::explorer_row_id("chapter-two"))
+                .unwrap()
+                .bounds();
+            assert_eq!(root_row.height, EXPLORER_ROW_EXTENT);
+            assert_eq!(first_document.height, EXPLORER_ROW_EXTENT);
+            assert_eq!(second_document.height, EXPLORER_ROW_EXTENT);
+            assert_eq!(second_document.y - first_document.y, EXPLORER_ROW_EXTENT);
             {
                 let bounds = simulator
                     .find(HarnessTarget::ExplorerSearch.id())

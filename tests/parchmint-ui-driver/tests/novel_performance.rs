@@ -342,7 +342,10 @@ fn novel_application_performance() {
     let mut index = 0;
     let switching = samples(20, || {
         harness
-            .click_text(WINDOW, format!("Chapter {:02}", index % chapters + 1))
+            .click_text(
+                WINDOW,
+                format!("Chapter {:02}", index % chapters.min(8) + 1),
+            )
             .unwrap();
         index += 1;
     });

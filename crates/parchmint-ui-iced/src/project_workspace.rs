@@ -163,6 +163,10 @@ pub enum ExplorerNavigation {
     CollapseOrParent,
 }
 
+pub(crate) const EXPLORER_ROW_EXTENT: f32 = 30.0;
+const EXPLORER_WINDOW_OVERSCAN_ROWS: usize = 5;
+const EXPLORER_WINDOW_SHIFT_ROWS: usize = 5;
+
 #[derive(Debug, Clone)]
 struct HierarchyNode {
     id: String,
@@ -414,6 +418,71 @@ impl ExplorerState {
             .into_iter()
             .filter_map(|id| self.row(id))
             .collect()
+    }
+
+    /// Builds only the visible rows around the Explorer viewport. Traversal
+    /// counts the complete expanded tree for spacer geometry, but allocates row
+    /// projections only for mounted items.
+    pub(crate) fn visible_row_window(
+        &self,
+        scroll_offset: f32,
+        viewport_height: f32,
+        force_full: bool,
+    ) -> ExplorerRowWindow<'_> {
+        let range = self.window_range(scroll_offset, viewport_height);
+        let mut pending = self
+            .roots
+            .iter()
+            .rev()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let mut visible_ids = Vec::new();
+        while let Some(node_id) = pending.pop() {
+            let Some(node) = self.nodes.get(node_id) else {
+                continue;
+            };
+            visible_ids.push(node_id);
+            if self.expanded.contains(node_id) {
+                pending.extend(node.children.iter().rev().map(String::as_str));
+            }
+        }
+        let start = if force_full {
+            0
+        } else {
+            range
+                .start
+                .min(visible_ids.len().saturating_sub(range.end - range.start))
+        };
+        let end = if force_full {
+            visible_ids.len()
+        } else {
+            range.end.min(visible_ids.len()).max(start)
+        };
+        let rows = visible_ids[start..end]
+            .iter()
+            .filter_map(|node_id| self.row(node_id))
+            .collect();
+        ExplorerRowWindow {
+            top_padding: start as f32 * EXPLORER_ROW_EXTENT,
+            bottom_padding: visible_ids.len().saturating_sub(end) as f32 * EXPLORER_ROW_EXTENT,
+            rows,
+        }
+    }
+
+    pub(crate) fn window_range(
+        &self,
+        scroll_offset: f32,
+        viewport_height: f32,
+    ) -> std::ops::Range<usize> {
+        let first_visible = (scroll_offset.max(0.0) / EXPLORER_ROW_EXTENT) as usize;
+        let start_before_quantization = first_visible.saturating_sub(EXPLORER_WINDOW_OVERSCAN_ROWS);
+        let start =
+            start_before_quantization / EXPLORER_WINDOW_SHIFT_ROWS * EXPLORER_WINDOW_SHIFT_ROWS;
+        let viewport_rows = (viewport_height.max(0.0) / EXPLORER_ROW_EXTENT).ceil() as usize;
+        let capacity = viewport_rows
+            .saturating_add(EXPLORER_WINDOW_OVERSCAN_ROWS * 2)
+            .saturating_add(EXPLORER_WINDOW_SHIFT_ROWS - 1);
+        start..start.saturating_add(capacity)
     }
 
     pub(crate) fn root_rows(&self) -> impl Iterator<Item = ExplorerRow<'_>> {
@@ -808,17 +877,10 @@ impl ExplorerState {
     }
 }
 
-fn synopsis_editors(explorer: &ExplorerState) -> BTreeMap<String, text_editor::Content> {
-    explorer
-        .nodes
-        .iter()
-        .map(|(node_id, node)| {
-            (
-                node_id.clone(),
-                text_editor::Content::with_text(&node.synopsis),
-            )
-        })
-        .collect()
+pub(crate) struct ExplorerRowWindow<'a> {
+    pub rows: Vec<ExplorerRow<'a>>,
+    pub top_padding: f32,
+    pub bottom_padding: f32,
 }
 
 /// Cards-specific projection over the shared hierarchy state.
@@ -2751,6 +2813,7 @@ fn comparison_line_word_count(line: &HistoryComparisonTextLine) -> usize {
 #[derive(Debug, Clone, Default)]
 pub struct HistoryState {
     checkpoints: Vec<HistoryCheckpointRow>,
+    timeline_layout: RefCell<Option<HistoryTimelineLayout>>,
     active_document_filter: Option<String>,
     pub(crate) group_filter: Option<String>,
     selected_checkpoint_id: Option<String>,
@@ -2772,6 +2835,14 @@ pub(crate) const HISTORY_CHECKPOINT_ROW_HEIGHT: f32 = 72.0;
 pub(crate) const HISTORY_TIMELINE_DIVIDER_HEIGHT: f32 = 1.0;
 pub(crate) const HISTORY_TIMELINE_HEADING_HEIGHT: f32 = 20.0;
 const HISTORY_CHECKPOINT_WINDOW_SIZE: usize = 60;
+
+#[derive(Debug, Clone, Default)]
+struct HistoryTimelineLayout {
+    visible_indices: Vec<usize>,
+    /// Cumulative row extents. The first element is always zero.
+    prefix_heights: Vec<f32>,
+    headings: Vec<Option<String>>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct HistoryCheckpointWindow {
@@ -2815,72 +2886,123 @@ impl HistoryState {
     }
 
     pub fn windowed_checkpoints(&self) -> impl Iterator<Item = &HistoryCheckpointRow> {
-        let window = self.checkpoint_window();
-        self.visible_checkpoints()
-            .skip(window.start)
-            .take(window.end.saturating_sub(window.start))
+        self.timeline_window()
+            .checkpoints
+            .into_iter()
+            .map(|(row, _)| row)
     }
 
     /// A concise date/session heading for a checkpoint at the start of a
     /// writing session. The comparison intentionally uses only persisted
     /// wall-clock metadata; old checkpoints remain in an honest legacy group.
     pub fn timeline_heading(&self, checkpoint_id: &str) -> Option<String> {
-        let mut previous: Option<&HistoryCheckpointRow> = None;
-        for checkpoint in self.visible_checkpoints() {
-            if checkpoint.checkpoint_id == checkpoint_id {
-                return starts_writing_session(previous, checkpoint).then(|| {
-                    checkpoint
-                        .recorded_at_unix_millis
-                        .map_or_else(|| "Earlier versions".to_owned(), writing_session_label)
-                });
-            }
-            previous = Some(checkpoint);
-        }
-        None
+        self.ensure_timeline_layout();
+        let layout = self.timeline_layout.borrow();
+        let layout = layout.as_ref()?;
+        layout
+            .visible_indices
+            .iter()
+            .position(|index| self.checkpoints[*index].checkpoint_id == checkpoint_id)
+            .and_then(|index| layout.headings[index].clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn checkpoint_window(&self) -> HistoryCheckpointWindow {
-        let scroll_offset = self.scroll_offset.max(0.0);
-        let mut top_padding = 0.0;
-        let mut start: usize = 0;
-        let mut visible_count: usize = 0;
-        let mut total_height = 0.0;
-        let mut found_start = false;
-        let mut previous = None;
+        let (window, _) = self.timeline_window_parts();
+        window
+    }
 
-        for checkpoint in self.visible_checkpoints() {
-            let extent = history_checkpoint_extent(previous, checkpoint);
-            if !found_start && total_height + extent <= scroll_offset {
-                start += 1;
-                top_padding += extent;
-            } else {
-                found_start = true;
-            }
-            total_height += extent;
-            visible_count += 1;
-            previous = Some(checkpoint);
+    /// Returns the mounted timeline rows with their precomputed session headings.
+    /// The cached layout is rebuilt only when checkpoints or their document filter change.
+    pub(crate) fn timeline_window(&self) -> HistoryTimelineWindow<'_> {
+        let (window, indices) = self.timeline_window_parts();
+        let layout = self.timeline_layout.borrow();
+        let layout = layout.as_ref().expect("timeline layout was built");
+        let checkpoints = indices
+            .into_iter()
+            .map(|visible_index| {
+                let checkpoint_index = layout.visible_indices[visible_index];
+                (
+                    &self.checkpoints[checkpoint_index],
+                    layout.headings[visible_index].clone(),
+                )
+            })
+            .collect();
+        HistoryTimelineWindow {
+            window,
+            checkpoints,
         }
+    }
 
+    fn timeline_window_parts(&self) -> (HistoryCheckpointWindow, std::ops::Range<usize>) {
+        self.ensure_timeline_layout();
+        let layout = self.timeline_layout.borrow();
+        let layout = layout.as_ref().expect("timeline layout was built");
+        let scroll_offset = self.scroll_offset.max(0.0);
+        let start = layout
+            .prefix_heights
+            .partition_point(|height| *height <= scroll_offset)
+            .saturating_sub(1)
+            .min(layout.visible_indices.len());
         let end = start
             .saturating_add(HISTORY_CHECKPOINT_WINDOW_SIZE)
-            .min(visible_count);
-        let visible_height = self
-            .visible_checkpoints()
-            .enumerate()
-            .scan(None, |previous, (index, checkpoint)| {
-                let extent = history_checkpoint_extent(*previous, checkpoint);
-                *previous = Some(checkpoint);
-                Some((index, extent))
-            })
-            .filter_map(|(index, extent)| (start..end).contains(&index).then_some(extent))
-            .sum::<f32>();
+            .min(layout.visible_indices.len());
+        let top_padding = layout.prefix_heights[start];
+        let total_height = *layout.prefix_heights.last().unwrap_or(&0.0);
+        let visible_height = layout.prefix_heights[end] - top_padding;
+        (
+            HistoryCheckpointWindow {
+                start,
+                end,
+                top_padding,
+                bottom_padding: (total_height - top_padding - visible_height).max(0.0),
+            },
+            start..end,
+        )
+    }
 
-        HistoryCheckpointWindow {
-            start,
-            end,
-            top_padding,
-            bottom_padding: (total_height - top_padding - visible_height).max(0.0),
+    fn invalidate_timeline_layout(&self) {
+        *self.timeline_layout.borrow_mut() = None;
+    }
+
+    fn ensure_timeline_layout(&self) {
+        if self.timeline_layout.borrow().is_some() {
+            return;
         }
+        let mut visible_indices = Vec::new();
+        let mut prefix_heights = vec![0.0];
+        let mut headings = Vec::new();
+        let mut previous: Option<&HistoryCheckpointRow> = None;
+        for (index, checkpoint) in self.checkpoints.iter().enumerate() {
+            if !self
+                .active_document_filter
+                .as_ref()
+                .is_none_or(|document_id| {
+                    checkpoint.category == HistoryCheckpointCategory::NamedSnapshot
+                        || checkpoint
+                            .affected_document_ids
+                            .iter()
+                            .any(|affected| affected == document_id)
+                })
+            {
+                continue;
+            }
+            let heading = starts_writing_session(previous, checkpoint).then(|| {
+                checkpoint
+                    .recorded_at_unix_millis
+                    .map_or_else(|| "Earlier versions".to_owned(), writing_session_label)
+            });
+            let extent = history_checkpoint_extent(previous, checkpoint);
+            visible_indices.push(index);
+            headings.push(heading);
+            prefix_heights.push(prefix_heights.last().copied().unwrap_or_default() + extent);
+            previous = Some(checkpoint);
+        }
+        *self.timeline_layout.borrow_mut() = Some(HistoryTimelineLayout {
+            visible_indices,
+            prefix_heights,
+            headings,
+        });
     }
 
     pub fn active_document_filter(&self) -> Option<&str> {
@@ -2931,6 +3053,11 @@ impl HistoryState {
     pub fn maintenance_message(&self) -> Option<&str> {
         self.maintenance_message.as_deref()
     }
+}
+
+pub(crate) struct HistoryTimelineWindow<'a> {
+    pub window: HistoryCheckpointWindow,
+    pub checkpoints: Vec<(&'a HistoryCheckpointRow, Option<String>)>,
 }
 
 fn history_checkpoint_extent(
@@ -3271,7 +3398,7 @@ fn history_tokens(text: &str) -> Vec<&str> {
         } else if character.is_whitespace() {
             1
         } else {
-            2
+            3
         };
         if previous.is_some_and(|previous| previous != kind || kind == 2) {
             tokens.push(&text[start..index]);
@@ -4063,6 +4190,10 @@ pub enum ProjectMessage {
     SetCardsSection(String),
     SelectAndToggleHierarchyExpanded(String),
     NavigateExplorer(ExplorerNavigation),
+    SetExplorerViewport {
+        offset: f32,
+        height: f32,
+    },
     RequestCreateHierarchy {
         parent_id: String,
         kind: HierarchyItemKind,
@@ -4430,6 +4561,9 @@ pub struct ProjectWorkspace {
     cards_expanded: BTreeSet<String>,
     card_details_expanded: BTreeSet<String>,
     cards_scroll_offset: f32,
+    explorer_scroll_offset: f32,
+    explorer_viewport_height: f32,
+    explorer_viewport_measured: bool,
     pub(crate) card_positions: crate::motion::Positions,
     cards_measurements: RefCell<BTreeMap<String, (u64, f32)>>,
     cards_grid_cache: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
@@ -4524,7 +4658,6 @@ impl ProjectWorkspace {
             ..HistoryState::default()
         };
         let explorer = ExplorerState::fixture();
-        let synopsis_editors = synopsis_editors(&explorer);
         Self {
             session: 37,
             project_revision: 1,
@@ -4536,6 +4669,9 @@ impl ProjectWorkspace {
             tree_clipboard: None,
             cards_section: "manuscript".to_owned(),
             cards_scroll_offset: 0.0,
+            explorer_scroll_offset: 0.0,
+            explorer_viewport_height: 720.0,
+            explorer_viewport_measured: false,
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
@@ -4556,7 +4692,7 @@ impl ProjectWorkspace {
             completed_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
-            synopsis_editors,
+            synopsis_editors: BTreeMap::new(),
             synopsis_drafts: BTreeMap::new(),
             metadata_editors: BTreeMap::new(),
             metadata_drafts: BTreeMap::new(),
@@ -4598,7 +4734,6 @@ impl ProjectWorkspace {
     /// Hydrates a production workspace from one authoritative project snapshot.
     pub fn from_snapshot(snapshot: &ProjectSnapshot) -> Self {
         let explorer = ExplorerState::from_project(&snapshot.project);
-        let synopsis_editors = synopsis_editors(&explorer);
         let settings = SettingsState::from_project(&snapshot.project, AppearanceMode::System);
         let metadata_values = metadata_values_from_project(&snapshot.project);
         let recently_deleted = RecentlyDeletedState::from_snapshot(snapshot);
@@ -4619,6 +4754,9 @@ impl ProjectWorkspace {
             tree_clipboard: None,
             cards_section: stable_id_string(ProjectSection::Manuscript.root_id().as_bytes()),
             cards_scroll_offset: 0.0,
+            explorer_scroll_offset: 0.0,
+            explorer_viewport_height: 720.0,
+            explorer_viewport_measured: false,
             card_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
@@ -4637,7 +4775,7 @@ impl ProjectWorkspace {
             completed_hierarchy_creation: None,
             open_created_after_rename: None,
             last_activated_document: None,
-            synopsis_editors,
+            synopsis_editors: BTreeMap::new(),
             synopsis_drafts: BTreeMap::new(),
             metadata_editors: BTreeMap::new(),
             metadata_drafts: BTreeMap::new(),
@@ -4857,6 +4995,7 @@ impl ProjectWorkspace {
             .is_some_and(|id| !self.explorer.contains_document(id))
         {
             self.history.active_document_filter = None;
+            self.history.invalidate_timeline_layout();
         }
         if matches!(
             &self.modal,
@@ -5004,6 +5143,18 @@ impl ProjectWorkspace {
 
     pub fn explorer(&self) -> &ExplorerState {
         &self.explorer
+    }
+
+    pub(crate) const fn explorer_scroll_offset(&self) -> f32 {
+        self.explorer_scroll_offset
+    }
+
+    pub(crate) const fn explorer_viewport_height(&self, initial_upper_bound: f32) -> f32 {
+        if self.explorer_viewport_measured {
+            self.explorer_viewport_height
+        } else {
+            initial_upper_bound.max(self.explorer_viewport_height)
+        }
     }
 
     pub fn tree_clipboard_kind(&self) -> Option<TreeClipboardKind> {
@@ -5257,10 +5408,6 @@ impl ProjectWorkspace {
     }
 
     fn sync_metadata_editors(&mut self) {
-        self.metadata_editors.retain(|(node, field), _| {
-            self.explorer.nodes.contains_key(node)
-                && self.settings.metadata_definitions.contains_key(field)
-        });
         let Some(node) = self
             .outline_field
             .as_ref()
@@ -5272,8 +5419,14 @@ impl ProjectWorkspace {
                     .map(|id| (*id).to_owned())
             })
         else {
+            self.metadata_editors.clear();
             return;
         };
+        // Only the selected card (or an active inline edit) needs live editor
+        // state. Committed and pending values live in separate maps.
+        self.metadata_editors.retain(|(id, field), _| {
+            id == &node && self.settings.metadata_definitions.contains_key(field)
+        });
         let fields = self
             .inspector()
             .metadata_items(&node)
@@ -5300,6 +5453,15 @@ impl ProjectWorkspace {
         self.synopsis_editors.get(node_id)
     }
 
+    fn ensure_synopsis_editor(&mut self, node_id: &str) -> Option<&mut text_editor::Content> {
+        let synopsis = &self.explorer.nodes.get(node_id)?.synopsis;
+        Some(
+            self.synopsis_editors
+                .entry(node_id.to_owned())
+                .or_insert_with(|| text_editor::Content::with_text(synopsis)),
+        )
+    }
+
     fn replace_synopsis_editor(&mut self, node_id: &str, synopsis: &str) {
         if let Some(editor) = self.synopsis_editors.get_mut(node_id) {
             *editor = text_editor::Content::with_text(synopsis);
@@ -5313,28 +5475,19 @@ impl ProjectWorkspace {
     fn reconcile_synopsis_editors(&mut self) {
         self.synopsis_editors
             .retain(|node_id, _| self.explorer.nodes.contains_key(node_id));
-        self.synopsis_drafts
-            .retain(|node_id, _| self.explorer.nodes.contains_key(node_id));
-        for (node_id, node) in &self.explorer.nodes {
-            if self
-                .synopsis_drafts
+        self.synopsis_drafts.retain(|node_id, draft| {
+            self.explorer
+                .nodes
                 .get(node_id)
-                .is_some_and(|draft| draft == &node.synopsis)
-            {
-                self.synopsis_drafts.remove(node_id);
-            }
+                .is_some_and(|node| draft != &node.synopsis)
+        });
+        for (node_id, editor) in &mut self.synopsis_editors {
             if self.synopsis_drafts.contains_key(node_id) {
                 continue;
             }
-            match self.synopsis_editors.get_mut(node_id) {
-                Some(editor) if editor.text() == node.synopsis => {}
-                Some(editor) => *editor = text_editor::Content::with_text(&node.synopsis),
-                None => {
-                    self.synopsis_editors.insert(
-                        node_id.clone(),
-                        text_editor::Content::with_text(&node.synopsis),
-                    );
-                }
+            let synopsis = &self.explorer.nodes[node_id].synopsis;
+            if editor.text() != *synopsis {
+                *editor = text_editor::Content::with_text(synopsis);
             }
         }
     }
@@ -6158,6 +6311,7 @@ impl ProjectWorkspace {
         if !matches!(
             message,
             ProjectMessage::SetCardsScroll(_)
+                | ProjectMessage::SetExplorerViewport { .. }
                 | ProjectMessage::SelectHierarchy { .. }
                 | ProjectMessage::OpenHierarchyContextMenu { .. }
                 | ProjectMessage::CloseHierarchyContextMenu
@@ -6336,6 +6490,16 @@ impl ProjectWorkspace {
                 }
                 self.group_comment_effects()
             }
+            ProjectMessage::SetExplorerViewport { offset, height } => {
+                if offset.is_finite() {
+                    self.explorer_scroll_offset = offset.max(0.0);
+                }
+                if height.is_finite() && height > 0.0 {
+                    self.explorer_viewport_height = height;
+                    self.explorer_viewport_measured = true;
+                }
+                Vec::new()
+            }
             ProjectMessage::RequestCreateHierarchy { parent_id, kind } => {
                 let can_contain_children =
                     self.explorer.nodes.get(&parent_id).is_some_and(|node| {
@@ -6443,6 +6607,7 @@ impl ProjectWorkspace {
                 }
                 if !open_document {
                     self.outline_field = Some((rename.node_id.clone(), None));
+                    self.ensure_synopsis_editor(&rename.node_id);
                 }
                 let open_created = self
                     .open_created_after_rename
@@ -6486,12 +6651,13 @@ impl ProjectWorkspace {
             ProjectMessage::BeginOutlineField { node_id, field_id } => {
                 if self.explorer.nodes.contains_key(&node_id) {
                     self.outline_field = Some((node_id.clone(), field_id.clone()));
+                    self.synopsis_editors.retain(|id, _| id == &node_id);
                     self.sync_metadata_editors();
                     if let Some(field) = field_id {
                         if let Some(editor) = self.metadata_editors.get_mut(&(node_id, field)) {
                             editor.perform(text_editor::Action::SelectAll);
                         }
-                    } else if let Some(editor) = self.synopsis_editors.get_mut(&node_id) {
+                    } else if let Some(editor) = self.ensure_synopsis_editor(&node_id) {
                         editor.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                     }
                 }
@@ -6500,6 +6666,7 @@ impl ProjectWorkspace {
             ProjectMessage::EndOutlineField { node_id, field_id } => {
                 if self.outline_field.as_ref() == Some(&(node_id, field_id)) {
                     self.outline_field = None;
+                    self.synopsis_editors.clear();
                 }
                 Vec::new()
             }
@@ -6512,7 +6679,7 @@ impl ProjectWorkspace {
             }
             ProjectMessage::EditSynopsis { node_id, action } => {
                 let is_edit = action.is_edit();
-                let Some(editor) = self.synopsis_editors.get_mut(&node_id) else {
+                let Some(editor) = self.ensure_synopsis_editor(&node_id) else {
                     return Vec::new();
                 };
                 editor.perform(action);
@@ -7345,6 +7512,7 @@ impl ProjectWorkspace {
                 });
                 self.history.active_document_filter = document_id;
                 self.history.checkpoints.clear();
+                self.history.invalidate_timeline_layout();
                 self.history.selected_checkpoint_id = None;
                 self.history.preview = None;
                 self.history.current_document = None;
@@ -8279,6 +8447,7 @@ impl ProjectWorkspace {
             }
             ProjectTaskPayload::HistoryLoaded { checkpoints } => {
                 self.history.checkpoints = checkpoints;
+                self.history.invalidate_timeline_layout();
                 self.history.loading_more = false;
                 if self
                     .history
@@ -8609,6 +8778,243 @@ fn is_research_section(section_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explorer_view_build_cost_tracks_expanded_rows() {
+        let mut visible = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        for index in 0..200 {
+            let id = format!("bulk-document-{index}");
+            visible.explorer.nodes.insert(
+                id.clone(),
+                HierarchyNode::new(
+                    &id,
+                    &format!("Bulk document {index}"),
+                    "manuscript",
+                    Some("manuscript"),
+                    HierarchyNodeKind::Document,
+                ),
+            );
+            visible
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .expect("fixture root")
+                .children
+                .push(id);
+        }
+        let mut collapsed = visible.clone();
+        collapsed.explorer.expanded.remove("manuscript");
+        let theme = crate::design_tokens::ParchMintTheme::new(
+            parchmint_preferences::ResolvedAppearance::Light,
+        );
+        assert_eq!(visible.explorer.rows().len(), 207);
+        assert_eq!(
+            visible
+                .explorer
+                .rows()
+                .into_iter()
+                .filter(|row| visible.explorer.ancestors_are_expanded(row.id))
+                .count(),
+            207
+        );
+        assert_eq!(
+            collapsed
+                .explorer
+                .rows()
+                .into_iter()
+                .filter(|row| collapsed.explorer.ancestors_are_expanded(row.id))
+                .count(),
+            3
+        );
+        if std::env::var_os("PARCHMINT_MEASURE_EXPLORER").is_some() {
+            for (label, workspace) in [("visible", &visible), ("collapsed", &collapsed)] {
+                let started = std::time::Instant::now();
+                for _ in 0..100 {
+                    std::hint::black_box(crate::iced_project_surface::explorer_rail_with_rename(
+                        workspace, theme, true, 720.0,
+                    ));
+                }
+                eprintln!(
+                    "EXPLORER {label}_view_build_100_ms={:.3}",
+                    started.elapsed().as_secs_f64() * 1_000.0,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explorer_row_window_tracks_scroll_disclosure_and_rename_mounting() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        for index in 0..200 {
+            let id = format!("bulk-document-{index}");
+            workspace.explorer.nodes.insert(
+                id.clone(),
+                HierarchyNode::new(
+                    &id,
+                    &format!("Bulk document {index}"),
+                    "manuscript",
+                    Some("manuscript"),
+                    HierarchyNodeKind::Document,
+                ),
+            );
+            workspace
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .expect("fixture root")
+                .children
+                .push(id);
+        }
+
+        let first = workspace.explorer.visible_row_window(0.0, 120.0, false);
+        assert_eq!(first.rows.len(), 18);
+        assert_eq!(first.rows.first().map(|row| row.id), Some("manuscript"));
+        assert_eq!(first.top_padding, 0.0);
+        assert_eq!(first.bottom_padding, 189.0 * EXPLORER_ROW_EXTENT);
+
+        let middle = workspace.explorer.visible_row_window(3_000.0, 120.0, false);
+        assert_eq!(middle.rows.len(), 18);
+        assert_eq!(
+            middle.rows.first().map(|row| row.id),
+            Some("bulk-document-90")
+        );
+        assert_eq!(middle.top_padding, 95.0 * EXPLORER_ROW_EXTENT);
+        assert_eq!(middle.bottom_padding, 94.0 * EXPLORER_ROW_EXTENT);
+
+        let full = workspace.explorer.visible_row_window(3_000.0, 120.0, true);
+        assert_eq!(full.rows.len(), 207);
+        assert_eq!(full.top_padding, 0.0);
+        assert_eq!(full.bottom_padding, 0.0);
+
+        workspace.explorer.expanded.remove("manuscript");
+        let collapsed = workspace.explorer.visible_row_window(3_000.0, 120.0, false);
+        assert_eq!(
+            collapsed.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            ["manuscript", "research", "research-notes"]
+        );
+        assert_eq!(collapsed.top_padding, 0.0);
+        assert_eq!(collapsed.bottom_padding, 0.0);
+
+        assert_eq!(
+            workspace.explorer.window_range(0.0, 720.0),
+            workspace.explorer.window_range(30.0, 720.0)
+        );
+        assert_ne!(
+            workspace.explorer.window_range(0.0, 720.0),
+            workspace.explorer.window_range(300.0, 720.0)
+        );
+        let cached_counts = Rc::clone(&workspace.cards().word_counts);
+        workspace.update(ProjectMessage::SetExplorerViewport {
+            offset: 30.0,
+            height: 720.0,
+        });
+        assert_eq!(workspace.explorer_scroll_offset(), 30.0);
+        assert!(Rc::ptr_eq(&cached_counts, &workspace.cards().word_counts));
+        workspace.update(ProjectMessage::SetExplorerViewport {
+            offset: 300.0,
+            height: 720.0,
+        });
+        assert_eq!(workspace.explorer_scroll_offset(), 300.0);
+        assert!(Rc::ptr_eq(&cached_counts, &workspace.cards().word_counts));
+    }
+
+    #[test]
+    fn explorer_surface_mounts_scrolled_drag_targets_and_rename_reveal() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        for index in 0..200 {
+            let id = format!("bulk-document-{index}");
+            workspace.explorer.nodes.insert(
+                id.clone(),
+                HierarchyNode::new(
+                    &id,
+                    &format!("Bulk document {index}"),
+                    "manuscript",
+                    Some("manuscript"),
+                    HierarchyNodeKind::Document,
+                ),
+            );
+            workspace
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .expect("fixture root")
+                .children
+                .push(id);
+        }
+        let theme = crate::design_tokens::ParchMintTheme::new(
+            parchmint_preferences::ResolvedAppearance::Light,
+        );
+        let target = |id: &str| crate::harness_target::explorer_row_id(id);
+        let mut initial =
+            iced_test::Simulator::<crate::iced_project_surface::ProjectSurfaceMessage>::with_size(
+                iced::Settings::default(),
+                iced::Size::new(320.0, 720.0),
+                crate::iced_project_surface::explorer_rail_with_rename(
+                    &workspace, theme, true, 720.0,
+                ),
+            );
+        assert!(initial.find(target("manuscript")).is_ok());
+        assert!(initial.find(target("bulk-document-199")).is_err());
+        drop(initial);
+
+        workspace.update(ProjectMessage::SetExplorerViewport {
+            offset: 6_000.0,
+            height: 300.0,
+        });
+        workspace.update(ProjectMessage::BeginHierarchyDrag {
+            source_id: "bulk-document-199".to_owned(),
+            gesture: SelectionGesture::Replace,
+        });
+        let mut scrolled =
+            iced_test::Simulator::<crate::iced_project_surface::ProjectSurfaceMessage>::with_size(
+                iced::Settings::default(),
+                iced::Size::new(320.0, 720.0),
+                crate::iced_project_surface::explorer_rail_with_rename(
+                    &workspace, theme, true, 720.0,
+                ),
+            );
+        assert!(scrolled.find(target("bulk-document-199")).is_ok());
+        assert!(scrolled.find(target("bulk-document-10")).is_err());
+        let mounted_y = scrolled
+            .find(target("bulk-document-199"))
+            .expect("scrolled row")
+            .bounds()
+            .y;
+        drop(scrolled);
+
+        workspace.update(ProjectMessage::CancelHierarchyDrag);
+        workspace.update(ProjectMessage::BeginHierarchyRename(
+            "bulk-document-10".to_owned(),
+        ));
+        let mut renaming =
+            iced_test::Simulator::<crate::iced_project_surface::ProjectSurfaceMessage>::with_size(
+                iced::Settings::default(),
+                iced::Size::new(320.0, 720.0),
+                crate::iced_project_surface::explorer_rail_with_rename(
+                    &workspace, theme, true, 720.0,
+                ),
+            );
+        assert!(renaming.find(target("bulk-document-10")).is_ok());
+        assert_eq!(
+            renaming
+                .find(target("bulk-document-199"))
+                .expect("same row during rename")
+                .bounds()
+                .y,
+            mounted_y,
+            "renaming must not shift the Explorer scroll position",
+        );
+        assert!(
+            renaming
+                .find(crate::iced_project_surface::hierarchy_rename_input_id(
+                    "bulk-document-10"
+                ))
+                .expect("rename input")
+                .bounds()
+                .height
+                <= EXPLORER_ROW_EXTENT
+        );
+    }
 
     #[test]
     fn overview_metadata_edits_preserve_lines_and_selection_across_updates() {
@@ -11192,6 +11598,13 @@ mod tests {
             visible_ids.last().map(String::as_str),
             Some("checkpoint-134")
         );
+        let timeline = workspace.history().timeline_window();
+        assert_eq!(timeline.checkpoints.len(), HISTORY_CHECKPOINT_WINDOW_SIZE);
+        assert_eq!(timeline.checkpoints[0].0.checkpoint_id, "checkpoint-75");
+        assert!(timeline.checkpoints[0].1.is_none());
+        assert!(timeline.checkpoints[1].1.is_none());
+        assert_eq!(timeline.checkpoints[5].0.checkpoint_id, "checkpoint-80");
+        assert!(timeline.checkpoints[5].1.is_some());
 
         assert_eq!(
             workspace.update(ProjectMessage::SelectHistoryCheckpoint(
@@ -11203,6 +11616,112 @@ mod tests {
             workspace.history().selected_checkpoint_id(),
             Some("checkpoint-75")
         );
+    }
+
+    #[test]
+    #[ignore = "opt-in large History timeline measurement"]
+    fn history_timeline_warm_window_avoids_rewalking_large_checkpoint_lists() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
+        let count = 50_000;
+        workspace.history.checkpoints = (0..count)
+            .map(|index| HistoryCheckpointRow {
+                checkpoint_id: format!("checkpoint-{index}"),
+                sequence: u64::try_from(index).expect("fixture index"),
+                category: HistoryCheckpointCategory::Autosave,
+                affected_document_ids: Vec::new(),
+                name: None,
+                recorded_at_unix_millis: Some(
+                    1_725_000_000_000_u64
+                        - u64::try_from(index / 10).expect("fixture session") * 40 * 60 * 1_000
+                        - u64::try_from(index % 10).expect("fixture position") * 60 * 1_000,
+                ),
+            })
+            .collect();
+        workspace.history.invalidate_timeline_layout();
+        // First access builds the derived prefix index; repeated viewport moves
+        // should use that index and materialize only the mounted rows.
+        let _ = workspace.history().timeline_window();
+        let started = std::time::Instant::now();
+        for step in 0..120 {
+            workspace.update(ProjectMessage::SetHistoryScroll(step as f32 * 9_000.0));
+            let timeline = workspace.history().timeline_window();
+            assert_eq!(timeline.checkpoints.len(), HISTORY_CHECKPOINT_WINDOW_SIZE);
+        }
+        let indexed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        if std::env::var_os("PARCHMINT_MEASURE_HISTORY").is_some() {
+            fn legacy_heading(history: &HistoryState, checkpoint_id: &str) -> Option<String> {
+                let mut previous = None;
+                for checkpoint in history.visible_checkpoints() {
+                    if checkpoint.checkpoint_id == checkpoint_id {
+                        return starts_writing_session(previous, checkpoint).then(|| {
+                            checkpoint.recorded_at_unix_millis.map_or_else(
+                                || "Earlier versions".to_owned(),
+                                writing_session_label,
+                            )
+                        });
+                    }
+                    previous = Some(checkpoint);
+                }
+                None
+            }
+
+            fn legacy_window(history: &HistoryState) -> HistoryCheckpointWindow {
+                let mut top_padding = 0.0;
+                let mut start = 0usize;
+                let mut total_height = 0.0;
+                let mut previous = None;
+                let mut found_start = false;
+                let mut visible_count = 0usize;
+                for checkpoint in history.visible_checkpoints() {
+                    let extent = history_checkpoint_extent(previous, checkpoint);
+                    if !found_start && total_height + extent <= history.scroll_offset.max(0.0) {
+                        start += 1;
+                        top_padding += extent;
+                    } else {
+                        found_start = true;
+                    }
+                    total_height += extent;
+                    visible_count += 1;
+                    previous = Some(checkpoint);
+                }
+                let end = start
+                    .saturating_add(HISTORY_CHECKPOINT_WINDOW_SIZE)
+                    .min(visible_count);
+                let mut visible_height = 0.0;
+                let mut previous = None;
+                for (index, checkpoint) in history.visible_checkpoints().enumerate() {
+                    let extent = history_checkpoint_extent(previous, checkpoint);
+                    if (start..end).contains(&index) {
+                        visible_height += extent;
+                    }
+                    previous = Some(checkpoint);
+                }
+                HistoryCheckpointWindow {
+                    start,
+                    end,
+                    top_padding,
+                    bottom_padding: (total_height - top_padding - visible_height).max(0.0),
+                }
+            }
+
+            let legacy_started = std::time::Instant::now();
+            for step in 0..120 {
+                workspace.update(ProjectMessage::SetHistoryScroll(step as f32 * 9_000.0));
+                let history = workspace.history();
+                let window = legacy_window(history);
+                for checkpoint in history
+                    .visible_checkpoints()
+                    .skip(window.start)
+                    .take(window.end.saturating_sub(window.start))
+                {
+                    std::hint::black_box(legacy_heading(history, &checkpoint.checkpoint_id));
+                }
+            }
+            eprintln!(
+                "HISTORY timeline_120_windows_50k indexed_ms={indexed_ms:.3} legacy_scan_ms={:.3}",
+                legacy_started.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
     }
 
     #[test]
@@ -11917,6 +12436,45 @@ mod tests {
                 .selection()
                 .as_deref(),
             Some("Original")
+        );
+    }
+
+    #[test]
+    fn inline_editors_keep_only_the_current_card_mounted() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        assert!(workspace.synopsis_editors.is_empty());
+        workspace.update(ProjectMessage::BeginOutlineField {
+            node_id: "chapter-one".into(),
+            field_id: None,
+        });
+        assert_eq!(workspace.synopsis_editors.len(), 1);
+        workspace.update(ProjectMessage::EndOutlineField {
+            node_id: "chapter-one".into(),
+            field_id: None,
+        });
+        assert!(workspace.synopsis_editors.is_empty());
+
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-one".into(),
+            gesture: SelectionGesture::Replace,
+        });
+        workspace.sync_metadata_editors();
+        assert!(!workspace.metadata_editors.is_empty());
+        assert!(
+            workspace
+                .metadata_editors
+                .keys()
+                .all(|(node, _)| node == "chapter-one")
+        );
+        workspace.update(ProjectMessage::SelectHierarchy {
+            node_id: "chapter-two".into(),
+            gesture: SelectionGesture::Replace,
+        });
+        assert!(
+            workspace
+                .metadata_editors
+                .keys()
+                .all(|(node, _)| node == "chapter-two")
         );
     }
 

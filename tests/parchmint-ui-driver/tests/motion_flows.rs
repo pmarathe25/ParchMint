@@ -396,7 +396,7 @@ fn delayed_actions_and_notifications_leave_the_workspace_usable() {
     frames(&harness, "error-dialog");
     click(&harness, HarnessTarget::ModalCancel);
     frames(&harness, "error-toast");
-    harness.click_text(WINDOW, "Notifications 1").unwrap();
+    harness.click_text(WINDOW, "Notifications").unwrap();
     frames(&harness, "notification-drawer");
     harness.click_text(WINDOW, "Close").unwrap();
     harness.elapse_notifications().unwrap();

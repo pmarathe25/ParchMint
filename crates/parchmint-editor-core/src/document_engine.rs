@@ -466,10 +466,8 @@ impl DocumentEngine for PrivateTextEngine {
         let changed_block = document.blocks[block_index].id;
         if block_index == end_block {
             let block = &mut document.blocks[block_index];
-            let byte_start =
-                scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
-            let byte_end =
-                scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
+            let (byte_start, byte_end) = scalar_range_to_bytes(&block.text, local_start, local_end)
+                .ok_or(EngineError::InvalidEdit)?;
             Arc::make_mut(&mut block.text).replace_range(byte_start..byte_end, &edit.inserted);
             update_marks_for_edit(block.marks_mut(), local_start, local_end, inserted_len);
         } else {
@@ -938,9 +936,8 @@ impl DocumentEngine for PrivateTextEngine {
             });
         }
 
-        let start_byte =
-            scalar_to_byte(&block.text, local_start).ok_or(EngineError::InvalidEdit)?;
-        let end_byte = scalar_to_byte(&block.text, local_end).ok_or(EngineError::InvalidEdit)?;
+        let (start_byte, end_byte) = scalar_range_to_bytes(&block.text, local_start, local_end)
+            .ok_or(EngineError::InvalidEdit)?;
         let mut before = block.clone();
         before.text = block.text[..start_byte].to_owned().into();
         before.marks = clipped_marks(&block.marks, 0, local_start);
@@ -1336,16 +1333,54 @@ fn normalize_marks(marks: &mut Vec<EngineMark>) {
 }
 
 fn scalar_to_byte(text: &str, scalar: usize) -> Option<usize> {
-    if scalar == text.chars().count() {
-        Some(text.len())
-    } else {
-        text.char_indices().nth(scalar).map(|(index, _)| index)
+    scalar_range_to_bytes(text, scalar, scalar).map(|(byte, _)| byte)
+}
+
+/// Resolves both endpoints in one UTF-8 scan. Most edits replace a range within
+/// one paragraph, so scanning from the paragraph start twice needlessly repeats
+/// work proportional to the caret's distance from the start.
+fn scalar_range_to_bytes(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    if start > end {
+        return None;
     }
+    let mut byte_start = None;
+    let mut byte_end = None;
+    let mut scalar_count = 0;
+    for (scalar, (byte, _)) in text.char_indices().enumerate() {
+        scalar_count = scalar + 1;
+        if scalar == start {
+            byte_start = Some(byte);
+        }
+        if scalar == end {
+            byte_end = Some(byte);
+        }
+        if byte_start.is_some() && byte_end.is_some() {
+            break;
+        }
+    }
+    if start == scalar_count {
+        byte_start = Some(text.len());
+    }
+    if end == scalar_count {
+        byte_end = Some(text.len());
+    }
+    Some((byte_start?, byte_end?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_range_byte_offsets_share_unicode_boundaries() {
+        let text = "aλ📝z";
+        assert_eq!(scalar_range_to_bytes(text, 0, 0), Some((0, 0)));
+        assert_eq!(scalar_range_to_bytes(text, 1, 3), Some((1, 7)));
+        assert_eq!(scalar_range_to_bytes(text, 3, 4), Some((7, 8)));
+        assert_eq!(scalar_range_to_bytes(text, 4, 4), Some((8, 8)));
+        assert_eq!(scalar_range_to_bytes(text, 3, 2), None);
+        assert_eq!(scalar_range_to_bytes(text, 0, 5), None);
+    }
 
     fn block(id: u8, kind: SemanticBlockKind, text: &str) -> SemanticBlockSnapshot {
         SemanticBlockData {

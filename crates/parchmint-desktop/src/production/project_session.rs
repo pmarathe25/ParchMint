@@ -912,6 +912,7 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             persisted_summaries: persistence_frontier.document_summaries.clone(),
             document_loader,
             search: search.clone(),
+            word_counts: Mutex::new(Default::default()),
         });
         self.shared
             .dictionary_source

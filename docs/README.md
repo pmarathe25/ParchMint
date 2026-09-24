@@ -20,6 +20,7 @@ outside the repository.
 - **Understand ownership and find a crate:** [Architecture](architecture/architecture.md).
 - **Keep the interface consistent:** [Visual language](design-language.md).
 - **Run editor benchmarks:** [Benchmark guide](../plans/implemented/editor-benchmark-guide.md).
+- **Review application performance findings:** [Latency and memory pass](../plans/implemented/application-latency-memory-2026-09-24.md).
 - **Follow repository instructions:** [AGENTS.md](../AGENTS.md).
 - **Build and publish installers:** [Release packaging](../packaging/README.md).
 

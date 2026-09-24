@@ -60,6 +60,38 @@ pub(super) struct ProductionProjectQuery {
     pub(super) persisted_summaries: BTreeMap<DocumentId, CanonicalDocumentSummary>,
     pub(super) document_loader: Arc<CanonicalDocumentLoader>,
     pub(super) search: Arc<ControlledSearch>,
+    pub(super) word_counts: Mutex<RevisionWordCountCache>,
+}
+
+#[derive(Default)]
+pub(super) struct RevisionWordCountCache {
+    entries: BTreeMap<DocumentId, (EditorRevision, DocumentWordCount)>,
+}
+
+impl RevisionWordCountCache {
+    fn get_or_compute(
+        &mut self,
+        document: DocumentId,
+        revision: EditorRevision,
+        compute: impl FnOnce() -> DocumentWordCount,
+    ) -> DocumentWordCount {
+        if let Some((cached_revision, count)) = self.entries.get(&document)
+            && *cached_revision == revision
+        {
+            return *count;
+        }
+        let count = compute();
+        self.entries.insert(document, (revision, count));
+        count
+    }
+
+    fn retain(&mut self, documents: &BTreeMap<DocumentId, EditorRevision>) {
+        self.entries.retain(|document, (revision, _)| {
+            documents
+                .get(document)
+                .is_some_and(|current| current == revision)
+        });
+    }
 }
 
 impl ProductionProjectQuery {
@@ -100,6 +132,12 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
             .iter()
             .map(|document| (document.document_id, document))
             .collect::<BTreeMap<_, _>>();
+        let live_loaded_revisions = loaded
+            .iter()
+            .map(|(id, document)| (*id, document.revision))
+            .collect::<BTreeMap<_, _>>();
+        let mut word_counts = self.word_counts.lock().expect("word count cache lock");
+        word_counts.retain(&live_loaded_revisions);
         let document_summaries = authored
             .document_summaries
             .into_iter()
@@ -131,11 +169,17 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
                                 })
                         },
                         |document| {
-                            ProjectFormatCodec::default()
-                                .decode_document(document.body.as_bytes())
-                                .map_or(DocumentWordCount::Pending, |document| {
-                                    DocumentWordCount::Known(document.word_count())
-                                })
+                            word_counts.get_or_compute(
+                                document.document_id,
+                                document.revision,
+                                || {
+                                    ProjectFormatCodec::default()
+                                        .decode_document(document.body.as_bytes())
+                                        .map_or(DocumentWordCount::Pending, |document| {
+                                            DocumentWordCount::Known(document.word_count())
+                                        })
+                                },
+                            )
                         },
                     ),
                 }
@@ -181,6 +225,40 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
             .map_err(map_project_query_error)?;
         self.register_recovery_bases(&snapshot.documents)?;
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod word_count_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn reuses_counts_at_same_revision_and_recomputes_after_revision_change() {
+        let document = DocumentId::from_bytes([7; 16]);
+        let mut cache = RevisionWordCountCache::default();
+        let calls = Cell::new(0);
+        let first_revision = EditorRevision::from(1);
+        let changed_revision = EditorRevision::from(2);
+
+        let first = cache.get_or_compute(document, first_revision, || {
+            calls.set(calls.get() + 1);
+            DocumentWordCount::Known(3)
+        });
+        let repeated = cache.get_or_compute(document, first_revision, || {
+            calls.set(calls.get() + 1);
+            DocumentWordCount::Known(99)
+        });
+        assert_eq!(first, DocumentWordCount::Known(3));
+        assert_eq!(repeated, first);
+        assert_eq!(calls.get(), 1);
+
+        let changed = cache.get_or_compute(document, changed_revision, || {
+            calls.set(calls.get() + 1);
+            DocumentWordCount::Known(4)
+        });
+        assert_eq!(changed, DocumentWordCount::Known(4));
+        assert_eq!(calls.get(), 2);
     }
 }
 
