@@ -12644,11 +12644,25 @@ fn replacement_selection(
     if included.is_empty() {
         return Err("replacement requires at least one included match".into());
     }
+    let results_by_id = results
+        .iter()
+        .map(|result| (result.match_id.as_str(), result))
+        .collect::<BTreeMap<_, _>>();
+    let mut revisions_by_document = BTreeMap::new();
+    for result in results {
+        revisions_by_document
+            .entry(result.document_id.as_str())
+            .or_insert(result.indexed_revision);
+    }
+    let documents_by_id = snapshot
+        .documents
+        .iter()
+        .map(|document| (stable_id_string(document.document_id.as_bytes()), document))
+        .collect::<BTreeMap<_, _>>();
     let mut ranges = BTreeMap::<String, Vec<(usize, usize, String)>>::new();
     for match_id in included {
-        let result = results
-            .iter()
-            .find(|result| &result.match_id == match_id)
+        let result = results_by_id
+            .get(match_id.as_str())
             .ok_or_else(|| "replacement contains a stale or unknown match".to_owned())?;
         let parts = match_id.split(':').collect::<Vec<_>>();
         if parts.len() != 6 || parts[0] != result.document_id || parts[2] != "Body" {
@@ -12677,16 +12691,14 @@ fn replacement_selection(
 
     let mut edits = Vec::new();
     for (document_id, mut document_ranges) in ranges {
-        let source = snapshot
-            .documents
-            .iter()
-            .find(|document| stable_id_string(document.document_id.as_bytes()) == document_id)
+        let source = documents_by_id
+            .get(&document_id)
             .ok_or_else(|| "replacement document is no longer available".to_owned())?;
         if source.revision.value()
-            != results
-                .iter()
-                .find(|result| result.document_id == document_id)
-                .map_or(u64::MAX, |result| result.indexed_revision)
+            != revisions_by_document
+                .get(document_id.as_str())
+                .copied()
+                .unwrap_or(u64::MAX)
         {
             return Err("replacement source changed after the search completed".into());
         }

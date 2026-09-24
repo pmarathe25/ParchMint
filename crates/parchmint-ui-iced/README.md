@@ -81,8 +81,8 @@ card surface and enclose their nested contents. Group frames follow allocated ro
 heights during animations and remain continuous across virtualized windows.
 Creation slots use muted icons, transparent fills, and dashed borders.
 Group headings toggle their children; group synopsis and metadata remain fully
-visible. Document cards keep synopsis and labeled metadata in separate columns in
-both states. Collapsed cards show fields marked visible, including dashes for empty
+visible. Document cards place a compact metadata grid below the synopsis.
+Collapsed cards show fields marked visible, including dashes for empty
 values; dragging between the named Settings sections changes that visibility with
 the same threshold, floating copy, and drop indicator as cards. New fields start
 hidden. Expanding a card reveals all details by growing vertically. Cards expand

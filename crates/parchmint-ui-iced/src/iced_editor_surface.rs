@@ -3569,7 +3569,12 @@ mod tests {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let (_adapter, _session, slots) = shared_document_slots(&workspace);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
-        let mut renderer = iced::Renderer::new(settings.default_font, settings.default_text_size);
+        let mut renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            settings.default_font,
+            settings.default_text_size,
+            Some("tiny-skia"),
+        ))
+        .expect("headless renderer");
         let size = Size::new(960.0, 600.0);
         let mut ui = UserInterface::build(
             editor_center_surface(&workspace, theme, &slots, None),

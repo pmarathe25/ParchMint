@@ -1767,7 +1767,7 @@ fn overview_add<'a>(
                 .center_y(Length::Fill),
             )
             .width(Length::FillPortion(1))
-            .height(crate::cards_layout::CARD_HEIGHT)
+            .height(crate::cards_layout::ADD_HEIGHT)
             .on_press(ProjectSurfaceMessage::Project(
                 ProjectMessage::RequestCreateHierarchy {
                     parent_id: parent.to_owned(),
@@ -4854,7 +4854,7 @@ fn outline_fields<'a>(
         .is_some_and(|row| row.kind == HierarchyRowKind::Group);
     let metadata_columns =
         crate::cards_layout::metadata_columns(width, group, metadata_items.len());
-    let field_width = crate::cards_layout::metadata_width(width);
+    let field_width = crate::cards_layout::metadata_width(width, group, metadata_columns);
     let metadata = metadata_items
         .into_iter()
         .map(|item| {
@@ -4927,12 +4927,7 @@ fn outline_fields<'a>(
                         .size(12)
                         .color(theme.palette().secondary_text)
                 )
-                .height(if full {
-                    Length::Shrink
-                } else {
-                    Length::Fixed(16.0)
-                })
-                .clip(true),
+                .height(Length::Shrink),
                 value,
             ]
             .spacing(2)
@@ -4949,8 +4944,6 @@ fn outline_fields<'a>(
         metadata_rows = metadata_rows.push(line);
     }
     let metadata = metadata_rows;
-    let metadata_width =
-        field_width * metadata_columns as f32 + (metadata_columns - 1) as f32 * 8.0;
     let synopsis_id = selected_id.clone();
     let done = ProjectSurfaceMessage::Project(ProjectMessage::EndOutlineField {
         node_id: selected.to_owned(),
@@ -4998,17 +4991,23 @@ fn outline_fields<'a>(
     );
     let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
     if has_metadata {
-        row![
-            container(synopsis)
-                .padding(iced::Padding {
-                    top: if group { 18.0 } else { 0.0 },
-                    ..Default::default()
-                })
-                .width(Length::FillPortion(1)),
-            container(metadata).width(metadata_width)
-        ]
-        .spacing(12)
-        .into()
+        if group {
+            let metadata_width =
+                field_width * metadata_columns as f32 + (metadata_columns - 1) as f32 * 8.0;
+            row![
+                container(synopsis)
+                    .padding(iced::Padding {
+                        top: 18.0,
+                        ..Default::default()
+                    })
+                    .width(Length::FillPortion(1)),
+                container(metadata).width(metadata_width)
+            ]
+            .spacing(12)
+            .into()
+        } else {
+            column![synopsis, metadata].spacing(8).into()
+        }
     } else {
         synopsis
     }
@@ -5828,7 +5827,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_show_labeled_metadata_in_the_compact_column() {
+    fn cards_show_labeled_metadata_in_columns_below_the_synopsis() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
@@ -5846,17 +5845,29 @@ mod tests {
                 .find(iced::widget::Id::from("synopsis-chapter-one".to_owned()))
                 .is_ok()
         );
-        assert!(
-            simulator
-                .find(iced::widget::Id::from(
-                    "metadata-chapter-one-field-17".to_owned()
-                ))
-                .is_ok()
-        );
+        let synopsis = simulator
+            .find(iced::widget::Id::from("synopsis-chapter-one".to_owned()))
+            .unwrap()
+            .bounds();
+        let first = simulator
+            .find(iced::widget::Id::from(
+                "metadata-chapter-one-field-17".to_owned(),
+            ))
+            .unwrap()
+            .bounds();
+        let second = simulator
+            .find(iced::widget::Id::from(
+                "metadata-chapter-one-field-18".to_owned(),
+            ))
+            .unwrap()
+            .bounds();
+        assert!(first.y >= synopsis.y + synopsis.height);
+        assert_eq!(first.y, second.y);
+        assert!(second.x >= first.x + first.width);
     }
 
     #[test]
-    fn creation_placeholder_matches_a_standard_document_card() {
+    fn creation_placeholder_is_shorter_than_a_document_card() {
         let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let mut surface = Simulator::<ProjectSurfaceMessage>::with_size(
             Settings::default(),
@@ -5875,7 +5886,7 @@ mod tests {
             .find(HarnessTarget::OverviewAdd.id())
             .unwrap()
             .bounds();
-        assert_eq!(half.height, card.height);
+        assert!(half.height >= 64.0 && half.height < card.height);
         assert!((half.width * 2.0 + 1.0 - card.width).abs() < 1.0);
     }
 
@@ -6135,7 +6146,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_keep_standard_geometry_after_long_field_edits() {
+    fn cards_stack_metadata_below_synopsis_after_long_field_edits() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         let before = workspace.cards().item_window(2, 792.0).rows[1].height;
         let synopsis = format!(
@@ -6185,8 +6196,8 @@ mod tests {
                 .bounds();
             assert!(synopsis_bounds.height > 40.0);
             assert!(metadata_bounds.height > 18.0);
-            assert_eq!(card.height, crate::cards_layout::CARD_HEIGHT);
-            assert!(metadata_bounds.x >= synopsis_bounds.x + synopsis_bounds.width);
+            assert!(card.height >= crate::cards_layout::CARD_HEIGHT);
+            assert!(metadata_bounds.y >= synopsis_bounds.y + synopsis_bounds.height);
             assert!(metadata_bounds.y + metadata_bounds.height <= card.y + card.height - SPACING_8);
             if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
                 simulator

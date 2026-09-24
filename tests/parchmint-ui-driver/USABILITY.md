@@ -82,7 +82,7 @@ Repeat creation with its keyboard shortcut while the document has focus; typing
 the name must not change the document body, whether confirmed or cancelled.
 
 Check Overview at wide and narrow widths: cards should share rows when space
-allows, metadata should occupy a narrow column, and Explorer should be hidden.
+allows, metadata should form columns below the synopsis, and Explorer should be hidden.
 Use both halves of the creation placeholder. Save a new tab inside a nested
 group using the expandable location tree.
 
@@ -294,7 +294,7 @@ popover. Choose an internal link through the Document tree, then move or rename 
 destination and follow the link again.
 
 In Overview, collapse a group's children and confirm its full details remain visible.
-Expand multiple document cards: metadata must stay in its column with labels above
-values. Scroll a large outline in both directions and record expansion/scrolling;
+Expand multiple document cards: metadata must stay below the synopsis with labels
+above values. Scroll a large outline in both directions and record expansion/scrolling;
 check that group frames, placeholders, and the scroll position remain stable.
 Test dropdown hover highlights and global search disclosure controls in both themes.

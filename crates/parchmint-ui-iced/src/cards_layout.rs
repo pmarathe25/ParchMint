@@ -16,12 +16,13 @@ pub(crate) fn grid_indent(depth: usize, width: f32) -> f32 {
     (depth as f32 * 24.0).min(width * 0.3)
 }
 
-pub(crate) const CARD_HEIGHT: f32 = 192.0;
+pub(crate) const CARD_HEIGHT: f32 = 176.0;
+pub(crate) const ADD_HEIGHT: f32 = 88.0;
 pub(crate) const CARD_FONT: Font = Font::with_name("Source Sans 3");
 pub(crate) const SCROLLBAR_GUTTER: f32 = 12.0;
 
 pub(crate) fn column_count(width: f32) -> usize {
-    ((width + 12.0) / 320.0).floor().max(1.0) as usize
+    ((width + 12.0) / 280.0).floor().max(1.0) as usize
 }
 
 impl CardItem<'_> {
@@ -69,31 +70,37 @@ impl CardItem<'_> {
     }
 
     pub(crate) fn metadata_width(&self, width: f32) -> f32 {
-        metadata_width(width)
+        metadata_width(
+            width,
+            self.kind == HierarchyRowKind::Group,
+            metadata_columns(
+                width,
+                self.kind == HierarchyRowKind::Group,
+                self.editable_metadata.len(),
+            ),
+        )
     }
 
     pub(crate) fn synopsis_height(&self, width: f32) -> f32 {
-        if self.details_expanded || self.kind == HierarchyRowKind::Group {
-            let metadata = if self.editable_metadata.is_empty() {
-                0.0
-            } else {
-                let columns = metadata_columns(
-                    width,
-                    self.kind == HierarchyRowKind::Group,
-                    self.editable_metadata.len(),
-                );
-                self.metadata_width(width) * columns as f32 + (columns - 1) as f32 * 8.0 + 12.0
-            };
-            (text_height(
-                self.synopsis,
-                (width - 30.0 - metadata).max(1.0),
-                14,
-                20.0,
-                CARD_FONT,
-            ) + 4.0)
-                .max(24.0)
+        let metadata = if self.kind == HierarchyRowKind::Group && !self.editable_metadata.is_empty()
+        {
+            let columns = metadata_columns(width, true, self.editable_metadata.len());
+            self.metadata_width(width) * columns as f32 + (columns - 1) as f32 * 8.0 + 12.0
         } else {
-            CARD_HEIGHT - 60.0
+            0.0
+        };
+        let height = (text_height(
+            self.synopsis,
+            (width - 30.0 - metadata).max(1.0),
+            14,
+            20.0,
+            CARD_FONT,
+        ) + 4.0)
+            .max(24.0);
+        if self.details_expanded || self.kind == HierarchyRowKind::Group {
+            height
+        } else {
+            height.min(64.0)
         }
     }
 
@@ -108,25 +115,14 @@ impl CardItem<'_> {
             return true;
         }
         let field_width = self.metadata_width(width);
-        if self.editable_metadata.iter().any(|(label, value)| {
-            text_height(label, field_width, 12, 15.6, CARD_FONT) > 16.0
-                || metadata_height(value, field_width) > 22.0
-        }) {
+        if self
+            .editable_metadata
+            .iter()
+            .any(|(_, value)| metadata_height(value, field_width) > 22.0)
+        {
             return true;
         }
-        let metadata = if self.editable_metadata.is_empty() {
-            0.0
-        } else {
-            field_width + 12.0
-        };
-        text_height(
-            self.synopsis,
-            (width - 30.0 - metadata).max(1.0),
-            14,
-            20.0,
-            CARD_FONT,
-        ) + 4.0
-            > CARD_HEIGHT - 60.0
+        text_height(self.synopsis, (width - 30.0).max(1.0), 14, 20.0, CARD_FONT) + 4.0 > 64.0
             || text_height(
                 self.title,
                 (width - 144.0).max(40.0),
@@ -137,47 +133,57 @@ impl CardItem<'_> {
     }
 
     pub(crate) fn row_height(&self, width: f32) -> f32 {
-        let height = if self.details_expanded || self.kind == HierarchyRowKind::Group {
-            let field_width = self.metadata_width(width);
-            let columns = metadata_columns(
-                width,
-                self.kind == HierarchyRowKind::Group,
-                self.editable_metadata.len(),
-            );
-            let metadata = self
+        let field_width = self.metadata_width(width);
+        let columns = metadata_columns(
+            width,
+            self.kind == HierarchyRowKind::Group,
+            self.editable_metadata.len(),
+        );
+        let metadata = self
+            .editable_metadata
+            .chunks(columns)
+            .map(|fields| {
+                fields
+                    .iter()
+                    .map(|(label, value)| {
+                        text_height(label, field_width, 12, 15.6, CARD_FONT).max(16.0)
+                            + if self.details_expanded || self.kind == HierarchyRowKind::Group {
+                                metadata_height(value, field_width)
+                            } else {
+                                22.0
+                            }
+                            + 2.0
+                    })
+                    .fold(0.0, f32::max)
+            })
+            .sum::<f32>()
+            + self
                 .editable_metadata
-                .chunks(columns)
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .map(|(label, value)| {
-                            text_height(label, field_width, 12, 15.6, CARD_FONT)
-                                + metadata_height(value, field_width)
-                                + 2.0
-                        })
-                        .fold(0.0, f32::max)
-                })
-                .sum::<f32>()
-                + self
-                    .editable_metadata
-                    .len()
-                    .div_ceil(columns)
-                    .saturating_sub(1) as f32
-                    * 6.0;
-            let synopsis = self.synopsis_height(width)
-                + if self.kind == HierarchyRowKind::Group && !self.editable_metadata.is_empty() {
-                    18.0
-                } else {
-                    0.0
-                };
-            let natural = 24.0 + self.heading_height(width) + 6.0 + synopsis.max(metadata);
-            if self.kind == HierarchyRowKind::Group {
-                natural
+                .len()
+                .div_ceil(columns)
+                .saturating_sub(1) as f32
+                * 6.0;
+        let synopsis = self.synopsis_height(width)
+            + if self.kind == HierarchyRowKind::Group && !self.editable_metadata.is_empty() {
+                18.0
             } else {
-                natural.max(CARD_HEIGHT)
-            }
+                0.0
+            };
+        let body = if self.kind == HierarchyRowKind::Group {
+            synopsis.max(metadata)
         } else {
-            CARD_HEIGHT
+            synopsis
+                + if self.editable_metadata.is_empty() {
+                    0.0
+                } else {
+                    8.0 + metadata
+                }
+        };
+        let natural = 24.0 + self.heading_height(width) + 6.0 + body;
+        let height = if self.kind == HierarchyRowKind::Group {
+            natural
+        } else {
+            natural.max(CARD_HEIGHT)
         };
         height.ceil() + CARDS_ROW_GAP
     }
@@ -185,16 +191,22 @@ impl CardItem<'_> {
 
 pub(crate) fn metadata_columns(width: f32, group: bool, fields: usize) -> usize {
     if group {
-        ((width / 420.0).floor() as usize)
+        ((width / 360.0).floor() as usize)
             .clamp(1, 3)
             .min(fields.max(1))
     } else {
-        1
+        (((width - 16.0) / 88.0).floor() as usize)
+            .clamp(1, 3)
+            .min(fields.max(1))
     }
 }
 
-pub(crate) fn metadata_width(width: f32) -> f32 {
-    (width * 0.32).clamp(88.0, 180.0)
+pub(crate) fn metadata_width(width: f32, group: bool, columns: usize) -> f32 {
+    if group {
+        (width * 0.32).clamp(88.0, 180.0)
+    } else {
+        ((width - 24.0 - (columns - 1) as f32 * 8.0) / columns as f32).max(1.0)
+    }
 }
 
 pub(crate) fn text_height(

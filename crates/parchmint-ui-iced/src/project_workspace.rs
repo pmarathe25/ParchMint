@@ -1009,7 +1009,7 @@ impl<'a> CardsState<'a> {
                 rows.push(CardsGridRow {
                     start: index,
                     end: index,
-                    height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
+                    height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
                     add_to: Some(parent),
                     depth: depth + 1,
                 });
@@ -1070,7 +1070,7 @@ impl<'a> CardsState<'a> {
             rows.push(CardsGridRow {
                 start: ids.len(),
                 end: ids.len(),
-                height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
+                height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
                 add_to: Some(parent),
                 depth: depth + 1,
             });
@@ -1078,7 +1078,7 @@ impl<'a> CardsState<'a> {
         rows.push(CardsGridRow {
             start: ids.len(),
             end: ids.len(),
-            height: crate::cards_layout::CARD_HEIGHT + CARDS_ROW_GAP,
+            height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
             add_to: Some(self.section_id.to_owned()),
             depth: 0,
         });
@@ -1143,13 +1143,13 @@ impl<'a> CardsState<'a> {
         }
     }
 
-    /// Mount only the viewport plus one screen of overscan. A fixed 48-row
-    /// window can otherwise mount hundreds of offscreen cards on wide displays.
+    /// Mount the viewport plus overscan. A fixed 48-row window can otherwise
+    /// mount hundreds of offscreen cards on wide displays.
     pub(crate) fn viewport_window(&self, columns: usize, width: f32, height: f32) -> CardsWindow {
         let rows = self.grid_rows(columns, width);
         let total = rows.offsets[rows.len()];
         let scroll_offset = self.scroll_offset.min((total - height).max(0.0));
-        let overscan = (height * 0.5).max(240.0);
+        let overscan = (height * 1.5).max(240.0);
         let start = rows
             .offsets
             .partition_point(|offset| *offset < (scroll_offset - overscan * 0.5).max(0.0))
@@ -2236,12 +2236,12 @@ impl ReplacementPreviewState {
         captured_project_revision: u64,
         captured_query_generation: u64,
     ) {
-        let mut documents = BTreeMap::<String, Vec<String>>::new();
+        let mut documents = BTreeMap::<String, Vec<GlobalSearchResult>>::new();
         for result in results.iter().filter(|result| result.is_replaceable()) {
             documents
                 .entry(result.document_id.clone())
                 .or_default()
-                .push(result.match_id.clone());
+                .push(result.clone());
         }
         self.nodes.clear();
         let document_ids = documents.keys().cloned().collect::<Vec<_>>();
@@ -2255,25 +2255,26 @@ impl ReplacementPreviewState {
             },
         );
         for (document, matches) in documents {
+            let match_ids = matches
+                .iter()
+                .map(|result| result.match_id.clone())
+                .collect();
             self.nodes.insert(
                 document,
                 ReplacementNode {
-                    children: matches.clone(),
+                    children: match_ids,
                     included: true,
                     result: None,
                     issue: None,
                 },
             );
-            for match_id in matches {
+            for result in matches {
                 self.nodes.insert(
-                    match_id.clone(),
+                    result.match_id.clone(),
                     ReplacementNode {
                         children: Vec::new(),
                         included: true,
-                        result: results
-                            .iter()
-                            .find(|result| result.match_id == match_id)
-                            .cloned(),
+                        result: Some(result),
                         issue: None,
                     },
                 );
@@ -2362,14 +2363,54 @@ impl ReplacementPreviewState {
     }
 
     pub fn rows(&self) -> Vec<ReplacementPreviewRow<'_>> {
+        let mut check_states = BTreeMap::new();
+        self.collect_check_states("all-matches", &mut check_states);
         let mut rows = Vec::new();
         self.append_rows(
             "all-matches",
             0,
             ReplacementPreviewRowKind::AllMatches,
+            &check_states,
             &mut rows,
         );
         rows
+    }
+
+    fn collect_check_states<'a>(
+        &'a self,
+        node_id: &'a str,
+        states: &mut BTreeMap<&'a str, ReplacementCheckState>,
+    ) -> ReplacementCheckState {
+        let Some(node) = self.nodes.get(node_id) else {
+            return ReplacementCheckState::Unselected;
+        };
+        let state = if node.children.is_empty() {
+            if node.included {
+                ReplacementCheckState::Selected
+            } else {
+                ReplacementCheckState::Unselected
+            }
+        } else {
+            let mut selected = false;
+            let mut unselected = false;
+            for child in &node.children {
+                match self.collect_check_states(child, states) {
+                    ReplacementCheckState::Selected => selected = true,
+                    ReplacementCheckState::Unselected => unselected = true,
+                    ReplacementCheckState::Indeterminate => {
+                        selected = true;
+                        unselected = true;
+                    }
+                }
+            }
+            match (selected, unselected) {
+                (true, false) => ReplacementCheckState::Selected,
+                (false, true) => ReplacementCheckState::Unselected,
+                _ => ReplacementCheckState::Indeterminate,
+            }
+        };
+        states.insert(node_id, state);
+        state
     }
 
     fn append_rows<'a>(
@@ -2377,6 +2418,7 @@ impl ReplacementPreviewState {
         node_id: &'a str,
         depth: usize,
         kind: ReplacementPreviewRowKind,
+        check_states: &BTreeMap<&str, ReplacementCheckState>,
         rows: &mut Vec<ReplacementPreviewRow<'a>>,
     ) {
         let Some(node) = self.nodes.get(node_id) else {
@@ -2387,7 +2429,7 @@ impl ReplacementPreviewState {
             node_id,
             kind,
             depth,
-            check_state: self.check_state(node_id),
+            check_state: check_states[node_id],
             document_id: result.map(|result| result.document_id.as_str()),
             prefix: result.map(|result| result.prefix.as_str()),
             matching_text: result.map(|result| result.matching_text.as_str()),
@@ -2408,6 +2450,7 @@ impl ReplacementPreviewState {
                 } else {
                     ReplacementPreviewRowKind::Document
                 },
+                check_states,
                 rows,
             );
         }
@@ -10809,7 +10852,7 @@ mod tests {
 
         let viewport = workspace.cards().viewport_window(5, 1840.0, 800.0);
         let old_window = workspace.cards().item_window(5, 1840.0);
-        assert!(viewport.rows.len() < 12);
+        assert!(viewport.rows.len() < 16);
         assert!(viewport.end - viewport.start < old_window.end - old_window.start);
         let total =
             viewport.rows.iter().map(|row| row.height).sum::<f32>() + viewport.bottom_padding;
