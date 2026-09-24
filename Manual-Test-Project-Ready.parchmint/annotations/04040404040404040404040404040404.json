@@ -1,0 +1,50 @@
+{
+  "document_id": "04040404040404040404040404040404",
+  "schema": "parchmint.annotation-sidecar/v1",
+  "threads": [
+    {
+      "anchor": {
+        "block_id": "04040404040404040404040404040404",
+        "context_after": ".",
+        "context_before": " rain and iron. ",
+        "end": 77,
+        "kind": "range",
+        "orphaned": false,
+        "quote": "Hello",
+        "start": 72
+      },
+      "id": "040404040404040404040404040404b2",
+      "messages": [
+        {
+          "body": "hello",
+          "id": "040404040404040504040404040404b2"
+        },
+        {
+          "body": "Goodbye",
+          "id": "040404040404040604040404040404be"
+        }
+      ],
+      "resolved": false
+    },
+    {
+      "anchor": {
+        "block_id": "04040404040404040404040404040404",
+        "context_after": " station at dusk",
+        "context_before": "Mara reaches ",
+        "end": 16,
+        "kind": "range",
+        "orphaned": false,
+        "quote": "the",
+        "start": 13
+      },
+      "id": "040404040404040404040404040404bf",
+      "messages": [
+        {
+          "body": "Example",
+          "id": "040404040404040504040404040404bf"
+        }
+      ],
+      "resolved": true
+    }
+  ]
+}

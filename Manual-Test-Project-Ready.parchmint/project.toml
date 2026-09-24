@@ -1,13 +1,27 @@
 [parchmint-persistence]
-recovery-project-revision = 0
-save-identity = "4bec9a8ed9aad7ce3dc082ff8d6a3b05b15b12861b2f3955b1d78ff0245a5584"
+recovery-project-revision = 73
+save-identity = "71678527138179fd725a33d5aaa33624e3fe1c9986de726a4e51fee06935482c"
 
 [parchmint-persistence.document-revisions]
+04040404040404040404040404040404 = 193
+06060606060606060606060606060606 = 0
+08080808080808080808080808080808 = 0
+0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b = 0
+0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d = 0
+11111111111111111111111111111111 = 0
+13131313131313131313131313131313 = 0
+15151515151515151515151515151515 = 0
+17171717171717171717171717171717 = 0
+1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a = 0
+1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c = 0
+1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f = 12
+22222222222222222222222222222222 = 0
+24242424242424242424242424242424 = 0
 
 [parchmint-persistence.document-summaries.04040404040404040404040404040404]
-content-hash = "ccb14ca101b54483eab1b9b3b5dc413d9babd06d670fd70ac86694dfa2343014"
-revision = 0
-word-count = 13
+content-hash = "c1144087414a2047f808256780c1877dda2a85fdd8214b1754366202e7c62ea4"
+revision = 193
+word-count = 15
 
 [parchmint-persistence.document-summaries.06060606060606060606060606060606]
 content-hash = "a7c9f7dbef779659ed147decb838bc57990ca1104a5dfbe9995ea2f26fd501bf"
@@ -60,8 +74,8 @@ revision = 0
 word-count = 11
 
 [parchmint-persistence.document-summaries.1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f]
-content-hash = "02ba2926897c8dcf07f71258ad3e80e000b6070759d11d67b98b97d41294f4dc"
-revision = 0
+content-hash = "88c8e0ed3a203cb9096ae838e43038981c094c8ba9b21c73fd7e8d011311fbcb"
+revision = 12
 word-count = 13
 
 [parchmint-persistence.document-summaries.22222222222222222222222222222222]
@@ -75,8 +89,145 @@ revision = 0
 word-count = 13
 
 [parchmint-structure]
-deletions = []
 version = 1
+
+[[parchmint-structure.deletions]]
+deleted-at-unix-millis = 1790046352979
+document-id = "39b5588ff791f1e49a0ad42f97d55e86"
+former-index = 3
+former-parent = "02020202020202020202020202020202"
+kind = "document"
+node-id = "39b55b8ff791f6fd9a0ad62f97d561ec"
+restoring-checkpoint = "7b94595f09eea2ac4e86b91b36760f1d"
+section = "manuscript"
+title = "Untitled"
+
+[[parchmint-structure.deletions.subtree]]
+children = []
+document-id = "39b5588ff791f1e49a0ad42f97d55e86"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "39b55b8ff791f6fd9a0ad62f97d561ec"
+kind = "document"
+parent = "02020202020202020202020202020202"
+synopsis = ""
+title = "Untitled"
+
+[parchmint-structure.deletions.subtree.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Harbor District"
+
+[[parchmint-structure.deletions]]
+deleted-at-unix-millis = 1790046266362
+former-index = 2
+former-parent = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+kind = "group"
+node-id = "59bbaeca4336d68759ed51ca36d3f968"
+restoring-checkpoint = "4c38398e05b6dd48ac9caaa56bf4ad2a"
+section = "manuscript"
+title = "New Group"
+
+[[parchmint-structure.deletions.subtree]]
+children = []
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "59bbaeca4336d68759ed51ca36d3f968"
+kind = "group"
+parent = "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+synopsis = ""
+title = "New Group"
+
+[parchmint-structure.deletions.subtree.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Harbor District"
+
+[[parchmint-structure.deletions]]
+deleted-at-unix-millis = 1790105867610
+document-id = "89de798ae341a5b1f9b8a239c076121c"
+former-index = 0
+former-parent = "50415243484d494e5400000000000003"
+kind = "document"
+node-id = "89de768ae341a098f9b8a039c0760eb6"
+restoring-checkpoint = "2841ef2c64e8388b0ad160149a744fcf"
+section = "unfiled"
+title = "Untitled"
+
+[[parchmint-structure.deletions.subtree]]
+children = []
+document-id = "89de798ae341a5b1f9b8a239c076121c"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "89de768ae341a098f9b8a039c0760eb6"
+kind = "document"
+parent = "50415243484d494e5400000000000003"
+synopsis = ""
+title = "Untitled"
+
+[parchmint-structure.deletions.subtree.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Harbor District"
+
+[[parchmint-structure.deletions]]
+deleted-at-unix-millis = 1790089068096
+document-id = "99b7784e10c8eddeda06a4b3656781c2"
+former-index = 2
+former-parent = "09090909090909090909090909090909"
+kind = "document"
+node-id = "99b7774e10c8ec2bda069eb365677790"
+restoring-checkpoint = "7dae8df41bc1f82398cdd7955b89ae34"
+section = "manuscript"
+title = "Untitled"
+
+[[parchmint-structure.deletions.subtree]]
+children = []
+document-id = "99b7784e10c8eddeda06a4b3656781c2"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "99b7774e10c8ec2bda069eb365677790"
+kind = "document"
+parent = "09090909090909090909090909090909"
+synopsis = ""
+title = "Untitled"
+
+[parchmint-structure.deletions.subtree.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Harbor District"
+
+[[parchmint-structure.deletions]]
+deleted-at-unix-millis = 1790105776123
+document-id = "a9e4c8c52ee67e6fb99b15d45f749c00"
+former-index = 0
+former-parent = "50415243484d494e5400000000000003"
+kind = "document"
+node-id = "a9e4c9c52ee68022b99b1bd45f74a632"
+restoring-checkpoint = "bda9689d45fd8ebdc7e1e3fba846e7b3"
+section = "unfiled"
+title = "Untitled"
+
+[[parchmint-structure.deletions.subtree]]
+children = []
+document-id = "a9e4c8c52ee67e6fb99b15d45f749c00"
+export-emit-titles = "inherit"
+export-excluded = false
+export-starts-new-page = false
+id = "a9e4c9c52ee68022b99b1bd45f74a632"
+kind = "document"
+parent = "50415243484d494e5400000000000003"
+synopsis = ""
+title = "Untitled"
+
+[parchmint-structure.deletions.subtree.metadata]
+91919191919191919191919191919191 = "Mara"
+92929292929292929292929292929292 = "Draft"
+93939393939393939393939393939393 = "Harbor District"
 
 [[parchmint-structure.metadata-fields]]
 applicability = "groups-and-documents"
@@ -190,7 +341,7 @@ id = "09090909090909090909090909090909"
 kind = "group"
 order = 1
 parent = "01010101010101010101010101010101"
-synopsis = "Mara and Iven trace a signal through the bell tower during the night watch."
+synopsis = "Mara and Iven trace a signal through the bell tower during the night watch. "
 title = "Chapter 2 — First Signal"
 
 [parchmint-structure.nodes.metadata]
@@ -439,7 +590,7 @@ author = "ParchMint Manual Test Suite"
 export-emit-titles = "inherit"
 export-excluded = false
 export-starts-new-page = false
-revision = 22
+revision = 51
 spellcheck-language = "en-US"
 title = "The Ember Archive — Manual Test Project"
 
