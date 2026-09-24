@@ -28,4 +28,4 @@ lto = "thin"
 strip = "symbols"
 
 [patch.crates-io]
-iced_tiny_skia = { path = "third_party/iced_tiny_skia-0.14.0" }
+iced_tiny_skia = { path = "third_party/iced_tiny_skia-0.14.1" }

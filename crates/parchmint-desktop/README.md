@@ -39,7 +39,7 @@ retaining GPU rendering. See [diagnostics](../parchmint-diagnostics/README.md)
 for limits.
 
 The opt-in `renderer-verification` feature checks every native software-rendered
-frame for stale pixels; see the [renderer guide](../../third_party/iced_tiny_skia-0.14.0/README.md#verify-the-patch).
+frame for stale pixels; see the [renderer guide](../../third_party/iced_tiny_skia-0.14.1/README.md#verify-the-patch).
 Use it for visual checks, not benchmarks.
 
 Logs use `logs/parchmint-debug.log` below these application-data directories:

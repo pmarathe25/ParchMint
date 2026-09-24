@@ -1,18 +1,17 @@
-# `iced_tiny_skia` 0.14.0
+# `iced_tiny_skia` 0.14.1
 
-**Purpose:** Fix transform scaling and Canvas text clipping in ParchMint's patched
-renderer, and avoid unnecessary CPU painting. This directory contains source
+**Purpose:** Fix Canvas text clipping in ParchMint's patched renderer and avoid
+unnecessary CPU painting. This directory contains source
 and normalized Cargo metadata from the
-[`iced_tiny_skia` 0.14.0 package](https://crates.io/crates/iced_tiny_skia/0.14.0).
+[`iced_tiny_skia` 0.14.1 package](https://crates.io/crates/iced_tiny_skia/0.14.1).
 The original package checksum is
-`fe0acf8b75a3bc914aff5f2329fdffc1b36eeaea29dda0e4bd232f1c62e9cc3d`.
+`c267596d742714b1853cc10c3983a367762816fc4836bd3b79f76ce76787d6f8`.
 Registry bookkeeping and the package lockfile are omitted.
 
 ## Transform scaling
 
-ParchMint backports the transform composition used by the official
-[`tiny_skia/src/lib.rs` on Iced `master`](https://github.com/iced-rs/iced/blob/master/tiny_skia/src/lib.rs),
-as inspected on 2026-08-11. The transform backport changes `Renderer::draw`:
+Iced 0.14.1 includes the transform composition that ParchMint previously
+backported. The renderer now follows the upstream behavior:
 
 - Primitive-group clip bounds are scaled directly. The group transform is
   already represented in the recorded clip bounds.
