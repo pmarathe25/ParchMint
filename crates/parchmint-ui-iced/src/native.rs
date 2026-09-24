@@ -1295,6 +1295,7 @@ struct NativeProjectState {
     refresh_spellcheck_view: Option<ViewId>,
     modifiers: keyboard::Modifiers,
     resizing: Option<SidebarPanel>,
+    pointer_down: bool,
     modal_focus: ModalFocus,
 }
 
@@ -4297,10 +4298,10 @@ impl NativeDesktop {
         {
             subscriptions.push(Subscription::run_with(deadline, deadline_ticks));
         }
-        // A global cursor subscription rebuilds the complete editor surface for
-        // every pointer move. Subscribe only while a splitter drag needs it.
+        // Cursor moves matter while dragging a splitter or selecting text.
+        // Avoid rebuilding the editor surface for ordinary pointer motion.
         if self.windows.values().any(
-            |window| matches!(window, NativeWindow::Project(state) if state.resizing.is_some()),
+            |window| matches!(window, NativeWindow::Project(state) if state.resizing.is_some() || state.pointer_down),
         ) {
             subscriptions.push(event::listen_with(resize_event));
         }
@@ -5002,6 +5003,25 @@ impl NativeDesktop {
                 return self.update_inner(Message::CloseProjectChooser);
             }
             return Task::none();
+        }
+        if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id)
+            && let Some(workspace) = state.workspace.as_mut()
+        {
+            match &event {
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                    state.pointer_down = state.shell.destination() == RibbonDestination::Editor;
+                }
+                Event::Mouse(mouse::Event::CursorMoved { .. }) if state.pointer_down => {
+                    workspace.editor_mut().set_pointer_selection_active(true);
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                | Event::Mouse(mouse::Event::CursorLeft)
+                | Event::Window(window::Event::Unfocused) => {
+                    state.pointer_down = false;
+                    workspace.editor_mut().set_pointer_selection_active(false);
+                }
+                _ => {}
+            }
         }
         if matches!(
             event,
@@ -7455,6 +7475,7 @@ impl NativeDesktop {
                 }
                 if reveal_selected_comment {
                     state.shell.select_destination(RibbonDestination::Editor);
+                    state.shell.layout_mut().set_inspector_visible(true);
                     state
                         .shell
                         .expand_inspector_section(crate::InspectorSection::Comments);
@@ -11777,6 +11798,7 @@ impl NativeDesktop {
                 refresh_spellcheck_view: None,
                 modifiers: keyboard::Modifiers::default(),
                 resizing: None,
+                pointer_down: false,
                 modal_focus: ModalFocus::Cancel,
             })),
         );
@@ -15479,7 +15501,7 @@ mod tests {
     }
 
     #[test]
-    fn file_close_uses_the_shared_command_dispatcher() {
+    fn shifted_file_close_uses_the_shared_command_dispatcher() {
         let project = legacy_project(PathBuf::from("/tmp/runtime-close.parchmint"), 65);
         let callbacks = Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked));
         let (mut desktop, _boot) = NativeDesktop::boot(NativeDesktopStartup {
@@ -15496,7 +15518,7 @@ mod tests {
         let command = crate::shortcut_router::resolve(
             &crate::shortcut_router::shortcut(
                 &keyboard::Key::Character("w".into()),
-                keyboard::Modifiers::COMMAND,
+                keyboard::Modifiers::COMMAND | keyboard::Modifiers::SHIFT,
             ),
             &bindings,
             parchmint_preferences::ShortcutScope::Editor,

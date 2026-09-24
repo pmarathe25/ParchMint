@@ -398,6 +398,34 @@ fn overview_creates_a_group_and_document_without_explorer() {
 }
 
 #[test]
+fn escape_cancels_a_new_overview_group_before_it_is_saved() {
+    let run = IsolatedRun::new("overview-cancel-group").expect("isolated run");
+    let project = run.root().join("overview-cancel-group.parchmint");
+    let harness = create_project(&run, &project, "Overview Cancel Group");
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::OverviewAddGroup)
+        .unwrap();
+    harness.redraw(HarnessWindow::Project).unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .unwrap();
+    harness.redraw(HarnessWindow::Project).unwrap();
+    let titles = harness.hierarchy_titles().unwrap();
+    assert!(
+        !titles.iter().any(|title| title == "New Group"),
+        "{titles:?}"
+    );
+    harness.close(HarnessWindow::Project).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
 fn explorer_f2_rename_replaces_the_selected_title() {
     let run = IsolatedRun::new("explorer-f2-rename").expect("isolated run");
     let project = run.root().join("explorer-f2-rename.parchmint");
@@ -946,10 +974,8 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
         .expect("hover the attached comment anchor");
     assert!(
-        harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
-            .unwrap(),
-        "the attached-comment hover card should appear beside the manuscript anchor; hover state: {}",
+        visible(&harness, "Open thread"),
+        "the attached-comment preview should appear beside the manuscript anchor; hover state: {}",
         harness
             .comment_hover_status()
             .expect("read comment-hover diagnostic")
@@ -958,26 +984,31 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "keeper")
         .expect("move within the commented selection");
     assert!(
-        harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
-            .unwrap(),
-        "the popover must remain anchored while the cursor moves within its commented text"
+        visible(&harness, "Open thread"),
+        "the preview must remain anchored while the cursor moves within its commented text"
     );
     harness
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
         .expect("move away from the attached comment anchor");
     assert!(
-        !harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
-            .unwrap(),
-        "the transient comment card should dismiss after the pointer leaves its anchor; hover state: {}",
+        !visible(&harness, "Open thread"),
+        "the transient comment preview should dismiss after the pointer leaves its anchor; hover state: {}",
         harness
             .comment_hover_status()
             .expect("read comment-hover diagnostic")
     );
     harness
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
-        .expect("reopen the anchored comment popover");
+        .expect("reopen the anchored comment preview");
+    harness
+        .click_text(HarnessWindow::Project, "Open thread")
+        .expect("open the full thread in the Inspector");
+    assert!(
+        harness
+            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
+            .unwrap(),
+        "opening a preview must reveal the full thread and its reply composer"
+    );
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
         .expect("open comment actions");
@@ -1010,16 +1041,13 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         "the reply must remain visible in the anchored thread after its live projection refresh"
     );
     harness
-        .click_text(HarnessWindow::Project, "✓")
+        .click_text(HarnessWindow::Project, "Resolve")
         .expect("resolve the comment thread");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
-        .expect("review the resolved thread in the persistent panel");
     assert!(visible(&harness, "Resolved"));
     assert!(visible(&harness, "Verify the storm detail."));
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
-        .expect("open comment actions");
+        .click_text(HarnessWindow::Project, "⋮")
+        .expect("open thread actions");
     harness
         .click_text(HarnessWindow::Project, "Delete thread")
         .expect("request comment deletion");

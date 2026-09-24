@@ -35,6 +35,7 @@ placeholder. Empty states should explain the state in one short sentence, with
 any available action rendered as a separate button. Do not give static text a
 button background, hover state, pointer cursor, or disabled-control color. Pair
 status color with a word or icon so meaning does not depend on color alone.
+Use sentence case for labels in lists, forms, and navigation.
 
 ## Buttons and text actions
 
@@ -55,7 +56,8 @@ Write action labels as short verbs or verb phrases in sentence case, such as
 “Save”, “Add field”, and “Delete thread”. Keep Cancel before the primary action
 in dialog footers. A clickable label is still a button: it needs hover, keyboard
 focus, and disabled states. Reserve confirmation for an action that would actually
-lose work.
+lose work. Show a configured keyboard shortcut in the tooltip for any action
+that has one.
 
 ## Icons
 
@@ -89,7 +91,9 @@ without appearing active.
 Build controls with `components` and take dimensions and type from
 `design_tokens`. Put workflow-specific detail in the screen, while shared states
 stay in the components. Keep optional detail behind selection, expansion, or a
-popover: collapsed Overview cards show chosen fields, selected comments reveal
-their thread, and settings lists identify items without repeating their full
-configuration. Check the result in light and dark appearances at normal and
-compact widths using the [native UI review](../tests/parchmint-ui-driver/USABILITY.md).
+popover: collapsed Overview cards and groups show chosen fields, expanding a
+group also reveals its other fields, and selected comments reveal their thread.
+A comment hover gives a brief preview without opening editing controls. Settings
+lists identify items without repeating their full configuration. Check the result
+in light and dark appearances at normal and compact widths using the
+[native UI review](../tests/parchmint-ui-driver/USABILITY.md).

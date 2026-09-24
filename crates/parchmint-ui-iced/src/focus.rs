@@ -70,7 +70,7 @@ where
     FocusableRegion {
         id: region_id(target).expect("an F6 region always has a stable widget ID"),
         content: content.into(),
-        outline: target != F6Region::FocusedEditor,
+        outline: !matches!(target, F6Region::FocusedEditor | F6Region::Explorer),
         input_enabled: None,
     }
     .into()
@@ -248,8 +248,8 @@ where
                 renderer::Quad {
                     bounds: layout.bounds(),
                     border: Border {
-                        color: theme.palette().primary,
-                        width: 2.0,
+                        color: theme.palette().primary.scale_alpha(0.45),
+                        width: 1.0,
                         radius: 3.0.into(),
                     },
                     ..renderer::Quad::default()

@@ -536,6 +536,15 @@ pub(crate) fn context_action<'a, Message: Clone + 'a>(
     })
 }
 
+pub(crate) fn tooltip_label(label: &str, command: &str) -> String {
+    let binding = crate::shortcut_router::label(command);
+    if binding.is_empty() {
+        label.to_owned()
+    } else {
+        format!("{label} · {binding}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

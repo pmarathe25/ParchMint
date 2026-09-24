@@ -316,7 +316,25 @@ fn project_surface_with_layout<'a>(
         .into();
     let base = stack![
         base,
-        container(crate::motion::reveal(
+        container(
+            container(Space::new())
+                .width(Length::Fill)
+                .height(1)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(theme.palette().divider.into()),
+                    ..Default::default()
+                })
+        )
+        .padding(iced::Padding {
+            top: 48.0,
+            ..iced::Padding::ZERO
+        })
+        .width(if shows_explorer && layout.explorer_is_visible() {
+            Length::Fixed(48.0 + rail_width as f32)
+        } else {
+            Length::Fixed(48.0)
+        }),
+        crate::motion::reveal(
             !focused,
             project_selector(
                 project_title,
@@ -324,12 +342,7 @@ fn project_surface_with_layout<'a>(
                 rail_width,
                 theme
             )
-        ))
-        .padding(iced::Padding {
-            top: 8.0,
-            left: 6.0,
-            ..iced::Padding::ZERO
-        })
+        )
     ];
     let base: Element<'a, ProjectSurfaceMessage> = base.into();
     let base = if let Some(source) = workspace.hierarchy_drag_source()
@@ -473,25 +486,68 @@ fn sidebar_splitter(
     panel: SidebarPanel,
     theme: ParchMintTheme,
 ) -> Element<'static, ProjectSurfaceMessage> {
-    mouse_area(panel_divider(theme))
+    let divider: Element<'static, ProjectSurfaceMessage> = if panel == SidebarPanel::Explorer {
+        column![
+            container(Space::new().height(48)).style(move |_| components::surface(
+                theme,
+                Surface::Sidebar,
+                Interaction::Rest
+            )),
+            panel_divider(theme, panel),
+        ]
+        .spacing(0)
+        .height(Length::Fill)
+        .into()
+    } else {
+        panel_divider(theme, panel)
+    };
+    mouse_area(divider)
         .on_press(ProjectSurfaceMessage::BeginResize(panel))
         .interaction(iced::mouse::Interaction::ResizingHorizontally)
         .into()
 }
 
-fn panel_divider(theme: ParchMintTheme) -> Element<'static, ProjectSurfaceMessage> {
-    container(
+fn panel_divider(
+    theme: ParchMintTheme,
+    panel: SidebarPanel,
+) -> Element<'static, ProjectSurfaceMessage> {
+    let adjoining: Element<'static, ProjectSurfaceMessage> = if panel == SidebarPanel::Explorer {
         container(Space::new())
-            .width(1)
+            .width(SIDEBAR_SPLITTER_WIDTH - 1)
             .height(Length::Fill)
-            .style(move |_| iced::widget::container::Style {
-                background: Some(Background::Color(theme.palette().divider)),
-                ..Default::default()
-            }),
+            .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest))
+            .into()
+    } else {
+        column![
+            container(Space::new())
+                .width(SIDEBAR_SPLITTER_WIDTH - 1)
+                .height(80)
+                .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+            container(Space::new())
+                .width(SIDEBAR_SPLITTER_WIDTH - 1)
+                .height(Length::Fill)
+                .style(move |_| {
+                    components::surface(theme, Surface::Manuscript, Interaction::Rest)
+                }),
+        ]
+        .spacing(0)
+        .into()
+    };
+    container(
+        row![
+            adjoining,
+            container(Space::new())
+                .width(1)
+                .height(Length::Fill)
+                .style(move |_| iced::widget::container::Style {
+                    background: Some(Background::Color(theme.palette().divider)),
+                    ..Default::default()
+                }),
+        ]
+        .spacing(0),
     )
     .width(SIDEBAR_SPLITTER_WIDTH)
     .height(Length::Fill)
-    .align_x(iced::alignment::Horizontal::Center)
     .into()
 }
 
@@ -513,32 +569,40 @@ fn project_selector<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let label = row![
-        text(title).size(14).width(Length::Fill),
+        container(text(title).size(14).wrapping(text::Wrapping::None))
+            .width(width.saturating_sub(40))
+            .clip(true),
         icon_sized(Icon::ChevronDown, 12)
     ]
     .spacing(8)
     .align_y(iced::alignment::Vertical::Center);
     let contents = crate::motion::row(vec![
-        crate::motion::slot(crate::icons::brand(36), Length::Fixed(36.0), true),
+        crate::motion::slot(
+            container(crate::icons::brand(36)).center(48),
+            Length::Fixed(48.0),
+            true,
+        ),
         crate::motion::slot(
             container(label)
+                .width(Length::Fill)
                 .padding(iced::Padding {
-                    left: 12.0,
+                    left: 8.0,
+                    right: 12.0,
                     ..iced::Padding::ZERO
                 })
-                .center_y(36)
+                .center_y(48)
                 .clip(true),
-            Length::Fixed(width.saturating_sub(12) as f32),
+            Length::Fixed(width as f32),
             expanded,
         ),
     ]);
-    stationary_tooltip::tooltip(
+    container(stationary_tooltip::tooltip(
         harness_target::target(
             HarnessTarget::ProjectMenu,
             button(
                 container(contents)
-                    .width(if expanded { 24.0 + width as f32 } else { 36.0 })
-                    .height(36),
+                    .width(if expanded { 48.0 + width as f32 } else { 48.0 })
+                    .height(48),
             )
             .padding(0)
             .on_press(ProjectSurfaceMessage::ShowProjectChooser)
@@ -546,9 +610,11 @@ fn project_selector<'a>(
                 components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
             }),
         ),
-        components::muted_label("Projects"),
+        components::muted_label(components::tooltip_label("Projects", "file.projects")),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
-    )
+    ))
+    .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest))
+    .into()
 }
 
 fn navigation_rail<'a>(
@@ -556,17 +622,43 @@ fn navigation_rail<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let mut items = column![Space::new().height(36), Space::new().height(8)].spacing(6);
-    for (page, symbol, label) in [
-        (RibbonDestination::Editor, Icon::Editor, "Editor"),
-        (RibbonDestination::Cards, Icon::Overview, "Overview"),
-        (RibbonDestination::History, Icon::History, "History"),
+    for (page, symbol, label, command) in [
+        (
+            RibbonDestination::Editor,
+            Icon::Editor,
+            "Editor",
+            "view.editor",
+        ),
+        (
+            RibbonDestination::Cards,
+            Icon::Overview,
+            "Overview",
+            "view.overview",
+        ),
+        (
+            RibbonDestination::History,
+            Icon::History,
+            "History",
+            "view.history",
+        ),
         (
             RibbonDestination::RecentlyDeleted,
             Icon::RecentlyDeleted,
             "Recently deleted",
+            "view.deleted",
         ),
-        (RibbonDestination::Export, Icon::Export, "Export"),
-        (RibbonDestination::Settings, Icon::Settings, "Settings"),
+        (
+            RibbonDestination::Export,
+            Icon::Export,
+            "Export",
+            "view.export",
+        ),
+        (
+            RibbonDestination::Settings,
+            Icon::Settings,
+            "Settings",
+            "view.settings",
+        ),
     ] {
         items = items.push(stationary_tooltip::tooltip(
             harness_target::target(
@@ -587,7 +679,7 @@ fn navigation_rail<'a>(
                         )
                     }),
             ),
-            container(text(label).size(12)).padding([4, 6]),
+            container(text(components::tooltip_label(label, command)).size(12)).padding([4, 6]),
             components::surface(theme, Surface::Elevated, Interaction::Rest),
         ));
     }
@@ -604,13 +696,17 @@ fn navigation_rail<'a>(
                 .width(47)
                 .height(Length::Fill)
                 .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-            container(Space::new())
-                .width(1)
-                .height(Length::Fill)
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(Background::Color(theme.palette().divider)),
-                    ..Default::default()
-                }),
+            column![
+                Space::new().height(48),
+                container(Space::new())
+                    .width(1)
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(Background::Color(theme.palette().divider)),
+                        ..Default::default()
+                    })
+            ]
+            .spacing(0),
         ],
     )
 }
@@ -751,7 +847,7 @@ pub(crate) fn explorer_rail_with_rename<'a>(
     let rows = window.rows.into_iter().fold(rows, |column, item| {
         let depth = hierarchy_depth(explorer, item.parent_id);
         let disclosure: Element<'a, ProjectSurfaceMessage> = match item.kind {
-            HierarchyRowKind::Root => button(icon_sized(
+            HierarchyRowKind::Root => container(icon_sized(
                 if item.expanded {
                     Icon::ChevronDown
                 } else {
@@ -761,14 +857,8 @@ pub(crate) fn explorer_rail_with_rename<'a>(
             ))
             .padding(SPACING_4)
             .width(26)
-            .on_press(ProjectSurfaceMessage::Project(
-                ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-            ))
-            .style(move |_, status| {
-                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-            })
             .into(),
-            HierarchyRowKind::Group => button(icon_sized(
+            HierarchyRowKind::Group => container(icon_sized(
                 if item.expanded {
                     Icon::ChevronDown
                 } else {
@@ -778,12 +868,6 @@ pub(crate) fn explorer_rail_with_rename<'a>(
             ))
             .width(26)
             .padding(4)
-            .on_press(ProjectSurfaceMessage::Project(
-                ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
-            ))
-            .style(move |_, status| {
-                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-            })
             .into(),
             HierarchyRowKind::Document => Space::new().width(26).into(),
         };
@@ -796,19 +880,19 @@ pub(crate) fn explorer_rail_with_rename<'a>(
             && workspace
                 .hierarchy_rename()
                 .is_some_and(|(node_id, _)| node_id == item.id);
-        let hierarchy_press = (!is_renaming
-            && matches!(
-                item.kind,
-                HierarchyRowKind::Group | HierarchyRowKind::Document
-            ))
-        .then(|| match item.kind {
+        let hierarchy_press = (!is_renaming).then(|| match item.kind {
+            HierarchyRowKind::Root => {
+                ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
+                    node_id: item.id.to_owned(),
+                    gesture: SelectionGesture::Replace,
+                })
+            }
             HierarchyRowKind::Document => ProjectSurfaceMessage::Project(
                 ProjectMessage::PreviewHierarchyNode(item.id.to_owned()),
             ),
             HierarchyRowKind::Group => ProjectSurfaceMessage::Project(
                 ProjectMessage::SelectAndToggleHierarchyExpanded(item.id.to_owned()),
             ),
-            HierarchyRowKind::Root => unreachable!("roots retain their disclosure control"),
         });
         let select: Element<'a, ProjectSurfaceMessage> = if is_renaming {
             let draft = workspace
@@ -854,23 +938,7 @@ pub(crate) fn explorer_rail_with_rename<'a>(
                     }),
             )
             .interaction(iced::mouse::Interaction::Pointer);
-            if item.kind == HierarchyRowKind::Root {
-                hierarchy_drag::source(
-                    item.id,
-                    row,
-                    ProjectSurfaceMessage::Project(ProjectMessage::SelectHierarchy {
-                        node_id: item.id.to_owned(),
-                        gesture: SelectionGesture::Replace,
-                    }),
-                    None,
-                    ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
-                        source_id: item.id.to_owned(),
-                        gesture: SelectionGesture::Replace,
-                    }),
-                )
-            } else {
-                row.into()
-            }
+            row.into()
         };
         let item_row: Element<'a, ProjectSurfaceMessage> =
             row![Space::new().width((depth * 14) as f32), disclosure, select]
@@ -882,11 +950,15 @@ pub(crate) fn explorer_rail_with_rename<'a>(
                 item.id,
                 item_row,
                 on_press,
-                (item.kind == HierarchyRowKind::Document).then(|| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(
-                        item.id.to_owned(),
-                    ))
-                }),
+                match item.kind {
+                    HierarchyRowKind::Document => Some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::OpenHierarchyNode(item.id.to_owned()),
+                    )),
+                    HierarchyRowKind::Root => Some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleHierarchyExpanded(item.id.to_owned()),
+                    )),
+                    HierarchyRowKind::Group => None,
+                },
                 ProjectSurfaceMessage::Project(ProjectMessage::BeginHierarchyDrag {
                     source_id: item.id.to_owned(),
                     gesture: SelectionGesture::Replace,
@@ -996,7 +1068,10 @@ pub(crate) fn explorer_rail_with_rename<'a>(
                             ButtonKind::Quiet,
                             interaction(status, false)
                         )),
-                    container(text("Global Search").size(12)).padding([4, 6]),
+                    container(
+                        text(components::tooltip_label("Global Search", "search.global")).size(12)
+                    )
+                    .padding([4, 6]),
                     components::surface(theme, Surface::Elevated, Interaction::Rest),
                 )
             )
@@ -1684,13 +1759,15 @@ fn global_search_rail<'a>(
         .push(
             column![
                 active_trail,
-                scrollable(results)
-                    .id(HarnessTarget::GlobalSearchResults.id())
-                    .spacing(SPACING_4)
-                    .on_scroll(|viewport| ProjectSurfaceMessage::Project(
-                        ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
-                    ))
-                    .height(Length::Fill)
+                crate::scroll_gate::smooth(
+                    scrollable(results)
+                        .id(HarnessTarget::GlobalSearchResults.id())
+                        .spacing(SPACING_4)
+                        .on_scroll(|viewport| ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
+                        ))
+                        .height(Length::Fill)
+                )
             ]
             .spacing(SPACING_12)
             .height(Length::Fill),
@@ -1812,7 +1889,14 @@ fn overview_add<'a>(
             .style(move |_, status| {
                 components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
             }),
-            text(label),
+            text(components::tooltip_label(
+                label,
+                if kind == HierarchyItemKind::Group {
+                    "outline.group"
+                } else {
+                    "outline.document"
+                },
+            )),
             iced::widget::tooltip::Position::Top,
         )
         .into()
@@ -1948,7 +2032,7 @@ pub(crate) fn cards_grid<'a>(
             .as_deref()
             .is_some_and(|id| id != cards.section_id());
         let trailing = if closes_group {
-            crate::cards_layout::GROUP_GAP + 12.0
+            crate::cards_layout::GROUP_GAP + 8.0
         } else {
             0.0
         };
@@ -1977,6 +2061,7 @@ pub(crate) fn cards_grid<'a>(
             }
             let index = *frame_ids.entry(id.to_owned()).or_insert_with(|| {
                 frames.push(crate::card_frames::GroupFrame {
+                    id: id.to_owned(),
                     depth,
                     first_row: row_index,
                     last_row: row_index,
@@ -2104,22 +2189,30 @@ pub(crate) fn cards_grid<'a>(
         hierarchy_drag::surface(
             right_click::right_click_area(
                 crate::scroll_gate::drop_none(
-                    scrollable(crate::card_frames::groups(grid, frames, theme).map(Some))
-                        .id(HarnessTarget::CardsList.id())
-                        .width(Length::Fill)
-                        .on_scroll(move |viewport| {
-                            let offset = viewport.absolute_offset().y;
-                            needs_cards_window_refresh(
-                                offset,
-                                viewport.bounds().height,
-                                viewport.content_bounds().height,
-                                coverage,
-                            )
-                            .then_some(ProjectSurfaceMessage::Project(
-                                ProjectMessage::SetCardsScroll(offset),
-                            ))
-                        })
-                        .height(Length::Fill),
+                    scrollable(
+                        crate::card_frames::groups(
+                            grid,
+                            frames,
+                            workspace.card_positions.clone(),
+                            theme,
+                        )
+                        .map(Some)
+                    )
+                    .id(HarnessTarget::CardsList.id())
+                    .width(Length::Fill)
+                    .on_scroll(move |viewport| {
+                        let offset = viewport.absolute_offset().y;
+                        needs_cards_window_refresh(
+                            offset,
+                            viewport.bounds().height,
+                            viewport.content_bounds().height,
+                            coverage,
+                        )
+                        .then_some(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetCardsScroll(offset),
+                        ))
+                    })
+                    .height(Length::Fill),
                 ),
                 move |point| ProjectSurfaceMessage::Project(
                     ProjectMessage::OpenHierarchyContextMenu {
@@ -2301,10 +2394,10 @@ fn outline_card<'a>(
             theme,
             width,
             item.synopsis_height(width),
-            group || item.details_expanded,
+            item.details_expanded,
         )
     ]
-    .spacing(6);
+    .spacing(4);
     let card_content: Element<'a, ProjectSurfaceMessage> = details.into();
     let middle_active =
         drag_destination.as_ref() == Some(&DragDestination::IntoGroup(node_id.clone()));
@@ -2643,7 +2736,9 @@ fn search_center<'a>(
             .push(actions.push(apply.style(move |_, status| {
                 components::button_style(theme, ButtonKind::Primary, interaction(status, false))
             })))
-            .push(scrollable(rows).height(Length::Fill)),
+            .push(crate::scroll_gate::smooth(
+                scrollable(rows).height(Length::Fill),
+            )),
     )
     .padding(SPACING_24)
     .width(Length::Fill)
@@ -3007,11 +3102,13 @@ fn history_center<'a>(
         filter,
         harness_target::target(
             HarnessTarget::HistoryTimeline,
-            scrollable(checkpoints)
-                .on_scroll(|viewport| ProjectSurfaceMessage::Project(
-                    ProjectMessage::SetHistoryScroll(viewport.absolute_offset().y)
-                ))
-                .height(Length::Fill)
+            crate::scroll_gate::smooth(
+                scrollable(checkpoints)
+                    .on_scroll(|viewport| ProjectSurfaceMessage::Project(
+                        ProjectMessage::SetHistoryScroll(viewport.absolute_offset().y)
+                    ))
+                    .height(Length::Fill)
+            )
         ),
         load_more,
         if history.active_document_filter().is_none() {
@@ -3026,7 +3123,7 @@ fn history_center<'a>(
         maintenance,
         harness_target::target(
             HarnessTarget::HistoryComparison,
-            scrollable(comparison).height(Length::Fill)
+            crate::scroll_gate::smooth(scrollable(comparison).height(Length::Fill))
         ),
         restore,
     ]
@@ -3037,7 +3134,7 @@ fn history_center<'a>(
             .width(280)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        panel_divider(theme),
+        static_divider(theme),
         // center_view already paints the History canvas as Manuscript.
         container(detail)
             .padding(SPACING_24)
@@ -3101,11 +3198,10 @@ fn deleted_center<'a>(
             let using_fallback = item.former_location != item.restore_location;
             let restore_location = restore_location_label(workspace, item.restore_location);
             let content: Element<'a, ProjectSurfaceMessage> = match deleted.selected_preview() {
-                Some(preview) => {
+                Some(preview) => crate::scroll_gate::smooth(
                     scrollable(container(semantic_preview(preview.semantic, theme)).max_width(840))
-                        .height(Length::Fill)
-                        .into()
-                }
+                        .height(Length::Fill),
+                ),
                 None => column![
                     text(if item.preview_document_id.is_none() {
                         "This group has no documents to preview."
@@ -3170,7 +3266,7 @@ fn deleted_center<'a>(
         container(
             column![
                 page_title("Recently Deleted"),
-                scrollable(list).height(Length::Fill),
+                crate::scroll_gate::smooth(scrollable(list).height(Length::Fill)),
             ]
             .spacing(18)
             .height(Length::Fill)
@@ -3530,11 +3626,13 @@ fn export_center<'a>(
         .padding([32, 24])
         .width(Length::Fill)
         .max_width(760);
-    container(scrollable(container(content).center_x(Length::Fill)).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(iced::alignment::Horizontal::Center)
-        .into()
+    container(crate::scroll_gate::smooth(
+        scrollable(container(content).center_x(Length::Fill)).height(Length::Fill),
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(iced::alignment::Horizontal::Center)
+    .into()
 }
 
 fn export_setting_label(setting: parchmint_domain::ProjectExportSetting) -> &'static str {
@@ -3596,7 +3694,7 @@ fn settings_center<'a>(
             .width(280)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
-        panel_divider(theme),
+        static_divider(theme),
         container(crate::motion::enter(
             format!("{category:?}"),
             settings_content(workspace, category, theme, true)
@@ -3763,7 +3861,7 @@ fn settings_content<'a>(
                 );
                 controls = controls.push(entry);
             }
-            scrollable(controls).height(Length::Fill).into()
+            crate::scroll_gate::smooth(scrollable(controls).height(Length::Fill))
         }
         SettingsCategory::Appearance => {
             let choices = settings.appearance_choices().into_iter().fold(
@@ -3809,39 +3907,40 @@ fn settings_content<'a>(
                     )
                 },
             );
-            scrollable(
-                column![
-                    page_title("Appearance"),
-                    container(choices).width(Length::Fill).max_width(540),
-                    row![
-                        components::muted_label("Application zoom"),
-                        pick_list(
-                            ["75%", "90%", "100%", "110%", "125%", "150%"].map(str::to_owned),
-                            Some(format!("{}%", settings.ui_zoom_percent())),
-                            |value: String| ProjectSurfaceMessage::Project(
-                                ProjectMessage::SetUiZoom(
-                                    value.trim_end_matches('%').parse().unwrap_or(100)
+            crate::scroll_gate::smooth(
+                scrollable(
+                    column![
+                        page_title("Appearance"),
+                        container(choices).width(Length::Fill).max_width(540),
+                        row![
+                            components::muted_label("Application zoom"),
+                            pick_list(
+                                ["75%", "90%", "100%", "110%", "125%", "150%"].map(str::to_owned),
+                                Some(format!("{}%", settings.ui_zoom_percent())),
+                                |value: String| ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetUiZoom(
+                                        value.trim_end_matches('%').parse().unwrap_or(100)
+                                    )
                                 )
-                            )
-                        ),
-                        button(text("Reset").size(13)).on_press_maybe(
-                            (settings.ui_zoom_percent() != 100).then_some(
-                                ProjectSurfaceMessage::Project(ProjectMessage::SetUiZoom(100))
-                            )
-                        ),
+                            ),
+                            button(text("Reset").size(13)).on_press_maybe(
+                                (settings.ui_zoom_percent() != 100).then_some(
+                                    ProjectSurfaceMessage::Project(ProjectMessage::SetUiZoom(100))
+                                )
+                            ),
+                        ]
+                        .spacing(12)
+                        .align_y(iced::alignment::Vertical::Center),
+                        iced::widget::checkbox(crate::motion::reduced())
+                            .label("Reduce motion")
+                            .on_toggle(|value| ProjectSurfaceMessage::Project(
+                                ProjectMessage::SetReducedMotion(value)
+                            )),
                     ]
-                    .spacing(12)
-                    .align_y(iced::alignment::Vertical::Center),
-                    iced::widget::checkbox(crate::motion::reduced())
-                        .label("Reduce motion")
-                        .on_toggle(|value| ProjectSurfaceMessage::Project(
-                            ProjectMessage::SetReducedMotion(value)
-                        )),
-                ]
-                .spacing(SPACING_12),
+                    .spacing(SPACING_12),
+                )
+                .height(Length::Fill),
             )
-            .height(Length::Fill)
-            .into()
         }
         SettingsCategory::Metadata => {
             let targets = hierarchy_drag::targets();
@@ -4008,7 +4107,7 @@ fn settings_content<'a>(
                 .into()
             });
             let metadata = hierarchy_drag::surface(
-                scrollable(metadata).height(Length::Fill),
+                crate::scroll_gate::smooth(scrollable(metadata).height(Length::Fill)),
                 targets,
                 settings.metadata_drag_source().is_some(),
                 true,
@@ -4031,19 +4130,24 @@ fn settings_content<'a>(
                         .width(256)
                         .height(Length::Fill),
                     static_divider(theme),
-                    container(column![scrollable(detail).height(Length::Fill)].spacing(10),)
-                        .padding(12)
-                        .width(Length::Fill)
-                        .max_width(920)
-                        .height(Length::Fill)
-                        .style(move |_| {
-                            // The Settings page already paints this entire region as Panel.
-                            if already_on_panel {
-                                iced::widget::container::Style::default()
-                            } else {
-                                components::surface(theme, Surface::Panel, Interaction::Rest)
-                            }
-                        }),
+                    container(
+                        column![crate::scroll_gate::smooth(
+                            scrollable(detail).height(Length::Fill)
+                        )]
+                        .spacing(10),
+                    )
+                    .padding(12)
+                    .width(Length::Fill)
+                    .max_width(920)
+                    .height(Length::Fill)
+                    .style(move |_| {
+                        // The Settings page already paints this entire region as Panel.
+                        if already_on_panel {
+                            iced::widget::container::Style::default()
+                        } else {
+                            components::surface(theme, Surface::Panel, Interaction::Rest)
+                        }
+                    }),
                 ]
                 .spacing(0)
                 .height(Length::Fill),
@@ -4127,15 +4231,13 @@ fn settings_content<'a>(
             .unwrap_or_else(|| components::muted_label("Select a style.").into());
             column![
                 row![
-                    container(scrollable(styles).height(Length::Fill))
-                        .padding(12)
-                        .style(move |_| components::surface(
-                            theme,
-                            Surface::Sidebar,
-                            Interaction::Rest
-                        ))
-                        .width(232)
-                        .height(Length::Fill),
+                    container(crate::scroll_gate::smooth(
+                        scrollable(styles).height(Length::Fill)
+                    ))
+                    .padding(12)
+                    .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest))
+                    .width(232)
+                    .height(Length::Fill),
                     static_divider(theme),
                     container(detail)
                         .padding(12)
@@ -4199,26 +4301,27 @@ fn settings_content<'a>(
                 .size(13)
                 .into()
             } else {
-                scrollable(
-                    matches
-                        .into_iter()
-                        .fold(column![].spacing(6), |column, word| {
-                            column.push(
-                                row![
-                                    text(word).width(Length::Fill).size(14),
-                                    button(text("Remove").size(12)).on_press(
-                                        ProjectSurfaceMessage::Project(
-                                            ProjectMessage::RemoveDictionaryWord(word.clone())
+                crate::scroll_gate::smooth(
+                    scrollable(
+                        matches
+                            .into_iter()
+                            .fold(column![].spacing(6), |column, word| {
+                                column.push(
+                                    row![
+                                        text(word).width(Length::Fill).size(14),
+                                        button(text("Remove").size(12)).on_press(
+                                            ProjectSurfaceMessage::Project(
+                                                ProjectMessage::RemoveDictionaryWord(word.clone())
+                                            )
                                         )
-                                    )
-                                ]
-                                .spacing(8)
-                                .align_y(iced::alignment::Vertical::Center),
-                            )
-                        }),
+                                    ]
+                                    .spacing(8)
+                                    .align_y(iced::alignment::Vertical::Center),
+                                )
+                            }),
+                    )
+                    .height(Length::Fill),
                 )
-                .height(Length::Fill)
-                .into()
             };
             container(
                 column![
@@ -4688,11 +4791,13 @@ fn style_detail<'a>(
     .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest));
     column![
         preview,
-        scrollable(container(content).padding(iced::Padding {
-            right: 16.0,
-            ..iced::Padding::ZERO
-        }))
-        .height(Length::Fill)
+        crate::scroll_gate::smooth(
+            scrollable(container(content).padding(iced::Padding {
+                right: 16.0,
+                ..iced::Padding::ZERO
+            }))
+            .height(Length::Fill)
+        )
     ]
     .spacing(8)
     .height(Length::Fill)
@@ -4788,7 +4893,9 @@ fn recovery_modal<'a>(
             page_title("Unsaved changes found"),
             text("Recover your newer edits, or open the last saved version and discard the unsaved changes.").size(16),
 
-            container(scrollable(summary).width(Length::Fill).spacing(12))
+            container(crate::scroll_gate::smooth(
+                scrollable(summary).width(Length::Fill).spacing(12),
+            ))
                 .max_height(260)
                 .padding(16)
                 .width(Length::Fill)
@@ -4883,13 +4990,14 @@ fn outline_fields<'a>(
         .filter(|item| full || item.visible_on_cards)
         .collect::<Vec<_>>();
     let has_metadata = !metadata_items.is_empty();
-    let group = workspace
-        .explorer()
-        .row(selected)
-        .is_some_and(|row| row.kind == HierarchyRowKind::Group);
+    let expanded_group = full
+        && workspace
+            .explorer()
+            .row(selected)
+            .is_some_and(|row| row.kind == HierarchyRowKind::Group);
     let metadata_columns =
-        crate::cards_layout::metadata_columns(width, group, metadata_items.len());
-    let field_width = crate::cards_layout::metadata_width(width, group, metadata_columns);
+        crate::cards_layout::metadata_columns(width, expanded_group, metadata_items.len());
+    let field_width = crate::cards_layout::metadata_width(width, expanded_group, metadata_columns);
     let metadata = metadata_items
         .into_iter()
         .map(|item| {
@@ -5026,7 +5134,7 @@ fn outline_fields<'a>(
     );
     let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
     if has_metadata {
-        if group {
+        if expanded_group {
             let metadata_width =
                 field_width * metadata_columns as f32 + (metadata_columns - 1) as f32 * 8.0;
             row![
@@ -5086,22 +5194,37 @@ fn inspector<'a>(
             let thread_id = thread.id().to_owned();
             let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
             if selected_thread {
-                comments = comments.push(
-                    container(
-                        crate::iced_editor_surface::comment_thread_card(
-                            "",
-                            comment_anchor_summary(thread.anchor()),
-                            thread,
-                            editor,
-                            theme,
+                let mut selected_content = column![].spacing(8);
+                if let Some(document_choices) = &document_choices {
+                    selected_content = selected_content.push(
+                        text(
+                            document_choices
+                                .iter()
+                                .find(|(id, _)| *id == thread.document_id())
+                                .map_or("Document", |(_, title)| *title)
+                                .to_owned(),
                         )
-                        .map(ProjectSurfaceMessage::EditorCenter),
+                        .size(12)
+                        .color(theme.palette().secondary_text),
+                    );
+                }
+                selected_content = selected_content.push(
+                    crate::iced_editor_surface::comment_thread_card(
+                        "",
+                        comment_anchor_summary(thread.anchor()),
+                        thread,
+                        editor,
+                        theme,
                     )
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(move |_| {
-                        components::surface(theme, Surface::Panel, Interaction::Selected)
-                    }),
+                    .map(ProjectSurfaceMessage::EditorCenter),
+                );
+                comments = comments.push(
+                    container(selected_content)
+                        .padding(8)
+                        .width(Length::Fill)
+                        .style(move |_| {
+                            components::surface(theme, Surface::Panel, Interaction::Rest)
+                        }),
                 );
                 continue;
             }
@@ -5111,7 +5234,9 @@ fn inspector<'a>(
                 .map_or("Comment", crate::CommentMessageView::body);
             let summary = row![
                 column![
-                    text(root_body).size(u32::from(UI_BODY.size)),
+                    container(text(root_body).size(u32::from(UI_BODY.size)))
+                        .height(44)
+                        .clip(true),
                     text(if let Some(document_choices) = &document_choices {
                         format!(
                             "{} · {}",
@@ -5184,9 +5309,12 @@ fn inspector<'a>(
         } else {
             comments
         };
-        column![title, scrollable(sections).height(Length::Fill),]
-            .spacing(12)
-            .height(Length::Fill)
+        column![
+            title,
+            crate::scroll_gate::smooth(scrollable(sections).height(Length::Fill)),
+        ]
+        .spacing(12)
+        .height(Length::Fill)
     } else {
         column![
             components::muted_label("Comments"),
@@ -6126,7 +6254,7 @@ mod tests {
                 item.row_height(group.width)
             );
             assert!(first.y >= group.y + group.height);
-            assert!(first.width >= 260.0);
+            assert!(first.width >= 230.0);
             assert!(second.x + second.width <= width - SPACING_16);
             if crate::cards_layout::column_count(width - 44.0) > 1 {
                 assert_eq!(second.y, first.y);
@@ -6200,10 +6328,7 @@ mod tests {
             field_id: "field-17".into(),
             value: value.clone(),
         });
-        assert_eq!(
-            workspace.cards().item_window(2, 792.0).rows[1].height,
-            before
-        );
+        assert!(workspace.cards().item_window(2, 792.0).rows[1].height >= before);
         for (width, appearance) in [
             (420.0, ResolvedAppearance::Light),
             (840.0, ResolvedAppearance::Light),
@@ -6688,7 +6813,7 @@ mod tests {
             workspace.editor().selected_comment(),
             Some(selected_id.as_str())
         );
-        assert_eq!(
+        assert_ne!(
             workspace.editor().inspector_comments()[0].id(),
             selected_id.as_str()
         );

@@ -1109,8 +1109,9 @@ impl<'a> CardsState<'a> {
                     return false;
                 }
                 let first = &self.explorer.nodes[ids[row.start]];
-                node.kind == HierarchyNodeKind::Document
-                    && first.kind == HierarchyNodeKind::Document
+                !(node.kind == HierarchyNodeKind::Group && item.expanded)
+                    && !(first.kind == HierarchyNodeKind::Group
+                        && self.expanded.contains(ids[row.start]))
                     && node.parent == first.parent
                     && row.end - row.start < columns.max(1)
             });
@@ -1152,7 +1153,8 @@ impl<'a> CardsState<'a> {
                 && previous.end > previous.start
                 && previous.end - previous.start < columns.max(1)
                 && let Some(first) = self.explorer.nodes.get(ids[previous.start])
-                && first.kind == HierarchyNodeKind::Document
+                && !(first.kind == HierarchyNodeKind::Group
+                    && self.expanded.contains(ids[previous.start]))
                 && first.parent.as_ref() == Some(parent)
             {
                 previous.add_to = row.add_to;
@@ -1167,7 +1169,7 @@ impl<'a> CardsState<'a> {
                 .as_deref()
                 .is_some_and(|id| id != self.section_id)
             {
-                row.height += crate::cards_layout::GROUP_GAP + 12.0;
+                row.height += crate::cards_layout::GROUP_GAP + 8.0;
             }
         }
         let mut offsets = Vec::with_capacity(compact.len() + 1);
@@ -1296,8 +1298,11 @@ impl<'a> CardsState<'a> {
                 })
             })
             .collect();
-        let details_expanded =
-            node.kind == HierarchyNodeKind::Group || self.details_expanded.contains(node_id);
+        let details_expanded = if node.kind == HierarchyNodeKind::Group {
+            self.expanded.contains(node_id)
+        } else {
+            self.details_expanded.contains(node_id)
+        };
         let has_hidden_metadata = !details_expanded
             && metadata_with_visibility
                 .iter()
@@ -11132,7 +11137,7 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_groups_keep_full_details_without_revealing_children() {
+    fn collapsed_groups_hide_extra_details_and_children() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
         let items = workspace.cards().items();
@@ -11141,7 +11146,7 @@ mod tests {
             .find(|item| item.node_id == "part-one")
             .unwrap();
         assert!(!group.expanded);
-        assert!(group.details_expanded);
+        assert!(!group.details_expanded);
         assert!(
             items
                 .iter()
@@ -11258,7 +11263,7 @@ mod tests {
 
         let viewport = workspace.cards().viewport_window(5, 1840.0, 800.0);
         let old_window = workspace.cards().item_window(5, 1840.0);
-        assert!(viewport.rows.len() < 16);
+        assert!(viewport.rows.len() < 30);
         assert!(viewport.end - viewport.start < old_window.end - old_window.start);
         let total =
             viewport.rows.iter().map(|row| row.height).sum::<f32>() + viewport.bottom_padding;

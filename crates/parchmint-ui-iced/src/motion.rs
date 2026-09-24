@@ -760,6 +760,15 @@ impl Positions {
             .expect("motion positions")
             .retain(|id, _| ids.contains(&id.as_str()));
     }
+
+    pub(crate) fn vertical_offset(&self, id: &str, now: Instant) -> f32 {
+        self.0
+            .lock()
+            .expect("motion positions")
+            .get(id)
+            .map(|place| place.y.value(now) - place.target.y)
+            .unwrap_or(0.0)
+    }
 }
 pub(crate) fn reflow<'a, Message: 'a>(
     positions: Positions,

@@ -314,6 +314,9 @@ struct SurfaceState {
     last_click: Option<SurfaceClick>,
     hovered_comment: Option<String>,
     hovered_link: Option<String>,
+    caret_visible: bool,
+    next_caret_blink: Option<Instant>,
+    pending_scroll_y: f32,
 }
 
 #[derive(Default)]
@@ -424,6 +427,9 @@ impl Default for SurfaceState {
             last_click: None,
             hovered_comment: None,
             hovered_link: None,
+            caret_visible: true,
+            next_caret_blink: None,
+            pending_scroll_y: 0.0,
         }
     }
 }
@@ -431,6 +437,16 @@ impl Default for SurfaceState {
 impl SurfaceState {
     const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
     const MULTI_CLICK_DISTANCE_SQUARED: f32 = 64.0;
+
+    fn next_scroll_step(&mut self) -> f32 {
+        let step = if self.pending_scroll_y.abs() < 1.0 {
+            self.pending_scroll_y
+        } else {
+            self.pending_scroll_y * 0.35
+        };
+        self.pending_scroll_y -= step;
+        step
+    }
 
     fn register_left_click(&mut self, position: Point) -> u8 {
         let now = Instant::now();
@@ -468,7 +484,41 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
         cursor: mouse::Cursor,
     ) -> Option<Action<MountedEditorMessage>> {
         let mut content = self.content();
+        let became_focused = content.focused && !state.focused;
         state.focused = content.focused;
+        if !content.focused
+            || !content.selection.is_collapsed()
+            || became_focused
+            || matches!(
+                event,
+                iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+                    | iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
+            )
+        {
+            state.caret_visible = true;
+            state.next_caret_blink = None;
+        }
+        if let iced::Event::Window(iced::window::Event::RedrawRequested(_)) = event
+            && state.pending_scroll_y.abs() > f32::EPSILON
+        {
+            return Some(Action::publish(MountedEditorMessage::Scroll {
+                delta_y: state.next_scroll_step(),
+                viewport: viewport_from_bounds(bounds)?,
+            }));
+        }
+        if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event
+            && content.focused
+            && content.selection.is_collapsed()
+        {
+            let next = state
+                .next_caret_blink
+                .get_or_insert(*now + Duration::from_millis(530));
+            if *now >= *next {
+                state.caret_visible = !state.caret_visible;
+                *next = *now + Duration::from_millis(530);
+            }
+            return Some(Action::request_redraw_at(*next));
+        }
         if matches!(
             event,
             iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
@@ -586,8 +636,14 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
                 let delta_y = match delta {
-                    mouse::ScrollDelta::Lines { y, .. } => -*y * 60.0,
-                    mouse::ScrollDelta::Pixels { y, .. } => -*y,
+                    mouse::ScrollDelta::Lines { y, .. } => {
+                        state.pending_scroll_y += -*y * 60.0;
+                        state.next_scroll_step()
+                    }
+                    mouse::ScrollDelta::Pixels { y, .. } => {
+                        state.pending_scroll_y = 0.0;
+                        -*y
+                    }
                 };
                 Some(
                     Action::publish(MountedEditorMessage::Scroll {
@@ -813,7 +869,7 @@ impl EditorSurface {
     }
 
     fn draws_focused_caret(&self, _state: &SurfaceState, content: &SurfaceContent) -> bool {
-        content.focused
+        content.focused && content.selection.is_collapsed() && _state.caret_visible
     }
 }
 
@@ -2546,6 +2602,70 @@ mod tests {
         assert_eq!(message, Some(MountedEditorMessage::Blur));
         assert!(!state.focused);
         assert!(!content.lock().expect("content").focused);
+    }
+
+    #[test]
+    fn focused_caret_blinks_and_keyboard_input_restores_it() {
+        let viewport = EditorViewport::new(200.0, 80.0).unwrap();
+        let geometry = BlockLayoutGeometry::build(
+            &VisibleEditorBlock::new(BlockId::from_bytes([54; 16]), "abc", 0.into()),
+            viewport,
+            0.0,
+            crate::EditorLayoutMetrics::default(),
+            None,
+        )
+        .unwrap();
+        let surface = EditorSurface {
+            content: Arc::new(Mutex::new(SurfaceContent {
+                geometry,
+                selection: EditorSelection::new(0.into(), 0.into()),
+                focused: true,
+                viewport,
+                theme: EditorSurfaceTheme::light(),
+                spellcheck: Vec::new(),
+                comments: Vec::new(),
+            })),
+            paint_background: true,
+        };
+        let mut state = SurfaceState::default();
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(200.0, 80.0));
+        let start = Instant::now();
+        canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(start)),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(surface.draws_focused_caret(&state, &surface.content()));
+        canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(
+                start + Duration::from_millis(530),
+            )),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(!surface.draws_focused_caret(&state, &surface.content()));
+        canvas::Program::update(
+            &surface,
+            &mut state,
+            &iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character("a".into()),
+                modified_key: keyboard::Key::Character("a".into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::NONE,
+                text: Some("a".into()),
+                repeat: false,
+            }),
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(surface.draws_focused_caret(&state, &surface.content()));
     }
 
     #[test]

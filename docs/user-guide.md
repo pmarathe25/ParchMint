@@ -163,8 +163,8 @@ card visibility. New fields start in the hidden section. Expanded cards show all
 
 Select text, then click the speech-bubble-plus icon (**Add comment**) in the small
 toolbar below the selection. You can also use **Add Comment** in the editor context
-menu or its keyboard shortcut at a selection or cursor. The card beside the text supports
-replies, message edits and deletion, resolving or reopening, and thread deletion.
+menu or its keyboard shortcut at a selection or cursor. Hover a commented passage
+for a short preview; **Open thread** reveals the full conversation in the Comments panel.
 **Enter** adds a new comment; **Shift+Enter** or **Alt+Enter** inserts a line break.
 Link and comment popovers stay beside their text. Hovered link destinations appear
 in the status bar; document links show their `>`-separated location.
@@ -289,7 +289,8 @@ standard field navigation remain available. The table below lists common default
 | Create a project | Ctrl+N | Command+N |
 | Open a project | Ctrl+O | Command+O |
 | Save | Ctrl+S | Command+S |
-| Close the current window | Ctrl+W | Command+W |
+| Close the current editor tab | Ctrl+W | Command+W |
+| Close the current window | Ctrl+Shift+W | Command+Shift+W |
 | Undo | Ctrl+Z | Command+Z |
 | Redo | Ctrl+Y | Command+Shift+Z |
 | Local Find | Ctrl+F | Command+F |

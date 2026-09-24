@@ -1489,6 +1489,7 @@ pub struct EditorWorkspace {
     comment_threads: BTreeMap<String, CommentThreadView>,
     group_comment_documents: BTreeSet<String>,
     hovered_comment: Option<CommentHover>,
+    pointer_selection_active: bool,
     pub(crate) hovered_link: Option<String>,
     comment_actions_open: bool,
     comment_composer: Option<CommentComposer>,
@@ -1496,6 +1497,7 @@ pub struct EditorWorkspace {
     comment_draft: text_editor::Content,
     comment_reply_drafts: BTreeMap<String, text_editor::Content>,
     editing_comment_message: Option<(String, String)>,
+    comment_edit_draft: text_editor::Content,
     collapsed_comment_replies: BTreeSet<String>,
     pending_delete_comment: Option<String>,
     comment_feedback: Option<String>,
@@ -1710,6 +1712,7 @@ impl EditorWorkspace {
             comment_threads: BTreeMap::new(),
             group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
+            pointer_selection_active: false,
             hovered_link: None,
             comment_actions_open: false,
             comment_composer: None,
@@ -1717,6 +1720,7 @@ impl EditorWorkspace {
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
+            comment_edit_draft: text_editor::Content::new(),
             collapsed_comment_replies: BTreeSet::new(),
             pending_delete_comment: None,
             comment_feedback: None,
@@ -1823,6 +1827,7 @@ impl EditorWorkspace {
             comment_threads: snapshot_comment_threads(snapshot),
             group_comment_documents: BTreeSet::new(),
             hovered_comment: None,
+            pointer_selection_active: false,
             hovered_link: None,
             comment_actions_open: false,
             comment_composer: None,
@@ -1830,6 +1835,7 @@ impl EditorWorkspace {
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
+            comment_edit_draft: text_editor::Content::new(),
             collapsed_comment_replies: BTreeSet::new(),
             pending_delete_comment: None,
             comment_feedback: None,
@@ -1947,6 +1953,7 @@ impl EditorWorkspace {
             })
         {
             self.editing_comment_message = None;
+            self.comment_edit_draft = text_editor::Content::new();
         }
         if matches!(
             &self.inspector,
@@ -2172,8 +2179,7 @@ impl EditorWorkspace {
     }
 
     pub fn inspector_comments(&self) -> Vec<&CommentThreadView> {
-        let mut threads = self
-            .comment_threads
+        self.comment_threads
             .values()
             .filter(|thread| match &self.inspector {
                 InspectorContext::Document { document_id } => &thread.document_id == document_id,
@@ -2182,10 +2188,7 @@ impl EditorWorkspace {
                 }
                 InspectorContext::None => false,
             })
-            .collect::<Vec<_>>();
-        let selected = self.selected_comment.as_deref();
-        threads.sort_by_key(|thread| selected != Some(thread.id()));
-        threads
+            .collect::<Vec<_>>()
     }
 
     /// Number of comment threads currently shown by the Inspector.
@@ -2223,6 +2226,14 @@ impl EditorWorkspace {
         })
     }
 
+    pub(crate) fn set_pointer_selection_active(&mut self, active: bool) {
+        self.pointer_selection_active = active;
+    }
+
+    pub(crate) fn pointer_selection_active(&self) -> bool {
+        self.pointer_selection_active
+    }
+
     pub(crate) fn comment_composer(&self, pane: EditorPane) -> Option<CommentComposer> {
         self.comment_composer
             .filter(|composer| composer.pane() == pane)
@@ -2247,11 +2258,29 @@ impl EditorWorkspace {
     pub(crate) fn complete_comment_command(&mut self, command: &EditorCommand) {
         match command {
             EditorCommand::CreateComment { .. } => self.complete_comment_creation(),
-            EditorCommand::ReplyToComment { thread_id, .. }
-            | EditorCommand::EditCommentMessage { thread_id, .. } => {
-                self.comment_reply_drafts
-                    .insert(thread_id.clone(), text_editor::Content::new());
-                self.editing_comment_message = None;
+            EditorCommand::ReplyToComment { thread_id, body } => {
+                if self
+                    .comment_reply_drafts
+                    .get(thread_id)
+                    .is_some_and(|draft| draft.text().trim() == body)
+                {
+                    self.comment_reply_drafts
+                        .insert(thread_id.clone(), text_editor::Content::new());
+                }
+                self.comment_feedback = None;
+            }
+            EditorCommand::EditCommentMessage {
+                thread_id,
+                message_id,
+                body,
+            } => {
+                if self.editing_comment_message.as_ref()
+                    == Some(&(thread_id.clone(), message_id.clone()))
+                    && self.comment_edit_draft.text().trim() == body
+                {
+                    self.editing_comment_message = None;
+                    self.comment_edit_draft = text_editor::Content::new();
+                }
                 self.comment_feedback = None;
             }
             _ => {}
@@ -2324,6 +2353,7 @@ impl EditorWorkspace {
             })
         {
             self.editing_comment_message = None;
+            self.comment_edit_draft = text_editor::Content::new();
         }
         if self
             .pending_delete_comment
@@ -2340,6 +2370,9 @@ impl EditorWorkspace {
     }
     pub fn comment_reply_draft(&self, thread: &str) -> Option<&text_editor::Content> {
         self.comment_reply_drafts.get(thread)
+    }
+    pub fn comment_edit_draft(&self) -> &text_editor::Content {
+        &self.comment_edit_draft
     }
     pub fn editing_comment_message(&self) -> Option<(&str, &str)> {
         self.editing_comment_message
@@ -2993,16 +3026,32 @@ impl EditorWorkspace {
                 Vec::new()
             }
             EditorMessage::SetCommentReplyDraft { thread_id, body } => {
-                self.comment_reply_drafts
-                    .insert(thread_id, text_editor::Content::with_text(&body));
+                if self
+                    .editing_comment_message
+                    .as_ref()
+                    .is_some_and(|(thread, _)| thread == &thread_id)
+                {
+                    self.comment_edit_draft = text_editor::Content::with_text(&body);
+                } else {
+                    self.comment_reply_drafts
+                        .insert(thread_id, text_editor::Content::with_text(&body));
+                }
                 self.comment_feedback = None;
                 Vec::new()
             }
             EditorMessage::EditCommentReplyDraft { thread_id, action } => {
-                self.comment_reply_drafts
-                    .entry(thread_id)
-                    .or_default()
-                    .perform(action);
+                if self
+                    .editing_comment_message
+                    .as_ref()
+                    .is_some_and(|(thread, _)| thread == &thread_id)
+                {
+                    self.comment_edit_draft.perform(action);
+                } else {
+                    self.comment_reply_drafts
+                        .entry(thread_id)
+                        .or_default()
+                        .perform(action);
+                }
                 self.comment_feedback = None;
                 Vec::new()
             }
@@ -3067,8 +3116,7 @@ impl EditorWorkspace {
                 body,
             } => {
                 self.comment_actions_open = false;
-                self.comment_reply_drafts
-                    .insert(thread_id.clone(), text_editor::Content::with_text(&body));
+                self.comment_edit_draft = text_editor::Content::with_text(&body);
                 self.editing_comment_message = Some((thread_id, message_id));
                 self.comment_feedback = None;
                 Vec::new()
@@ -3083,12 +3131,7 @@ impl EditorWorkspace {
                     self.comment_feedback = Some("Comment edit is stale.".into());
                     return Vec::new();
                 }
-                let body = self
-                    .comment_reply_drafts
-                    .get(&thread_id)
-                    .map(|body| body.text())
-                    .map(|body| body.trim().to_owned())
-                    .unwrap_or_default();
+                let body = self.comment_edit_draft.text().trim().to_owned();
                 if body.is_empty() {
                     self.comment_feedback = Some("Comment text is required.".into());
                     Vec::new()
@@ -3101,10 +3144,8 @@ impl EditorWorkspace {
                 }
             }
             EditorMessage::CancelEditCommentMessage => {
-                if let Some((thread, _)) = self.editing_comment_message.take() {
-                    self.comment_reply_drafts
-                        .insert(thread, text_editor::Content::new());
-                }
+                self.editing_comment_message = None;
+                self.comment_edit_draft = text_editor::Content::new();
                 self.comment_feedback = None;
                 Vec::new()
             }
@@ -4459,6 +4500,63 @@ mod tests {
     }
 
     #[test]
+    fn editing_a_comment_preserves_an_unsent_reply_and_newer_input() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "thread".into(),
+            body: "Keep this reply".into(),
+        });
+        workspace.update(EditorMessage::BeginEditCommentMessage {
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            body: "Original".into(),
+        });
+        assert_eq!(
+            workspace.comment_reply_draft("thread").unwrap().text(),
+            "Keep this reply"
+        );
+        assert_eq!(workspace.comment_edit_draft().text(), "Original");
+        workspace.update(EditorMessage::CancelEditCommentMessage);
+        assert_eq!(
+            workspace.comment_reply_draft("thread").unwrap().text(),
+            "Keep this reply"
+        );
+
+        workspace.update(EditorMessage::BeginEditCommentMessage {
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            body: "Original".into(),
+        });
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "thread".into(),
+            body: "Edited".into(),
+        });
+        workspace.complete_comment_command(&EditorCommand::EditCommentMessage {
+            thread_id: "thread".into(),
+            message_id: "message".into(),
+            body: "Edited".into(),
+        });
+        assert_eq!(
+            workspace.comment_reply_draft("thread").unwrap().text(),
+            "Keep this reply"
+        );
+        assert_eq!(workspace.editing_comment_message(), None);
+
+        workspace.update(EditorMessage::SetCommentReplyDraft {
+            thread_id: "thread".into(),
+            body: "Newer reply".into(),
+        });
+        workspace.complete_comment_command(&EditorCommand::ReplyToComment {
+            thread_id: "thread".into(),
+            body: "Keep this reply".into(),
+        });
+        assert_eq!(
+            workspace.comment_reply_draft("thread").unwrap().text(),
+            "Newer reply"
+        );
+    }
+
+    #[test]
     fn manuscript_comment_keeps_its_target_when_research_receives_focus() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let manuscript_view = workspace.pane(EditorPane::Primary).view();
@@ -4655,7 +4753,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_comment_is_first_in_its_inspector_and_clears_only_when_removed() {
+    fn selecting_a_comment_keeps_the_inspector_order_stable_until_removed() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         let first = parchmint_editor_api::CommentId::from_bytes([1; 16]);
         let selected = parchmint_editor_api::CommentId::from_bytes([2; 16]);
@@ -4686,7 +4784,7 @@ mod tests {
                 .into_iter()
                 .map(|thread| thread.id())
                 .collect::<Vec<_>>(),
-            [selected_id.as_str(), first_id.as_str()]
+            [first_id.as_str(), selected_id.as_str()]
         );
 
         workspace.reconcile_document_comments("chapter-one", &comments);

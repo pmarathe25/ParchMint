@@ -9,11 +9,12 @@ use iced::advanced::{
 use iced::widget::container;
 use iced::{Element, Event, Length, Padding, Point, Rectangle, Size, Vector};
 
-const DELAY: Duration = Duration::from_millis(600);
+const DELAY: Duration = Duration::from_millis(450);
 const PADDING: f32 = 5.0;
+const HOVER_SLOP_SQUARED: f32 = 25.0;
 
-/// Wraps an icon-only control in a compact tooltip. The pointer must remain
-/// still for a short interval; moving it hides the bubble until it re-enters.
+/// Wraps a control in a compact tooltip. A brief stable hover opens it, and
+/// small pointer movements do not dismiss it.
 pub(crate) fn tooltip<'a, Message>(
     content: impl Into<Element<'a, Message>>,
     bubble: impl Into<Element<'a, Message>>,
@@ -142,7 +143,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
                         point: previous, ..
                     },
                     Some(point),
-                ) if point != previous => {
+                ) if (point.x - previous.x).powi(2) + (point.y - previous.y).powi(2)
+                    > HOVER_SLOP_SQUARED =>
+                {
                     *state = State::Hovered { at: now, point };
                     shell.request_redraw_at(now + DELAY);
                 }
@@ -155,13 +158,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
                     *state = State::Open { point };
                     shell.invalidate_layout();
                 }
-                (State::Open { point: previous }, Some(point)) if point != previous => {
-                    *state = State::Suppressed;
-                    shell.invalidate_layout();
-                }
-                (State::Open { .. }, Some(_))
-                | (State::Suppressed, Some(_))
-                | (State::Idle, None) => {}
+                (State::Open { .. }, Some(_)) => {}
+                (State::Suppressed, Some(_)) | (State::Idle, None) => {}
             }
         }
         self.content.as_widget_mut().update(

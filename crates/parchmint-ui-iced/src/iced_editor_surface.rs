@@ -283,18 +283,34 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
             .unwrap_or_default(),
     );
     let splitter = mouse_area(
-        container(
-            container(Space::new().width(1).height(Length::Fill)).style(move |_| {
-                iced::widget::container::Style {
-                    background: Some(theme.palette().divider.into()),
-                    ..Default::default()
-                }
-            }),
-        )
+        stack![
+            column![
+                container(Space::new())
+                    .width(8)
+                    .height(32)
+                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+                container(Space::new())
+                    .width(8)
+                    .height(Length::Fill)
+                    .style(move |_| {
+                        components::surface(theme, Surface::Manuscript, Interaction::Rest)
+                    }),
+            ]
+            .spacing(0),
+            container(
+                container(Space::new().width(1).height(Length::Fill)).style(move |_| {
+                    iced::widget::container::Style {
+                        background: Some(theme.palette().divider.into()),
+                        ..Default::default()
+                    }
+                }),
+            )
+            .width(8)
+            .height(Length::Fill)
+            .align_x(Horizontal::Center),
+        ]
         .width(8)
-        .height(Length::Fill)
-        .align_x(Horizontal::Center)
-        .style(move |_| components::surface(theme, Surface::Manuscript, Interaction::Rest)),
+        .height(Length::Fill),
     )
     .on_press(EditorCenterMessage::BeginSplitResize)
     .interaction(iced::mouse::Interaction::ResizingHorizontally);
@@ -919,9 +935,19 @@ fn toolbar_tooltip(
     label: &'static str,
     theme: ParchMintTheme,
 ) -> Element<'static, EditorCenterMessage> {
+    let command = match label {
+        "Bold" => "format.bold",
+        "Italic" => "format.italic",
+        "Underline" => "format.underline",
+        "Strikethrough" => "format.strikethrough",
+        "Link" => "format.link",
+        "Block quote" => "format.quote",
+        "Add comment" => "format.comment",
+        _ => "",
+    };
     stationary_tooltip::tooltip(
         control,
-        container(text(label).size(12)).padding([4, 6]),
+        container(text(components::tooltip_label(label, command)).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
 }
@@ -1139,7 +1165,11 @@ fn editor_pane_surface<'a>(
     } else {
         body
     };
-    let body = if workspace.focused_pane() == pane
+    // Keep the Canvas at the same widget-tree path as a selection grows.
+    // Replacing `body` with a Stack only after the first selected character
+    // remounts its pointer state and ends the drag at that character.
+    let selection_actions: Element<'a, EditorCenterMessage> = if workspace.focused_pane() == pane
+        && !workspace.pointer_selection_active()
         && workspace.comment_composer(pane).is_none()
         && !workspace.link_editor().is_open()
         && spelling_menu.is_none()
@@ -1172,26 +1202,24 @@ fn editor_pane_surface<'a>(
             ),
         ]
         .spacing(2);
-        stack![
-            body,
-            container(opaque(container(actions).padding(3).style(move |_| {
-                components::surface(theme, Surface::Elevated, Interaction::Rest)
-            })))
-            .padding(iced::Padding {
-                top: anchor.y + anchor.height + 4.0,
-                left: anchor.x.max(4.0),
-                right: 0.0,
-                bottom: 0.0
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(Horizontal::Left)
-            .align_y(Vertical::Top)
-        ]
+        container(opaque(container(actions).padding(3).style(move |_| {
+            components::surface(theme, Surface::Elevated, Interaction::Rest)
+        })))
+        .padding(iced::Padding {
+            top: anchor.y + anchor.height + 4.0,
+            left: anchor.x.max(4.0),
+            right: 0.0,
+            bottom: 0.0,
+        })
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Horizontal::Left)
+        .align_y(Vertical::Top)
         .into()
     } else {
-        body
+        Space::new().width(0).height(0).into()
     };
+    let body = stack![body, selection_actions].into();
     let hovered_thread = workspace.hovered_comment(pane).and_then(|hover| {
         workspace
             .comment_thread(hover.comment_id())
@@ -1199,9 +1227,7 @@ fn editor_pane_surface<'a>(
     });
     let body = match (workspace.comment_composer(pane), hovered_thread) {
         (Some(composer), _) => comment_composer_overlay(body, composer, workspace, theme),
-        (None, Some((hover, thread))) => {
-            comment_hover_overlay(body, &hover, &thread, workspace, theme)
-        }
+        (None, Some((hover, thread))) => comment_hover_overlay(body, &hover, &thread, theme),
         (None, None) => body,
     };
     let body = if workspace.link_editor().is_open() && workspace.focused_pane() == pane {
@@ -1305,7 +1331,6 @@ fn comment_hover_overlay<'a>(
     content: Element<'a, EditorCenterMessage>,
     hover: &crate::CommentHover,
     thread: &crate::CommentThreadView,
-    workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let quote = match thread.anchor() {
@@ -1314,8 +1339,48 @@ fn comment_hover_overlay<'a>(
         | crate::CommentAnchor::Orphaned { quote, .. } => quote.clone(),
         crate::CommentAnchor::Document { .. } => "Whole document".to_owned(),
     };
-    let card = comment_thread_card("", quote, thread, workspace, theme);
-    anchored_comment_overlay(content, hover.anchor_bounds(), card, true, theme)
+    let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = thread
+        .messages()
+        .first()
+        .map_or("Comment", crate::CommentMessageView::body)
+        .to_owned();
+    let replies = thread.messages().len().saturating_sub(1);
+    let card = column![
+        text(if thread.resolved() {
+            "Resolved comment"
+        } else {
+            "Comment"
+        })
+        .size(12)
+        .color(theme.palette().secondary_text),
+        container(text(quote).size(12).color(theme.palette().secondary_text))
+            .height(36)
+            .clip(true),
+        container(text(body).size(14).width(Length::Fill))
+            .height(62)
+            .clip(true),
+        row![
+            text(if replies == 1 {
+                "1 reply".to_owned()
+            } else {
+                format!("{replies} replies")
+            })
+            .size(12)
+            .color(theme.palette().secondary_text),
+            Space::new().width(Length::Fill),
+            comment_popover_action(
+                "Open thread",
+                EditorCenterMessage::Workspace(EditorMessage::SelectComment(
+                    thread.id().to_owned()
+                )),
+                theme,
+            ),
+        ]
+        .align_y(Vertical::Center),
+    ]
+    .spacing(8);
+    anchored_comment_overlay(content, hover.anchor_bounds(), card.into(), true, theme)
 }
 
 fn comment_key_binding(
@@ -1340,6 +1405,10 @@ fn comment_composer_overlay<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let mut card = column![
+        text("New comment").size(16).font(iced::Font {
+            weight: iced::font::Weight::Semibold,
+            ..iced::Font::DEFAULT
+        }),
         text_editor(workspace.comment_draft())
             .id(HarnessTarget::CommentDraft.id())
             .key_binding(|press| comment_key_binding(
@@ -1354,6 +1423,9 @@ fn comment_composer_overlay<'a>(
             })
             .height(Length::Fixed(76.0))
             .style(move |_, status| multiline_field_style(theme, status)),
+        text("Enter adds · Shift+Enter new line")
+            .size(11)
+            .color(theme.palette().secondary_text),
         row![
             Space::new().width(Length::Fill),
             comment_popover_action(
@@ -1392,24 +1464,30 @@ pub(crate) fn comment_thread_card<'a>(
     let thread_id = thread.id().to_owned();
     let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut card = column![
+        container(
+            text(format!("“{quote}”"))
+                .size(12)
+                .color(theme.palette().secondary_text)
+                .width(Length::Fill),
+        )
+        .height(38)
+        .clip(true),
         row![
-            container(text(quote).size(12).color(theme.palette().secondary_text))
-                .padding([4, 8])
-                .width(Length::Fill)
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(theme.palette().comment_active.scale_alpha(0.10).into()),
-                    border: iced::Border {
-                        radius: 4.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }),
-            text(if thread.resolved() { "Resolved" } else { "" })
-                .size(11)
-                .color(theme.palette().comment_resolved),
+            text(if thread.resolved() {
+                "Resolved"
+            } else {
+                "Open"
+            })
+            .size(11)
+            .color(theme.palette().comment_resolved),
+            Space::new().width(Length::Fill),
             stationary_tooltip::tooltip(
                 comment_popover_action(
-                    if thread.resolved() { "↶" } else { "✓" },
+                    if thread.resolved() {
+                        "Reopen"
+                    } else {
+                        "Resolve"
+                    },
                     EditorCenterMessage::Workspace(EditorMessage::ToggleCommentResolved {
                         thread_id: thread_id.clone(),
                         resolved: !thread.resolved(),
@@ -1424,22 +1502,60 @@ pub(crate) fn comment_thread_card<'a>(
                 .size(12),
                 components::surface(theme, Surface::Elevated, Interaction::Rest),
             ),
+            crate::action_menu::notifying_menu(
+                button(text("⋮").size(20))
+                    .padding([0, 7])
+                    .on_press(())
+                    .style(move |_, status| components::button_style(
+                        theme,
+                        ButtonKind::Quiet,
+                        button_interaction(status, false)
+                    ))
+                    .into(),
+                vec![(
+                    "Delete thread".into(),
+                    EditorCenterMessage::Workspace(EditorMessage::RequestDeleteCommentThread(
+                        thread_id.clone()
+                    )),
+                )],
+                theme,
+                168.0,
+                |open| EditorCenterMessage::Workspace(EditorMessage::SetCommentActionsOpen(open)),
+            ),
         ]
         .spacing(6)
         .align_y(Vertical::Center),
     ]
-    .spacing(5);
+    .spacing(8);
+
+    let reply_count = thread.messages().len().saturating_sub(1);
+    if reply_count > 0 {
+        let collapsed = workspace.comment_replies_collapsed(&thread_id);
+        card = card.push(comment_popover_action(
+            if collapsed {
+                format!("Show {reply_count} replies")
+            } else {
+                "Hide replies".to_owned()
+            },
+            EditorCenterMessage::Workspace(EditorMessage::ToggleCommentReplies {
+                thread_id: thread_id.clone(),
+                collapsed: !collapsed,
+            }),
+            theme,
+        ));
+    }
 
     for (message_index, message) in thread.messages().iter().enumerate() {
+        if message_index > 0 && workspace.comment_replies_collapsed(&thread_id) {
+            continue;
+        }
         let message_id = message.id().to_owned();
         if workspace.editing_comment_message() == Some((thread_id.as_str(), message_id.as_str())) {
             let edit_thread = thread_id.clone();
             card = card
                 .push(
                     text_editor(
-                        workspace
-                            .comment_reply_draft(&thread_id)
-                            .expect("every rendered comment thread has an edit draft"),
+                        workspace.comment_edit_draft(),
                     )
                     .id(HarnessTarget::CommentEdit.id())
                     .key_binding({
@@ -1486,7 +1602,7 @@ pub(crate) fn comment_thread_card<'a>(
             let body = message.body().to_owned();
             card = card.push(
                 row![
-                    text(message.body().to_owned()).size(13).width(Length::Fill),
+                    text(message.body().to_owned()).size(14).width(Length::Fill),
                     harness_target::target(
                         HarnessTarget::CommentMenu(message_index),
                         crate::action_menu::notifying_menu(
@@ -1519,12 +1635,6 @@ pub(crate) fn comment_thread_card<'a>(
                                         }
                                     )
                                 ),
-                                (
-                                    "Delete thread".into(),
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::RequestDeleteCommentThread(edit_thread)
-                                    )
-                                ),
                             ],
                             theme,
                             168.0,
@@ -1545,36 +1655,44 @@ pub(crate) fn comment_thread_card<'a>(
     {
         let reply_thread = thread_id.clone();
         card = card.push(
-            text_editor(
-                workspace
-                    .comment_reply_draft(&thread_id)
-                    .expect("every rendered comment thread has a reply draft"),
-            )
-            .id(HarnessTarget::CommentReply.id())
-            .key_binding({
-                let thread_id = thread_id.clone();
-                move |press| {
-                    comment_key_binding(
-                        press,
-                        EditorMessage::SubmitCommentReply {
-                            thread_id: thread_id.clone(),
-                        },
-                    )
-                }
-            })
-            .placeholder("Reply…")
-            .on_action(move |action| {
-                EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
-                    thread_id: reply_thread.clone(),
-                    action,
+            column![
+                text_editor(
+                    workspace
+                        .comment_reply_draft(&thread_id)
+                        .expect("every rendered comment thread has a reply draft"),
+                )
+                .id(HarnessTarget::CommentReply.id())
+                .key_binding({
+                    let thread_id = thread_id.clone();
+                    move |press| {
+                        comment_key_binding(
+                            press,
+                            EditorMessage::SubmitCommentReply {
+                                thread_id: thread_id.clone(),
+                            },
+                        )
+                    }
                 })
-            })
-            .height(Length::Fixed(76.0))
-            .style(move |_, status| multiline_field_style(theme, status)),
+                .placeholder("Reply to this comment…")
+                .on_action(move |action| {
+                    EditorCenterMessage::Workspace(EditorMessage::EditCommentReplyDraft {
+                        thread_id: reply_thread.clone(),
+                        action,
+                    })
+                })
+                .height(Length::Fixed(68.0))
+                .style(move |_, status| multiline_field_style(theme, status)),
+            ]
+            .spacing(4),
         );
     }
 
     if workspace.editing_comment_message().is_none() {
+        card = card.push(
+            text("Enter sends · Shift+Enter new line")
+                .size(11)
+                .color(theme.palette().secondary_text),
+        );
         card = card.push(row![
             Space::new().width(Length::Fill),
             comment_popover_action(
@@ -1982,7 +2100,14 @@ fn tab_button(
             iced::widget::Id::from(format!("tab-close-{pane:?}-{id}")),
             close,
         ),
-        container(text(format!("Close {}", presentation.full_title())).size(12)).padding([4, 6]),
+        container(
+            text(components::tooltip_label(
+                &format!("Close {}", presentation.full_title()),
+                "tab.close",
+            ))
+            .size(12),
+        )
+        .padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     );
     let context_document = id.clone();
@@ -2871,17 +2996,14 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
 
-        simulator
-            .click("✓")
-            .expect("comment hover popover resolve control");
+        assert!(simulator.find("✓").is_err());
+        assert!(simulator.find(HarnessTarget::CommentReply.id()).is_err());
+        simulator.click("Open thread").expect("open hovered thread");
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert_eq!(
             messages,
             [EditorCenterMessage::Workspace(
-                EditorMessage::ToggleCommentResolved {
-                    thread_id: comment_id.clone(),
-                    resolved: true,
-                }
+                EditorMessage::SelectComment(comment_id.clone())
             )]
         );
 
@@ -2889,13 +3011,7 @@ mod tests {
         assert_eq!(workspace.focused_pane(), EditorPane::Primary);
         assert!(matches!(
             effects.as_slice(),
-            [crate::EditorEffect::Command {
-                command: crate::EditorCommand::SetCommentResolved {
-                    thread_id: selected,
-                    resolved: true,
-                },
-                ..
-            }] if selected == &comment_id
+            [crate::EditorEffect::NavigateCommentAnchor { .. }]
         ));
     }
 

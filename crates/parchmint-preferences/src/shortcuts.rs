@@ -97,9 +97,9 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
         ("file.open", "Open project", "Projects", "O", 0),
         ("file.projects", "Recent projects", "Projects", "O", 4),
         ("file.save", "Save", "Projects", "S", 0),
-        ("file.close", "Close window", "Projects", "W", 0),
+        ("file.close", "Close window", "Projects", "W", 4),
         ("file.new-tab", "New document tab", "Documents", "T", 0),
-        ("tab.close", "Close tab", "Documents", "W", 2),
+        ("tab.close", "Close tab", "Documents", "W", 0),
         (
             "tab.move-pane",
             "Move tab to other pane",

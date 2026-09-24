@@ -8,6 +8,7 @@ use iced::advanced::{
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
 
 pub(crate) struct GroupFrame {
+    pub id: String,
     pub depth: usize,
     pub first_row: usize,
     pub last_row: usize,
@@ -18,11 +19,13 @@ pub(crate) struct GroupFrame {
 pub(crate) fn groups<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     frames: Vec<GroupFrame>,
+    positions: crate::motion::Positions,
     theme: ParchMintTheme,
 ) -> Element<'a, Message> {
     Element::new(CardFrames {
         content: content.into(),
         frames: Some(frames),
+        positions: Some(positions),
         theme,
     })
 }
@@ -34,6 +37,7 @@ pub(crate) fn placeholder<'a, Message: 'a>(
     Element::new(CardFrames {
         content: content.into(),
         frames: None,
+        positions: None,
         theme,
     })
 }
@@ -41,6 +45,7 @@ pub(crate) fn placeholder<'a, Message: 'a>(
 struct CardFrames<'a, Message> {
     content: Element<'a, Message>,
     frames: Option<Vec<GroupFrame>>,
+    positions: Option<crate::motion::Positions>,
     theme: ParchMintTheme,
 }
 
@@ -104,9 +109,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
             for frame in frames {
                 let first = rows[frame.first_row].bounds();
                 let last = rows[frame.last_row].bounds();
+                let motion_y = self
+                    .positions
+                    .as_ref()
+                    .map(|positions| positions.vertical_offset(&frame.id, crate::motion::now()))
+                    .unwrap_or(0.0);
                 let indent = crate::cards_layout::grid_indent(frame.depth, layout.bounds().width);
-                let top = first.y - if frame.starts_here { 0.0 } else { 12.0 };
-                let bottom = last.y + last.height
+                let top = first.y + motion_y - if frame.starts_here { 0.0 } else { 12.0 };
+                let bottom = last.y + motion_y + last.height
                     - if frame.ends_here {
                         crate::cards_layout::GROUP_GAP
                     } else {
@@ -304,12 +314,14 @@ mod tests {
                 ]
             ],
             vec![GroupFrame {
+                id: "group".to_owned(),
                 depth: 0,
                 first_row: 0,
                 last_row: 1,
                 starts_here: true,
                 ends_here: true,
             }],
+            crate::motion::Positions::default(),
             theme,
         );
         let mut tree = Tree::new(&content);

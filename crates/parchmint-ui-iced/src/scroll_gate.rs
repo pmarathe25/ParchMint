@@ -2,9 +2,31 @@
 
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
-    widget::{Operation, Tree},
+    widget::{Operation, Tree, tree},
 };
-use iced::{Element, Event, Length, Rectangle, Size, Vector};
+use iced::{Element, Event, Length, Point, Rectangle, Size, Vector};
+use std::time::Duration;
+
+const SCROLL_FRAME: Duration = Duration::from_millis(16);
+
+#[derive(Default)]
+struct SmoothState {
+    remaining_y: f32,
+    anchor: Option<Point>,
+    shift: bool,
+}
+
+impl SmoothState {
+    fn take_step(&mut self) -> f32 {
+        let step = if self.remaining_y.abs() < 1.0 {
+            self.remaining_y
+        } else {
+            self.remaining_y * 0.35
+        };
+        self.remaining_y -= step;
+        step
+    }
+}
 
 /// Filters optional messages from a child while forwarding its widget state.
 /// The scrollable uses `None` while its mounted rows still cover the viewport.
@@ -19,12 +41,27 @@ pub(crate) fn drop_none<'a, Message: 'a>(
     })
 }
 
+/// Smooths line-wheel input while preserving child messages and pixel input.
+pub(crate) fn smooth<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    drop_none(content.into().map(Some))
+}
+
 struct DropNone<'a, Message> {
     content: Element<'a, Option<Message>>,
     overlay_message: fn(Option<Message>) -> Message,
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for DropNone<'_, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<SmoothState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(SmoothState::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -59,18 +96,79 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for DropNone<'_, Mess
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        let state = tree.state.downcast_mut::<SmoothState>();
+        if let Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) = event {
+            state.shift = modifiers.shift();
+        }
+        let smooth_lines = match event {
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Lines { x, y },
+            }) if *x == 0.0
+                && *y != 0.0
+                && !state.shift
+                && !crate::motion::reduced()
+                && cursor.is_over(layout.bounds()) =>
+            {
+                state.remaining_y += *y * 60.0;
+                state.anchor = cursor.position();
+                true
+            }
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { .. },
+            }) => {
+                state.remaining_y = 0.0;
+                false
+            }
+            _ => false,
+        };
+        let redraw_tick = matches!(
+            event,
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        );
+        let step = if smooth_lines || redraw_tick && state.remaining_y.abs() > f32::EPSILON {
+            Some(state.take_step())
+        } else {
+            None
+        };
+        let anchor = state.anchor;
+        let synthetic = step.map(|y| {
+            Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y },
+            })
+        });
         let mut messages = Vec::new();
         let mut child_shell = Shell::new(&mut messages);
-        self.content.as_widget_mut().update(
-            &mut tree.children[0],
-            event,
-            layout,
-            cursor,
-            renderer,
-            clipboard,
-            &mut child_shell,
-            viewport,
-        );
+        if let Some(synthetic) = &synthetic {
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                synthetic,
+                layout,
+                anchor.map_or(cursor, mouse::Cursor::Available),
+                renderer,
+                clipboard,
+                &mut child_shell,
+                viewport,
+            );
+        }
+        if !smooth_lines {
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                &mut child_shell,
+                viewport,
+            );
+        }
+        if step.is_some() {
+            if child_shell.is_event_captured() && state.remaining_y.abs() > f32::EPSILON {
+                shell.request_redraw_at(crate::motion::now() + SCROLL_FRAME);
+            } else if !child_shell.is_event_captured() {
+                state.remaining_y = 0.0;
+            }
+        }
         if child_shell.is_event_captured() {
             shell.capture_event();
         }
