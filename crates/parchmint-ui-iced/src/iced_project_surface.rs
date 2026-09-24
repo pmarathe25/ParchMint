@@ -1856,6 +1856,29 @@ fn cards_center<'a>(
     )
 }
 
+#[derive(Clone, Copy)]
+struct CardsWindowCoverage {
+    mounted_start: f32,
+    mounted_end: f32,
+    has_rows_before: bool,
+    has_rows_after: bool,
+    projected_scroll: f32,
+}
+
+fn needs_cards_window_refresh(
+    offset: f32,
+    viewport_height: f32,
+    content_height: f32,
+    coverage: CardsWindowCoverage,
+) -> bool {
+    const GUARD: f32 = 96.0;
+    (coverage.has_rows_before && offset <= coverage.mounted_start + GUARD)
+        || (coverage.has_rows_after && offset + viewport_height >= coverage.mounted_end - GUARD)
+        || (offset <= 1.0 && coverage.projected_scroll > 1.0)
+        || (offset + viewport_height >= content_height - 1.0
+            && coverage.projected_scroll + viewport_height < content_height - 1.0)
+}
+
 pub(crate) fn cards_grid<'a>(
     workspace: &'a ProjectWorkspace,
     theme: ParchMintTheme,
@@ -1866,6 +1889,13 @@ pub(crate) fn cards_grid<'a>(
     let targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
     let window = cards.viewport_window(columns, width, height);
+    let coverage = CardsWindowCoverage {
+        mounted_start: window.top_padding,
+        mounted_end: window.top_padding + window.rows.iter().map(|row| row.height).sum::<f32>(),
+        has_rows_before: window.top_padding > 0.0,
+        has_rows_after: window.bottom_padding > 0.0,
+        projected_scroll: cards.scroll_offset(),
+    };
     let visible = cards.items_in_window(&window);
     workspace
         .card_positions
@@ -2038,13 +2068,24 @@ pub(crate) fn cards_grid<'a>(
         .align_y(iced::alignment::Vertical::Center),
         hierarchy_drag::surface(
             right_click::right_click_area(
-                scrollable(crate::card_frames::groups(grid, frames, theme))
-                    .id(HarnessTarget::CardsList.id())
-                    .width(Length::Fill)
-                    .on_scroll(|viewport| ProjectSurfaceMessage::Project(
-                        ProjectMessage::SetCardsScroll(viewport.absolute_offset().y)
-                    ))
-                    .height(Length::Fill),
+                crate::scroll_gate::drop_none(
+                    scrollable(crate::card_frames::groups(grid, frames, theme).map(Some))
+                        .id(HarnessTarget::CardsList.id())
+                        .width(Length::Fill)
+                        .on_scroll(move |viewport| {
+                            let offset = viewport.absolute_offset().y;
+                            needs_cards_window_refresh(
+                                offset,
+                                viewport.bounds().height,
+                                viewport.content_bounds().height,
+                                coverage,
+                            )
+                            .then_some(ProjectSurfaceMessage::Project(
+                                ProjectMessage::SetCardsScroll(offset),
+                            ))
+                        })
+                        .height(Length::Fill),
+                ),
                 move |point| ProjectSurfaceMessage::Project(
                     ProjectMessage::OpenHierarchyContextMenu {
                         node_id: cards.section_id().to_owned(),
@@ -5710,6 +5751,45 @@ mod tests {
 
     use super::*;
     use crate::EditorPane;
+
+    #[test]
+    fn cards_scroll_rebuilds_before_the_viewport_leaves_mounted_rows() {
+        let coverage = CardsWindowCoverage {
+            mounted_start: 400.0,
+            mounted_end: 1_700.0,
+            has_rows_before: true,
+            has_rows_after: true,
+            projected_scroll: 800.0,
+        };
+        let refresh = |offset| needs_cards_window_refresh(offset, 600.0, 3_000.0, coverage);
+        assert!(!refresh(850.0));
+        assert!(refresh(495.0));
+        assert!(refresh(1_010.0));
+        assert!(needs_cards_window_refresh(
+            0.0,
+            600.0,
+            3_000.0,
+            CardsWindowCoverage {
+                mounted_start: 0.0,
+                mounted_end: 1_100.0,
+                has_rows_before: false,
+                has_rows_after: true,
+                ..coverage
+            }
+        ));
+        assert!(needs_cards_window_refresh(
+            2_400.0,
+            600.0,
+            3_000.0,
+            CardsWindowCoverage {
+                mounted_start: 2_000.0,
+                mounted_end: 3_000.0,
+                has_rows_before: true,
+                has_rows_after: false,
+                projected_scroll: 2_200.0,
+            }
+        ));
+    }
 
     #[test]
     fn previews_preserve_inline_fonts_when_combined_with_other_marks() {

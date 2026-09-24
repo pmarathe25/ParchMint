@@ -904,6 +904,10 @@ impl<'a> CardsState<'a> {
         self.section_id
     }
 
+    pub(crate) const fn scroll_offset(&self) -> f32 {
+        self.scroll_offset
+    }
+
     pub const fn shows_hierarchy(&self) -> bool {
         true
     }

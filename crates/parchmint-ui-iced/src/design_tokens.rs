@@ -9,6 +9,7 @@ use iced::{
 use parchmint_design_system::{TOKENS, production_token};
 use parchmint_editor_iced::{EditorSurfaceColor, EditorSurfaceTheme};
 use parchmint_preferences::ResolvedAppearance;
+use std::sync::{Arc, LazyLock};
 
 /// Fixed desktop metrics from the native design source.
 pub const RIBBON_HEIGHT: u16 = 44;
@@ -167,6 +168,13 @@ pub struct ParchMintTheme {
 
 impl ParchMintTheme {
     pub fn new(appearance: ResolvedAppearance) -> Self {
+        match appearance {
+            ResolvedAppearance::Light => *LIGHT_PRESENTATION,
+            ResolvedAppearance::Dark => *DARK_PRESENTATION,
+        }
+    }
+
+    fn build(appearance: ResolvedAppearance) -> Self {
         let dark = appearance == ResolvedAppearance::Dark;
         let color = |role| semantic_color(role, dark);
         Self {
@@ -228,6 +236,13 @@ impl ParchMintTheme {
 
     /// Keeps default widgets on the same palette as shared components.
     pub fn iced_theme(self) -> Theme {
+        match self.appearance {
+            ResolvedAppearance::Light => LIGHT_ICED_THEME.clone(),
+            ResolvedAppearance::Dark => DARK_ICED_THEME.clone(),
+        }
+    }
+
+    fn build_iced_theme(self) -> Theme {
         Theme::custom_with_fn(
             match self.appearance {
                 ResolvedAppearance::Light => "ParchMint Light",
@@ -296,12 +311,33 @@ impl ParchMintTheme {
     /// Iced themes. This lets reusable widget styles remain semantic in both
     /// native and headless rendering without a parallel Light/Dark branch.
     pub fn from_iced_theme(theme: &Theme) -> Option<Self> {
-        [ResolvedAppearance::Light, ResolvedAppearance::Dark]
-            .into_iter()
-            .map(Self::new)
-            .find(|candidate| candidate.iced_theme().palette() == theme.palette())
+        if let (Theme::Custom(current), Theme::Custom(light)) = (theme, &*LIGHT_ICED_THEME)
+            && Arc::ptr_eq(current, light)
+        {
+            return Some(*LIGHT_PRESENTATION);
+        }
+        if let (Theme::Custom(current), Theme::Custom(dark)) = (theme, &*DARK_ICED_THEME)
+            && Arc::ptr_eq(current, dark)
+        {
+            return Some(*DARK_PRESENTATION);
+        }
+        let palette = theme.palette();
+        if palette == LIGHT_ICED_THEME.palette() {
+            Some(*LIGHT_PRESENTATION)
+        } else if palette == DARK_ICED_THEME.palette() {
+            Some(*DARK_PRESENTATION)
+        } else {
+            None
+        }
     }
 }
+
+static LIGHT_PRESENTATION: LazyLock<ParchMintTheme> =
+    LazyLock::new(|| ParchMintTheme::build(ResolvedAppearance::Light));
+static DARK_PRESENTATION: LazyLock<ParchMintTheme> =
+    LazyLock::new(|| ParchMintTheme::build(ResolvedAppearance::Dark));
+static LIGHT_ICED_THEME: LazyLock<Theme> = LazyLock::new(|| LIGHT_PRESENTATION.build_iced_theme());
+static DARK_ICED_THEME: LazyLock<Theme> = LazyLock::new(|| DARK_PRESENTATION.build_iced_theme());
 
 fn semantic_color(role: &str, dark: bool) -> Color {
     let token = production_token(role)

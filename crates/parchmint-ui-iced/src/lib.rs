@@ -21,6 +21,7 @@ mod native;
 mod project_runtime;
 mod project_workspace;
 mod right_click;
+mod scroll_gate;
 mod stationary_tooltip;
 mod visual_verification;
 
