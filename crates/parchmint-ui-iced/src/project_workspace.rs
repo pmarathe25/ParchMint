@@ -5079,11 +5079,9 @@ impl ProjectWorkspace {
     ) -> Option<DragDestination> {
         let drag = self.pointer_drag.as_ref()?;
         if self.dragged_subtree_contains(id) {
-            return Some(
-                drag.destination
-                    .clone()
-                    .unwrap_or_else(|| DragDestination::BeforeSibling(drag.source_id.clone())),
-            );
+            // The source placeholder is an explicit way back to the original
+            // order, even after a preview has moved it elsewhere.
+            return Some(DragDestination::BeforeSibling(drag.source_id.clone()));
         }
         self.explorer
             .normalized_selected_ids()
@@ -5095,6 +5093,13 @@ impl ProjectWorkspace {
     }
 
     fn projected_drop(&self, destination: &DragDestination) -> Option<ExplorerState> {
+        if self.pointer_drag.as_ref().is_some_and(|drag| {
+            *destination == DragDestination::BeforeSibling(drag.source_id.clone())
+        }) {
+            let mut preview = self.explorer.clone();
+            preview.expanded = self.cards_expanded.clone();
+            return Some(preview);
+        }
         let moving = self
             .explorer
             .normalized_selected_ids()
@@ -5210,10 +5215,6 @@ impl ProjectWorkspace {
         self.hierarchy_context_menu.is_some()
             || self.tab_context.is_some()
             || self.comment_context.is_some()
-    }
-
-    pub(crate) fn comment_context(&self) -> Option<&(String, bool, Point)> {
-        self.comment_context.as_ref()
     }
 
     pub(crate) fn tab_context(&self) -> Option<&(crate::EditorPane, String, Point)> {
@@ -8301,6 +8302,9 @@ impl ProjectWorkspace {
         source_id: String,
         destination: DragDestination,
     ) -> Vec<ProjectEffect> {
+        if destination == DragDestination::BeforeSibling(source_id.clone()) {
+            return Vec::new();
+        }
         if self.explorer.drag_validity(&source_id, destination.clone()) != DragValidity::Allowed {
             return Vec::new();
         }
@@ -10756,7 +10760,7 @@ mod tests {
                 "chapter-one",
                 DragDestination::BeforeSibling("chapter-one".to_owned())
             ),
-            Some(destination)
+            Some(DragDestination::BeforeSibling("part-one".to_owned()))
         );
         workspace.update(ProjectMessage::LeaveHierarchySurface(
             HierarchySurface::Explorer,
@@ -10823,6 +10827,51 @@ mod tests {
         assert_eq!(
             workspace.displayed_explorer().preorder_ids(),
             order.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn card_drag_can_return_to_its_source_slot_in_one_gesture() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let original = workspace
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-two".to_owned(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::BeforeSibling("chapter-one".to_owned())),
+        });
+        assert_ne!(
+            workspace.displayed_explorer().preorder_ids(),
+            original.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let restore = workspace.preview_destination(
+            "chapter-two",
+            DragDestination::AfterSibling("chapter-two".to_owned()),
+        );
+        assert_eq!(
+            restore,
+            Some(DragDestination::BeforeSibling("chapter-two".to_owned()))
+        );
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: restore,
+        });
+        assert_eq!(
+            workspace.displayed_explorer().preorder_ids(),
+            original.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .is_empty()
         );
     }
 

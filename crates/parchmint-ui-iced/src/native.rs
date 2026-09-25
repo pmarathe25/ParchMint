@@ -8192,7 +8192,7 @@ impl NativeDesktop {
         let binding = state
             .editor_bindings
             .get(&pane)
-            .ok_or("Open a document before adding a comment.")?;
+            .ok_or("Open a document before adding a note.")?;
         if state.mounted_documents.get(&pane).is_some_and(|document| {
             !mount_matches_active_document(
                 workspace.editor().pane(pane).active_document(),
@@ -8323,7 +8323,7 @@ impl NativeDesktop {
             issue
                 .as_ref()
                 .map(|issue| issue.word.clone())
-                .unwrap_or_else(|| "Comment".into()),
+                .unwrap_or_else(|| "Note".into()),
             word_bounds,
             crate::Rect::new(0.0, 0.0, viewport.width, viewport.height),
         )
@@ -10540,7 +10540,7 @@ impl NativeDesktop {
             } => {
                 let selection = if let Some((observed, captured)) = anchor {
                     if observed != before {
-                        return Err("The document changed while you were writing the comment. Your draft is retained; select its text again before adding it.".into());
+                        return Err("The document changed while you were writing the note. Your draft is retained; select its text again before adding it.".into());
                     }
                     captured
                 } else {

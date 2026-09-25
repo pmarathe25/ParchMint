@@ -76,35 +76,6 @@ pub(crate) fn anchored_menu<'a, Message: Clone + 'a>(
     })
 }
 
-pub(crate) fn notifying_menu<'a, Message: Clone + 'a>(
-    trigger: Element<'a, ()>,
-    options: Vec<(String, Message)>,
-    theme: ParchMintTheme,
-    width: f32,
-    on_toggle: fn(bool) -> Message,
-) -> Element<'a, Message> {
-    Element::new(ActionMenu {
-        horizontal: false,
-        menu_content: None,
-        on_toggle: Some(on_toggle),
-        trigger,
-        panel: None,
-        enabled: !options.is_empty(),
-        options: options
-            .into_iter()
-            .map(|(label, message)| Choice {
-                label,
-                message,
-                icon: None,
-                target: None,
-                divider_before: false,
-            })
-            .collect(),
-        theme,
-        width,
-    })
-}
-
 pub(crate) fn menu_with_footer<'a, Message: Clone + 'a>(
     trigger: Element<'a, ()>,
     options: Vec<(String, Message)>,

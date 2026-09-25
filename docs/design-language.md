@@ -92,8 +92,9 @@ Build controls with `components` and take dimensions and type from
 `design_tokens`. Put workflow-specific detail in the screen, while shared states
 stay in the components. Keep optional detail behind selection, expansion, or a
 popover: collapsed Overview cards and groups show chosen fields, expanding a
-group also reveals its other fields, and selected comments reveal their thread.
-A comment hover gives a brief preview without opening editing controls. Settings
+group also reveals its other fields, and notes show their full text when edited.
+A note hover presents its content beside the annotated text; selecting the note
+opens a compact editor. Settings
 lists identify items without repeating their full configuration. Check the result
 in light and dark appearances at normal and compact widths using the
 [native UI review](../tests/parchmint-ui-driver/USABILITY.md).

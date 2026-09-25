@@ -534,7 +534,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
     }
     fn state(&self) -> tree::State {
         let now = now();
-        let mut progress = Tween::new(f32::from(self.reveal.unwrap_or(false)), now, ENTRANCE);
+        let duration = if self.resize { LAYOUT } else { ENTRANCE };
+        let mut progress = Tween::new(f32::from(self.reveal.unwrap_or(false)), now, duration);
         progress.set(f32::from(self.reveal.unwrap_or(true)), now, enabled());
         tree::State::new(EntranceState {
             height: 0.0,
@@ -551,7 +552,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         if state.key != self.key {
             state.key = self.key.clone();
             state.now = now();
-            state.progress = Tween::new(0.0, state.now, ENTRANCE);
+            state.progress =
+                Tween::new(0.0, state.now, if self.resize { LAYOUT } else { ENTRANCE });
             state.progress.set(1.0, state.now, enabled());
         }
         if let Some(visible) = self.reveal.filter(|_| !self.resize) {
@@ -592,7 +594,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         if self.resize {
             let now = now();
             if state.height == 0.0 {
-                state.progress = Tween::new(size.height, now, ENTRANCE);
+                state.progress = Tween::new(size.height, now, LAYOUT);
             }
             state.height = size.height;
             state.progress.set(size.height, now, enabled());
@@ -1125,10 +1127,10 @@ mod tests {
         tree.diff(&card);
         let initial = card.as_widget_mut().layout(&mut tree, &renderer, &limits);
         assert_eq!(initial.size().height, 192.0);
-        FRAME_TIME.set(Some(now() + ENTRANCE / 2));
+        FRAME_TIME.set(Some(now() + LAYOUT / 2));
         let middle = card.as_widget_mut().layout(&mut tree, &renderer, &limits);
         assert!(middle.size().height > 192.0 && middle.size().height < 400.0);
-        FRAME_TIME.set(Some(now() + ENTRANCE));
+        FRAME_TIME.set(Some(now() + LAYOUT));
         assert_eq!(
             card.as_widget_mut()
                 .layout(&mut tree, &renderer, &limits)

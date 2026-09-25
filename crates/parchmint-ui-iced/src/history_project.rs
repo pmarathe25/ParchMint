@@ -178,7 +178,7 @@ fn compare_scope(
                 .collect()
         };
         add(
-            &format!("Comments · {title}"),
+            &format!("Notes · {title}"),
             &comments_text(&before_comments),
             &comments_text(
                 after
@@ -439,20 +439,15 @@ fn comments_text(comments: &[parchmint_editor_api::CanonicalComment]) -> String 
             } => (quote.as_str(), *orphaned),
             CanonicalCommentAnchor::Document { .. } => ("document", false),
         };
-        output.push_str(&format!(
-            "Comment on {quote} · {}{}\n",
-            if thread.resolved {
-                "Resolved"
-            } else {
-                "Unresolved"
-            },
-            if orphaned {
-                " · anchor unavailable"
-            } else {
-                ""
-            }
-        ));
         for message in &thread.messages {
+            output.push_str(&format!(
+                "Note on {quote}{}\n",
+                if orphaned {
+                    " · anchor unavailable"
+                } else {
+                    ""
+                }
+            ));
             output.push_str(&message.body);
             output.push('\n');
         }

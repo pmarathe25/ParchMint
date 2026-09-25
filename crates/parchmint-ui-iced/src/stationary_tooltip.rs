@@ -48,7 +48,9 @@ enum State {
     Open {
         point: Point,
     },
-    Suppressed,
+    Suppressed {
+        point: Point,
+    },
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip<'_, Message> {
@@ -112,8 +114,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
             if matches!(state, State::Open { .. }) {
                 shell.invalidate_layout();
             }
-            *state = if cursor.is_over(layout.bounds()) {
-                State::Suppressed
+            *state = if let Some(point) = cursor.position_over(layout.bounds()) {
+                State::Suppressed { point }
             } else {
                 State::Idle
             };
@@ -134,7 +136,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
                 }
                 (State::Hovered { .. }, None)
                 | (State::Open { .. }, None)
-                | (State::Suppressed, None) => {
+                | (State::Suppressed { .. }, None) => {
                     *state = State::Idle;
                     shell.invalidate_layout();
                 }
@@ -159,7 +161,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StationaryTooltip
                     shell.invalidate_layout();
                 }
                 (State::Open { .. }, Some(_)) => {}
-                (State::Suppressed, Some(_)) | (State::Idle, None) => {}
+                (State::Suppressed { point: previous }, Some(point))
+                    if (point.x - previous.x).powi(2) + (point.y - previous.y).powi(2)
+                        > HOVER_SLOP_SQUARED =>
+                {
+                    *state = State::Hovered { at: now, point };
+                    shell.request_redraw_at(now + DELAY);
+                }
+                (State::Suppressed { .. }, Some(_)) | (State::Idle, None) => {}
             }
         }
         self.content.as_widget_mut().update(
@@ -336,7 +345,7 @@ mod tests {
     use iced::advanced::renderer::Headless;
 
     #[test]
-    fn clicking_suppresses_tooltips_until_the_pointer_leaves() {
+    fn clicking_suppresses_tooltips_until_the_pointer_moves_again() {
         let start = Instant::now();
         let _clock = crate::motion::FixedTime::new(start);
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
@@ -361,6 +370,8 @@ mod tests {
         *tree.state.downcast_mut::<State>() = State::Open {
             point: node.bounds().center(),
         };
+        let moved = Point::new(node.bounds().x + 2.0, node.bounds().center_y());
+        assert!(node.bounds().contains(moved));
         for (event, cursor, open) in [
             (
                 Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
@@ -373,20 +384,13 @@ mod tests {
                 false,
             ),
             (
-                Event::Mouse(mouse::Event::CursorLeft),
-                mouse::Cursor::Unavailable,
-                false,
-            ),
-            (
-                Event::Mouse(mouse::Event::CursorMoved {
-                    position: node.bounds().center(),
-                }),
-                inside,
+                Event::Mouse(mouse::Event::CursorMoved { position: moved }),
+                mouse::Cursor::Available(moved),
                 false,
             ),
             (
                 Event::Window(iced::window::Event::RedrawRequested(start + DELAY * 3)),
-                inside,
+                mouse::Cursor::Available(moved),
                 true,
             ),
         ] {
@@ -402,7 +406,9 @@ mod tests {
             );
             assert_eq!(
                 matches!(tree.state.downcast_ref::<State>(), State::Open { .. }),
-                open
+                open,
+                "tooltip state: {:?}",
+                tree.state.downcast_ref::<State>()
             );
         }
     }

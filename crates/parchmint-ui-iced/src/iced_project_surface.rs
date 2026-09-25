@@ -1198,58 +1198,6 @@ fn hierarchy_context_overlay<'a>(
     window_height: f32,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let base = content;
-    if let Some((thread_id, resolved, point)) = workspace.comment_context() {
-        let actions = column![
-            components::context_action(
-                "Reply",
-                ProjectSurfaceMessage::Project(ProjectMessage::OpenCommentDetails(
-                    thread_id.clone()
-                )),
-                theme
-            ),
-            components::context_action(
-                if *resolved { "Reopen" } else { "Resolve" },
-                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                    EditorMessage::ToggleCommentResolved {
-                        thread_id: thread_id.clone(),
-                        resolved: !resolved
-                    }
-                )),
-                theme
-            ),
-            components::context_action(
-                "Delete thread…",
-                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                    EditorMessage::RequestDeleteCommentThread(thread_id.clone())
-                )),
-                theme
-            ),
-        ]
-        .spacing(2);
-        return stack![
-            base,
-            container(opaque(hierarchy_drag::commit_on_click_away(
-                container(actions)
-                    .padding(6)
-                    .width(200)
-                    .style(move |_| components::surface(
-                        theme,
-                        Surface::Elevated,
-                        Interaction::Rest
-                    )),
-                ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
-            )))
-            .padding(iced::Padding {
-                left: point.x().min(window_width - 208.0).max(8.0),
-                top: point.y().min(window_height - 118.0).max(8.0),
-                right: 0.0,
-                bottom: 0.0,
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-        ]
-        .into();
-    }
     if let Some((pane, document_id, point)) = workspace.tab_context() {
         let actions = column![
             components::context_action(
@@ -1428,7 +1376,7 @@ fn comment_anchor_summary(anchor: &CommentAnchor) -> String {
         CommentAnchor::Range { quote, .. } => format!("“{quote}”"),
         CommentAnchor::Position { quote, .. } if quote.is_empty() => "At cursor".to_owned(),
         CommentAnchor::Position { quote, .. } => format!("At cursor · “{quote}”"),
-        CommentAnchor::Document { .. } => "Document comment".to_owned(),
+        CommentAnchor::Document { .. } => "Document note".to_owned(),
         CommentAnchor::Orphaned { quote, .. } => format!("Anchor needs attention · “{quote}”"),
     }
 }
@@ -2023,6 +1971,7 @@ pub(crate) fn cards_grid<'a>(
     let mut items = visible.into_iter().peekable();
     let mut frames: Vec<crate::card_frames::GroupFrame> = Vec::new();
     let mut frame_ids = std::collections::BTreeMap::new();
+    let mut last_card_id: Option<String> = None;
     let mut grid = column![Space::new().height(window.top_padding)].spacing(0);
     for (row_index, grid_row) in window.rows.iter().enumerate() {
         // Iced omits a zero-height spacer from the column's child list.
@@ -2067,11 +2016,13 @@ pub(crate) fn cards_grid<'a>(
                     last_row: row_index,
                     starts_here: own_group == Some(id),
                     ends_here: false,
+                    last_card_id: last_card_id.clone(),
                 });
                 frames.len() - 1
             });
             frames[index].last_row = row_index;
             frames[index].ends_here = grid_row.add_to.as_deref() == Some(id);
+            frames[index].last_card_id = last_card_id.clone();
         }
         let add_control = |parent: &str, depth: usize| {
             let indent = crate::cards_layout::grid_indent(depth, width);
@@ -2117,6 +2068,13 @@ pub(crate) fn cards_grid<'a>(
                 generation,
                 false,
             ));
+        }
+        last_card_id = Some(last_node.clone());
+        for frame in frames
+            .iter_mut()
+            .filter(|frame| frame.last_row == row_index)
+        {
+            frame.last_card_id = last_card_id.clone();
         }
         if let Some(parent) = &grid_row.add_to {
             cells = cells.push(add_control(parent, grid_row.depth));
@@ -2726,7 +2684,7 @@ fn search_center<'a>(
         ]
         .align_y(iced::alignment::Vertical::Center),
         replacement,
-        text("Replaces document body text only; titles, synopsis, metadata, and comments stay as they are.").size(12),
+        text("Replaces document body text only; titles, synopsis, metadata, and notes stay as they are.").size(12),
     ].spacing(16);
     if !validation.is_empty() {
         content = content.push(text(validation).size(13));
@@ -5166,13 +5124,13 @@ fn inspector<'a>(
     let selected = workspace.inspector_node_id();
     let content = if let Some(selected) = selected {
         let title = workspace.explorer().title(selected).unwrap_or("Untitled");
-        let title: Element<'a, ProjectSurfaceMessage> = if compact {
-            text(format!("Comments · {title}")).size(12).into()
+        let heading: Element<'a, ProjectSurfaceMessage> = if compact {
+            text(format!("Notes · {title}")).size(12).into()
         } else {
             harness_target::target(
                 HarnessTarget::InspectorTitle,
                 column![
-                    text("Comments").size(14).font(Font {
+                    text("Notes").size(14).font(Font {
                         weight: font::Weight::Semibold,
                         ..Font::DEFAULT
                     }),
@@ -5182,143 +5140,186 @@ fn inspector<'a>(
             )
         };
         let editor = workspace.editor();
-        let mut comments = column![].spacing(SPACING_8);
+        let mut notes = column![].spacing(SPACING_8);
         let threads = editor.inspector_comments();
-        let has_threads = !threads.is_empty();
         let document_choices = matches!(
             editor.inspector_context(),
             crate::InspectorContext::Group { .. }
         )
         .then(|| workspace.history_document_choices());
+        let mut count = 0;
         for thread in threads {
             let thread_id = thread.id().to_owned();
-            let selected_thread = editor.selected_comment() == Some(thread_id.as_str());
-            if selected_thread {
-                let mut selected_content = column![].spacing(8);
-                if let Some(document_choices) = &document_choices {
-                    selected_content = selected_content.push(
-                        text(
-                            document_choices
-                                .iter()
-                                .find(|(id, _)| *id == thread.document_id())
-                                .map_or("Document", |(_, title)| *title)
-                                .to_owned(),
-                        )
-                        .size(12)
-                        .color(theme.palette().secondary_text),
+            let quote = comment_anchor_summary(thread.anchor());
+            let document_title = document_choices.as_ref().map(|choices| {
+                choices
+                    .iter()
+                    .find(|(id, _)| *id == thread.document_id())
+                    .map_or("Document", |(_, title)| *title)
+                    .to_owned()
+            });
+            for message in thread.messages() {
+                count += 1;
+                let message_id = message.id().to_owned();
+                let selected_note = editor.selected_comment() == Some(thread_id.as_str());
+                let editing = editor.editing_comment_message()
+                    == Some((thread_id.as_str(), message_id.as_str()))
+                    && !editor.editing_note_in_hover();
+                let note_body = crate::iced_editor_surface::note_message_body(
+                    &thread_id,
+                    message,
+                    editor,
+                    theme,
+                    !editor.editing_note_in_hover(),
+                )
+                .map(ProjectSurfaceMessage::EditorCenter);
+                let note_body: Element<'a, ProjectSurfaceMessage> = if editing {
+                    note_body
+                } else {
+                    container(note_body).max_height(72).clip(true).into()
+                };
+                let edit = stationary_tooltip::tooltip(
+                    harness_target::target_id(
+                        iced::widget::Id::from(format!("note-edit-{message_id}")),
+                        button(icon_sized(Icon::Rename, 15))
+                            .padding(4)
+                            .on_press(ProjectSurfaceMessage::EditorCenter(
+                                EditorCenterMessage::Workspace(
+                                    EditorMessage::BeginEditCommentMessage {
+                                        thread_id: thread_id.clone(),
+                                        message_id: message_id.clone(),
+                                        body: message.body().to_owned(),
+                                    },
+                                ),
+                            ))
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, false),
+                                )
+                            }),
+                    ),
+                    text("Edit note").size(12),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
+                );
+                let delete = stationary_tooltip::tooltip(
+                    harness_target::target_id(
+                        iced::widget::Id::from(format!("note-delete-{message_id}")),
+                        button(icon_sized(Icon::RecentlyDeleted, 15))
+                            .padding(4)
+                            .on_press(ProjectSurfaceMessage::EditorCenter(
+                                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteNote {
+                                    thread_id: thread_id.clone(),
+                                    message_id: message_id.clone(),
+                                }),
+                            ))
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, false),
+                                )
+                            }),
+                    ),
+                    text("Delete note").size(12),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
+                );
+                let mut card = column![
+                    row![
+                        text(document_title.clone().unwrap_or_else(|| "Note".to_owned()))
+                            .size(12)
+                            .color(theme.palette().secondary_text)
+                            .width(Length::Fill),
+                        edit,
+                        delete,
+                    ]
+                    .spacing(2)
+                    .align_y(iced::alignment::Vertical::Center),
+                    container(
+                        text(quote.clone())
+                            .size(12)
+                            .color(theme.palette().secondary_text)
+                    )
+                    .max_height(26)
+                    .clip(true),
+                    note_body,
+                ]
+                .spacing(6);
+                if editor.pending_delete_note() == Some((thread_id.as_str(), message_id.as_str())) {
+                    card = card.push(
+                        column![
+                            text("Delete this note?").size(12),
+                            row![
+                                button("Delete")
+                                    .on_press(ProjectSurfaceMessage::EditorCenter(
+                                        EditorCenterMessage::Workspace(
+                                            EditorMessage::ConfirmDeleteNote
+                                        )
+                                    ))
+                                    .style(move |_, status| components::button_style(
+                                        theme,
+                                        ButtonKind::Destructive,
+                                        interaction(status, false)
+                                    )),
+                                button("Cancel")
+                                    .on_press(ProjectSurfaceMessage::EditorCenter(
+                                        EditorCenterMessage::Workspace(
+                                            EditorMessage::CancelDeleteNote
+                                        )
+                                    ))
+                                    .style(move |_, status| components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false)
+                                    )),
+                            ]
+                            .spacing(6),
+                        ]
+                        .spacing(4),
                     );
                 }
-                selected_content = selected_content.push(
-                    crate::iced_editor_surface::comment_thread_card(
-                        "",
-                        comment_anchor_summary(thread.anchor()),
-                        thread,
-                        editor,
-                        theme,
-                    )
-                    .map(ProjectSurfaceMessage::EditorCenter),
-                );
-                comments = comments.push(
-                    container(selected_content)
-                        .padding(8)
-                        .width(Length::Fill)
-                        .style(move |_| {
-                            components::surface(theme, Surface::Panel, Interaction::Rest)
-                        }),
-                );
-                continue;
-            }
-            let root_body = thread
-                .messages()
-                .first()
-                .map_or("Comment", crate::CommentMessageView::body);
-            let summary = row![
-                column![
-                    container(text(root_body).size(u32::from(UI_BODY.size)))
-                        .height(44)
-                        .clip(true),
-                    text(if let Some(document_choices) = &document_choices {
-                        format!(
-                            "{} · {}",
-                            document_choices
-                                .iter()
-                                .find(|(id, _)| *id == thread.document_id())
-                                .map(|(_, title)| *title)
-                                .unwrap_or("Document"),
-                            comment_anchor_summary(thread.anchor())
-                        )
-                    } else {
-                        comment_anchor_summary(thread.anchor())
-                    })
-                    .size(u32::from(UI_COMPACT.size))
-                    .color(theme.palette().secondary_text),
-                ]
-                .spacing(SPACING_4)
-                .width(Length::Fill),
-                text(if thread.resolved() { "Resolved" } else { "" })
-                    .size(u32::from(UI_LABEL.size))
-                    .font(Font {
-                        weight: font::Weight::Semibold,
-                        ..Font::DEFAULT
-                    })
-                    .color(theme.palette().comment_resolved),
-            ]
-            .spacing(SPACING_8);
-            let context_id = thread_id.clone();
-            let resolved = thread.resolved();
-            comments = comments.push(right_click::right_click_area(
-                container(
-                    button(summary)
-                        .width(Length::Fill)
-                        .padding([6, 4])
-                        .on_press(ProjectSurfaceMessage::EditorCenter(
-                            EditorCenterMessage::Workspace(EditorMessage::SelectComment(thread_id)),
+                notes =
+                    notes.push(
+                        mouse_area(container(card).padding(10).width(Length::Fill).style(
+                            move |_| {
+                                components::surface(
+                                    theme,
+                                    Surface::Panel,
+                                    if selected_note {
+                                        Interaction::Selected
+                                    } else {
+                                        Interaction::Rest
+                                    },
+                                )
+                            },
                         ))
-                        .style(move |_, status| {
-                            components::button_style(
-                                theme,
-                                ButtonKind::Quiet,
-                                interaction(status, false),
-                            )
-                        }),
-                )
-                .width(Length::Fill)
-                .padding(6)
-                .style(move |_| {
-                    if selected_thread {
-                        components::surface(theme, Surface::Panel, Interaction::Selected)
-                    } else {
-                        iced::widget::container::Style::default()
-                    }
-                }),
-                move |point| {
-                    ProjectSurfaceMessage::Project(ProjectMessage::OpenCommentContextMenu {
-                        thread_id: context_id.clone(),
-                        resolved,
-                        point: Point::new(point.x, point.y),
-                    })
-                },
-            ));
+                        .on_press(ProjectSurfaceMessage::EditorCenter(
+                            EditorCenterMessage::Workspace(EditorMessage::SelectComment(
+                                thread_id.clone(),
+                            )),
+                        )),
+                    );
+            }
         }
-        let sections = if !has_threads {
-            column![
-                text("No comments")
-                    .size(13)
-                    .color(theme.palette().secondary_text)
-            ]
+        let sections: Element<'a, ProjectSurfaceMessage> = if count == 0 {
+            text("No notes yet")
+                .size(13)
+                .color(theme.palette().secondary_text)
+                .into()
         } else {
-            comments
+            notes.into()
         };
         column![
-            title,
+            heading,
             crate::scroll_gate::smooth(scrollable(sections).height(Length::Fill)),
         ]
         .spacing(12)
         .height(Length::Fill)
     } else {
         column![
-            components::muted_label("Comments"),
-            components::muted_label("Open a document to view its comments."),
+            components::muted_label("Notes"),
+            components::muted_label("Open a document to view its notes."),
         ]
         .spacing(10)
     };
@@ -5396,9 +5397,9 @@ fn status_bar<'a>(
             HarnessTarget::ToggleInspector,
             inspector_visible,
             if inspector_visible {
-                "Hide comments"
+                "Hide notes"
             } else {
-                "Show comments"
+                "Show notes"
             },
             Some(ProjectSurfaceMessage::ToggleInspector),
         )
@@ -5472,6 +5473,11 @@ fn status_pane_button<'a>(
     label: &'static str,
     message: Option<ProjectSurfaceMessage>,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    let command = match target {
+        HarnessTarget::ToggleExplorer => "view.explorer",
+        HarnessTarget::ToggleInspector => "view.comments",
+        _ => "",
+    };
     stationary_tooltip::tooltip(
         harness_target::target(
             target,
@@ -5488,7 +5494,7 @@ fn status_pane_button<'a>(
                     )
                 }),
         ),
-        container(text(label).size(12)).padding([4, 6]),
+        container(text(components::tooltip_label(label, command)).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
 }
@@ -5500,14 +5506,10 @@ fn modal_view<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     if let ProjectModal::CommentThread { thread_id } = &modal {
         let content = workspace.editor().comment_thread(thread_id).map_or_else(
-            || text("Thread deleted").into(),
+            || text("Note deleted").into(),
             |thread| {
                 crate::iced_editor_surface::comment_thread_card(
-                    if thread.resolved() {
-                        "Resolved comment"
-                    } else {
-                        "Comment"
-                    },
+                    "Note",
                     comment_anchor_summary(thread.anchor()),
                     thread,
                     workspace.editor(),
@@ -5786,7 +5788,7 @@ fn modal_view<'a>(
         } => (
             "Restore document?",
             format!(
-                "Restore “{affected_summary}” to “{checkpoint_label}”? Only its text, formatting, and comments change."
+                "Restore “{affected_summary}” to “{checkpoint_label}”? Only its text, formatting, and notes change."
             ),
         ),
         ProjectModal::HistoryRestore {
@@ -6838,7 +6840,44 @@ mod tests {
             .unwrap()
             .bounds();
         assert!(comment.x + comment.width <= 1_440.0);
-        assert!(simulator.find(HarnessTarget::CommentReply.id()).is_ok());
+        assert!(simulator.find(HarnessTarget::CommentReply.id()).is_err());
+        let message_id = workspace
+            .editor()
+            .comment_thread(&selected_id)
+            .unwrap()
+            .messages()[0]
+            .id()
+            .to_owned();
+        simulator
+            .click(iced::widget::Id::from(format!("note-edit-{message_id}")))
+            .unwrap();
+        assert!(
+            matches!(simulator.into_messages().collect::<Vec<_>>().as_slice(),
+            [ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                EditorMessage::BeginEditCommentMessage { thread_id, message_id: edited, .. }
+            ))] if thread_id == &selected_id && edited == &message_id)
+        );
+        workspace
+            .editor_mut()
+            .update(EditorMessage::BeginEditHoveredNote {
+                thread_id: selected_id,
+                message_id,
+                body: "A long selected comment that must leave room for its unresolved status"
+                    .into(),
+            });
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            native_project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+                &layout,
+                [true; 3],
+            ),
+        );
+        assert!(simulator.find(HarnessTarget::CommentEdit.id()).is_err());
     }
 
     #[test]

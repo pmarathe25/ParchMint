@@ -14,6 +14,7 @@ pub(crate) struct GroupFrame {
     pub last_row: usize,
     pub starts_here: bool,
     pub ends_here: bool,
+    pub last_card_id: Option<String>,
 }
 
 pub(crate) fn groups<'a, Message: 'a>(
@@ -109,14 +110,24 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
             for frame in frames {
                 let first = rows[frame.first_row].bounds();
                 let last = rows[frame.last_row].bounds();
-                let motion_y = self
+                let top_motion_y = self
                     .positions
                     .as_ref()
                     .map(|positions| positions.vertical_offset(&frame.id, crate::motion::now()))
                     .unwrap_or(0.0);
+                let bottom_motion_y = self
+                    .positions
+                    .as_ref()
+                    .and_then(|positions| {
+                        frame
+                            .last_card_id
+                            .as_ref()
+                            .map(|id| positions.vertical_offset(id, crate::motion::now()))
+                    })
+                    .unwrap_or(top_motion_y);
                 let indent = crate::cards_layout::grid_indent(frame.depth, layout.bounds().width);
-                let top = first.y + motion_y - if frame.starts_here { 0.0 } else { 12.0 };
-                let bottom = last.y + motion_y + last.height
+                let top = first.y + top_motion_y - if frame.starts_here { 0.0 } else { 12.0 };
+                let bottom = last.y + bottom_motion_y + last.height
                     - if frame.ends_here {
                         crate::cards_layout::GROUP_GAP
                     } else {
@@ -320,6 +331,7 @@ mod tests {
                 last_row: 1,
                 starts_here: true,
                 ends_here: true,
+                last_card_id: None,
             }],
             crate::motion::Positions::default(),
             theme,

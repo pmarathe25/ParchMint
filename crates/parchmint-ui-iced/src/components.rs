@@ -497,7 +497,7 @@ pub(crate) fn context_action<'a, Message: Clone + 'a>(
         "Close tab" => "tab.close",
         "New document" => "outline.document",
         "New group" => "outline.group",
-        "Add Comment" => "format.comment",
+        "Add note" => "format.comment",
         "Delete" => "outline.delete",
         _ => "",
     });

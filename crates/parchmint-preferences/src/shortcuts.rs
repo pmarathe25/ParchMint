@@ -125,7 +125,7 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
         ("view.export", "Export", "Navigation", "X", 4),
         ("view.settings", "Settings", "Navigation", ",", 0),
         ("view.explorer", "Toggle Explorer", "Navigation", "E", 4),
-        ("view.comments", "Toggle comments", "Navigation", "C", 4),
+        ("view.comments", "Toggle Notes", "Navigation", "C", 4),
         (
             "view.companion",
             "Toggle companion pane",
@@ -177,7 +177,7 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
             4,
         ),
         ("format.link", "Link", "Formatting", "K", 0),
-        ("format.comment", "Add comment", "Formatting", "M", 2),
+        ("format.comment", "Add note", "Formatting", "M", 2),
         ("format.numbered", "Numbered list", "Formatting", "7", 4),
         ("format.bulleted", "Bulleted list", "Formatting", "8", 4),
         ("format.quote", "Block quote", "Formatting", "9", 4),

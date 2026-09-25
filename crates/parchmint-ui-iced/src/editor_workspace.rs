@@ -1370,11 +1370,22 @@ pub enum EditorMessage {
     CancelDeleteCommentThread,
     ReattachComment(String),
     ConvertCommentToDocument(String),
+    RequestDeleteNote {
+        thread_id: String,
+        message_id: String,
+    },
+    ConfirmDeleteNote,
+    CancelDeleteNote,
     DeleteCommentMessage {
         thread_id: String,
         message_id: String,
     },
     BeginEditCommentMessage {
+        thread_id: String,
+        message_id: String,
+        body: String,
+    },
+    BeginEditHoveredNote {
         thread_id: String,
         message_id: String,
         body: String,
@@ -1497,9 +1508,11 @@ pub struct EditorWorkspace {
     comment_draft: text_editor::Content,
     comment_reply_drafts: BTreeMap<String, text_editor::Content>,
     editing_comment_message: Option<(String, String)>,
+    hover_note_edit: bool,
     comment_edit_draft: text_editor::Content,
     collapsed_comment_replies: BTreeSet<String>,
     pending_delete_comment: Option<String>,
+    pending_delete_note: Option<(String, String)>,
     comment_feedback: Option<String>,
     spellcheck_errors: BTreeMap<ViewId, String>,
     inspector: InspectorContext,
@@ -1720,9 +1733,11 @@ impl EditorWorkspace {
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
+            hover_note_edit: false,
             comment_edit_draft: text_editor::Content::new(),
             collapsed_comment_replies: BTreeSet::new(),
             pending_delete_comment: None,
+            pending_delete_note: None,
             comment_feedback: None,
             spellcheck_errors: BTreeMap::new(),
             inspector,
@@ -1835,9 +1850,11 @@ impl EditorWorkspace {
             comment_draft: text_editor::Content::new(),
             comment_reply_drafts: BTreeMap::new(),
             editing_comment_message: None,
+            hover_note_edit: false,
             comment_edit_draft: text_editor::Content::new(),
             collapsed_comment_replies: BTreeSet::new(),
             pending_delete_comment: None,
+            pending_delete_note: None,
             comment_feedback: None,
             spellcheck_errors: BTreeMap::new(),
             inspector,
@@ -1953,6 +1970,7 @@ impl EditorWorkspace {
             })
         {
             self.editing_comment_message = None;
+            self.hover_note_edit = false;
             self.comment_edit_draft = text_editor::Content::new();
         }
         if matches!(
@@ -2279,6 +2297,7 @@ impl EditorWorkspace {
                     && self.comment_edit_draft.text().trim() == body
                 {
                     self.editing_comment_message = None;
+                    self.hover_note_edit = false;
                     self.comment_edit_draft = text_editor::Content::new();
                 }
                 self.comment_feedback = None;
@@ -2362,6 +2381,20 @@ impl EditorWorkspace {
         {
             self.pending_delete_comment = None;
         }
+        if self
+            .pending_delete_note
+            .as_ref()
+            .is_some_and(|(thread, message)| {
+                self.comment_threads.get(thread).is_none_or(|current| {
+                    !current
+                        .messages
+                        .iter()
+                        .any(|candidate| candidate.id == *message)
+                })
+            })
+        {
+            self.pending_delete_note = None;
+        }
         self.comment_feedback = None;
     }
 
@@ -2379,11 +2412,19 @@ impl EditorWorkspace {
             .as_ref()
             .map(|(thread, message)| (thread.as_str(), message.as_str()))
     }
+    pub fn editing_note_in_hover(&self) -> bool {
+        self.hover_note_edit
+    }
     pub fn comment_replies_collapsed(&self, thread: &str) -> bool {
         self.collapsed_comment_replies.contains(thread)
     }
     pub fn pending_delete_comment(&self) -> Option<&str> {
         self.pending_delete_comment.as_deref()
+    }
+    pub fn pending_delete_note(&self) -> Option<(&str, &str)> {
+        self.pending_delete_note
+            .as_ref()
+            .map(|(thread, message)| (thread.as_str(), message.as_str()))
     }
     pub fn comment_feedback(&self) -> Option<&str> {
         self.comment_feedback.as_deref()
@@ -2979,7 +3020,7 @@ impl EditorWorkspace {
             EditorMessage::CreateComment { document_level } => {
                 let body = self.comment_draft.text().trim().to_owned();
                 if body.is_empty() {
-                    self.comment_feedback = Some("Comment text is required.".into());
+                    self.comment_feedback = Some("Note text is required.".into());
                     Vec::new()
                 } else {
                     let pane = self
@@ -2988,10 +3029,10 @@ impl EditorWorkspace {
                     if self.comment_composer.is_some_and(|composer| {
                         composer.mount_generation != self.pane(pane).mount_generation
                     }) {
-                        self.comment_feedback = Some("The comment's document changed. Select its text again before adding the comment.".into());
+                        self.comment_feedback = Some("The note's document changed. Select its text again before adding the note.".into());
                         return Vec::new();
                     }
-                    self.comment_feedback = Some("Saving comment…".into());
+                    self.comment_feedback = Some("Saving note…".into());
                     vec![EditorEffect::Command {
                         view: self.pane(pane).view,
                         command: EditorCommand::CreateComment {
@@ -3110,6 +3151,26 @@ impl EditorWorkspace {
                     message_id,
                 })
             }
+            EditorMessage::RequestDeleteNote {
+                thread_id,
+                message_id,
+            } => {
+                self.pending_delete_note = Some((thread_id, message_id));
+                Vec::new()
+            }
+            EditorMessage::ConfirmDeleteNote => {
+                let Some((thread_id, message_id)) = self.pending_delete_note.take() else {
+                    return Vec::new();
+                };
+                self.command(EditorCommand::DeleteCommentMessage {
+                    thread_id,
+                    message_id,
+                })
+            }
+            EditorMessage::CancelDeleteNote => {
+                self.pending_delete_note = None;
+                Vec::new()
+            }
             EditorMessage::BeginEditCommentMessage {
                 thread_id,
                 message_id,
@@ -3118,6 +3179,19 @@ impl EditorWorkspace {
                 self.comment_actions_open = false;
                 self.comment_edit_draft = text_editor::Content::with_text(&body);
                 self.editing_comment_message = Some((thread_id, message_id));
+                self.hover_note_edit = false;
+                self.comment_feedback = None;
+                Vec::new()
+            }
+            EditorMessage::BeginEditHoveredNote {
+                thread_id,
+                message_id,
+                body,
+            } => {
+                self.comment_actions_open = false;
+                self.comment_edit_draft = text_editor::Content::with_text(&body);
+                self.editing_comment_message = Some((thread_id, message_id));
+                self.hover_note_edit = true;
                 self.comment_feedback = None;
                 Vec::new()
             }
@@ -3128,12 +3202,12 @@ impl EditorWorkspace {
                 if self.editing_comment_message.as_ref()
                     != Some(&(thread_id.clone(), message_id.clone()))
                 {
-                    self.comment_feedback = Some("Comment edit is stale.".into());
+                    self.comment_feedback = Some("Note edit is stale.".into());
                     return Vec::new();
                 }
                 let body = self.comment_edit_draft.text().trim().to_owned();
                 if body.is_empty() {
-                    self.comment_feedback = Some("Comment text is required.".into());
+                    self.comment_feedback = Some("Note text is required.".into());
                     Vec::new()
                 } else {
                     self.command(EditorCommand::EditCommentMessage {
@@ -3145,6 +3219,7 @@ impl EditorWorkspace {
             }
             EditorMessage::CancelEditCommentMessage => {
                 self.editing_comment_message = None;
+                self.hover_note_edit = false;
                 self.comment_edit_draft = text_editor::Content::new();
                 self.comment_feedback = None;
                 Vec::new()
@@ -3403,6 +3478,8 @@ impl EditorWorkspace {
     }
 
     fn select_comment(&mut self, comment_id: String) -> Vec<EditorEffect> {
+        self.hover_note_edit = false;
+        self.hovered_comment = None;
         self.selected_comment = self
             .comment_threads
             .contains_key(&comment_id)
@@ -4411,10 +4488,7 @@ mod tests {
                 })
                 .is_empty()
         );
-        assert_eq!(
-            workspace.comment_feedback(),
-            Some("Comment text is required.")
-        );
+        assert_eq!(workspace.comment_feedback(), Some("Note text is required."));
 
         workspace.update(EditorMessage::SetCommentDraft("A note".into()));
         assert!(matches!(
@@ -4442,10 +4516,7 @@ mod tests {
                 })
                 .is_empty()
         );
-        assert_eq!(
-            workspace.comment_feedback(),
-            Some("Comment text is required.")
-        );
+        assert_eq!(workspace.comment_feedback(), Some("Note text is required."));
         workspace.update(EditorMessage::SetCommentReplyDraft {
             thread_id: "thread".into(),
             body: "  After  ".into(),
@@ -4497,6 +4568,30 @@ mod tests {
             workspace.update(EditorMessage::ConfirmDeleteCommentThread).as_slice(),
             [EditorEffect::Command { command: EditorCommand::DeleteCommentThread { thread_id }, .. }] if thread_id == "thread"
         ));
+    }
+
+    #[test]
+    fn note_deletion_confirms_the_exact_message() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::RequestDeleteNote {
+            thread_id: "thread".into(),
+            message_id: "first".into(),
+        });
+        assert_eq!(workspace.pending_delete_note(), Some(("thread", "first")));
+        workspace.update(EditorMessage::CancelDeleteNote);
+        assert_eq!(workspace.pending_delete_note(), None);
+        workspace.update(EditorMessage::RequestDeleteNote {
+            thread_id: "thread".into(),
+            message_id: "second".into(),
+        });
+        assert!(
+            matches!(workspace.update(EditorMessage::ConfirmDeleteNote).as_slice(), [
+            EditorEffect::Command { command: EditorCommand::DeleteCommentMessage {
+                thread_id, message_id,
+            }, .. }
+        ] if thread_id == "thread" && message_id == "second")
+        );
+        assert_eq!(workspace.pending_delete_note(), None);
     }
 
     #[test]

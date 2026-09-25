@@ -22,8 +22,8 @@ available and keeps `tiny-skia` as a fallback. Headless drivers select
 | --- | --- |
 | [shortcut_router.rs](src/shortcut_router.rs) | Resolve every shipped or reassigned shortcut from the shared command catalog; adapt text editing commands to the focused widget |
 | [native.rs](src/native.rs) | Route input and completions to the owning window; apply editor commands against the originating view and selection |
-| [project_workspace.rs](src/project_workspace.rs) | Explorer, Overview, comments, History, search, settings, export, and recovery presentation; shared tree selection and move validation |
-| [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and comment drafts |
+| [project_workspace.rs](src/project_workspace.rs) | Explorer, Overview, notes, History, search, settings, export, and recovery presentation; shared tree selection and move validation |
+| [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and note drafts |
 | [project_runtime.rs](src/project_runtime.rs) | Resolve IDs from current snapshots and call application ports |
 | [iced_project_surface.rs](src/iced_project_surface.rs), [iced_editor_surface.rs](src/iced_editor_surface.rs) | Render workspace state |
 | [cards_layout.rs](src/cards_layout.rs), [card_frames.rs](src/card_frames.rs) | Card geometry, text measurement, and enclosing group outlines |
@@ -50,9 +50,11 @@ Recently Deleted entries; undiscarded drafts remain available to crash recovery.
 Discard uses the ordinary mutation/save lane, so it is durable before the UI
 reports it as saved.
 
-Comment drafts retain their originating pane, mount generation, revision, and
-selection; failed submission keeps the text. The comments panel indexes threads using
-live anchors, including unsaved comments. The anchored popover owns editing.
+Note drafts retain their originating pane, mount generation, revision, and
+selection; failed submission keeps the text. The Notes panel presents each saved
+message as an independent note at its original anchor; older reply threads
+remain readable without changing storage.
+The anchored popover owns creation and editing.
 
 Styles and metadata managers stage changes locally across snapshots. Save applies
 the staged definitions; Cancel asks before discarding only when the draft differs

@@ -9,9 +9,9 @@ Shortcuts use **Ctrl** on Windows and Linux or **Command** on macOS, called the
 
 ParchMint opens your most recent project directly. On first launch it opens
 **My Writing**, a local workspace in the application-data directory. Use the
-project title menu to create or open another project. The comments sidebar starts
-hidden; the comments button in the status bar reveals it. Opening the companion pane for the first
-time creates an empty tab.
+project title menu to create or open another project. The Notes sidebar starts
+hidden; the notes button in the status bar reveals it. Opening the companion pane
+for the first time creates an empty tab.
 
 ## Create or open a project
 
@@ -33,7 +33,7 @@ Each project has one writable session; opening it again focuses its existing win
 | Explorer | Navigate documents while writing in Editor |
 | Editor | Write and format documents in one or two panes |
 | Overview | Create the project structure, edit planning details, and rearrange cards |
-| Comments | Find and navigate document comments |
+| Notes | Find and navigate annotations in writing |
 
 The icon rail on the left opens **Editor**, **Overview**, **History**,
 **Recently Deleted**, **Export**, and **Settings**. Hover an icon for its label.
@@ -79,7 +79,7 @@ maximized; a floating window keeps its titlebar. Fullscreen remains fullscreen.
 **F11** also toggles focus view.
 Choose **Exit focus** in the top bar or press **Escape** to restore the layout.
 When both panes show the same document, edits,
-comments, undo, saves, and word counts are shared; cursors, selections, scrolling,
+notes, undo, saves, and word counts are shared; cursors, selections, scrolling,
 and local searches remain independent.
 
 Each editor pane has a **+** button for a new tab (primary modifier plus **T**).
@@ -124,7 +124,7 @@ with the shared Explorer selection.
 ## Write and format
 
 The formatting controls in the top bar act on the focused editor pane. Paragraph
-styles, bold, italic, lists, links, and comments stay directly accessible. The list
+styles, bold, italic, lists, links, and notes stay directly accessible. The list
 button inserts bullets; its adjacent arrow offers bulleted and numbered lists.
 When space permits, font family and size, underline, strikethrough, block quotes,
 alignment, line spacing, and breaks also appear in the toolbar. In narrower
@@ -159,22 +159,21 @@ editor also controls field order and applicability. Drag fields across the divid
 between **Shown on collapsed cards** and **Hidden until expanded** to change their
 card visibility. New fields start in the hidden section. Expanded cards show all fields.
 
-## Comment on writing
+## Add notes to writing
 
-Select text, then click the speech-bubble-plus icon (**Add comment**) in the small
-toolbar below the selection. You can also use **Add Comment** in the editor context
-menu or its keyboard shortcut at a selection or cursor. Hover a commented passage
-for a short preview; **Open thread** reveals the full conversation in the Comments panel.
-**Enter** adds a new comment; **Shift+Enter** or **Alt+Enter** inserts a line break.
-Link and comment popovers stay beside their text. Hovered link destinations appear
-in the status bar; document links show their `>`-separated location.
-The Comments panel lists comments for the selected document. Selecting a group
-includes comments from all documents nested inside it, labeled by document title.
-Select a comment to open its document, reveal its location, and expand its thread
-in the Comments panel. Reply, edit, resolve, or delete there without leaving the
-panel. Right-click an unselected thread for those actions. Deleting a thread asks
-for confirmation in its card.
-Comments stay in the project and are excluded from export.
+Select text and choose **Add note** in the small toolbar beside the selection.
+You can also choose **Add note** from the editor context menu or use its keyboard
+shortcut. Type in the popover and press **Enter** to add the note; use
+**Shift+Enter** or **Alt+Enter** for a line break. The note stays anchored to the
+selected text, outside exported manuscripts.
+
+Hover anywhere along an annotated line between the selection's endpoints to see
+its notes. Click a note in the popover to edit it. The **Notes** sidebar shows a
+card for each note, with its quoted text and content. Click the card to open the
+annotated passage in the editor, or use its pencil and trash buttons to edit or
+delete the note. Deletion asks for confirmation. Selecting a group shows notes
+from all its documents, labeled by document title. Older projects with comment
+threads retain every saved message as a separate note at the original anchor.
 
 A draft stays attached to its original document and selection while you consult
 Research. If that document changes before submission, ParchMint keeps the draft
@@ -216,11 +215,11 @@ Selecting a checkpoint compares that saved version with the current project,
 including unsaved writing. Changed documents and groups appear in collapsible
 sections matching the outline. Renames strike through the old title. Unchanged
 items and lines are omitted. Content appears side by side, with changed words
-highlighted; metadata, synopsis, comments, and export changes have separate compact
+highlighted; metadata, synopsis, notes, and export changes have separate compact
 sections.
 Formatting-only changes show HTML differences; project style changes show CSS.
 **Restore project** replaces the whole project. **Restore document** replaces
-only the selected document's text, formatting, and comments; its name, location,
+only the selected document's text, formatting, and notes; its name, location,
 planning details, other documents, and project settings stay unchanged. Both
 actions ask for confirmation and create a new History entry. A document cannot
 be restored from a version that predates it.
@@ -261,7 +260,7 @@ menu transitions immediate. This setting is saved for all windows.
 
 Choose **Export** from the application menu, select an output HTML file, review title, page-break, and
 numbering options, then select **Export**. The result is one self-contained HTML
-file containing the whole Manuscript. Research, Synopsis, metadata, and comments
+file containing the whole Manuscript. Research, Synopsis, metadata, and notes
 are excluded. Use **Open** or **Reveal** after completion to inspect the file.
 
 ## Move or back up a project

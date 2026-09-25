@@ -317,6 +317,9 @@ struct SurfaceState {
     caret_visible: bool,
     next_caret_blink: Option<Instant>,
     pending_scroll_y: f32,
+    scroll_inertia_y: f32,
+    last_wheel: Option<Instant>,
+    last_wheel_delta: f32,
 }
 
 #[derive(Default)]
@@ -430,6 +433,9 @@ impl Default for SurfaceState {
             caret_visible: true,
             next_caret_blink: None,
             pending_scroll_y: 0.0,
+            scroll_inertia_y: 0.0,
+            last_wheel: None,
+            last_wheel_delta: 0.0,
         }
     }
 }
@@ -438,6 +444,36 @@ impl SurfaceState {
     const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
     const MULTI_CLICK_DISTANCE_SQUARED: f32 = 64.0;
 
+    fn add_scroll_inertia(&mut self, delta: f32) {
+        let now = Instant::now();
+        let continuing = self.last_wheel.is_some_and(|previous| {
+            now.saturating_duration_since(previous) <= Duration::from_millis(140)
+        }) && self.last_wheel_delta.signum() == delta.signum();
+        self.scroll_inertia_y = if continuing {
+            (self.scroll_inertia_y * 0.55 + delta * 0.18).clamp(-32.0, 32.0)
+        } else if delta.abs() >= 90.0 {
+            (delta * 0.12).clamp(-32.0, 32.0)
+        } else {
+            0.0
+        };
+        self.last_wheel = Some(now);
+        self.last_wheel_delta = delta;
+    }
+
+    fn wheel(&mut self, delta: f32) {
+        self.add_scroll_inertia(delta);
+        self.pending_scroll_y += delta;
+    }
+
+    fn pixel_wheel(&mut self, delta: f32) {
+        self.pending_scroll_y = 0.0;
+        self.add_scroll_inertia(delta);
+    }
+
+    fn scroll_active(&self) -> bool {
+        self.pending_scroll_y.abs() > f32::EPSILON || self.scroll_inertia_y.abs() > f32::EPSILON
+    }
+
     fn next_scroll_step(&mut self) -> f32 {
         let step = if self.pending_scroll_y.abs() < 1.0 {
             self.pending_scroll_y
@@ -445,7 +481,12 @@ impl SurfaceState {
             self.pending_scroll_y * 0.35
         };
         self.pending_scroll_y -= step;
-        step
+        let inertia = self.scroll_inertia_y;
+        self.scroll_inertia_y *= 0.86;
+        if self.scroll_inertia_y.abs() < 0.75 {
+            self.scroll_inertia_y = 0.0;
+        }
+        step + inertia
     }
 
     fn register_left_click(&mut self, position: Point) -> u8 {
@@ -499,7 +540,7 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             state.next_caret_blink = None;
         }
         if let iced::Event::Window(iced::window::Event::RedrawRequested(_)) = event
-            && state.pending_scroll_y.abs() > f32::EPSILON
+            && state.scroll_active()
         {
             return Some(Action::publish(MountedEditorMessage::Scroll {
                 delta_y: state.next_scroll_step(),
@@ -637,11 +678,11 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
                 let delta_y = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => {
-                        state.pending_scroll_y += -*y * 60.0;
+                        state.wheel(-*y * 60.0);
                         state.next_scroll_step()
                     }
                     mouse::ScrollDelta::Pixels { y, .. } => {
-                        state.pending_scroll_y = 0.0;
+                        state.pixel_wheel(-*y);
                         -*y
                     }
                 };
@@ -913,16 +954,18 @@ fn comment_hit(content: &SurfaceContent, x: f32, y: f32) -> Option<CommentHit> {
     }
     content.comments.iter().find_map(|decoration| {
         let rectangles = content.geometry.selection_rectangles(decoration.range());
-        if !rectangles.iter().any(|bounds| {
-            x >= bounds.x
-                && x < bounds.x + bounds.width
-                && y >= bounds.y
-                && y < bounds.y + bounds.height
-        }) {
+        if !comment_line_contains(&rectangles, x, y) {
             return None;
         }
-        // Keep the anchor stable while moving across glyphs or wrapped lines.
-        let bounds = rectangles.first()?;
+        // The hover region covers the selected span on one line, or every
+        // intervening line for a multiline note. The popover therefore stays
+        // open while the pointer travels through surrounding whitespace.
+        let (first, last) = (rectangles.first()?, rectangles.last()?);
+        let (anchor_x, anchor_width) = if first.y == last.y {
+            (first.x, last.x + last.width - first.x)
+        } else {
+            (0.0, content.viewport.width)
+        };
         Some((
             Some(
                 decoration
@@ -932,9 +975,33 @@ fn comment_hit(content: &SurfaceContent, x: f32, y: f32) -> Option<CommentHit> {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
             ),
-            (bounds.x, bounds.y, bounds.width, bounds.height),
+            (
+                anchor_x,
+                first.y,
+                anchor_width,
+                last.y + last.height - first.y,
+            ),
         ))
     })
+}
+
+fn comment_line_contains(rectangles: &[EditorRectangle], x: f32, y: f32) -> bool {
+    let (Some(first), Some(last)) = (rectangles.first(), rectangles.last()) else {
+        return false;
+    };
+    if y < first.y || y >= last.y + last.height {
+        return false;
+    }
+    if (first.y - last.y).abs() < f32::EPSILON {
+        return x >= first.x && x < last.x + last.width;
+    }
+    if y < first.y + first.height {
+        return x >= first.x;
+    }
+    if y >= last.y {
+        return x < last.x + last.width;
+    }
+    true
 }
 
 fn viewport_from_bounds(bounds: Rectangle) -> Option<EditorViewport> {
@@ -3146,10 +3213,17 @@ mod tests {
         let anchor = comment_hit(&content, first.x, first.y)
             .expect("first scalar is inside the comment")
             .1;
-        let expected = content.geometry.selection_rectangles(range)[0];
+        let rectangles = content.geometry.selection_rectangles(range);
+        let expected = rectangles[0];
+        let end = rectangles.last().unwrap();
         assert_eq!(
             anchor,
-            (expected.x, expected.y, expected.width, expected.height),
+            (
+                expected.x,
+                expected.y,
+                end.x + end.width - expected.x,
+                expected.height
+            ),
             "comment cards anchor to text geometry, never to the pointer position"
         );
         let second = content.geometry.draw_scalars()[1].bounds;
@@ -3171,6 +3245,36 @@ mod tests {
             None,
             "blank space below the comment must not open it"
         );
+    }
+
+    #[test]
+    fn multiline_note_hit_spans_the_full_intervening_lines() {
+        let glyphs = [
+            EditorRectangle {
+                x: 70.0,
+                y: 10.0,
+                width: 9.0,
+                height: 18.0,
+            },
+            EditorRectangle {
+                x: 100.0,
+                y: 50.0,
+                width: 9.0,
+                height: 18.0,
+            },
+            EditorRectangle {
+                x: 30.0,
+                y: 90.0,
+                width: 9.0,
+                height: 18.0,
+            },
+        ];
+        assert!(comment_line_contains(&glyphs, 280.0, 18.0));
+        assert!(comment_line_contains(&glyphs, 280.0, 58.0));
+        assert!(comment_line_contains(&glyphs, 5.0, 58.0));
+        assert!(comment_line_contains(&glyphs, 5.0, 98.0));
+        assert!(!comment_line_contains(&glyphs, 50.0, 18.0));
+        assert!(!comment_line_contains(&glyphs, 50.0, 120.0));
     }
 
     #[test]
