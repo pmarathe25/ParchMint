@@ -1,5 +1,6 @@
 //! Card outlines follow the allocated (including animated) grid-row geometry.
 //! The window stays virtualized; an enclosing group can start above the window.
+use crate::DragDestination;
 use crate::design_tokens::ParchMintTheme;
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
@@ -22,12 +23,14 @@ pub(crate) fn groups<'a, Message: 'a>(
     frames: Vec<GroupFrame>,
     positions: crate::motion::Positions,
     theme: ParchMintTheme,
+    drop_destination: Option<DragDestination>,
 ) -> Element<'a, Message> {
     Element::new(CardFrames {
         content: content.into(),
         frames: Some(frames),
         positions: Some(positions),
         theme,
+        drop_destination,
     })
 }
 
@@ -40,6 +43,7 @@ pub(crate) fn placeholder<'a, Message: 'a>(
         frames: None,
         positions: None,
         theme,
+        drop_destination: None,
     })
 }
 
@@ -48,6 +52,7 @@ struct CardFrames<'a, Message> {
     frames: Option<Vec<GroupFrame>>,
     positions: Option<crate::motion::Positions>,
     theme: ParchMintTheme,
+    drop_destination: Option<DragDestination>,
 }
 
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Message> {
@@ -185,6 +190,36 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
                         height: 1.0,
                         ..bounds
                     });
+                }
+                // Insertion lines for group-atomic drops: the per-card
+                // indicator cannot reach past an expanded group's contents,
+                // so the frame draws the line where the placeholder lands —
+                // after the last row for AfterSibling, before the first row
+                // for BeforeSibling.
+                let insertion = match &self.drop_destination {
+                    Some(DragDestination::AfterSibling(id)) if id == &frame.id => Some(Rectangle {
+                        y: (bounds.y + bounds.height - 2.0).max(bounds.y),
+                        width: bounds.width,
+                        height: 2.0,
+                        ..bounds
+                    }),
+                    Some(DragDestination::BeforeSibling(id)) if id == &frame.id => {
+                        Some(Rectangle {
+                            width: bounds.width,
+                            height: 2.0,
+                            ..bounds
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(area) = insertion {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: area,
+                            ..Default::default()
+                        },
+                        palette.accent,
+                    );
                 }
             }
         } else {
@@ -335,6 +370,7 @@ mod tests {
             }],
             crate::motion::Positions::default(),
             theme,
+            None,
         );
         let mut tree = Tree::new(&content);
         let viewport = Rectangle::with_size(Size::new(100.0, 120.0));

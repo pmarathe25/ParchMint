@@ -86,11 +86,11 @@ fn comment_popover_escape_does_not_leak_into_inspector_or_editor() {
             (0.5, 0.5),
         )
         .expect("open the editor popover");
-    assert!(visible(&harness, "Add Comment"));
+    assert!(visible(&harness, "Add note"));
     harness
         .press_key(HarnessWindow::Project, HarnessKey::Escape)
         .expect("dismiss the editor popover");
-    assert!(!visible(&harness, "Add Comment"));
+    assert!(!visible(&harness, "Add note"));
 
     harness
         .click_target(

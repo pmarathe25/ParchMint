@@ -206,7 +206,7 @@ fn workspace_transitions_keep_writing_and_controls_available() {
             "Reveal the letter's author later.",
         )
         .unwrap();
-    harness.click_text(WINDOW, "Add comment").unwrap();
+    harness.click_text(WINDOW, "Add note").unwrap();
     frames(&harness, "comment-saved");
     harness.press_command_key(WINDOW, 'f').unwrap();
     frames(&harness, "find-open");
@@ -348,6 +348,10 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
                 destination,
                 position,
             )
+            .unwrap();
+        // The insertion preview appears only after the pointer dwells.
+        harness
+            .advance_motion(WINDOW, Duration::from_millis(120))
             .unwrap();
         let preview = harness.preview_hierarchy_titles().unwrap();
         frames(&harness, name);

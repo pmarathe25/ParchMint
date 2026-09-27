@@ -322,6 +322,23 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
             .unwrap(),
         "new fields should stay out of collapsed cards"
     );
+    // Expansion must reveal clipped information, rather than empty hidden fields.
+    harness
+        .click_text(HarnessWindow::Project, "What happens here?")
+        .unwrap();
+    harness
+        .click_target(HarnessWindow::Project, HarnessTarget::InspectorSynopsis)
+        .unwrap();
+    harness
+        .type_into_target(
+            HarnessWindow::Project,
+            HarnessTarget::InspectorSynopsis,
+            "A long planning synopsis that spans several lines on a compact card. The ending must stay hidden until the reader expands the full card details.",
+        )
+        .unwrap();
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .unwrap();
     let card = harness.hierarchy_node(&title).unwrap();
     harness
         .toggle_card_details(HarnessWindow::Project, card.clone())

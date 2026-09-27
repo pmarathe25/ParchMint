@@ -447,10 +447,10 @@ fn spelling_menu_popover(
                 theme,
             ))
         });
-    container(
+    container(crate::scroll_gate::smooth(
         iced::widget::scrollable(actions.spacing(2))
             .height((menu.bounds().height() - 12.0).max(0.0)),
-    )
+    ))
     .padding(6)
     .width(menu.bounds().width())
     .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
@@ -1026,7 +1026,12 @@ fn link_editor_popover(
                 theme,
             ));
         }
-        content = content.push(container(iced::widget::scrollable(locations)).max_height(240));
+        content = content.push(
+            container(crate::scroll_gate::smooth(iced::widget::scrollable(
+                locations,
+            )))
+            .max_height(240),
+        );
     } else {
         content = content.push(url_input);
     }
@@ -1124,29 +1129,30 @@ fn editor_pane_surface<'a>(
             .active_document()
             .and_then(|id| workspace.scratch(id).map(|content| (id, content)))
         {
-            text_editor(content)
-                .id(iced::widget::Id::from(format!("scratch-editor-{id}")))
-                .placeholder("")
-                .height(Length::Fill)
-                .padding(iced::Padding {
-                    top: 32.0,
-                    right: 54.0,
-                    bottom: 32.0,
-                    left: 54.0,
-                })
-                .size(18)
-                .on_action(move |action| EditorCenterMessage::Scratch {
-                    pane,
-                    id: id.to_owned(),
-                    action,
-                })
-                .style(move |_, status| {
-                    let mut style = multiline_field_style(theme, status);
-                    style.border = iced::Border::default();
-                    style.background = theme.palette().manuscript.into();
-                    style
-                })
-                .into()
+            crate::scroll_gate::smooth(
+                text_editor(content)
+                    .id(iced::widget::Id::from(format!("scratch-editor-{id}")))
+                    .placeholder("")
+                    .height(Length::Fill)
+                    .padding(iced::Padding {
+                        top: 32.0,
+                        right: 54.0,
+                        bottom: 32.0,
+                        left: 54.0,
+                    })
+                    .size(18)
+                    .on_action(move |action| EditorCenterMessage::Scratch {
+                        pane,
+                        id: id.to_owned(),
+                        action,
+                    })
+                    .style(move |_, status| {
+                        let mut style = multiline_field_style(theme, status);
+                        style.border = iced::Border::default();
+                        style.background = theme.palette().manuscript.into();
+                        style
+                    }),
+            )
         } else {
             pane_body(state, pane, theme, slots)
         },
@@ -1317,7 +1323,6 @@ fn editor_pane_surface<'a>(
         content,
         targets,
         hierarchy_drag_active || workspace.tab_drag_is_active(),
-        false,
         move |target| {
             if target.is_some() {
                 EditorCenterMessage::HierarchyDropTarget(pane)
@@ -1344,43 +1349,38 @@ fn comment_hover_overlay<'a>(
     };
     let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut card = column![
-        text("Notes").size(12).color(theme.palette().secondary_text),
-        container(text(quote).size(12).color(theme.palette().secondary_text))
-            .height(22)
+        components::muted_label("Notes"),
+        container(components::muted_label(quote))
+            .height(18)
             .clip(true),
     ]
-    .spacing(8);
+    .spacing(4);
     for message in thread.messages() {
         let editing = workspace.editing_note_in_hover()
             && workspace.editing_comment_message() == Some((thread.id(), message.id()));
         let note = if editing {
             note_message_body(thread.id(), message, workspace, theme, true)
         } else {
-            button(text(message.body().to_owned()).size(14).width(Length::Fill))
-                .width(Length::Fill)
-                .padding(6)
-                .on_press(EditorCenterMessage::Workspace(
-                    EditorMessage::BeginEditHoveredNote {
-                        thread_id: thread.id().to_owned(),
-                        message_id: message.id().to_owned(),
-                        body: message.body().to_owned(),
-                    },
-                ))
-                .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Quiet,
-                        button_interaction(status, false),
-                    )
-                })
-                .into()
+            mouse_area(
+                container(text(message.body().to_owned()).size(13).width(Length::Fill))
+                    .padding([2, 4])
+                    .width(Length::Fill),
+            )
+            .on_press(EditorCenterMessage::Workspace(
+                EditorMessage::BeginEditHoveredNote {
+                    thread_id: thread.id().to_owned(),
+                    message_id: message.id().to_owned(),
+                    body: message.body().to_owned(),
+                },
+            ))
+            .into()
         };
         card = card.push(note);
     }
     anchored_comment_overlay(
         content,
         hover.anchor_bounds(),
-        container(iced::widget::scrollable(card))
+        container(crate::scroll_gate::smooth(iced::widget::scrollable(card)))
             .max_height(240)
             .into(),
         !workspace.editing_note_in_hover(),
@@ -1410,27 +1410,27 @@ fn comment_composer_overlay<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let mut card = column![
-        text("New note").size(16).font(iced::Font {
+        text("New note").size(14).font(iced::Font {
             weight: iced::font::Weight::Semibold,
             ..iced::Font::DEFAULT
         }),
-        text_editor(workspace.comment_draft())
-            .id(HarnessTarget::CommentDraft.id())
-            .key_binding(|press| comment_key_binding(
-                press,
-                EditorMessage::CreateComment {
-                    document_level: false
-                }
-            ))
-            .placeholder("Write a note")
-            .on_action(|action| {
-                EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(action))
-            })
-            .height(Length::Fixed(76.0))
-            .style(move |_, status| multiline_field_style(theme, status)),
-        text("Enter adds · Shift+Enter new line")
-            .size(11)
-            .color(theme.palette().secondary_text),
+        crate::scroll_gate::smooth(
+            text_editor(workspace.comment_draft())
+                .id(HarnessTarget::CommentDraft.id())
+                .key_binding(|press| comment_key_binding(
+                    press,
+                    EditorMessage::CreateComment {
+                        document_level: false
+                    }
+                ))
+                .placeholder("Write a note")
+                .on_action(|action| {
+                    EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(action))
+                })
+                .height(Length::Fixed(76.0))
+                .style(move |_, status| multiline_field_style(theme, status))
+        ),
+        components::muted_label("Enter adds · Shift+Enter new line"),
         row![
             Space::new().width(Length::Fill),
             comment_popover_action(
@@ -1525,7 +1525,7 @@ pub(crate) fn note_message_body<'a>(
         body.into()
     } else {
         text(message.body().to_owned())
-            .size(14)
+            .size(13)
             .width(Length::Fill)
             .into()
     }
@@ -1539,15 +1539,11 @@ pub(crate) fn comment_thread_card<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let thread_id = thread.id().to_owned();
-    let mut card = column![
-        text(format!(
-            "“{}”",
-            quote.split_whitespace().collect::<Vec<_>>().join(" ")
-        ))
-        .size(12)
-        .color(theme.palette().secondary_text),
-    ]
-    .spacing(8);
+    let mut card = column![components::muted_label(format!(
+        "“{}”",
+        quote.split_whitespace().collect::<Vec<_>>().join(" ")
+    )),]
+    .spacing(4);
     for message in thread.messages() {
         let message_id = message.id().to_owned();
         let actions = row![
@@ -1611,7 +1607,7 @@ fn anchored_comment_overlay<'a>(
         content,
         container(card)
             .width(320)
-            .padding(10)
+            .padding(8)
             .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
             .into(),
         anchor,

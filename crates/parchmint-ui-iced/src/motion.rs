@@ -27,7 +27,7 @@ pub(crate) fn set_reduced(value: bool) {
 pub(crate) fn set_capture(value: bool) {
     CAPTURE.set(value);
 }
-fn enabled() -> bool {
+pub(crate) fn enabled() -> bool {
     !reduced() && !SETTLED.get() && !CAPTURE.get()
 }
 
@@ -143,6 +143,22 @@ pub(crate) fn row<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a,
     Element::new(MotionRow {
         slots,
         animated: true,
+        page: String::new(),
+    })
+}
+
+/// A pane row that snaps instead of sliding when the page changes, so
+/// navigating screens never plays sidebar collapse/expand motion. Toggles
+/// within the same page still animate. Each distinct page gets its own
+/// reveal state; only matching pages animate between each other.
+pub(crate) fn row_for_page<'a, Message: 'a>(
+    page: impl Into<String>,
+    slots: Vec<Slot<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        page: page.into(),
     })
 }
 
@@ -150,16 +166,19 @@ pub(crate) fn row_instant<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Ele
     Element::new(MotionRow {
         slots,
         animated: false,
+        page: String::new(),
     })
 }
 struct MotionRow<'a, Message> {
     slots: Vec<Slot<'a, Message>>,
     animated: bool,
+    page: String,
 }
 struct RowState {
     reveals: Vec<Tween>,
     widths: Vec<f32>,
     now: Instant,
+    page: String,
 }
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -175,6 +194,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 .map(|slot| Tween::new(if slot.visible { 1.0 } else { 0.0 }, now, LAYOUT))
                 .collect(),
             now,
+            page: self.page.clone(),
         })
     }
     fn children(&self) -> Vec<Tree> {
@@ -186,15 +206,26 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
     fn diff(&self, tree: &mut Tree) {
         let state = tree.state.downcast_mut::<RowState>();
         let now = now();
+        // A page change snaps every reveal instantly: navigating must not
+        // replay sidebar motion. The whole-page entrance (if any) still plays.
+        let navigated = state.page != self.page;
+        if navigated {
+            state.page.clone_from(&self.page);
+        }
+        let previous_len = state.reveals.len();
         state.widths.resize(self.slots.len(), 320.0);
         state
             .reveals
             .resize_with(self.slots.len(), || Tween::new(0.0, now, LAYOUT));
-        for (reveal, slot) in state.reveals.iter_mut().zip(&self.slots) {
+        for (index, (reveal, slot)) in state.reveals.iter_mut().zip(&self.slots).enumerate() {
+            // Toggling a pane within a screen animates. Mounting entirely new
+            // slots snaps in instead: sliding sidebars on structural changes
+            // is disruptive. Page changes snap via the page key above.
+            let added = index >= previous_len;
             reveal.set(
                 if slot.visible { 1.0 } else { 0.0 },
                 now,
-                self.animated && enabled(),
+                self.animated && enabled() && !added && !navigated,
             );
         }
         state.now = now;
@@ -752,6 +783,7 @@ pub(crate) struct Positions(std::sync::Arc<std::sync::Mutex<BTreeMap<String, Pla
 struct Placement {
     generation: u64,
     target: Point,
+    width: f32,
     x: Tween,
     y: Tween,
 }
@@ -858,16 +890,40 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                 .or_insert_with(|| Placement {
                     generation: self.generation,
                     target,
+                    width: layout.bounds().width,
                     x: Tween::new(target.x, *now, LAYOUT),
                     y: Tween::new(target.y, *now, LAYOUT),
                 });
-            if place.target != target || !self.animate || !enabled() {
-                let animate = self.animate && enabled() && place.generation != self.generation;
-                place.x.set(target.x, *now, animate);
-                place.y.set(target.y, *now, animate);
+            let resized = (place.width - layout.bounds().width).abs() > 0.5;
+            if place.target != target || resized || !self.animate || !enabled() {
+                // A full-width group heading cannot travel through its former
+                // compact card slot without covering neighboring cards.
+                let animate =
+                    self.animate && enabled() && !resized && place.generation != self.generation;
+                if animate {
+                    // Material motion: list elements travel vertically from
+                    // their start to their end. A group expanding downward
+                    // pushes siblings down, so the meaningful axis is always
+                    // Y: snapping Y would teleport cards in the wrong
+                    // direction. Animate Y whenever it changes; animate X
+                    // only for pure horizontal shifts (same-row reorder, tab
+                    // strips) where there is no vertical story to tell.
+                    let current_x = place.x.value(*now);
+                    let current_y = place.y.value(*now);
+                    let dx = (target.x - current_x).abs();
+                    let dy = (target.y - current_y).abs();
+                    let animate_y = dy >= 1.0;
+                    let animate_x = dx >= 1.0 && dy < 1.0;
+                    place.x.set(target.x, *now, animate_x);
+                    place.y.set(target.y, *now, animate_y);
+                } else {
+                    place.x.set(target.x, *now, false);
+                    place.y.set(target.y, *now, false);
+                }
             }
             place.generation = self.generation;
             place.target = target;
+            place.width = layout.bounds().width;
             let offset = if enabled() {
                 Vector::new(
                     place.x.value(*now) - target.x,
@@ -1258,6 +1314,75 @@ mod tests {
     }
 
     #[test]
+    fn page_change_snaps_sidebars_while_same_page_toggles_animate() {
+        set_reduced(false);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let mut element: Element<'_, ()> = row_for_page(
+            "Editor",
+            vec![
+                slot(pane(), Length::Fill, true),
+                slot(pane(), Length::Fill, true),
+            ],
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let original = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(original.children()[0].size().width, 400.0);
+        // Navigating away with a sidebar hidden snaps: no intermediate
+        // geometry and no further frames.
+        element = row_for_page(
+            "Cards",
+            vec![
+                slot(pane(), Length::Fill, true),
+                slot(pane(), Length::Fill, false),
+            ],
+        );
+        tree.diff(&element);
+        let snapped = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(snapped.children()[0].size().width, 800.0);
+        assert_eq!(snapped.children()[1].size().width, 0.0);
+        let settled_at = tree.state.downcast_ref::<RowState>().now + LAYOUT;
+        assert_eq!(
+            frame(&mut element, &mut tree, &renderer, &snapped, settled_at),
+            iced::window::RedrawRequest::Wait
+        );
+        // Toggling within the same page animates through intermediate widths.
+        element = row_for_page(
+            "Cards",
+            vec![
+                slot(pane(), Length::Fill, false),
+                slot(pane(), Length::Fill, true),
+            ],
+        );
+        tree.diff(&element);
+        let start = tree.state.downcast_ref::<RowState>().now;
+        assert_eq!(
+            frame(
+                &mut element,
+                &mut tree,
+                &renderer,
+                &snapped,
+                start + LAYOUT / 2
+            ),
+            iced::window::RedrawRequest::NextFrame
+        );
+        let middle = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let width = middle.children()[1].size().width;
+        assert!(width > 400.0 && width < 800.0);
+    }
+
+    #[test]
     fn incoming_panes_reveal_at_their_final_text_width() {
         set_reduced(false);
         let start = Instant::now();
@@ -1417,6 +1542,81 @@ mod tests {
             tree.state.downcast_ref::<ReflowState>().offset,
             Vector::ZERO
         );
+    }
+
+    #[test]
+    fn a_group_changing_width_does_not_slide_over_its_previous_row() {
+        set_reduced(false);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let mut element: Element<'_, ()> = reflow(
+            positions.clone(),
+            "group",
+            1,
+            true,
+            iced::widget::Space::new().width(200).height(100),
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let start = Instant::now();
+        let compact = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(220.0, 0.0));
+        frame(&mut element, &mut tree, &renderer, &compact, start);
+        element = reflow(
+            positions,
+            "group",
+            2,
+            true,
+            iced::widget::Space::new().width(800).height(100),
+        );
+        tree.diff(&element);
+        let expanded = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(0.0, 120.0));
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &expanded,
+            start + Duration::from_millis(16),
+        );
+        assert_eq!(
+            tree.state.downcast_ref::<ReflowState>().offset,
+            Vector::ZERO
+        );
+    }
+
+    #[test]
+    fn reflow_slides_vertically_and_snaps_horizontally_on_diagonal_moves() {
+        set_reduced(false);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let card = || iced::widget::Space::new().width(80).height(40);
+        let mut element: Element<'_, ()> = reflow(positions.clone(), "card", 1, true, card());
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let start = Instant::now();
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        element = reflow(positions, "card", 2, true, card());
+        tree.diff(&element);
+        // A group collapse shifts siblings mostly vertically with a small
+        // column shift: the card should slide vertically and snap
+        // horizontally instead of flying diagonally.
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(40.0, 300.0));
+        frame(&mut element, &mut tree, &renderer, &node, start + LAYOUT);
+        let offset = tree.state.downcast_ref::<ReflowState>().offset;
+        assert_ne!(offset, Vector::ZERO);
+        assert_eq!(offset.x, 0.0);
+        assert!(offset.y < 0.0);
     }
 
     #[test]

@@ -444,15 +444,14 @@ impl<'a, Message: Clone + 'a> Widget<Message, iced::Theme, iced::Renderer>
                 column(choices).spacing(2).into()
             };
 
-            let content: Element<'_, Message> =
-                container(iced::widget::scrollable(options).height(Length::Shrink))
-                    .max_height(440)
-                    .width(width)
-                    .padding(4)
-                    .style(move |_| {
-                        components::surface(theme, Surface::Elevated, Interaction::Rest)
-                    })
-                    .into();
+            let content: Element<'_, Message> = container(crate::scroll_gate::smooth(
+                iced::widget::scrollable(options).height(Length::Shrink),
+            ))
+            .max_height(440)
+            .width(width)
+            .padding(4)
+            .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
+            .into();
             self.menu_content = Some((state.selected, content));
         }
         let (_, content) = self.menu_content.as_mut().expect("open menu has content");

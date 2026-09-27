@@ -284,7 +284,10 @@ fn project_surface_with_layout<'a>(
     let body = if destination == RibbonDestination::Cards {
         crate::motion::row_instant(body_slots)
     } else {
-        crate::motion::row(body_slots)
+        // Keyed by destination so switching pages snaps the sidebars instead
+        // of replaying their collapse/expand motion. Same-page sidebar
+        // toggles keep the same key and animate as before.
+        crate::motion::row_for_page(format!("{destination:?}"), body_slots)
     };
     let mut content = column![body]
         .spacing(0)
@@ -369,19 +372,20 @@ fn project_surface_with_layout<'a>(
         if let Some(source) = workspace.hierarchy_drag_source()
             && let Some(item) = workspace.cards().item_by_id(source)
         {
+            let ghost = outline_card(
+                workspace,
+                theme,
+                item,
+                workspace.card_drag_geometry().1,
+                1,
+                &hierarchy_drag::targets(),
+                0,
+                true,
+            );
             stack![
                 base,
                 crate::drag_ghost::floating(
-                    outline_card(
-                        workspace,
-                        theme,
-                        item,
-                        workspace.card_drag_geometry().1,
-                        false,
-                        &hierarchy_drag::targets(),
-                        0,
-                        true
-                    ),
+                    ghost,
                     workspace.card_drag_geometry().0,
                     workspace.card_drag_geometry().1,
                 )
@@ -728,18 +732,20 @@ fn ribbon<'a>(
     let expanded = workspace.editor().expanded_pane();
     let tools = focus::f6_region(
         F6Region::FormattingToolbar,
-        scrollable(
-            crate::iced_editor_surface::formatting_toolbar_for_width(
-                workspace.editor(),
-                theme,
-                width.saturating_sub(if expanded.is_some() { 148 } else { 24 }) >= 740,
+        crate::scroll_gate::smooth(
+            scrollable(
+                crate::iced_editor_surface::formatting_toolbar_for_width(
+                    workspace.editor(),
+                    theme,
+                    width.saturating_sub(if expanded.is_some() { 148 } else { 24 }) >= 740,
+                )
+                .map(ProjectSurfaceMessage::EditorCenter),
             )
-            .map(ProjectSurfaceMessage::EditorCenter),
-        )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new().width(3).scroller_width(3),
-        ))
-        .width(Length::Fill),
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(3).scroller_width(3),
+            ))
+            .width(Length::Fill),
+        ),
     );
     let mut content = row![tools]
         .align_y(iced::alignment::Vertical::Center)
@@ -970,6 +976,7 @@ pub(crate) fn explorer_rail_with_rename<'a>(
         let drag_destination = workspace.hierarchy_drag_destination();
         let indicator = hierarchy_row_indicator(item.kind, &node_id, drag_destination, theme);
         let kind = item.kind;
+        let expanded = item.expanded;
         let target_id = node_id.clone();
         let row_body = hierarchy_drag::target(
             container(item_row)
@@ -986,7 +993,8 @@ pub(crate) fn explorer_rail_with_rename<'a>(
             indicator,
             &targets,
             move |bounds, point| {
-                let destination = hierarchy_row_destination(kind, &target_id, bounds, point)?;
+                let destination =
+                    hierarchy_row_destination(kind, expanded, &target_id, bounds, point)?;
                 workspace.preview_destination(&target_id, destination)
             },
         );
@@ -1102,7 +1110,6 @@ pub(crate) fn explorer_rail_with_rename<'a>(
         crate::scroll_gate::drop_none(scrollable),
         targets,
         workspace.hierarchy_drag_source().is_some(),
-        false,
         |destination| {
             ProjectSurfaceMessage::Project(ProjectMessage::PreviewHierarchyDrop {
                 surface: crate::HierarchySurface::Explorer,
@@ -1152,21 +1159,19 @@ fn hierarchy_row_indicator(
         }
         _ => return None,
     };
-    Some(hierarchy_drag::DropIndicator {
-        position,
-        color: {
-            let accent = theme.palette().accent;
-            if matches!(position, hierarchy_drag::DropIndicatorPosition::Into) {
-                Color { a: 0.18, ..accent }
-            } else {
-                accent
-            }
-        },
-    })
+    Some(hierarchy_drag::DropIndicator::new(position, {
+        let accent = theme.palette().accent;
+        if matches!(position, hierarchy_drag::DropIndicatorPosition::Into) {
+            Color { a: 0.18, ..accent }
+        } else {
+            accent
+        }
+    }))
 }
 
 fn hierarchy_row_destination(
     kind: HierarchyRowKind,
+    expanded: bool,
     node_id: &str,
     bounds: iced::Rectangle,
     point: iced::Point,
@@ -1176,9 +1181,18 @@ fn hierarchy_row_destination(
     }
     let relative_y = (point.y - bounds.y) / bounds.height.max(1.0);
     if matches!(kind, HierarchyRowKind::Root | HierarchyRowKind::Group) {
-        if relative_y < 0.25 {
+        // An expanded group is atomic: only its top edge inserts before it.
+        // Everything else drops into it; after-the-group is reached past its
+        // visible children through the next sibling's before slot.
+        if expanded && matches!(kind, HierarchyRowKind::Group) {
+            if relative_y < 0.30 {
+                return Some(DragDestination::BeforeSibling(node_id.to_owned()));
+            }
+            return Some(DragDestination::IntoGroup(node_id.to_owned()));
+        }
+        if relative_y < 0.30 {
             Some(DragDestination::BeforeSibling(node_id.to_owned()))
-        } else if relative_y > 0.75 {
+        } else if relative_y > 0.70 {
             Some(DragDestination::AfterSibling(node_id.to_owned()))
         } else {
             Some(DragDestination::IntoGroup(node_id.to_owned()))
@@ -1954,6 +1968,7 @@ pub(crate) fn cards_grid<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let cards = workspace.cards();
     let targets = hierarchy_drag::targets();
+    let stable_targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
     let window = cards.viewport_window(columns, width, height);
     let coverage = CardsWindowCoverage {
@@ -1964,9 +1979,19 @@ pub(crate) fn cards_grid<'a>(
         projected_scroll: cards.scroll_offset(),
     };
     let visible = cards.items_in_window(&window);
-    workspace
-        .card_positions
-        .retain(&visible.iter().map(|item| item.node_id).collect::<Vec<_>>());
+    let add_ids = window
+        .rows
+        .iter()
+        .filter_map(|row| row.add_to.as_ref())
+        .map(|parent| format!("add:{parent}"))
+        .collect::<Vec<_>>();
+    workspace.card_positions.retain(
+        &visible
+            .iter()
+            .map(|item| item.node_id)
+            .chain(add_ids.iter().map(String::as_str))
+            .collect::<Vec<_>>(),
+    );
     let generation = window.generation;
     let mut items = visible.into_iter().peekable();
     let mut frames: Vec<crate::card_frames::GroupFrame> = Vec::new();
@@ -1976,11 +2001,14 @@ pub(crate) fn cards_grid<'a>(
     for (row_index, grid_row) in window.rows.iter().enumerate() {
         // Iced omits a zero-height spacer from the column's child list.
         let row_index = row_index + usize::from(window.top_padding > 0.0);
+        let is_dragging = workspace.hierarchy_drag_source().is_some();
         let closes_group = grid_row
             .add_to
             .as_deref()
             .is_some_and(|id| id != cards.section_id());
-        let trailing = if closes_group {
+        let trailing = if is_dragging && closes_group {
+            crate::cards_layout::GROUP_GAP + 24.0
+        } else if closes_group {
             crate::cards_layout::GROUP_GAP + 8.0
         } else {
             0.0
@@ -1990,6 +2018,18 @@ pub(crate) fn cards_grid<'a>(
         let own_group = first
             .filter(|item| item.kind == HierarchyRowKind::Group && item.expanded)
             .map(|item| item.node_id);
+        let leading = if is_dragging && own_group.is_some() {
+            20.0
+        } else {
+            0.0
+        };
+        let own_first_child: Option<String> = own_group.and_then(|group_id| {
+            workspace
+                .displayed_explorer()
+                .row(group_id)
+                .and_then(|row| row.child_ids.first().map(|child| (*child).to_owned()))
+        });
+        let closed_group = closes_group.then(|| grid_row.add_to.as_deref().unwrap().to_owned());
         let mut current = first
             .map(|item| item.node_id)
             .or(grid_row.add_to.as_deref());
@@ -2026,10 +2066,17 @@ pub(crate) fn cards_grid<'a>(
         }
         let add_control = |parent: &str, depth: usize| {
             let indent = crate::cards_layout::grid_indent(depth, width);
-            crate::card_frames::placeholder(
+            let control = crate::card_frames::placeholder(
                 container(overview_add(parent, parent == cards.section_id(), theme))
                     .width((width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32),
                 theme,
+            );
+            crate::motion::reflow(
+                workspace.card_positions.clone(),
+                format!("add:{parent}"),
+                generation,
+                workspace.hierarchy_drag_source().is_some(),
+                control,
             )
         };
         if let Some(parent) = &grid_row.add_to
@@ -2037,12 +2084,40 @@ pub(crate) fn cards_grid<'a>(
         {
             let indent = crate::cards_layout::grid_indent(grid_row.depth, width);
             let control = add_control(parent, grid_row.depth);
-            grid = grid.push(
+            let slot_parent = parent.clone();
+            let row_closed_group = closed_group.clone();
+            let slot = hierarchy_drag::target_with_zone(
                 container(row![Space::new().width(indent), control]).padding(iced::Padding {
+                    top: leading,
                     bottom: crate::project_workspace::CARDS_ROW_GAP + trailing,
                     ..iced::Padding::ZERO
                 }),
+                None,
+                &targets,
+                move |bounds, point| {
+                    if !bounds.contains(point) {
+                        return None;
+                    }
+                    if trailing > 0.0
+                        && closes_group
+                        && point.y > bounds.y + bounds.height - trailing
+                    {
+                        if let Some(group_id) = row_closed_group.as_deref() {
+                            return workspace
+                                .preview_destination(
+                                    group_id,
+                                    DragDestination::AfterSibling(group_id.to_owned()),
+                                )
+                                .map(|destination| (destination, bounds));
+                        }
+                    }
+                    let destination = DragDestination::IntoGroup(slot_parent.clone());
+                    workspace
+                        .preview_destination(&slot_parent, destination)
+                        .map(|destination| (destination, bounds))
+                },
             );
+            grid = grid.push(slot);
             continue;
         }
         let first = items.peek().expect("projected grid row");
@@ -2059,14 +2134,7 @@ pub(crate) fn cards_grid<'a>(
         for item in items.by_ref().take(grid_row.end - grid_row.start) {
             last_node = item.node_id.to_owned();
             cells = cells.push(outline_card(
-                workspace,
-                theme,
-                item,
-                cell_width,
-                columns > 1,
-                &targets,
-                generation,
-                false,
+                workspace, theme, item, cell_width, columns, &targets, generation, false,
             ));
         }
         last_card_id = Some(last_node.clone());
@@ -2077,7 +2145,22 @@ pub(crate) fn cards_grid<'a>(
             frame.last_card_id = last_card_id.clone();
         }
         if let Some(parent) = &grid_row.add_to {
-            cells = cells.push(add_control(parent, grid_row.depth));
+            let control = add_control(parent, grid_row.depth);
+            let slot_parent = parent.clone();
+            cells = cells.push(hierarchy_drag::target_with_zone(
+                control,
+                None,
+                &targets,
+                move |bounds, point| {
+                    if !bounds.contains(point) {
+                        return None;
+                    }
+                    let destination = DragDestination::IntoGroup(slot_parent.clone());
+                    workspace
+                        .preview_destination(&slot_parent, destination)
+                        .map(|destination| (destination, bounds))
+                },
+            ));
         }
         let context_parent = parent.clone();
         let body = right_click::right_click_area(
@@ -2089,8 +2172,13 @@ pub(crate) fn cards_grid<'a>(
                 })
             },
         );
+        let row_parent = parent.clone();
+        let row_own_group = own_group.map(str::to_owned);
+        let row_first_child = own_first_child.clone();
+        let row_closed_group = closed_group.clone();
         grid = grid.push(hierarchy_drag::target(
             container(body).padding(iced::Padding {
+                top: leading,
                 bottom: trailing,
                 ..iced::Padding::ZERO
             }),
@@ -2100,14 +2188,50 @@ pub(crate) fn cards_grid<'a>(
                 if !bounds.contains(point) {
                     return None;
                 }
+                if leading > 0.0 && point.y < bounds.y + leading {
+                    if let Some(first_child) = row_first_child.as_deref() {
+                        return workspace.preview_destination(
+                            first_child,
+                            DragDestination::BeforeSibling(first_child.to_owned()),
+                        );
+                    }
+                    if let Some(group_id) = row_own_group.as_deref() {
+                        return workspace.preview_destination(
+                            group_id,
+                            DragDestination::IntoGroup(group_id.to_owned()),
+                        );
+                    }
+                }
+                if trailing > 0.0 && closes_group && point.y > bounds.y + bounds.height - trailing {
+                    if let Some(group_id) = row_closed_group.as_deref() {
+                        return workspace.preview_destination(
+                            group_id,
+                            DragDestination::AfterSibling(group_id.to_owned()),
+                        );
+                    }
+                }
                 workspace.preview_destination(
-                    &last_node,
-                    DragDestination::AfterSibling(last_node.clone()),
+                    &row_parent,
+                    DragDestination::IntoGroup(row_parent.clone()),
                 )
             },
         ));
     }
-    grid = grid.push(Space::new().height(window.bottom_padding));
+    let section_id = cards.section_id().to_owned();
+    grid = grid.push(hierarchy_drag::target(
+        Space::new()
+            .height(window.bottom_padding.max(120.0))
+            .width(Length::Fill),
+        None,
+        &targets,
+        move |bounds, point| {
+            if !bounds.contains(point) {
+                return None;
+            }
+            workspace
+                .preview_destination(&section_id, DragDestination::IntoGroup(section_id.clone()))
+        },
+    ));
     if window.rows.is_empty() {
         grid = grid.push(text("Add a document or group to start your outline.").size(13));
     }
@@ -2148,11 +2272,30 @@ pub(crate) fn cards_grid<'a>(
             right_click::right_click_area(
                 crate::scroll_gate::drop_none(
                     scrollable(
-                        crate::card_frames::groups(
-                            grid,
-                            frames,
-                            workspace.card_positions.clone(),
-                            theme,
+                        hierarchy_drag::target(
+                            crate::card_frames::groups(
+                                grid,
+                                frames,
+                                workspace.card_positions.clone(),
+                                theme,
+                                workspace.hierarchy_drag_destination().cloned(),
+                            ),
+                            None,
+                            &stable_targets,
+                            move |bounds, point| {
+                                bounds
+                                    .contains(point)
+                                    .then(|| {
+                                        workspace.card_drop_at(
+                                            width,
+                                            iced::Point::new(
+                                                point.x - bounds.x,
+                                                point.y - bounds.y,
+                                            ),
+                                        )
+                                    })
+                                    .flatten()
+                            }
                         )
                         .map(Some)
                     )
@@ -2179,9 +2322,8 @@ pub(crate) fn cards_grid<'a>(
                     }
                 )
             ),
-            targets,
+            stable_targets,
             workspace.hierarchy_drag_source().is_some(),
-            true,
             |destination| ProjectSurfaceMessage::Project(ProjectMessage::PreviewHierarchyDrop {
                 surface: crate::HierarchySurface::Cards,
                 destination,
@@ -2202,11 +2344,12 @@ fn outline_card<'a>(
     theme: ParchMintTheme,
     item: crate::CardItem<'a>,
     width: f32,
-    horizontal: bool,
+    columns: usize,
     targets: &hierarchy_drag::HoverTargets<DragDestination>,
     generation: u64,
     floating: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
+    let horizontal = columns > 1;
     let drag_source = workspace.hierarchy_drag_source().map(str::to_owned);
     let drag_destination = workspace.hierarchy_drag_destination().cloned();
     let node_id = item.node_id.to_owned();
@@ -2224,28 +2367,6 @@ fn outline_card<'a>(
             .font(crate::cards_layout::CARD_FONT)
             .size(12)
             .color(theme.palette().secondary_text),
-    );
-    let drag_node = node_id.clone();
-    let heading = hierarchy_drag::source_with_pointer(
-        &node_id,
-        heading,
-        ProjectSurfaceMessage::Project(if group {
-            ProjectMessage::ToggleCardsExpanded(node_id.clone())
-        } else {
-            ProjectMessage::SelectHierarchy {
-                node_id: node_id.clone(),
-                gesture: SelectionGesture::Replace,
-            }
-        }),
-        (!group)
-            .then(|| ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(node_id.clone()))),
-        move |origin, bounds| {
-            ProjectSurfaceMessage::Project(ProjectMessage::BeginCardDrag {
-                source_id: drag_node.clone(),
-                grab_offset: Point::new(origin.x - bounds.x + 12.0, origin.y - bounds.y + 12.0),
-                width,
-            })
-        },
     );
     let heading: Element<'a, ProjectSurfaceMessage> = if group {
         row![
@@ -2277,7 +2398,7 @@ fn outline_card<'a>(
         .spacing(6)
         .into()
     } else {
-        heading
+        heading.into()
     };
     let heading: Element<'a, ProjectSurfaceMessage> = if let Some((id, draft)) = workspace
         .hierarchy_rename()
@@ -2360,6 +2481,7 @@ fn outline_card<'a>(
     let middle_active =
         drag_destination.as_ref() == Some(&DragDestination::IntoGroup(node_id.clone()));
     let source_active = drag_source.as_deref() == Some(node_id.as_str());
+    let in_dragged_subtree = !floating && workspace.dragged_subtree_contains(node_id.as_str());
     let card_content = if source_active && !floating {
         container(
             Space::new()
@@ -2407,6 +2529,12 @@ fn outline_card<'a>(
         if !floating && (source_active || middle_active) {
             style.background = Some(theme.palette().accent_subtle.into());
         }
+        // A dragged group's descendants travel with it: tint the whole
+        // subtree so the drag reads as one atomic unit instead of a lone
+        // title card leaving its contents behind.
+        if in_dragged_subtree && !source_active && !floating {
+            style.background = Some(theme.palette().accent_subtle.into());
+        }
         if floating {
             style.background = Some(theme.palette().control_hover.into());
             style.border.color = theme.palette().strong_border;
@@ -2431,16 +2559,57 @@ fn outline_card<'a>(
             })
         }),
     );
+    let drag_node = node_id.clone();
+    let card = hierarchy_drag::source_with_pointer_yielding(
+        &node_id,
+        card,
+        ProjectSurfaceMessage::Project(if group {
+            ProjectMessage::ToggleCardsExpanded(node_id.clone())
+        } else {
+            ProjectMessage::SelectHierarchy {
+                node_id: node_id.clone(),
+                gesture: SelectionGesture::Replace,
+            }
+        }),
+        (!group)
+            .then(|| ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(node_id.clone()))),
+        move |origin, bounds| {
+            ProjectSurfaceMessage::Project(ProjectMessage::BeginCardDrag {
+                source_id: drag_node.clone(),
+                grab_offset: Point::new(origin.x - bounds.x, origin.y - bounds.y),
+                width: if group && item.expanded {
+                    (width - (columns - 1) as f32 * 12.0) / columns as f32
+                } else {
+                    width
+                },
+            })
+        },
+    );
     let kind = item.kind;
+    let expanded = item.expanded;
     let target_node = node_id.clone();
+    // Expanded headers draw no card-level line: first-inside lands in the
+    // preview before the first child, Into tints the header, and After draws
+    // at the frame's contents bottom (a card-level line there would sit
+    // between the heading and its contents).
+    let indicator = if group && expanded {
+        None
+    } else {
+        cards_drop_indicator(&target_node, drag_destination.as_ref(), theme, horizontal)
+    };
     let card = crate::motion::reflow(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
-        workspace.hierarchy_drag_source().is_none() && !source_active,
+        // Animate insertion previews. Disclosure changes replace entire rows,
+        // so their cards and creation slots must settle together.
+        !source_active && drag_source.is_some(),
         card,
     );
-    let card = hierarchy_drag::target_with_zone(card, None, targets, move |bounds, point| {
+    let card = hierarchy_drag::target_with_zone(card, indicator, targets, move |bounds, point| {
+        if source_active {
+            return None;
+        }
         let destination = cards_drop_destination(kind, &target_node, bounds, point, horizontal)?;
         let zone = cards_drop_zone(kind, &destination, bounds, horizontal);
         workspace
@@ -2455,6 +2624,45 @@ fn outline_card<'a>(
     .into()
 }
 
+fn cards_drop_edge(bounds: iced::Rectangle) -> f32 {
+    // Larger before/after handles make group edges easy to hit without
+    // accidentally falling into the group on small pointer jitter.
+    (bounds.height * 0.30).clamp(28.0, 40.0)
+}
+
+fn cards_drop_indicator(
+    node_id: &str,
+    current: Option<&DragDestination>,
+    theme: ParchMintTheme,
+    horizontal: bool,
+) -> Option<hierarchy_drag::DropIndicator> {
+    use hierarchy_drag::DropIndicatorPosition;
+    let position = match current {
+        Some(DragDestination::BeforeSibling(target)) if target == node_id => {
+            DropIndicatorPosition::Before
+        }
+        Some(DragDestination::AfterSibling(target)) if target == node_id => {
+            DropIndicatorPosition::After
+        }
+        Some(DragDestination::IntoGroup(target)) if target == node_id => {
+            DropIndicatorPosition::Into
+        }
+        _ => return None,
+    };
+    Some(hierarchy_drag::DropIndicator {
+        position,
+        color: {
+            let accent = theme.palette().accent;
+            if matches!(position, hierarchy_drag::DropIndicatorPosition::Into) {
+                Color { a: 0.18, ..accent }
+            } else {
+                accent
+            }
+        },
+        horizontal,
+    })
+}
+
 fn cards_drop_zone(
     kind: HierarchyRowKind,
     destination: &DragDestination,
@@ -2463,7 +2671,7 @@ fn cards_drop_zone(
 ) -> iced::Rectangle {
     let mut zone = bounds;
     if kind == HierarchyRowKind::Group {
-        let edge = (bounds.height * 0.25).min(24.0);
+        let edge = cards_drop_edge(bounds);
         match destination {
             DragDestination::BeforeSibling(_) => zone.height = edge,
             DragDestination::AfterSibling(_) => {
@@ -2498,16 +2706,16 @@ fn cards_drop_destination(
 ) -> Option<DragDestination> {
     let row_gap = crate::project_workspace::CARDS_ROW_GAP;
     let hit_bounds = iced::Rectangle {
-        x: bounds.x - 6.0,
-        y: bounds.y - row_gap / 2.0,
-        width: bounds.width + 12.0,
-        height: bounds.height + row_gap,
+        x: bounds.x - 8.0,
+        y: bounds.y - row_gap / 2.0 - 4.0,
+        width: bounds.width + 16.0,
+        height: bounds.height + row_gap + 8.0,
     };
     if !hit_bounds.contains(point) {
         return None;
     }
     let before = if kind == HierarchyRowKind::Group {
-        let edge = (bounds.height * 0.25).min(24.0);
+        let edge = cards_drop_edge(bounds);
         if point.y > bounds.y + edge && point.y < bounds.y + bounds.height - edge {
             return Some(DragDestination::IntoGroup(node_id.to_owned()));
         }
@@ -3049,9 +3257,11 @@ fn history_center<'a>(
             components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
         })
         .into(),
-        container(scrollable(locations).height(Length::Shrink))
-            .max_height(360)
-            .into(),
+        container(crate::scroll_gate::smooth(
+            scrollable(locations).height(Length::Shrink),
+        ))
+        .max_height(360)
+        .into(),
         theme,
         320.0,
     );
@@ -3675,10 +3885,10 @@ fn metadata_section_heading(
     theme: ParchMintTheme,
 ) -> Element<'static, ProjectSurfaceMessage> {
     let indicator = (active_target == Some((target_index, visible_on_cards))).then_some(
-        hierarchy_drag::DropIndicator {
-            position: hierarchy_drag::DropIndicatorPosition::Into,
-            color: theme.palette().selection_border,
-        },
+        hierarchy_drag::DropIndicator::new(
+            hierarchy_drag::DropIndicatorPosition::Into,
+            theme.palette().selection_border,
+        ),
     );
     hierarchy_drag::target(
         container(components::muted_label(label))
@@ -4007,14 +4217,15 @@ fn settings_content<'a>(
                     .spacing(SPACING_8);
                     let before = active_target == Some((index, field.visible_on_cards));
                     let after = active_target == Some((index + 1, field.visible_on_cards));
-                    let indicator = (before || after).then_some(hierarchy_drag::DropIndicator {
-                        position: if before {
-                            hierarchy_drag::DropIndicatorPosition::Before
-                        } else {
-                            hierarchy_drag::DropIndicatorPosition::After
-                        },
-                        color: theme.palette().selection_border,
-                    });
+                    let indicator =
+                        (before || after).then_some(hierarchy_drag::DropIndicator::new(
+                            if before {
+                                hierarchy_drag::DropIndicatorPosition::Before
+                            } else {
+                                hierarchy_drag::DropIndicatorPosition::After
+                            },
+                            theme.palette().selection_border,
+                        ));
                     column.push(hierarchy_drag::target_with_zone(
                         container(row).width(Length::Fill),
                         indicator,
@@ -4068,7 +4279,6 @@ fn settings_content<'a>(
                 crate::scroll_gate::smooth(scrollable(metadata).height(Length::Fill)),
                 targets,
                 settings.metadata_drag_source().is_some(),
-                true,
                 |destination| {
                     ProjectSurfaceMessage::Project(ProjectMessage::SetMetadataFieldDragTarget(
                         destination,
@@ -5178,74 +5388,77 @@ fn inspector<'a>(
                 } else {
                     container(note_body).max_height(72).clip(true).into()
                 };
-                let edit = stationary_tooltip::tooltip(
-                    harness_target::target_id(
-                        iced::widget::Id::from(format!("note-edit-{message_id}")),
-                        button(icon_sized(Icon::Rename, 15))
-                            .padding(4)
-                            .on_press(ProjectSurfaceMessage::EditorCenter(
-                                EditorCenterMessage::Workspace(
-                                    EditorMessage::BeginEditCommentMessage {
-                                        thread_id: thread_id.clone(),
-                                        message_id: message_id.clone(),
-                                        body: message.body().to_owned(),
-                                    },
-                                ),
-                            ))
-                            .style(move |_, status| {
-                                components::button_style(
-                                    theme,
-                                    ButtonKind::Quiet,
-                                    interaction(status, false),
-                                )
-                            }),
-                    ),
-                    text("Edit note").size(12),
-                    components::surface(theme, Surface::Elevated, Interaction::Rest),
-                );
-                let delete = stationary_tooltip::tooltip(
-                    harness_target::target_id(
-                        iced::widget::Id::from(format!("note-delete-{message_id}")),
-                        button(icon_sized(Icon::RecentlyDeleted, 15))
-                            .padding(4)
-                            .on_press(ProjectSurfaceMessage::EditorCenter(
-                                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteNote {
-                                    thread_id: thread_id.clone(),
-                                    message_id: message_id.clone(),
+                let actions: Element<'a, ProjectSurfaceMessage> = if selected_note || editing {
+                    let edit = stationary_tooltip::tooltip(
+                        harness_target::target_id(
+                            iced::widget::Id::from(format!("note-edit-{message_id}")),
+                            button(icon_sized(Icon::Rename, 15))
+                                .padding(4)
+                                .on_press(ProjectSurfaceMessage::EditorCenter(
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::BeginEditCommentMessage {
+                                            thread_id: thread_id.clone(),
+                                            message_id: message_id.clone(),
+                                            body: message.body().to_owned(),
+                                        },
+                                    ),
+                                ))
+                                .style(move |_, status| {
+                                    components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false),
+                                    )
                                 }),
-                            ))
-                            .style(move |_, status| {
-                                components::button_style(
-                                    theme,
-                                    ButtonKind::Quiet,
-                                    interaction(status, false),
-                                )
-                            }),
-                    ),
-                    text("Delete note").size(12),
-                    components::surface(theme, Surface::Elevated, Interaction::Rest),
-                );
+                        ),
+                        text("Edit note").size(12),
+                        components::surface(theme, Surface::Elevated, Interaction::Rest),
+                    );
+                    let delete = stationary_tooltip::tooltip(
+                        harness_target::target_id(
+                            HarnessTarget::NoteDelete(count - 1).id(),
+                            button(icon_sized(Icon::RecentlyDeleted, 15))
+                                .padding(4)
+                                .on_press(ProjectSurfaceMessage::EditorCenter(
+                                    EditorCenterMessage::Workspace(
+                                        EditorMessage::RequestDeleteNote {
+                                            thread_id: thread_id.clone(),
+                                            message_id: message_id.clone(),
+                                        },
+                                    ),
+                                ))
+                                .style(move |_, status| {
+                                    components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false),
+                                    )
+                                }),
+                        ),
+                        text("Delete note").size(12),
+                        components::surface(theme, Surface::Elevated, Interaction::Rest),
+                    );
+                    row![edit, delete]
+                        .spacing(2)
+                        .align_y(iced::alignment::Vertical::Center)
+                        .into()
+                } else {
+                    Space::new().width(0).height(0).into()
+                };
+                let header_label = document_title.clone().unwrap_or_else(|| "Note".to_owned());
                 let mut card = column![
                     row![
-                        text(document_title.clone().unwrap_or_else(|| "Note".to_owned()))
-                            .size(12)
-                            .color(theme.palette().secondary_text)
-                            .width(Length::Fill),
-                        edit,
-                        delete,
+                        components::muted_label(header_label).width(Length::Fill),
+                        actions,
                     ]
-                    .spacing(2)
+                    .spacing(4)
                     .align_y(iced::alignment::Vertical::Center),
-                    container(
-                        text(quote.clone())
-                            .size(12)
-                            .color(theme.palette().secondary_text)
-                    )
-                    .max_height(26)
-                    .clip(true),
+                    container(components::muted_label(quote.clone()))
+                        .max_height(18)
+                        .clip(true),
                     note_body,
                 ]
-                .spacing(6);
+                .spacing(4);
                 if editor.pending_delete_note() == Some((thread_id.as_str(), message_id.as_str())) {
                     card = card.push(
                         column![
@@ -5279,10 +5492,12 @@ fn inspector<'a>(
                         .spacing(4),
                     );
                 }
-                notes =
-                    notes.push(
-                        mouse_area(container(card).padding(10).width(Length::Fill).style(
-                            move |_| {
+                notes = notes.push(
+                    mouse_area(
+                        container(card)
+                            .padding(SPACING_8)
+                            .width(Length::Fill)
+                            .style(move |_| {
                                 components::surface(
                                     theme,
                                     Surface::Panel,
@@ -5292,14 +5507,14 @@ fn inspector<'a>(
                                         Interaction::Rest
                                     },
                                 )
-                            },
-                        ))
-                        .on_press(ProjectSurfaceMessage::EditorCenter(
-                            EditorCenterMessage::Workspace(EditorMessage::SelectComment(
-                                thread_id.clone(),
-                            )),
+                            }),
+                    )
+                    .on_press(ProjectSurfaceMessage::EditorCenter(
+                        EditorCenterMessage::Workspace(EditorMessage::SelectComment(
+                            thread_id.clone(),
                         )),
-                    );
+                    )),
+                );
             }
         }
         let sections: Element<'a, ProjectSurfaceMessage> = if count == 0 {
@@ -5520,7 +5735,7 @@ fn modal_view<'a>(
         );
         return container(
             column![
-                scrollable(content).height(Length::Shrink),
+                crate::scroll_gate::smooth(scrollable(content).height(Length::Shrink)),
                 button("Done")
                     .on_press(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal)),
             ]
@@ -5717,7 +5932,10 @@ fn modal_view<'a>(
                         field_interaction(status)
                     )),
                 components::muted_label("Location"),
-                container(scrollable(locations).height(Length::Shrink)).max_height(220),
+                container(crate::scroll_gate::smooth(
+                    scrollable(locations).height(Length::Shrink)
+                ))
+                .max_height(220),
                 row![
                     Space::new().width(Length::Fill),
                     focus::region(
@@ -7468,7 +7686,13 @@ mod tests {
             iced::Point::new(80.0, 38.0),
         ] {
             assert!(matches!(
-                hierarchy_row_destination(HierarchyRowKind::Document, "chapter-two", bounds, point),
+                hierarchy_row_destination(
+                    HierarchyRowKind::Document,
+                    false,
+                    "chapter-two",
+                    bounds,
+                    point
+                ),
                 Some(DragDestination::BeforeSibling(_)) | Some(DragDestination::AfterSibling(_))
             ));
         }

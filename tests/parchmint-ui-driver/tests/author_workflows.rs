@@ -137,12 +137,17 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
 }
 
 #[test]
-fn every_applicable_metadata_field_is_available_on_cards() {
+fn expanded_cards_include_hidden_metadata_fields() {
     let run = IsolatedRun::new("settings-metadata").expect("isolated run");
     let project = run.root().join("settings-metadata.parchmint");
     let harness = create_project(&run, &project, "Metadata Settings");
     create_group(&harness, "Manuscript", "Part One");
-    create_document(&harness, "Part One", "Metadata Scene");
+    // A clipped title provides real information for the expansion button to reveal.
+    create_document(
+        &harness,
+        "Part One",
+        "Metadata Scene with a title that exceeds the compact card heading",
+    );
 
     harness
         .click_target(
@@ -184,7 +189,9 @@ fn every_applicable_metadata_field_is_available_on_cards() {
     harness
         .toggle_card_details(
             HarnessWindow::Project,
-            harness.hierarchy_node("Metadata Scene").unwrap(),
+            harness
+                .hierarchy_node("Metadata Scene with a title that exceeds the compact card heading")
+                .unwrap(),
         )
         .expect("expand the card to show the hidden field");
     assert!(visible(&harness, "Point of view"));
@@ -927,10 +934,10 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
             )
             .unwrap();
     }
-    assert!(visible(&harness, "Add Comment"));
+    assert!(visible(&harness, "Add note"));
     harness
-        .click_text(HarnessWindow::Project, "Add Comment")
-        .expect("begin a comment from the popover");
+        .click_text(HarnessWindow::Project, "Add note")
+        .expect("begin a note from the popover");
     assert!(
         harness
             .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentDraft)
@@ -941,7 +948,7 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         harness
             .target_is_focused(HarnessWindow::Project, HarnessTarget::CommentDraft)
             .expect("inspect anchored comment composer focus"),
-        "the contextual Add Comment action must place the insertion point in its composer"
+        "the contextual Add note action must place the insertion point in its composer"
     );
     harness
         .type_focused(HarnessWindow::Project, "Verify the weather detail.")
@@ -974,8 +981,8 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
         .expect("hover the attached comment anchor");
     assert!(
-        visible(&harness, "Open thread"),
-        "the attached-comment preview should appear beside the manuscript anchor; hover state: {}",
+        visible(&harness, "Notes"),
+        "the attached-note preview should appear beside the manuscript anchor; hover state: {}",
         harness
             .comment_hover_status()
             .expect("read comment-hover diagnostic")
@@ -984,76 +991,47 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "keeper")
         .expect("move within the commented selection");
     assert!(
-        visible(&harness, "Open thread"),
+        visible(&harness, "Notes"),
         "the preview must remain anchored while the cursor moves within its commented text"
     );
     harness
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
         .expect("move away from the attached comment anchor");
     assert!(
-        !visible(&harness, "Open thread"),
-        "the transient comment preview should dismiss after the pointer leaves its anchor; hover state: {}",
+        !visible(&harness, "Notes"),
+        "the transient note preview should dismiss after the pointer leaves its anchor; hover state: {}",
         harness
             .comment_hover_status()
             .expect("read comment-hover diagnostic")
     );
     harness
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
-        .expect("reopen the anchored comment preview");
+        .expect("reopen the anchored note preview");
     harness
-        .click_text(HarnessWindow::Project, "Open thread")
-        .expect("open the full thread in the Inspector");
-    assert!(
-        harness
-            .target_is_visible(HarnessWindow::Project, HarnessTarget::CommentReply)
-            .unwrap(),
-        "opening a preview must reveal the full thread and its reply composer"
-    );
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::CommentMenu(0))
-        .expect("open comment actions");
-    harness
-        .click_text(HarnessWindow::Project, "Edit")
-        .expect("edit the root comment inside the anchored popover");
+        .click_text(HarnessWindow::Project, "Verify the weather detail.")
+        .expect("edit the hovered note in place");
     harness
         .replace_target(
             HarnessWindow::Project,
             HarnessTarget::CommentEdit,
             "Verify the storm detail.",
         )
-        .expect("replace the comment body in the anchored editor");
+        .expect("replace the note body in the anchored editor");
     harness
-        .click_text(HarnessWindow::Project, "Save edit")
-        .expect("save the edited comment");
+        .click_text(HarnessWindow::Project, "Save note")
+        .expect("save the edited note");
     assert!(visible(&harness, "Verify the storm detail."));
     harness
-        .type_into_target(
-            HarnessWindow::Project,
-            HarnessTarget::CommentReply,
-            "Confirmed against the log.",
-        )
-        .expect("reply to the comment thread");
-    harness
-        .click_text(HarnessWindow::Project, "Reply")
-        .expect("submit the comment reply");
-    assert!(
-        visible(&harness, "Confirmed against the log."),
-        "the reply must remain visible in the anchored thread after its live projection refresh"
-    );
-    harness
-        .click_text(HarnessWindow::Project, "Resolve")
-        .expect("resolve the comment thread");
-    assert!(visible(&harness, "Resolved"));
+        .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
+        .expect("open the Notes panel");
     assert!(visible(&harness, "Verify the storm detail."));
     harness
-        .click_text(HarnessWindow::Project, "⋮")
-        .expect("open thread actions");
+        .click_target(HarnessWindow::Project, HarnessTarget::NoteDelete(0))
+        .expect("request note deletion through its icon");
+    assert!(visible(&harness, "Delete this note?"));
     harness
-        .click_text(HarnessWindow::Project, "Delete thread")
-        .expect("request comment deletion");
-    harness
-        .click_text(HarnessWindow::Project, "Confirm delete")
-        .expect("delete the comment thread");
+        .click_text(HarnessWindow::Project, "Delete")
+        .expect("confirm note deletion");
     assert!(!visible(&harness, "Verify the storm detail."));
     harness
         .close(HarnessWindow::Project)

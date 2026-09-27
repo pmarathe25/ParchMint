@@ -30,11 +30,7 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
     assert!(harness.has_window(WINDOW).unwrap());
     assert!(!harness.has_window(HarnessWindow::Launcher).unwrap());
-    assert!(
-        !harness
-            .text_is_visible(WINDOW, "No comments in this document")
-            .unwrap()
-    );
+    assert!(!harness.text_is_visible(WINDOW, "No notes yet").unwrap());
     harness
         .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "The first line.")
         .unwrap();
@@ -252,6 +248,9 @@ fn overview_groups_collapse_and_managers_are_contextual() {
                 position,
             )
             .unwrap();
+        harness
+            .advance_motion(WINDOW, std::time::Duration::from_millis(120))
+            .unwrap();
         let order = harness.preview_hierarchy_titles().unwrap();
         if let Some(previous) = &preview_order {
             assert_eq!(
@@ -371,7 +370,7 @@ fn native_key_events_delete_selections_merge_empty_lines_and_insert_tabs() {
         .click_target(WINDOW, HarnessTarget::AddComment)
         .unwrap();
     harness.type_focused(WINDOW, "Tab comment").unwrap();
-    harness.click_text(WINDOW, "Add comment").unwrap();
+    harness.click_text(WINDOW, "Add note").unwrap();
     harness.press_command_key(WINDOW, 's').unwrap();
     harness.close(WINDOW).unwrap();
     harness.shutdown().unwrap();

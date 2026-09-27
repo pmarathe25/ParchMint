@@ -4164,13 +4164,15 @@ impl NativeDesktop {
                 }
             }
 
-            let menu = container(iced::widget::scrollable(items).height(Length::Shrink))
-                .width(280)
-                .max_height(420)
-                .padding(5)
-                .style(move |_| {
-                    components::surface(theme, components::Surface::Elevated, Interaction::Rest)
-                });
+            let menu = container(crate::scroll_gate::smooth(
+                iced::widget::scrollable(items).height(Length::Shrink),
+            ))
+            .width(280)
+            .max_height(420)
+            .padding(5)
+            .style(move |_| {
+                components::surface(theme, components::Surface::Elevated, Interaction::Rest)
+            });
             return stack![
                 base,
                 iced::widget::mouse_area(
@@ -5689,10 +5691,12 @@ impl NativeDesktop {
                         row![
                             column![
                                 text(heading).size(12),
-                                iced::widget::scrollable(
-                                    text(notification.message.clone()).size(13)
-                                )
-                                .height(Length::Shrink),
+                                crate::scroll_gate::smooth(
+                                    iced::widget::scrollable(
+                                        text(notification.message.clone()).size(13)
+                                    )
+                                    .height(Length::Shrink),
+                                ),
                             ]
                             .spacing(2)
                             .width(Length::Fill),
@@ -5752,7 +5756,9 @@ impl NativeDesktop {
                             .on_press(Message::ClearNotifications { window: id }),
                     ]
                     .align_y(iced::alignment::Vertical::Center),
-                    iced::widget::scrollable(entries).height(Length::Shrink),
+                    crate::scroll_gate::smooth(
+                        iced::widget::scrollable(entries).height(Length::Shrink),
+                    ),
                     button(text("Close").size(12))
                         .on_press(Message::ToggleNotificationDrawer { window: id }),
                 ]
@@ -12944,7 +12950,9 @@ fn project_chooser_content(
     }
     crate::motion::enter(
         format!("launcher-{creating_project}"),
-        iced::widget::scrollable(content.width(Length::Fill)).height(Length::Fill),
+        crate::scroll_gate::smooth(
+            iced::widget::scrollable(content.width(Length::Fill)).height(Length::Fill),
+        ),
     )
 }
 

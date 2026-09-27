@@ -76,6 +76,7 @@ pub enum HarnessTarget {
     ToggleExplorer,
     ToggleInspector,
     CommentMenu(usize),
+    NoteDelete(usize),
 }
 
 impl HarnessTarget {
@@ -152,6 +153,7 @@ impl HarnessTarget {
             Self::PaneFocus(EditorPane::Companion) => "harness.pane-focus.companion",
             Self::ToggleExplorer => "harness.toggle-explorer",
             Self::ToggleInspector => "harness.toggle-inspector",
+            Self::NoteDelete(index) => return format!("harness.note.delete.{index}").into(),
             Self::CommentMenu(index) => return format!("harness.comment.menu.{index}").into(),
         })
     }

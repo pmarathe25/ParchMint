@@ -794,7 +794,7 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
         .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Add comment")
+        .click_text(HarnessWindow::Project, "Add note")
         .unwrap();
     harness.elapse_autosave_idle().unwrap();
 

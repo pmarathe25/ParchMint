@@ -1021,7 +1021,7 @@ impl NativeDesktopHarness {
     ) -> Result<(), HarnessError> {
         let source_bounds = self.find_text_bounds(window, source)?;
         let source_position = source_bounds.center();
-        let threshold_position = IcedPoint::new(source_position.x + 5.0, source_position.y);
+        let threshold_position = IcedPoint::new(source_position.x + 8.0, source_position.y);
         self.dispatch_events(
             window,
             [
@@ -1815,6 +1815,7 @@ impl NativeDesktopHarness {
                 mouse::Button::Left,
             ))],
         )?;
+        self.redraw(window)?;
         self.record(window, "release hierarchy drag".to_owned());
         Ok(())
     }
@@ -1838,7 +1839,7 @@ impl NativeDesktopHarness {
                 IcedPoint::new(source_bounds.center_x(), source_bounds.y + 24.0)
             }
         };
-        let threshold_position = IcedPoint::new(source_position.x + 5.0, source_position.y);
+        let threshold_position = IcedPoint::new(source_position.x + 8.0, source_position.y);
         self.dispatch_events(
             window,
             [
@@ -1904,7 +1905,7 @@ impl NativeDesktopHarness {
         let source_position = self
             .find_id_bounds(window, harness_target::explorer_row_id(source.id()))?
             .center();
-        let threshold_position = IcedPoint::new(source_position.x + 5.0, source_position.y);
+        let threshold_position = IcedPoint::new(source_position.x + 8.0, source_position.y);
         self.dispatch_events(
             window,
             [

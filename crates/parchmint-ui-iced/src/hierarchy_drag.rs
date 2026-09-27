@@ -8,8 +8,12 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Vector};
 use std::time::{Duration, Instant};
 use std::{cell::RefCell, rc::Rc};
 
-const DRAG_THRESHOLD: f32 = 4.0;
+const DRAG_THRESHOLD: f32 = 6.0;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+/// Dragging near the top/bottom edge of a scrollable surface auto-scrolls
+/// so cards can reach offscreen positions while the pointer stays in the viewport.
+const DRAG_SCROLL_MARGIN: f32 = 64.0;
+const DRAG_SCROLL_STEP: f32 = 14.0;
 
 pub(crate) fn source<'a, Message>(
     id: impl Into<String>,
@@ -27,6 +31,7 @@ where
         on_click,
         on_double_click,
         on_drag_start: Box::new(move |_, _| on_drag_start.clone()),
+        yield_to_children: false,
     }
     .into()
 }
@@ -44,6 +49,25 @@ pub(crate) fn source_with_pointer<'a, Message: Clone + 'a>(
         on_click,
         on_double_click,
         on_drag_start: Box::new(on_drag_start),
+        yield_to_children: false,
+    }
+    .into()
+}
+
+pub(crate) fn source_with_pointer_yielding<'a, Message: Clone + 'a>(
+    id: impl Into<String>,
+    content: impl Into<Element<'a, Message>>,
+    on_click: Message,
+    on_double_click: Option<Message>,
+    on_drag_start: impl Fn(Point, Rectangle) -> Message + 'a,
+) -> Element<'a, Message> {
+    HierarchyDragSource {
+        id: id.into(),
+        content: content.into(),
+        on_click,
+        on_double_click,
+        on_drag_start: Box::new(on_drag_start),
+        yield_to_children: true,
     }
     .into()
 }
@@ -119,7 +143,6 @@ pub(crate) fn surface<'a, Message, Destination>(
     content: impl Into<Element<'a, Message>>,
     targets: HoverTargets<Destination>,
     active: bool,
-    stabilize: bool,
     on_hover: impl Fn(Option<Destination>) -> Message + 'a,
     on_leave: Message,
 ) -> Element<'a, Message>
@@ -131,7 +154,6 @@ where
         content: content.into(),
         targets,
         active,
-        stabilize,
         on_hover: Box::new(on_hover),
         on_leave,
     }
@@ -149,6 +171,21 @@ pub(crate) enum DropIndicatorPosition {
 pub(crate) struct DropIndicator {
     pub position: DropIndicatorPosition,
     pub color: Color,
+    /// Grid cards sit side by side as well as stacked: a horizontal
+    /// insertion line would point at the wrong edge. Vertical lists keep
+    /// `false` and draw top/bottom lines; grid rows pass `true` so
+    /// before/after draw as left/right lines.
+    pub horizontal: bool,
+}
+
+impl DropIndicator {
+    pub(crate) fn new(position: DropIndicatorPosition, color: Color) -> Self {
+        Self {
+            position,
+            color,
+            horizontal: false,
+        }
+    }
 }
 
 struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
@@ -157,6 +194,7 @@ struct HierarchyDragSource<'a, Message, Theme = iced::Theme, Renderer = iced::Re
     on_click: Message,
     on_double_click: Option<Message>,
     on_drag_start: Box<dyn Fn(Point, Rectangle) -> Message + 'a>,
+    yield_to_children: bool,
 }
 
 struct CommitOnClickAway<'a, Message, Theme = iced::Theme, Renderer = iced::Renderer> {
@@ -368,6 +406,104 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if self.yield_to_children {
+            let mut child_messages = Vec::new();
+            let mut child_shell = Shell::new(&mut child_messages);
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout,
+                cursor,
+                renderer,
+                clipboard,
+                &mut child_shell,
+                viewport,
+            );
+            let captured = child_shell.is_event_captured();
+            if captured {
+                shell.capture_event();
+            }
+            shell.request_redraw_at(child_shell.redraw_request());
+            if child_shell.is_layout_invalid() {
+                shell.invalidate_layout();
+            }
+            if child_shell.are_widgets_invalid() {
+                shell.invalidate_widgets();
+            }
+            drop(child_shell);
+            let child_captured = captured;
+            for message in child_messages {
+                shell.publish(message);
+            }
+
+            let state = tree.state.downcast_mut::<SourceState>();
+            if child_captured {
+                state.press_origin = None;
+                state.dragging = false;
+                return;
+            }
+
+            match event {
+                Event::Mouse(iced::mouse::Event::CursorLeft)
+                | Event::Window(iced::window::Event::Unfocused) => {
+                    state.press_origin = None;
+                    state.dragging = false;
+                    state.last_pointer = None;
+                }
+                Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    state.last_pointer = Some(*position);
+                    if let Some(origin) = state.press_origin
+                        && !state.dragging
+                        && origin.distance(*position) >= DRAG_THRESHOLD
+                    {
+                        state.dragging = true;
+                        state.last_click = None;
+                        shell.publish((self.on_drag_start)(
+                            layout.position() + state.grab_offset,
+                            layout.bounds(),
+                        ));
+                    }
+                }
+                Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                    let position = cursor
+                        .position_over(layout.bounds())
+                        .filter(|position| viewport.contains(*position));
+                    if let Some(position) = position {
+                        state.press_origin = Some(position);
+                        state.grab_offset = position - layout.position();
+                        state.dragging = false;
+                    }
+                }
+                Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                    if state.press_origin.take().is_some() =>
+                {
+                    if !state.dragging {
+                        shell.publish(self.on_click.clone());
+                        let now = Instant::now();
+                        let is_double_click = state.last_click.is_some_and(|(last, at)| {
+                            now.duration_since(at) <= DOUBLE_CLICK_INTERVAL
+                                && last.distance(state.last_pointer.unwrap_or(last))
+                                    < DRAG_THRESHOLD
+                        });
+                        if is_double_click {
+                            state.last_click = None;
+                            if let Some(on_double_click) = &self.on_double_click {
+                                shell.publish(on_double_click.clone());
+                            }
+                        } else if self.on_double_click.is_some() {
+                            state.last_click = state
+                                .last_pointer
+                                .or_else(|| cursor.position_over(layout.bounds()))
+                                .map(|position| (position, now));
+                        }
+                    }
+                    state.dragging = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         // Nested MouseAreas must not open a document before a drag starts.
         let owns_left_pointer = {
             let state = tree.state.downcast_ref::<SourceState>();
@@ -669,9 +805,20 @@ where
         };
         let bounds = layout.bounds();
         let bounds = match indicator.position {
+            DropIndicatorPosition::Before if indicator.horizontal => Rectangle {
+                width: 2.0,
+                height: bounds.height,
+                ..bounds
+            },
             DropIndicatorPosition::Before => Rectangle {
                 width: bounds.width,
                 height: 2.0,
+                ..bounds
+            },
+            DropIndicatorPosition::After if indicator.horizontal => Rectangle {
+                x: bounds.x + (bounds.width - 2.0).max(0.0),
+                width: 2.0,
+                height: bounds.height,
                 ..bounds
             },
             DropIndicatorPosition::After => Rectangle {
@@ -759,12 +906,30 @@ where
     }
 }
 
-#[derive(Default)]
-struct SurfaceState {
+/// Minimum hover time before a drop placeholder appears, so sweeping a card
+/// across the outline never strobes previews on and off. The placeholder is
+/// otherwise a pure function of the cursor: no sticky zones, no memory of
+/// where the card has been.
+pub(crate) const DROP_HOVER_DWELL: Duration = Duration::from_millis(120);
+
+struct SurfaceState<Destination> {
     inside: bool,
     position: Option<Point>,
     scrolled: bool,
-    accepted_zone: Option<Rectangle>,
+    pending: Option<(Option<Destination>, Instant)>,
+    accepted: Option<Option<Destination>>,
+}
+
+impl<Destination> Default for SurfaceState<Destination> {
+    fn default() -> Self {
+        Self {
+            inside: false,
+            position: None,
+            scrolled: false,
+            pending: None,
+            accepted: None,
+        }
+    }
 }
 
 struct HierarchyDragSurface<
@@ -777,9 +942,56 @@ struct HierarchyDragSurface<
     content: Element<'a, Message, Theme, Renderer>,
     targets: HoverTargets<Destination>,
     active: bool,
-    stabilize: bool,
     on_hover: Box<dyn Fn(Option<Destination>) -> Message + 'a>,
     on_leave: Message,
+}
+
+impl<Message, Destination, Theme, Renderer>
+    HierarchyDragSurface<'_, Message, Destination, Theme, Renderer>
+where
+    Destination: Clone + PartialEq + 'static,
+    Message: Clone,
+{
+    /// Stage a hover candidate behind the dwell: the placeholder only appears
+    /// once the cursor rests on one target, so sweeping across the outline
+    /// never strobes previews.
+    fn hover_candidate(
+        state: &mut SurfaceState<Destination>,
+        on_hover: &dyn Fn(Option<Destination>) -> Message,
+        shell: &mut Shell<'_, Message>,
+        candidate: Option<Destination>,
+    ) {
+        let now = crate::motion::now();
+        if state.accepted.as_ref() == Some(&candidate) {
+            state.pending = None;
+            return;
+        }
+        if candidate.is_none() || !crate::motion::enabled() {
+            shell.publish(on_hover(candidate.clone()));
+            state.accepted = Some(candidate);
+            state.pending = None;
+            return;
+        }
+        if let Some((pending, since)) = state.pending.as_ref()
+            && *pending == candidate
+        {
+            if now.saturating_duration_since(*since) >= DROP_HOVER_DWELL {
+                shell.publish(on_hover(candidate.clone()));
+                state.accepted = Some(candidate);
+                state.pending = None;
+            } else {
+                shell.request_redraw_at(*since + DROP_HOVER_DWELL);
+            }
+            return;
+        }
+        // An unconfirmed destination must never commit the previous hover.
+        if state.accepted.as_ref().is_some_and(Option::is_some) {
+            shell.publish(on_hover(None));
+        }
+        state.accepted = Some(None);
+        state.pending = Some((candidate, now));
+        shell.request_redraw_at(now + DROP_HOVER_DWELL);
+    }
 }
 
 impl<Message, Destination, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -790,11 +1002,11 @@ where
     Renderer: renderer::Renderer,
 {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<SurfaceState>()
+        tree::Tag::of::<SurfaceState<Destination>>()
     }
 
     fn state(&self) -> tree::State {
-        tree::State::new(SurfaceState::default())
+        tree::State::new(SurfaceState::<Destination>::default())
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -842,7 +1054,7 @@ where
             shell,
             viewport,
         );
-        let state = tree.state.downcast_mut::<SurfaceState>();
+        let state = tree.state.downcast_mut::<SurfaceState<Destination>>();
         if !self.active {
             *state = SurfaceState::default();
             return;
@@ -860,39 +1072,76 @@ where
                 event,
                 Event::Window(iced::window::Event::RedrawRequested(_))
             );
-        if !matches!(
+        let cursor_moved = matches!(event, Event::Mouse(iced::mouse::Event::CursorMoved { .. }));
+        // Edge auto-scroll: holding the drag near the top/bottom edge
+        // scrolls so offscreen rows stay reachable. Pointer moves only
+        // kickstart the frame loop; the scroll steps run on animation
+        // frames, which re-hit-test afterwards through the scrolled path.
+        let near_edge = || {
+            let probe = cursor.position()?;
+            if !viewport.contains(probe) {
+                return None;
+            }
+            let bounds = layout.bounds();
+            if probe.x < bounds.x - 8.0 || probe.x > bounds.x + bounds.width + 8.0 {
+                return None;
+            }
+            if probe.y <= bounds.y + DRAG_SCROLL_MARGIN {
+                // Positive pixel deltas scroll up toward earlier rows.
+                Some(DRAG_SCROLL_STEP)
+            } else if probe.y >= bounds.y + bounds.height - DRAG_SCROLL_MARGIN {
+                Some(-DRAG_SCROLL_STEP)
+            } else {
+                None
+            }
+        };
+        if cursor_moved {
+            if near_edge().is_some() {
+                shell.request_redraw();
+            }
+        } else if matches!(
             event,
-            Event::Mouse(
-                iced::mouse::Event::CursorMoved { .. }
-                    | iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
-            )
-        ) && !after_scroll
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        ) && let Some(y) = near_edge()
         {
+            crate::scroll_gate::without_momentum(|| {
+                self.content.as_widget_mut().update(
+                    &mut tree.children[0],
+                    &Event::Mouse(iced::mouse::Event::WheelScrolled {
+                        delta: iced::mouse::ScrollDelta::Pixels { x: 0.0, y },
+                    }),
+                    layout,
+                    cursor,
+                    renderer,
+                    clipboard,
+                    shell,
+                    viewport,
+                );
+            });
+            state.scrolled = true;
+            shell.request_redraw();
+        }
+        // Recompute on frames too: scrolling can change the hit under a still cursor.
+        let redraw = matches!(
+            event,
+            Event::Window(iced::window::Event::RedrawRequested(_))
+        );
+        if !cursor_moved && !after_scroll && !redraw {
             return;
         }
         let point = cursor
             .position()
             .filter(|point| layout.bounds().contains(*point) && viewport.contains(*point));
         if let Some(point) = point {
-            let moved = state
-                .position
-                .is_none_or(|previous| previous.distance(point) >= DRAG_THRESHOLD);
-            if (moved || state.scrolled)
-                && (!self.stabilize
-                    || state.scrolled
-                    || state.accepted_zone.is_none_or(|zone| !zone.contains(point)))
-            {
-                let candidate = self.targets.borrow_mut().take();
-                state.accepted_zone = candidate.as_ref().map(|(_, zone)| Rectangle {
-                    x: zone.x + point.x,
-                    y: zone.y + point.y,
-                    ..*zone
-                });
-                shell.publish((self.on_hover)(
-                    candidate.map(|(destination, _)| destination),
-                ));
-                state.position = Some(point);
-            }
+            // The candidate is a pure function of this frame's cursor: the
+            // first hit wins, with no memory of previous drag positions.
+            let candidate = self
+                .targets
+                .borrow_mut()
+                .take()
+                .map(|(destination, _)| destination);
+            Self::hover_candidate(state, &self.on_hover, shell, candidate);
+            state.position = Some(point);
             state.inside = true;
             state.scrolled = false;
         } else if state.inside {
@@ -992,8 +1241,9 @@ mod tests {
     use iced::advanced::renderer::Headless;
 
     #[test]
-    fn live_drop_target_stays_put_until_the_pointer_leaves_its_zone() {
+    fn hover_dwell_confirms_placeholders_and_sweeps_stay_quiet() {
         use iced::advanced::renderer::Headless;
+        use std::time::{Duration, Instant};
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             iced::Font::DEFAULT,
             iced::Pixels(16.0),
@@ -1019,7 +1269,6 @@ mod tests {
                 ),
                 targets,
                 true,
-                true,
                 |target| target,
                 None,
             )
@@ -1031,26 +1280,75 @@ mod tests {
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits)
             .move_to(Point::new(50.0, 50.0));
+        let viewport = Rectangle::with_size(Size::new(600.0, 400.0));
         let mut messages = Vec::new();
-        for (destination, point) in [
-            ("before group", Point::new(80.0, 60.0)),
-            ("after document", Point::new(82.0, 66.0)),
-            ("after document", Point::new(82.0, 90.0)),
-        ] {
-            element = make(destination);
-            tree.diff(&element);
+        let start = Instant::now();
+        let at = |millis: u64| start + Duration::from_millis(millis);
+        let send = |element: &mut iced::Element<'_, Option<&'static str>>,
+                    tree: &mut Tree,
+                    event: &Event,
+                    point: mouse::Cursor,
+                    at: Instant,
+                    messages: &mut Vec<Option<&'static str>>| {
+            let _clock = crate::motion::FixedTime::new(at);
+            let mut shell = Shell::new(messages);
             element.as_widget_mut().update(
-                &mut tree,
-                &Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                tree,
+                event,
                 Layout::new(&node),
-                mouse::Cursor::Available(point),
+                point,
                 &renderer,
                 &mut iced::advanced::clipboard::Null,
-                &mut Shell::new(&mut messages),
-                &Rectangle::with_size(Size::new(600.0, 400.0)),
+                &mut shell,
+                &viewport,
             );
-        }
-        assert_eq!(messages, [Some("before group"), Some("after document")]);
+        };
+        let point = Point::new(80.0, 200.0);
+        // Hovering stages a candidate but publishes nothing until the dwell
+        // elapses, so sweeping across targets stays quiet.
+        send(
+            &mut element,
+            &mut tree,
+            &Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            mouse::Cursor::Available(point),
+            at(0),
+            &mut messages,
+        );
+        assert!(messages.is_empty());
+        send(
+            &mut element,
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(at(200))),
+            mouse::Cursor::Available(point),
+            at(200),
+            &mut messages,
+        );
+        assert_eq!(messages, [Some("before group")]);
+        // Moving to a new target resets to the origin until the hover confirms.
+        element = make("after document");
+        tree.diff(&element);
+        let point = Point::new(82.0, 210.0);
+        send(
+            &mut element,
+            &mut tree,
+            &Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            mouse::Cursor::Available(point),
+            at(210),
+            &mut messages,
+        );
+        assert_eq!(messages, [Some("before group"), None]);
+        send(
+            &mut element,
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(at(400))),
+            mouse::Cursor::Available(point),
+            at(400),
+            &mut messages,
+        );
+        assert_eq!(
+            messages,
+            [Some("before group"), None, Some("after document")]
+        );
     }
 
     #[test]
@@ -1099,5 +1397,143 @@ mod tests {
             );
         }
         assert_eq!(messages, vec![Some(Vector::new(90.0, 30.0))]);
+    }
+
+    #[test]
+    fn holding_near_the_bottom_edge_scrolls_without_moving_the_pointer() {
+        use std::time::Instant;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let targets = targets::<()>();
+        let mut element = surface(
+            iced::widget::scrollable(iced::widget::Space::new().width(200).height(1000))
+                .height(100)
+                .on_scroll(|viewport| Some(viewport.absolute_offset().y)),
+            targets,
+            true,
+            |_| None,
+            None,
+        );
+        let mut tree = Tree::new(&element);
+        let viewport = Rectangle::with_size(Size::new(200.0, 100.0));
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, viewport.size()),
+        );
+        // Park the pointer inside the bottom auto-scroll margin and hold it:
+        // animation frames must scroll the wrapped scrollable on their own.
+        let point = Point::new(100.0, 90.0);
+        let mut messages: Vec<Option<f32>> = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            Layout::new(&node),
+            mouse::Cursor::Available(point),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &viewport,
+        );
+        messages.clear();
+        let mut shell = Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+            Layout::new(&node),
+            mouse::Cursor::Available(point),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+        drop(shell);
+        let offsets: Vec<f32> = messages.into_iter().flatten().collect();
+        assert!(
+            offsets.iter().any(|offset| *offset > 0.0),
+            "holding near the bottom edge must scroll down, got {offsets:?}"
+        );
+    }
+
+    #[test]
+    fn leaving_the_window_clears_the_drag_preview() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let targets = targets();
+        let mut element = surface(
+            target_with_zone(
+                iced::widget::Space::new().width(300).height(180),
+                None,
+                &targets,
+                move |bounds, point| {
+                    bounds.contains(point).then_some((
+                        "into group",
+                        Rectangle {
+                            height: 24.0,
+                            ..bounds
+                        },
+                    ))
+                },
+            ),
+            targets,
+            true,
+            |target| target,
+            None,
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(600.0, 400.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(50.0, 50.0));
+        let viewport = Rectangle::with_size(Size::new(600.0, 400.0));
+        let mut messages = Vec::new();
+        let start = std::time::Instant::now();
+        // Dwell first so the hover confirms.
+        let point = Point::new(80.0, 200.0);
+        for (event, cursor, at) in [
+            (
+                Event::Mouse(mouse::Event::CursorMoved { position: point }),
+                mouse::Cursor::Available(point),
+                start,
+            ),
+            (
+                Event::Window(iced::window::Event::RedrawRequested(
+                    start + std::time::Duration::from_millis(200),
+                )),
+                mouse::Cursor::Available(point),
+                start + std::time::Duration::from_millis(200),
+            ),
+            // Leaving the window clears the accepted target.
+            (
+                Event::Mouse(mouse::Event::CursorMoved {
+                    position: Point::new(-50.0, -50.0),
+                }),
+                mouse::Cursor::Unavailable,
+                start + std::time::Duration::from_millis(210),
+            ),
+        ] {
+            let _clock = crate::motion::FixedTime::new(at);
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &viewport,
+            );
+        }
+        assert_eq!(messages, [Some("into group"), None]);
     }
 }

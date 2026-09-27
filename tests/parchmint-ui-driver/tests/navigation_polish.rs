@@ -233,7 +233,7 @@ fn group_comments_include_nested_documents_after_reopening() {
             .click_target(WINDOW, HarnessTarget::AddComment)
             .unwrap();
         harness.type_focused(WINDOW, comment).unwrap();
-        harness.click_text(WINDOW, "Add comment").unwrap();
+        harness.click_text(WINDOW, "Add note").unwrap();
         harness.press_command_key(WINDOW, 's').unwrap();
     }
     harness.shutdown().unwrap();

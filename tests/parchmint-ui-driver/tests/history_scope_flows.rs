@@ -132,7 +132,7 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
         .unwrap();
     capture(&harness, "history-document-confirmation");
     assert!(harness.contains_text(HarnessWindow::Project,
-        "Restore “Manuscript > Chapter” to “Before revision”? Only its text, formatting, and comments change.").unwrap());
+        "Restore “Manuscript > Chapter” to “Before revision”? Only its text, formatting, and notes change.").unwrap());
     harness
         .click_text(HarnessWindow::Project, "Restore document")
         .unwrap();

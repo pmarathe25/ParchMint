@@ -54,11 +54,28 @@ impl CardItem<'_> {
         })
     }
 
+    /// Width available to the card title after padding, word count, and row
+    /// controls. The previous estimate (width - 144) was far narrower than
+    /// the rendered title, so medium titles measured as multi-line while
+    /// rendering on one line: expanding then added a blank gap under the
+    /// title and the button appeared on fully-visible cards.
+    pub(crate) fn title_width(&self, width: f32) -> f32 {
+        let words = crate::components::word_count_label(self.words);
+        let words_width = measured_text(&words, 300.0, 12, 16.0, CARD_FONT).width;
+        (width - 30.0 - words_width).max(40.0)
+    }
+
     pub(crate) fn heading_height(&self, width: f32) -> f32 {
         if self.details_expanded {
             text_height(
                 self.title,
-                (width - 144.0).max(40.0),
+                (self.title_width(width)
+                    - if self.kind == HierarchyRowKind::Group {
+                        32.0
+                    } else {
+                        26.0
+                    })
+                .max(1.0),
                 self.title_size(),
                 24.0,
                 self.title_font(),
@@ -106,6 +123,10 @@ impl CardItem<'_> {
         }
     }
 
+    /// Offer expansion solely when information is truncated from the compact
+    /// card: a wrapped title, a clipped synopsis, a clipped metadata value,
+    /// or fields hidden until expanded. Fully-visible cards never show a
+    /// button that would only add spacing.
     pub(crate) fn needs_expansion(&self, width: f32) -> bool {
         if self.kind == HierarchyRowKind::Group {
             return false;
@@ -113,25 +134,24 @@ impl CardItem<'_> {
         if self.has_hidden_metadata {
             return true;
         }
-        if self.editable_metadata.len() > 3 {
+        let field_width = self.metadata_width(width);
+        if self.editable_metadata.iter().any(|(_, value)| {
+            !value.trim().is_empty() && metadata_height(value, field_width) > 22.0
+        }) {
             return true;
         }
-        let field_width = self.metadata_width(width);
-        if self
-            .editable_metadata
-            .iter()
-            .any(|(_, value)| metadata_height(value, field_width) > 22.0)
+        if !self.synopsis.trim().is_empty()
+            && text_height(self.synopsis, (width - 30.0).max(1.0), 14, 20.0, CARD_FONT) + 4.0 > 64.0
         {
             return true;
         }
-        text_height(self.synopsis, (width - 30.0).max(1.0), 14, 20.0, CARD_FONT) + 4.0 > 64.0
-            || text_height(
-                self.title,
-                (width - 144.0).max(40.0),
-                self.title_size(),
-                24.0,
-                self.title_font(),
-            ) > 24.0
+        text_height(
+            self.title,
+            self.title_width(width),
+            self.title_size(),
+            24.0,
+            self.title_font(),
+        ) > 24.0
     }
 
     pub(crate) fn row_height(&self, width: f32) -> f32 {
@@ -263,4 +283,58 @@ fn measured_text(content: &str, width: f32, size: u32, line_height: f32, font: F
 
 pub(crate) fn metadata_height(value: &str, width: f32) -> f32 {
     (text_height(value, (width - 6.0).max(1.0), 13, 18.0, CARD_FONT) + 4.0).max(22.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::HierarchyRowKind;
+
+    fn document<'a>(
+        title: &'a str,
+        synopsis: &'a str,
+        fields: &'a [(&'a str, &'a str)],
+    ) -> CardItem<'a> {
+        CardItem {
+            editable_metadata: fields.to_vec(),
+            has_hidden_metadata: false,
+            node_id: "card",
+            document_id: None,
+            title,
+            synopsis,
+            words: 0,
+            kind: HierarchyRowKind::Document,
+            depth: 0,
+            expanded: false,
+            details_expanded: false,
+            visible: true,
+            selected: false,
+            metadata: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fully_visible_cards_offer_no_expansion() {
+        // Short title, synopsis, and values with no hidden fields: nothing is
+        // truncated, so no button — even with several metadata fields.
+        let card = document(
+            "A short title",
+            "A brief synopsis.",
+            &[("A", "one"), ("B", "two"), ("C", "three"), ("D", "four")],
+        );
+        assert!(!card.needs_expansion(300.0));
+    }
+
+    #[test]
+    fn truncated_content_offers_expansion() {
+        assert!(document("Hi", &"Long synopsis. ".repeat(40), &[]).needs_expansion(300.0));
+        assert!(
+            document("Hi", "Brief.", &[("Note", &"Value text. ".repeat(30))])
+                .needs_expansion(300.0)
+        );
+        assert!(document(&"Very long title. ".repeat(20), "Brief.", &[]).needs_expansion(300.0));
+        let mut hidden = document("Hi", "Brief.", &[]);
+        hidden.has_hidden_metadata = true;
+        assert!(hidden.needs_expansion(300.0));
+    }
 }

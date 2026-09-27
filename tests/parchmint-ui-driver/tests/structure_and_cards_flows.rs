@@ -176,10 +176,13 @@ fn hierarchy_drag_previews_reflow_cancel_and_commit_on_both_surfaces() {
             )
             .unwrap();
         let committed = harness.hierarchy_titles().unwrap();
-        assert_order(
-            &committed,
-            &["Discovery", "Act One", "Departure", "Act Two", "Arrival"],
-        );
+        let expected = if surface == HarnessHierarchySurface::Cards {
+            // The leading edge of a group inserts at its first child slot.
+            ["Act One", "Discovery", "Departure", "Act Two", "Arrival"]
+        } else {
+            ["Discovery", "Act One", "Departure", "Act Two", "Arrival"]
+        };
+        assert_order(&committed, &expected);
         close(harness);
         let reopened =
             DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
@@ -637,7 +640,7 @@ fn cards_document_click_selects_and_double_click_opens_the_document() {
 }
 
 #[test]
-fn dragging_an_expanded_cards_group_does_not_collapse_it() {
+fn dragging_an_expanded_cards_group_restores_its_disclosure() {
     let run = IsolatedRun::new("cards-group-drag-disclosure").expect("isolated run");
     let project = run.root().join("cards-group-drag-disclosure.parchmint");
     let harness = create_project(&run, &project, "Cards Group Drag Disclosure");

@@ -320,6 +320,7 @@ struct SurfaceState {
     scroll_inertia_y: f32,
     last_wheel: Option<Instant>,
     last_wheel_delta: f32,
+    last_scroll_step: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -436,6 +437,7 @@ impl Default for SurfaceState {
             scroll_inertia_y: 0.0,
             last_wheel: None,
             last_wheel_delta: 0.0,
+            last_scroll_step: None,
         }
     }
 }
@@ -446,21 +448,26 @@ impl SurfaceState {
 
     fn add_scroll_inertia(&mut self, delta: f32) {
         let now = Instant::now();
+        // Symmetric in both directions, matching the scrollable smoothing:
+        // a fresh (zero) prior never counts as continuing.
         let continuing = self.last_wheel.is_some_and(|previous| {
-            now.saturating_duration_since(previous) <= Duration::from_millis(140)
-        }) && self.last_wheel_delta.signum() == delta.signum();
+            now.saturating_duration_since(previous) <= Duration::from_millis(180)
+        }) && self.last_wheel_delta != 0.0
+            && delta != 0.0
+            && self.last_wheel_delta.signum() == delta.signum();
         self.scroll_inertia_y = if continuing {
-            (self.scroll_inertia_y * 0.55 + delta * 0.18).clamp(-32.0, 32.0)
-        } else if delta.abs() >= 90.0 {
-            (delta * 0.12).clamp(-32.0, 32.0)
+            (self.scroll_inertia_y * 0.60 + delta * 0.35).clamp(-160.0, 160.0)
         } else {
-            0.0
+            (delta * 0.30).clamp(-160.0, 160.0)
         };
         self.last_wheel = Some(now);
         self.last_wheel_delta = delta;
     }
 
     fn wheel(&mut self, delta: f32) {
+        if self.pending_scroll_y * delta < 0.0 {
+            self.pending_scroll_y = 0.0;
+        }
         self.add_scroll_inertia(delta);
         self.pending_scroll_y += delta;
     }
@@ -475,15 +482,24 @@ impl SurfaceState {
     }
 
     fn next_scroll_step(&mut self) -> f32 {
+        let now = Instant::now();
+        let frames = self
+            .last_scroll_step
+            .replace(now)
+            .map_or(1.0, |previous| {
+                now.saturating_duration_since(previous).as_secs_f32() / 0.016
+            })
+            .clamp(0.0, 4.0);
         let step = if self.pending_scroll_y.abs() < 1.0 {
             self.pending_scroll_y
         } else {
-            self.pending_scroll_y * 0.35
+            self.pending_scroll_y * (1.0 - 0.58_f32.powf(frames))
         };
         self.pending_scroll_y -= step;
-        let inertia = self.scroll_inertia_y;
-        self.scroll_inertia_y *= 0.86;
-        if self.scroll_inertia_y.abs() < 0.75 {
+        let decay = 0.86_f32.powf(frames);
+        let inertia = self.scroll_inertia_y * (1.0 - decay) / (1.0 - 0.86);
+        self.scroll_inertia_y *= decay;
+        if self.scroll_inertia_y.abs() < 0.3 {
             self.scroll_inertia_y = 0.0;
         }
         step + inertia
@@ -850,16 +866,18 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
 
             for decoration in &content.comments {
                 for rectangle in content.geometry.selection_rectangles(decoration.range()) {
-                    let rectangle = if decoration.active() {
-                        rectangle
+                    // Annotated text is always highlighted so notes are
+                    // discoverable without hovering. The active thread keeps
+                    // the full-strength fill while inactive threads use the
+                    // same highlight at a softer alpha.
+                    let color = if decoration.active() {
+                        content.theme.comment().iced()
                     } else {
-                        EditorRectangle {
-                            y: rectangle.y + rectangle.height - 2.0,
-                            height: 2.0,
-                            ..rectangle
-                        }
+                        let mut color = content.theme.comment().iced();
+                        color.a *= 0.65;
+                        color
                     };
-                    fill_rectangle(frame, rectangle, content.theme.comment().iced());
+                    fill_rectangle(frame, rectangle, color);
                 }
             }
 

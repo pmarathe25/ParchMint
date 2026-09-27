@@ -112,6 +112,12 @@ struct HierarchyPointerDrag {
     grab_offset: Point,
     card_width: f32,
     from_card: bool,
+    /// A dragged group travels collapsed as one atomic card. These remember
+    /// scopes the source group was expanded in so the drop (or cancel)
+    /// restores exactly the pre-drag disclosure state.
+    target_grid: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
+    collapsed_cards_group: Option<String>,
+    collapsed_explorer_group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -893,6 +899,7 @@ pub struct CardsState<'a> {
     scroll_offset: f32,
     measurements: &'a RefCell<BTreeMap<String, (u64, f32)>>,
     grid_cache: &'a RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
+    dragging: bool,
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
@@ -1045,6 +1052,7 @@ impl<'a> CardsState<'a> {
             self.section_id,
             self.expanded,
             self.details_expanded,
+            self.dragging,
         )
             .hash(&mut hash);
         let signature = hash.finish();
@@ -1164,12 +1172,20 @@ impl<'a> CardsState<'a> {
             }
         }
         for row in &mut compact {
+            if self.dragging
+                && row.start < row.end
+                && self.explorer.nodes[ids[row.start]].kind == HierarchyNodeKind::Group
+                && self.expanded.contains(ids[row.start])
+            {
+                row.height += 20.0;
+            }
             if row
                 .add_to
                 .as_deref()
                 .is_some_and(|id| id != self.section_id)
             {
-                row.height += crate::cards_layout::GROUP_GAP + 8.0;
+                row.height +=
+                    crate::cards_layout::GROUP_GAP + if self.dragging { 24.0 } else { 8.0 };
             }
         }
         let mut offsets = Vec::with_capacity(compact.len() + 1);
@@ -1306,7 +1322,9 @@ impl<'a> CardsState<'a> {
         let has_hidden_metadata = !details_expanded
             && metadata_with_visibility
                 .iter()
-                .any(|(_, _, _, visible)| !visible);
+                .any(|(_, _, value, visible)| {
+                    !visible && value.is_some_and(|value| !value.trim().is_empty())
+                });
         let editable_metadata = metadata_with_visibility
             .iter()
             .filter(|(_, _, _, visible)| details_expanded || *visible)
@@ -4941,18 +4959,7 @@ impl ProjectWorkspace {
                     | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
                     DragDestination::EditorPane(_) => true,
                 });
-        self.pointer_drag = self.pointer_drag.take().filter(|drag| {
-            self.explorer.nodes.contains_key(&drag.source_id)
-                && drag
-                    .destination
-                    .as_ref()
-                    .is_none_or(|destination| match destination {
-                        DragDestination::BeforeSibling(id)
-                        | DragDestination::AfterSibling(id)
-                        | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
-                        DragDestination::EditorPane(_) => true,
-                    })
-        });
+        self.reconcile_pointer_drag();
         if let Some(destination) = self.pointer_drag.as_ref().and_then(|drag| {
             (drag.surface == Some(HierarchySurface::Cards))
                 .then(|| drag.destination.clone())
@@ -5072,6 +5079,49 @@ impl ProjectWorkspace {
                 .any(|source| *source == id || self.explorer.is_ancestor(source, id))
     }
 
+    fn reconcile_pointer_drag(&mut self) {
+        let Some(drag) = self.pointer_drag.take() else {
+            return;
+        };
+        let valid = self.explorer.nodes.contains_key(&drag.source_id)
+            && drag
+                .destination
+                .as_ref()
+                .is_none_or(|destination| match destination {
+                    DragDestination::BeforeSibling(id)
+                    | DragDestination::AfterSibling(id)
+                    | DragDestination::IntoGroup(id) => self.explorer.nodes.contains_key(id),
+                    DragDestination::EditorPane(_) => true,
+                });
+        if valid {
+            drag.target_grid.borrow_mut().take();
+            self.pointer_drag = Some(drag);
+        } else {
+            self.restore_drag_collapsed_group(&drag);
+            self.cards_drag_destination = None;
+        }
+    }
+
+    /// Restore disclosure scopes collapsed for a drag. Runs on commit and
+    /// cancel so a dragged group returns to exactly its pre-drag expanded
+    /// state at its new location. Each scope restores independently: a group
+    /// expanded only in the Overview must not gain Explorer expansion as a
+    /// side effect (and vice versa).
+    fn restore_drag_collapsed_group(&mut self, drag: &HierarchyPointerDrag) {
+        if let Some(id) = drag.collapsed_cards_group.as_deref()
+            && self.explorer.nodes.contains_key(id)
+        {
+            self.cards_expanded.insert(id.to_owned());
+            self.cards_grid_cache.get_mut().take();
+            self.cards_word_counts_cache.get_mut().take();
+        }
+        if let Some(id) = drag.collapsed_explorer_group.as_deref()
+            && self.explorer.nodes.contains_key(id)
+        {
+            self.explorer.expanded.insert(id.to_owned());
+        }
+    }
+
     pub(crate) fn preview_destination(
         &self,
         id: &str,
@@ -5079,8 +5129,6 @@ impl ProjectWorkspace {
     ) -> Option<DragDestination> {
         let drag = self.pointer_drag.as_ref()?;
         if self.dragged_subtree_contains(id) {
-            // The source placeholder is an explicit way back to the original
-            // order, even after a preview has moved it elsewhere.
             return Some(DragDestination::BeforeSibling(drag.source_id.clone()));
         }
         self.explorer
@@ -5375,6 +5423,7 @@ impl ProjectWorkspace {
             scroll_offset: self.cards_scroll_offset,
             measurements: &self.cards_measurements,
             grid_cache: &self.cards_grid_cache,
+            dragging: self.pointer_drag.is_some(),
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
@@ -5382,6 +5431,102 @@ impl ProjectWorkspace {
             field_order: &self.settings.metadata_order,
             values: &self.metadata_values,
         }
+    }
+
+    /// Hit test the collapsed source layout, never the temporary insertion tree.
+    /// Preview movement cannot change the destination of a stationary cursor.
+    pub(crate) fn card_drop_at(&self, width: f32, point: iced::Point) -> Option<DragDestination> {
+        let drag = self.pointer_drag.as_ref()?;
+        let mut cards = self.cards();
+        cards.explorer = &self.explorer;
+        cards.expanded = &self.cards_expanded;
+        cards.grid_cache = &drag.target_grid;
+        let columns = crate::cards_layout::column_count(width);
+        let grid = cards.grid_rows(columns, width);
+        let index = grid
+            .offsets
+            .partition_point(|offset| *offset <= point.y)
+            .saturating_sub(1);
+        if let Some(row) = grid.rows.get(index) {
+            let top = grid.offsets[index];
+            let bottom = grid.offsets[index + 1];
+            let first = (row.start < row.end).then(|| cards.item(&grid.ids[row.start]).unwrap());
+            let mut inside = first
+                .as_ref()
+                .map(|item| item.node_id)
+                .or(row.add_to.as_deref())
+                .unwrap_or(cards.section_id);
+            loop {
+                let node = &self.explorer.nodes[inside];
+                let depth = self.explorer.depth(inside).saturating_sub(1);
+                let inset = crate::cards_layout::grid_indent(depth, width);
+                if inside == cards.section_id
+                    || (node.kind == HierarchyNodeKind::Group
+                        && self.cards_expanded.contains(inside)
+                        && point.x >= inset
+                        && point.x <= width - inset)
+                {
+                    break;
+                }
+                inside = node.parent.as_deref().unwrap_or(cards.section_id);
+            }
+            if let Some(group) = row.add_to.as_deref().filter(|id| *id != cards.section_id)
+                && point.y >= bottom - crate::cards_layout::GROUP_GAP - 24.0
+                && inside == group
+            {
+                return self
+                    .preview_destination(group, DragDestination::AfterSibling(group.to_owned()));
+            }
+            for (column, id) in grid.ids[row.start..row.end].iter().enumerate() {
+                let item = cards.item(id).unwrap();
+                let cell_width = item.grid_width(width, columns);
+                let x = item.grid_indent(width) + column as f32 * (cell_width + 12.0);
+                let leading = if item.kind == HierarchyRowKind::Group && item.expanded {
+                    20.0
+                } else {
+                    0.0
+                };
+                let bounds = iced::Rectangle {
+                    x,
+                    y: top + leading,
+                    width: cell_width,
+                    height: item.row_height(cell_width) - CARDS_ROW_GAP,
+                };
+                if point.x >= x && point.x <= x + cell_width && point.y <= bounds.y + bounds.height
+                {
+                    if self.dragged_subtree_contains(id) {
+                        return Some(DragDestination::BeforeSibling(drag.source_id.clone()));
+                    }
+                    let destination = if item.kind == HierarchyRowKind::Group {
+                        if point.y < bounds.y + 24.0 {
+                            self.explorer.nodes[id]
+                                .children
+                                .iter()
+                                .find(|child| !self.dragged_subtree_contains(child))
+                                .map(|child| DragDestination::BeforeSibling(child.clone()))
+                                .unwrap_or_else(|| DragDestination::IntoGroup(id.clone()))
+                        } else if !item.expanded && point.y >= bounds.y + bounds.height - 24.0 {
+                            DragDestination::AfterSibling(id.clone())
+                        } else {
+                            // A group header and its leading gap are inside the group.
+                            DragDestination::IntoGroup(id.clone())
+                        }
+                    } else if (columns > 1 && point.x < bounds.center_x())
+                        || (columns == 1 && point.y < bounds.center_y())
+                    {
+                        DragDestination::BeforeSibling(id.clone())
+                    } else {
+                        DragDestination::AfterSibling(id.clone())
+                    };
+                    return self.preview_destination(id, destination);
+                }
+            }
+            return self.preview_destination(inside, DragDestination::IntoGroup(inside.to_owned()));
+        }
+        self.preview_destination(
+            cards.section_id,
+            DragDestination::IntoGroup(cards.section_id.to_owned()),
+        )
     }
 
     pub fn explorer_active_panes(&self, node_id: &str) -> (bool, bool) {
@@ -6472,12 +6617,25 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::ToggleCardsExpanded(node_id) => {
+                // Disclosure must always work: a stuck drag preview (e.g. a
+                // release outside the window that never arrived) would
+                // otherwise swallow the click and leave a stale insertion
+                // outline behind. Toggling drops any in-flight drag first,
+                // restoring its collapsed group.
+                if let Some(drag) = self.pointer_drag.take() {
+                    self.restore_drag_collapsed_group(&drag);
+                }
+                self.cards_drag_destination = None;
                 if !self.cards_expanded.remove(&node_id) {
                     self.cards_expanded.insert(node_id);
                 }
                 Vec::new()
             }
             ProjectMessage::ToggleHierarchyExpanded(node_id) => {
+                if let Some(drag) = self.pointer_drag.take() {
+                    self.restore_drag_collapsed_group(&drag);
+                }
+                self.cards_drag_destination = None;
                 self.explorer.toggle_expanded(&node_id);
                 Vec::new()
             }
@@ -7134,17 +7292,45 @@ impl ProjectWorkspace {
                 width,
             } => {
                 let effects = self.update(ProjectMessage::BeginHierarchyDrag {
-                    source_id,
+                    source_id: source_id.clone(),
                     gesture: SelectionGesture::Replace,
                 });
                 if let Some(drag) = self.pointer_drag.as_mut() {
-                    drag.grab_offset = grab_offset;
+                    drag.grab_offset = Point::new(
+                        grab_offset.x().min(width - 12.0).max(12.0),
+                        grab_offset.y().min(80.0),
+                    );
                     drag.card_width = width;
                     drag.from_card = true;
+                    // Dragging a group collapses it so the whole subtree
+                    // travels as one card; the drop restores the old state.
+                    if self
+                        .explorer
+                        .nodes
+                        .get(&source_id)
+                        .is_some_and(|node| node.kind == HierarchyNodeKind::Group)
+                    {
+                        if self.cards_expanded.remove(&source_id) {
+                            drag.collapsed_cards_group = Some(source_id.clone());
+                        }
+                        self.cards_grid_cache.get_mut().take();
+                        self.cards_word_counts_cache.get_mut().take();
+                    }
+                }
+                let origin_dest = DragDestination::BeforeSibling(source_id.clone());
+                let preview = self.projected_drop(&origin_dest);
+                if let Some(drag) = self.pointer_drag.as_mut() {
+                    drag.destination = Some(origin_dest.clone());
+                    drag.surface = Some(HierarchySurface::Cards);
+                    drag.preview = preview;
+                    self.cards_drag_destination = Some(origin_dest);
                 }
                 effects
             }
             ProjectMessage::BeginHierarchyDrag { source_id, gesture } => {
+                if let Some(previous) = self.pointer_drag.take() {
+                    self.restore_drag_collapsed_group(&previous);
+                }
                 let selected_before = self.explorer.selected.clone();
                 let anchor_before = self.explorer.selection_anchor.clone();
 
@@ -7163,6 +7349,23 @@ impl ProjectWorkspace {
                     .get(&source_id)
                     .is_some_and(|node| node.kind != HierarchyNodeKind::Root)
                 {
+                    // Explorer-scope drags collapse an expanded source group
+                    // the same way card drags collapse the Overview scope.
+                    let is_group = self
+                        .explorer
+                        .nodes
+                        .get(&source_id)
+                        .is_some_and(|node| node.kind == HierarchyNodeKind::Group);
+                    let collapsed_explorer_group = (is_group
+                        && self.explorer.expanded.remove(&source_id))
+                    .then(|| source_id.clone());
+                    let collapsed_cards_group = (is_group
+                        && self.cards_expanded.remove(&source_id))
+                    .then(|| source_id.clone());
+                    if is_group {
+                        self.cards_grid_cache.get_mut().take();
+                        self.cards_word_counts_cache.get_mut().take();
+                    }
                     self.pointer_drag = Some(HierarchyPointerDrag {
                         source_id,
                         destination: None,
@@ -7173,6 +7376,9 @@ impl ProjectWorkspace {
                         grab_offset: Point::new(20.0, 20.0),
                         card_width: 320.0,
                         from_card: false,
+                        target_grid: RefCell::new(None),
+                        collapsed_cards_group,
+                        collapsed_explorer_group,
                     });
                     self.cards_drag_destination = None;
                     self.hierarchy_context_menu = None;
@@ -7183,36 +7389,35 @@ impl ProjectWorkspace {
                 surface,
                 destination,
             } => {
-                // Crossing space between cards keeps the last preview; leaving
-                // the surface or Escape cancels it explicitly.
-                if surface == HierarchySurface::Cards
-                    && destination.is_none()
-                    && self
-                        .pointer_drag
-                        .as_ref()
-                        .is_some_and(|drag| drag.surface == Some(surface))
-                {
-                    return Vec::new();
-                }
-                if self.pointer_drag.as_ref().is_none_or(|drag| {
-                    drag.surface == Some(surface) && drag.destination == destination
-                }) {
-                    return Vec::new();
-                }
+                let drag = match self.pointer_drag.as_ref() {
+                    Some(drag)
+                        if drag.surface == Some(surface) && drag.destination == destination =>
+                    {
+                        return Vec::new();
+                    }
+                    Some(drag) => drag,
+                    None => return Vec::new(),
+                };
                 self.cards_grid_cache.get_mut().take();
                 self.cards_word_counts_cache.get_mut().take();
-                let preview = if surface == HierarchySurface::Cards {
-                    destination
+                let source_id = drag.source_id.clone();
+                let origin_dest = DragDestination::BeforeSibling(source_id.clone());
+                let (preview, effective_dest) = if surface == HierarchySurface::Cards {
+                    match destination
                         .as_ref()
-                        .and_then(|destination| self.projected_drop(destination))
+                        .and_then(|d| self.projected_drop(d).map(|p| (p, d.clone())))
+                    {
+                        Some((p, d)) => (Some(p), Some(d)),
+                        None => (self.projected_drop(&origin_dest), Some(origin_dest)),
+                    }
                 } else {
-                    None
+                    (None, destination.clone())
                 };
                 if let Some(drag) = self.pointer_drag.as_mut() {
                     drag.surface = Some(surface);
                     drag.preview = preview;
-                    drag.destination = destination.clone();
-                    self.cards_drag_destination = destination;
+                    drag.destination = effective_dest.clone();
+                    self.cards_drag_destination = effective_dest;
                 }
                 Vec::new()
             }
@@ -7252,35 +7457,46 @@ impl ProjectWorkspace {
             ProjectMessage::CommitHierarchyDrag => {
                 let drag = self.pointer_drag.take();
                 self.cards_drag_destination = None;
-                let Some(HierarchyPointerDrag {
-                    source_id,
-                    destination: Some(destination),
-                    preview,
-                    ..
-                }) = drag
+                let Some(destination) = drag.as_ref().and_then(|drag| drag.destination.clone())
                 else {
+                    if let Some(drag) = &drag {
+                        self.restore_drag_collapsed_group(drag);
+                    }
                     return Vec::new();
                 };
-                let effects = self.drop_hierarchy(source_id, destination);
+                let drag = drag.expect("destination checked");
+                let effects = self.drop_hierarchy(drag.source_id.clone(), destination);
                 if !effects.is_empty() {
-                    if let Some(preview) = &preview {
+                    if let Some(preview) = &drag.preview {
                         self.cards_expanded.clone_from(&preview.expanded);
                     }
-                    self.drop_preview = preview;
+                    // The retained preview keeps showing the collapsed travel
+                    // layout otherwise, so patch the restored group into it.
+                    let mut retained = drag.preview.clone();
+                    if let Some(id) = drag.collapsed_cards_group.as_deref()
+                        && let Some(preview) = retained.as_mut()
+                    {
+                        preview.expanded.insert(id.to_owned());
+                    }
+                    self.drop_preview = retained;
                 }
+                self.restore_drag_collapsed_group(&drag);
                 effects
             }
             ProjectMessage::CancelHierarchyDrag => {
                 if let Some(drag) = self.pointer_drag.take() {
                     self.explorer.selected = drag
                         .selected_before
+                        .clone()
                         .into_iter()
                         .filter(|id| self.explorer.nodes.contains_key(id))
                         .collect();
                     self.explorer.selection_anchor = drag
                         .anchor_before
+                        .clone()
                         .filter(|id| self.explorer.nodes.contains_key(id));
                     self.sync_selection_context();
+                    self.restore_drag_collapsed_group(&drag);
                 }
                 self.cards_drag_destination = None;
                 Vec::new()
@@ -7313,7 +7529,9 @@ impl ProjectWorkspace {
                     self.sync_selection_context();
                     self.hierarchy_context_menu = Some(node_id);
                     self.hierarchy_context_point = point;
-                    self.pointer_drag = None;
+                    if let Some(drag) = self.pointer_drag.take() {
+                        self.restore_drag_collapsed_group(&drag);
+                    }
                     self.cards_drag_destination = None;
                 }
                 Vec::new()
@@ -9364,6 +9582,37 @@ mod tests {
     }
 
     #[test]
+    fn empty_hidden_metadata_does_not_offer_card_expansion() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        for field in workspace.settings.metadata_definitions.values_mut() {
+            field.visible_on_cards = true;
+        }
+        workspace
+            .settings
+            .metadata_definitions
+            .get_mut("field-17")
+            .unwrap()
+            .visible_on_cards = false;
+        workspace
+            .metadata_values
+            .remove(&("chapter-one".into(), "field-17".into()));
+        let cards = workspace.cards();
+        let card = cards.item("chapter-one").unwrap();
+        assert!(!card.has_hidden_metadata);
+        assert!(!card.needs_expansion(800.0));
+        workspace
+            .metadata_values
+            .insert(("chapter-one".into(), "field-17".into()), "Mara".into());
+        assert!(
+            workspace
+                .cards()
+                .item("chapter-one")
+                .unwrap()
+                .needs_expansion(800.0)
+        );
+    }
+
+    #[test]
     fn moving_a_metadata_field_to_hidden_only_removes_it_from_collapsed_cards() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::ManageSettings(SettingsCategory::Metadata));
@@ -10808,25 +11057,187 @@ mod tests {
             destination: Some(DragDestination::BeforeSibling("chapter-one".to_owned())),
         });
         assert_eq!(editing(&workspace), before);
-        let preview = workspace
-            .displayed_explorer()
-            .preorder_ids()
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        assert_ne!(
+            workspace.displayed_explorer().preorder_ids(),
+            order.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        // An invalid hover clears back to the base layout so the placeholder
+        // stays in its original slot and bounces back there if released.
         workspace.update(ProjectMessage::PreviewHierarchyDrop {
             surface: HierarchySurface::Cards,
             destination: None,
         });
         assert_eq!(
             workspace.displayed_explorer().preorder_ids(),
-            preview.iter().map(String::as_str).collect::<Vec<_>>()
+            order.iter().map(String::as_str).collect::<Vec<_>>()
         );
         workspace.update(ProjectMessage::CancelHierarchyDrag);
         assert_eq!(editing(&workspace), before);
         assert_eq!(
             workspace.displayed_explorer().preorder_ids(),
             order.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn card_targets_use_the_innermost_group_and_its_trailing_gap() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let mut nested = workspace.explorer.nodes["part-one"].clone();
+        nested.parent = Some("part-one".into());
+        nested.children = vec!["chapter-one".into(), "chapter-two".into()];
+        workspace.explorer.nodes.insert("nested".into(), nested);
+        workspace
+            .explorer
+            .nodes
+            .get_mut("part-one")
+            .unwrap()
+            .children = vec!["nested".into()];
+        for id in ["chapter-one", "chapter-two"] {
+            workspace.explorer.nodes.get_mut(id).unwrap().parent = Some("nested".into());
+        }
+        workspace.cards_expanded.insert("nested".into());
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-three".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        let grid = workspace.cards().grid_rows(3, 800.0);
+        let row = grid
+            .rows
+            .iter()
+            .position(|row| row.add_to.as_deref() == Some("nested"))
+            .unwrap();
+        let top = grid.offsets[row];
+        let bottom = grid.offsets[row + 1];
+        assert_eq!(
+            workspace.card_drop_at(800.0, iced::Point::new(30.0, top + 5.0)),
+            Some(DragDestination::IntoGroup("nested".into()))
+        );
+        assert_eq!(
+            workspace.card_drop_at(800.0, iced::Point::new(5.0, top + 5.0)),
+            Some(DragDestination::IntoGroup("part-one".into()))
+        );
+        assert_eq!(
+            workspace.card_drop_at(800.0, iced::Point::new(30.0, bottom - 2.0)),
+            Some(DragDestination::AfterSibling("nested".into()))
+        );
+    }
+
+    #[test]
+    fn card_targets_do_not_depend_on_previous_previews() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-one".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        let probes: Vec<_> = (0..50)
+            .flat_map(|y| {
+                (0..8).map(move |x| iced::Point::new(x as f32 * 100.0 + 5.0, y as f32 * 25.0))
+            })
+            .collect();
+        let before: Vec<_> = probes
+            .iter()
+            .map(|&point| workspace.card_drop_at(800.0, point))
+            .collect();
+        for destination in [
+            Some(DragDestination::IntoGroup("research".into())),
+            Some(DragDestination::AfterSibling("part-one".into())),
+            None,
+        ] {
+            workspace.update(ProjectMessage::PreviewHierarchyDrop {
+                surface: HierarchySurface::Cards,
+                destination,
+            });
+            let after: Vec<_> = probes
+                .iter()
+                .map(|&point| workspace.card_drop_at(800.0, point))
+                .collect();
+            assert_eq!(before, after);
+        }
+    }
+
+    #[test]
+    fn disclosure_after_a_drag_toggles_the_restored_state() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "part-one".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        assert!(!workspace.cards_expanded.contains("part-one"));
+        assert!(workspace.pointer_drag.is_none());
+    }
+
+    #[test]
+    fn losing_a_drop_target_restores_the_dragged_groups_disclosure() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "part-one".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::BeforeSibling("chapter-three".into())),
+        });
+        workspace.explorer.nodes.remove("chapter-three");
+        workspace.reconcile_pointer_drag();
+        assert!(workspace.pointer_drag.is_none());
+        assert!(workspace.cards_expanded.contains("part-one"));
+        assert!(workspace.cards_drag_destination.is_none());
+    }
+
+    #[test]
+    fn dragging_a_group_collapses_it_and_cancel_restores_expansion() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        assert!(workspace.cards_expanded.contains("part-one"));
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "part-one".to_owned(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        // The subtree travels as one atomic card: children hide for the drag.
+        assert!(!workspace.cards_expanded.contains("part-one"));
+        assert!(
+            !workspace
+                .cards()
+                .items()
+                .iter()
+                .any(|item| item.node_id == "chapter-one" && item.visible)
+        );
+        workspace.update(ProjectMessage::CancelHierarchyDrag);
+        assert!(workspace.cards_expanded.contains("part-one"));
+        assert!(
+            workspace
+                .cards()
+                .items()
+                .iter()
+                .any(|item| item.node_id == "chapter-one" && item.visible)
+        );
+    }
+
+    #[test]
+    fn committing_a_group_drag_restores_expansion_and_keeps_children() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "part-one".to_owned(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        assert!(!workspace.cards_expanded.contains("part-one"));
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::IntoGroup("research".to_owned())),
+        });
+        workspace.update(ProjectMessage::CommitHierarchyDrag);
+        assert!(workspace.cards_expanded.contains("part-one"));
+        let retained = workspace.drop_preview.as_ref().expect("retained preview");
+        assert!(retained.expanded.contains("part-one"));
+        assert_eq!(
+            retained.nodes["part-one"].children,
+            ["chapter-one", "chapter-two"]
         );
     }
 
