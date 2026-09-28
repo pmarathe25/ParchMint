@@ -22,7 +22,7 @@ fn frames(harness: &DesktopInteractionHarness, name: &str) {
 
 fn window_frames(harness: &DesktopInteractionHarness, window: HarnessWindow, name: &str) {
     let mut elapsed = 0;
-    // A group disclosure can be followed by compact-grid packing.
+    // Sample the shared group and compact-grid transition.
     for delta in [0, 16, 32, 48, 64, 100, 200] {
         elapsed += delta;
         harness
@@ -349,6 +349,8 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
         harness.release_hierarchy_drag(WINDOW).unwrap();
         assert_eq!(harness.hierarchy_titles().unwrap(), original);
     }
+    harness.toggle_cards_group(WINDOW, act_one.clone()).unwrap();
+    harness.toggle_cards_group(WINDOW, act_one.clone()).unwrap();
     for (name, destination, position) in [
         ("card-reorder", departure, HarnessDropPosition::After),
         ("card-move-group", act_two, HarnessDropPosition::Into),

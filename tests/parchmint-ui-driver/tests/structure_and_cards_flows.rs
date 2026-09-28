@@ -1043,6 +1043,9 @@ fn nested_group_drop_stays_inside_its_rendered_destination() {
                 .release_hierarchy_drag(HarnessWindow::Project)
                 .unwrap();
             assert_eq!(harness.hierarchy_titles().unwrap(), original);
+            harness
+                .advance_motion(HarnessWindow::Project, Duration::from_millis(220))
+                .unwrap();
         } else {
             harness
                 .release_hierarchy_drag(HarnessWindow::Project)

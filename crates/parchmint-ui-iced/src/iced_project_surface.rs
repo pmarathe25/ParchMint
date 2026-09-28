@@ -2773,10 +2773,12 @@ fn outline_card<'a>(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
-        // Disclosure rows already move through height allocation. Once they
-        // finish, animate the final compact-grid packing and its siblings.
-        // Targets remain inside the same moving layer as their cards.
-        !source_active && (group || !workspace.cards_disclosures_active()),
+        // Disclosure rows move through height allocation while the active
+        // group's heading reflows. Other cards follow their allocated rows;
+        // compact-grid packing resumes when the disclosure finishes.
+        !source_active
+            && (!workspace.cards_disclosures_active()
+                || (group && workspace.cards_disclosure(&node_id).is_some())),
         group.then(|| item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP),
         card,
     );

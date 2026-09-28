@@ -154,6 +154,51 @@ fn group_destination(
         .unwrap_or_else(|| (DragDestination::IntoGroup(section.to_owned()), None))
 }
 
+/// Empty cells beside a group's last card in a row insert after that card.
+/// Appending to the group is reserved for the space below its contents.
+fn blank_row_destination(
+    frames: &[FrameBounds<'_>],
+    rows: &[Layout<'_>],
+    point: Point,
+    width: f32,
+    destination: &DragDestination,
+) -> Option<DragDestination> {
+    let DragDestination::IntoGroup(group) = destination else {
+        return None;
+    };
+    let frame = frames.iter().find(|frame| frame.frame.id == *group)?;
+    let (row_index, last) =
+        frame.frame.members.iter().rfind(|(index, id)| {
+            !id.starts_with("add:") && rows[*index].bounds().contains(point)
+        })?;
+    if frames.iter().any(|candidate| candidate.frame.id == *last) {
+        return None;
+    }
+    let has_following_subgroup = frame.frame.members.iter().any(|(index, id)| {
+        *index > *row_index
+            && frames.iter().any(|candidate| {
+                candidate.frame.id == *id && candidate.frame.depth == frame.frame.depth + 1
+            })
+    });
+    if !has_following_subgroup {
+        return None;
+    }
+    let columns = crate::cards_layout::column_count(width);
+    let indent = crate::cards_layout::grid_indent(frame.frame.depth + 1, width);
+    let cell_width = (width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32;
+    let count = frame
+        .frame
+        .members
+        .iter()
+        .filter(|(index, id)| index == row_index && !id.starts_with("add:"))
+        .count();
+    let right = rows[*row_index].bounds().x
+        + indent
+        + count as f32 * cell_width
+        + count.saturating_sub(1) as f32 * 12.0;
+    (point.x >= right).then(|| DragDestination::AfterSibling(last.clone()))
+}
+
 pub(crate) fn groups<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     frames: Vec<GroupFrame>,
@@ -258,7 +303,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for CardFrames<'_, Me
                     frame_bounds(frame, &rows, layout.bounds().width, self.positions.as_ref())
                 })
                 .collect();
-            let (destination, zone) = group_destination(&frames, point, &targets.section_id);
+            let (mut destination, zone) = group_destination(&frames, point, &targets.section_id);
+            if let Some(sibling) =
+                blank_row_destination(&frames, &rows, point, layout.bounds().width, &destination)
+            {
+                destination = sibling;
+            }
             if let Some(destination) = (targets.validate)(destination) {
                 let zone = zone.unwrap_or_else(|| layout.bounds());
                 *targets.targets.borrow_mut() = Some((
@@ -503,6 +553,51 @@ mod tests {
             last_row_disclosures: 0,
             members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn blank_cell_after_document_targets_second_position_before_subgroup() {
+        let mut parent = group("part", 0, 0, 2);
+        parent.members = vec![(1, "chapter".into()), (2, "subgroup".into())];
+        let subgroup = group("subgroup", 1, 2, 2);
+        let nodes = [
+            layout::Node::new(Size::new(800.0, 100.0)),
+            layout::Node::new(Size::new(800.0, 100.0)).move_to(Point::new(0.0, 100.0)),
+            layout::Node::new(Size::new(800.0, 100.0)).move_to(Point::new(0.0, 200.0)),
+        ];
+        let rows = nodes.iter().map(Layout::new).collect::<Vec<_>>();
+        let frames = [
+            FrameBounds {
+                frame: &parent,
+                bounds: Rectangle::new(Point::ORIGIN, Size::new(800.0, 300.0)),
+                after: None,
+            },
+            FrameBounds {
+                frame: &subgroup,
+                bounds: Rectangle::new(Point::new(24.0, 200.0), Size::new(752.0, 100.0)),
+                after: None,
+            },
+        ];
+        assert_eq!(
+            blank_row_destination(
+                &frames,
+                &rows,
+                Point::new(400.0, 150.0),
+                800.0,
+                &DragDestination::IntoGroup("part".into()),
+            ),
+            Some(DragDestination::AfterSibling("chapter".into()))
+        );
+        assert_eq!(
+            blank_row_destination(
+                &frames,
+                &rows,
+                Point::new(400.0, 250.0),
+                800.0,
+                &DragDestination::IntoGroup("subgroup".into()),
+            ),
+            None
+        );
     }
 
     #[test]

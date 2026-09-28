@@ -1281,8 +1281,8 @@ fn editor_pane_surface<'a>(
     };
     let search_open = search.is_open();
     let content = column![
-        crate::motion::reveal(workspace.expanded_pane().is_none(), tabs),
-        crate::motion::reveal(
+        crate::motion::reveal_down(workspace.expanded_pane().is_none(), tabs),
+        crate::motion::reveal_down(
             workspace.expanded_pane().is_none(),
             container(
                 row![

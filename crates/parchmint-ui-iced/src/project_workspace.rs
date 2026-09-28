@@ -1214,8 +1214,8 @@ impl<'a> CardsState<'a> {
         // morphs, so following groups never get pulled up before moving down.
         let mut openings = self
             .disclosures
-            .iter()
-            .filter_map(|(id, _)| self.item(id).map(|item| (id, item)))
+            .keys()
+            .filter_map(|id| self.item(id).map(|item| (id, item)))
             .collect::<Vec<_>>();
         openings.sort_by_key(|(_, item)| std::cmp::Reverse(item.depth));
         for (id, mut item) in openings {
@@ -5319,6 +5319,21 @@ impl ProjectWorkspace {
         }
     }
 
+    fn restore_drag_selection(&mut self, drag: &HierarchyPointerDrag) {
+        self.explorer.selected = drag
+            .selected_before
+            .iter()
+            .filter(|id| self.explorer.nodes.contains_key(*id))
+            .cloned()
+            .collect();
+        self.explorer.selection_anchor = drag
+            .anchor_before
+            .as_ref()
+            .filter(|id| self.explorer.nodes.contains_key(*id))
+            .cloned();
+        self.sync_selection_context();
+    }
+
     pub(crate) fn preview_destination(
         &self,
         id: &str,
@@ -6743,7 +6758,7 @@ impl ProjectWorkspace {
                     self.cards_disclosures
                         .entry(node_id.clone())
                         .or_insert_with(|| crate::motion::Disclosure::new(was_expanded))
-                        .set_after_heading(!was_expanded);
+                        .set(!was_expanded);
                     // Keep closing rows mounted until their clipped exit finishes.
                     self.cards_expanded.insert(node_id);
                 } else if was_expanded {
@@ -7595,12 +7610,16 @@ impl ProjectWorkspace {
                 let Some(destination) = drag.as_ref().and_then(|drag| drag.destination.clone())
                 else {
                     if let Some(drag) = &drag {
+                        self.restore_drag_selection(drag);
                         self.restore_drag_collapsed_group(drag);
                     }
                     return Vec::new();
                 };
                 let drag = drag.expect("destination checked");
                 let effects = self.drop_hierarchy(drag.source_id.clone(), destination);
+                if effects.is_empty() {
+                    self.restore_drag_selection(&drag);
+                }
                 if !effects.is_empty() {
                     if let Some(preview) = &drag.preview {
                         self.cards_expanded.clone_from(&preview.expanded);
@@ -7620,17 +7639,7 @@ impl ProjectWorkspace {
             }
             ProjectMessage::CancelHierarchyDrag => {
                 if let Some(drag) = self.pointer_drag.take() {
-                    self.explorer.selected = drag
-                        .selected_before
-                        .clone()
-                        .into_iter()
-                        .filter(|id| self.explorer.nodes.contains_key(id))
-                        .collect();
-                    self.explorer.selection_anchor = drag
-                        .anchor_before
-                        .clone()
-                        .filter(|id| self.explorer.nodes.contains_key(id));
-                    self.sync_selection_context();
+                    self.restore_drag_selection(&drag);
                     self.restore_drag_collapsed_group(&drag);
                 }
                 self.cards_drag_destination = None;
@@ -11355,6 +11364,7 @@ mod tests {
     #[test]
     fn card_drag_can_return_to_its_source_slot_in_one_gesture() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let selected_before = workspace.explorer.selected.clone();
         let original = workspace
             .explorer
             .preorder_ids()
@@ -11395,6 +11405,11 @@ mod tests {
                 .update(ProjectMessage::CommitHierarchyDrag)
                 .is_empty()
         );
+        assert!(workspace.pointer_drag.is_none());
+        assert_eq!(workspace.explorer.selected, selected_before);
+        let _settled = crate::motion::SettledMotion::new();
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        assert!(!workspace.cards_expanded.contains("part-one"));
     }
 
     #[test]

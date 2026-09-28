@@ -102,6 +102,67 @@ where
     .into()
 }
 
+/// A full-window dismiss layer that lets the same press reach controls below
+/// it in a Stack. A menu above this layer captures presses inside the menu.
+pub(crate) fn pass_through_press<'a, Message: Clone + 'a>(
+    on_press: Message,
+) -> Element<'a, Message> {
+    Element::new(PassThroughPress { on_press })
+}
+
+struct PassThroughPress<Message> {
+    on_press: Message,
+}
+
+impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for PassThroughPress<Message> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+
+    fn update(
+        &mut self,
+        _tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        if matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonPressed(
+                mouse::Button::Left | mouse::Button::Right
+            ))
+        ) && cursor.is_over(layout.bounds())
+        {
+            shell.publish(self.on_press.clone());
+        }
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        _renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &renderer::Style,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+    }
+}
+
 pub(crate) type HoverTargets<D> = Rc<RefCell<Option<(D, Rectangle)>>>;
 type DropResolver<'a, D> = dyn Fn(Rectangle, Point) -> Option<(D, Rectangle)> + 'a;
 

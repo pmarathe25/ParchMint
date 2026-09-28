@@ -4113,7 +4113,10 @@ impl NativeDesktop {
                 .center(Length::Fill)
                 .into(),
         };
-        let base = crate::focus::input_scope(base, self.project_chooser != Some(id));
+        let base = crate::focus::input_scope(
+            base,
+            self.project_chooser != Some(id) || !self.creating_project,
+        );
         if self.project_chooser != Some(id) {
             // Keep the underlying widget tree when the project menu opens,
             // including search scroll positions and text-field focus.
@@ -4191,13 +4194,7 @@ impl NativeDesktop {
             });
             return stack![
                 base,
-                iced::widget::mouse_area(
-                    container(Space::new())
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                )
-                .on_press(Message::CloseProjectChooser)
-                .on_right_press(Message::CloseProjectChooser),
+                crate::hierarchy_drag::pass_through_press(Message::CloseProjectChooser),
                 container(opaque(crate::motion::enter("projects-menu", menu)))
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -6250,15 +6247,14 @@ impl NativeDesktop {
                         ),
                     ));
                 }
-                let restore = if matches!(
+                if matches!(
                     destination,
                     RibbonDestination::Editor | RibbonDestination::GlobalSearch
                 ) {
                     restore_search_scroll(workspace)
                 } else {
                     Task::none()
-                };
-                restore
+                }
             }
             ProjectSurfaceMessage::ShowProjectChooser
             | ProjectSurfaceMessage::OpenDocumentHistory(_) => unreachable!(),
@@ -6267,12 +6263,11 @@ impl NativeDesktop {
                     || !state.shell.layout().explorer_is_visible();
                 state.shell.layout_mut().set_explorer_visible(visible);
                 workspace.editor_mut().exit_pane_focus();
-                let restore = if visible {
+                if visible {
                     restore_search_scroll(workspace)
                 } else {
                     Task::none()
-                };
-                restore
+                }
             }
             ProjectSurfaceMessage::ToggleInspector => {
                 let visible = workspace.editor().expanded_pane().is_some()
@@ -14327,6 +14322,51 @@ mod tests {
             crate::ProjectFixture::Explorer,
         )));
         state.as_mut()
+    }
+
+    #[test]
+    fn clicking_navigation_while_project_menu_is_open_applies_both_actions() {
+        let project = legacy_project(PathBuf::from("/tmp/project-menu-click.parchmint"), 254);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        install_fixture_workspace(&mut desktop, window);
+        desktop.project_chooser = Some(window);
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(1280.0, 720.0),
+            desktop.view(window),
+        );
+        simulator
+            .click(crate::HarnessTarget::Ribbon(RibbonDestination::Settings).id())
+            .expect("Settings remains clickable outside the project menu");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::CloseProjectChooser))
+        );
+        assert!(
+            messages.iter().any(|message| matches!(
+                message,
+                Message::ProjectSurface {
+                    message: ProjectSurfaceMessage::Navigate(RibbonDestination::Settings),
+                    ..
+                }
+            )),
+            "{messages:?}"
+        );
+        for message in messages {
+            let _ = desktop.update(message);
+        }
+        assert!(desktop.project_chooser.is_none());
     }
 
     #[test]

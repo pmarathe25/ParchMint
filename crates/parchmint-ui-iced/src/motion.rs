@@ -123,16 +123,6 @@ impl Disclosure {
     pub(crate) fn set(&mut self, visible: bool) {
         self.0.set(f32::from(visible), now(), enabled());
     }
-    /// The compact group card is taller than its wide heading. Revealing its
-    /// children while that heading shrinks pulls them upwards. Finish the
-    /// heading's layout transition before revealing newly mounted descendants.
-    pub(crate) fn set_after_heading(&mut self, visible: bool) {
-        let opening_from_closed = visible && self.visible_fraction() == 0.0;
-        self.set(visible);
-        if opening_from_closed && enabled() {
-            self.0.started += LAYOUT;
-        }
-    }
     pub(crate) fn visible_fraction(&self) -> f32 {
         if enabled() {
             self.0.value(now())
@@ -633,6 +623,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         disclosure: None,
         on_complete: None,
         origin: None,
+        slide_from_top: false,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -648,6 +639,25 @@ pub(crate) fn reveal<'a, Message: 'a>(
         disclosure: None,
         on_complete: None,
         origin: None,
+        slide_from_top: false,
+    })
+}
+/// Reveal a row from the edge above it while allocating its height. The
+/// content and the rows below travel on the same timeline.
+pub(crate) fn reveal_down<'a, Message: 'a>(
+    visible: bool,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: String::new(),
+        content: content.into(),
+        reveal: Some(visible),
+        resize: false,
+        clip_resize: true,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
+        slide_from_top: true,
     })
 }
 /// Animate allocated height so following rows move with the card boundary.
@@ -664,6 +674,7 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         disclosure: None,
         on_complete: None,
         origin: None,
+        slide_from_top: false,
     })
 }
 /// Group fields retain their own trajectories while the header surface resizes.
@@ -682,6 +693,7 @@ pub(crate) fn resize_group_height<'a, Message: 'a>(
         disclosure: None,
         on_complete: None,
         origin: None,
+        slide_from_top: false,
     })
 }
 /// Reveal rows from their top edge without sliding their text against the
@@ -701,6 +713,7 @@ pub(crate) fn disclosure<'a, Message: 'a>(
         disclosure: Some(timeline),
         on_complete,
         origin: None,
+        slide_from_top: false,
     })
 }
 
@@ -713,6 +726,7 @@ struct Entrance<'a, Message> {
     disclosure: Option<Disclosure>,
     on_complete: Option<Message>,
     origin: Option<Rc<Cell<Point>>>,
+    slide_from_top: bool,
 }
 struct EntranceState {
     height: f32,
@@ -797,15 +811,17 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         } else {
             f32::from(self.reveal.unwrap_or(true))
         };
-        let offset = if self.reveal.is_none() && self.origin.is_none() {
-            8.0 * (1.0 - progress)
-        } else {
-            0.0
-        };
         let child = self
             .content
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
+        let offset = if self.slide_from_top {
+            -child.size().height * (1.0 - progress)
+        } else if self.reveal.is_none() && self.origin.is_none() {
+            8.0 * (1.0 - progress)
+        } else {
+            0.0
+        };
         let mut size = child.size();
         if self.resize {
             let now = now();
@@ -1026,6 +1042,7 @@ impl LocalPositions {
             disclosure: None,
             on_complete: None,
             origin: Some(self.origin.clone()),
+            slide_from_top: false,
         })
     }
 }
@@ -1336,8 +1353,24 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     let current_y = place.y.value(*now);
                     let dx = (target.x - current_x).abs();
                     let dy = (target.y - current_y).abs();
-                    let animate_y = dy >= 1.0;
-                    let animate_x = dx >= 1.0 && (dy < 1.0 || self.both_axes);
+                    // The card already carries its heading as it moves and
+                    // changes width. A second local tween would leave its
+                    // title and word count floating outside the surface.
+                    let heading = self.origin.is_some()
+                        && self
+                            .id
+                            .split_once('\0')
+                            .is_some_and(|(_, field)| matches!(field, "title" | "words"));
+                    let animate_y = dy >= 1.0 && !heading;
+                    let animate_x = dx >= 1.0 && !heading && (dy < 1.0 || self.both_axes);
+                    // A heading clears the compact row before it reaches its
+                    // full width, so its growing edge does not cover a card
+                    // that preceded it in that row.
+                    place.y.duration = if self.morph_width && grew {
+                        LAYOUT / 2
+                    } else {
+                        LAYOUT
+                    };
                     place.x.set(target.x, *now, animate_x);
                     place.y.set(target.y, *now, animate_y);
                 } else {
@@ -1863,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn group_children_never_travel_up_while_the_compact_header_shrinks() {
+    fn group_children_reveal_while_the_header_shrinks() {
         set_reduced(false);
         let start = Instant::now();
         let _clock = FixedTime::new(start);
@@ -1889,33 +1922,24 @@ mod tests {
         let mut group = make(210, &timeline);
         let mut tree = Tree::new(&group);
         group.as_widget_mut().layout(&mut tree, &renderer, &limits);
-        timeline.set_after_heading(true);
+        timeline.set(true);
         group = make(100, &timeline);
         tree.diff(&group);
-        let mut previous = [None, None];
-        for millis in (0..=448).step_by(16) {
+        let mut concurrent = false;
+        for millis in (0..=208).step_by(16) {
             let at = start + Duration::from_millis(millis);
             FRAME_TIME.set(Some(at));
             let node = group.as_widget_mut().layout(&mut tree, &renderer, &limits);
             frame(&mut group, &mut tree, &renderer, &node, at);
             let node = group.as_widget_mut().layout(&mut tree, &renderer, &limits);
-            for (row, previous) in node.children()[1..].iter().zip(&mut previous) {
-                if row.size().height > 0.5 {
-                    if let Some(y) = *previous {
-                        assert!(
-                            row.bounds().y >= y - 0.01,
-                            "visible child moved up at {millis}ms"
-                        );
-                    }
-                    *previous = Some(row.bounds().y);
-                }
-            }
+            concurrent |=
+                node.children()[0].size().height < 210.0 && node.children()[1].size().height > 0.0;
         }
-        assert!(previous.iter().all(Option::is_some));
-        timeline.set_after_heading(false);
+        assert!(concurrent, "header and children should move together");
+        timeline.set(false);
         FRAME_TIME.set(Some(now() + LAYOUT / 2));
         let partial = timeline.visible_fraction();
-        timeline.set_after_heading(true);
+        timeline.set(true);
         assert_eq!(
             timeline.visible_fraction(),
             partial,

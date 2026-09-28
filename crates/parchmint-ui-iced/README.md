@@ -87,11 +87,9 @@ card surface and enclose their nested contents. Group frames follow allocated ro
 heights during animations and remain continuous across virtualized windows.
 Creation slots use muted icons, transparent fills, and dashed borders.
 Group headings toggle their children; group synopsis and metadata remain fully
-visible. Opening a group first morphs its compact card into a wide heading,
-then reveals descendants downward; these phases must not overlap because the
-heading becomes shorter and would pull visible descendants upwards. Closing
-reverses that order. Space released by the heading stays at the group bottom
-until the children fill it, keeping following groups from moving up and then down.
+visible. The compact card morphs into a wide heading while descendants reveal
+on the same timeline. Released heading space stays at the group bottom until
+the children fill it, keeping following groups moving steadily.
 Document cards place a compact metadata grid below the synopsis.
 Collapsed cards show fields marked visible, including dashes for empty
 values; dragging between the named Settings sections changes that visibility with
@@ -126,8 +124,9 @@ surviving rows when streamed groups insert above them. Widgets request redraws
 only during transitions; typing and
 pointer dragging remain immediate. Pane children stay mounted during focus and
 sidebar changes. Card drop targets use the same animated bounds as the cards and enclosing group
-frames. Blank group space targets its innermost container; only the exterior
-trailing gap targets a sibling after the group. Invalid hovers keep the source
+frames. Blank cells beside a document target the position after that document;
+remaining group space targets its innermost container, and the exterior trailing
+gap targets a sibling after the group. Invalid hovers keep the source
 vacancy unpainted and release without moving the item. Reduced motion
 is an application preference. Headless workflows and captures settle motion;
 frame-level tests cover intermediate geometry and input. Group disclosures retain
