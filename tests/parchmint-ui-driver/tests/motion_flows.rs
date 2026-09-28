@@ -22,7 +22,8 @@ fn frames(harness: &DesktopInteractionHarness, name: &str) {
 
 fn window_frames(harness: &DesktopInteractionHarness, window: HarnessWindow, name: &str) {
     let mut elapsed = 0;
-    for delta in [0, 16, 32, 48, 64, 100] {
+    // A group disclosure can be followed by compact-grid packing.
+    for delta in [0, 16, 32, 48, 64, 100, 200] {
         elapsed += delta;
         harness
             .advance_motion(window, Duration::from_millis(delta))
@@ -193,6 +194,17 @@ fn workspace_transitions_keep_writing_and_controls_available() {
     assert!(harness.text_is_visible(WINDOW, "Searching…").unwrap());
     harness.release_completions(false).unwrap();
     frames(&harness, "search-results");
+    harness.hold_completions().unwrap();
+    harness
+        .replace_target(WINDOW, HarnessTarget::GlobalSearchQuery, "letter")
+        .unwrap();
+    frames(&harness, "search-results-exit");
+    harness.release_completions(false).unwrap();
+    frames(&harness, "search-results-replaced");
+    click(&harness, HarnessTarget::GlobalReplaceToggle);
+    frames(&harness, "global-replace-open");
+    click(&harness, HarnessTarget::GlobalReplaceToggle);
+    frames(&harness, "global-replace-close");
     harness.click_text(WINDOW, "←  Search").unwrap();
     harness
         .select_editor_text(WINDOW, EditorPane::Primary, "letter")
@@ -224,10 +236,12 @@ fn workspace_transitions_keep_writing_and_controls_available() {
     click(&harness, HarnessTarget::ListMenu);
     frames(&harness, "list-menu");
     harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
+    frames(&harness, "list-menu-exit");
     harness.elapse_autosave_idle().unwrap();
     harness.click_text(WINDOW, "The Glass Harbor").unwrap();
     frames(&harness, "project-menu");
     harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
+    frames(&harness, "project-menu-exit");
     for destination in [
         RibbonDestination::Cards,
         RibbonDestination::History,

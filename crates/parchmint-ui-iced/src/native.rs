@@ -4982,6 +4982,14 @@ impl NativeDesktop {
         {
             return Task::none();
         }
+        // Overlay widgets retain their contents until the exit animation completes.
+        // Their captured Escape must not also dispatch an immediate native dismissal.
+        if !accelerator_fallback
+            && matches!(&event, Event::Keyboard(keyboard::Event::KeyPressed { key, .. }) if *key == keyboard::Key::Named(keyboard::key::Named::Escape))
+            && matches!(self.windows.get(&id), Some(NativeWindow::Project(state)) if state.workspace.as_ref().is_some_and(|workspace| workspace.modal().is_some() || workspace.has_context_menu() || workspace.editor().pending_delete_note().is_some() || workspace.editor().link_editor().is_open() || workspace.editor().editing_comment_message().is_some() || [EditorPane::Primary, EditorPane::Companion].into_iter().any(|pane| workspace.editor().comment_composer(pane).is_some())))
+        {
+            return Task::none();
+        }
         if self.project_chooser == Some(id) {
             if let Event::Keyboard(keyboard::Event::KeyPressed {
                 key: keyboard::Key::Named(keyboard::key::Named::Tab),
@@ -5434,6 +5442,29 @@ impl NativeDesktop {
                 ..
             }) => {
                 if state
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.editor().pending_delete_note().is_some())
+                {
+                    if let Some(workspace) = state.workspace.as_mut() {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelDeleteNote);
+                        if workspace.modal().is_none() {
+                            state.shell.dismiss_dialog();
+                        }
+                    }
+                } else if state
+                    .workspace
+                    .as_ref()
+                    .is_some_and(|workspace| workspace.editor().editing_comment_message().is_some())
+                {
+                    if let Some(workspace) = state.workspace.as_mut() {
+                        workspace
+                            .editor_mut()
+                            .update(crate::EditorMessage::CancelEditCommentMessage);
+                    }
+                } else if state
                     .workspace
                     .as_ref()
                     .is_some_and(|workspace| workspace.modal().is_some())
@@ -7407,6 +7438,13 @@ impl NativeDesktop {
                     .workspace_messages()
                     .iter()
                     .any(|message| matches!(message, crate::EditorMessage::OpenLocalFind));
+                let begins_note_edit = message.workspace_messages().iter().any(|message| {
+                    matches!(
+                        message,
+                        crate::EditorMessage::BeginEditCommentMessage { .. }
+                            | crate::EditorMessage::BeginEditHoveredNote { .. }
+                    )
+                });
                 let restore_pane_focus = matches!(
                     &message,
                     EditorCenterMessage::Workspace(
@@ -7441,10 +7479,12 @@ impl NativeDesktop {
                     state.editor_hosts.set_replace_draft(*pane, value.clone());
                 }
 
+                let note_delete_before = workspace.editor().pending_delete_note().is_some();
                 let mut effects = Vec::new();
                 for workspace_message in message.workspace_messages() {
                     effects.extend(workspace.editor_mut().update(workspace_message));
                 }
+                let note_delete_after = workspace.editor().pending_delete_note().is_some();
                 if restore_pane_focus {
                     let editor = workspace.editor();
                     if let Some(document) = editor.pane(editor.focused_pane()).active_document() {
@@ -7453,7 +7493,9 @@ impl NativeDesktop {
                             .focus(crate::FocusTarget::EditorDocument(document.to_owned()));
                     }
                 }
-                let pane_focus_task = if opens_find {
+                let mut pane_focus_task = if begins_note_edit {
+                    iced::widget::operation::focus(crate::HarnessTarget::CommentEdit.id())
+                } else if opens_find {
                     state.shell.focus(crate::FocusTarget::None);
                     for binding in state.editor_bindings.values() {
                         let _ = binding.host().blur();
@@ -7467,6 +7509,23 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
+                if !note_delete_before && note_delete_after {
+                    if workspace.modal().is_none() {
+                        state
+                            .shell
+                            .open_dialog(crate::DialogKind::RestoreConfirmation);
+                    }
+                    state.modal_focus = ModalFocus::Cancel;
+                    pane_focus_task =
+                        iced::widget::operation::focus(crate::focus::modal_cancel_id());
+                } else if note_delete_before && !note_delete_after {
+                    if workspace.modal().is_some() {
+                        pane_focus_task =
+                            iced::widget::operation::focus(crate::focus::modal_cancel_id());
+                    } else {
+                        state.shell.dismiss_dialog();
+                    }
+                }
                 if reveal_focused_document {
                     workspace.reveal_focused_editor_document();
                     if let Some(document) = workspace

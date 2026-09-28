@@ -1133,14 +1133,18 @@ where
             .position()
             .filter(|point| layout.bounds().contains(*point) && viewport.contains(*point));
         if let Some(point) = point {
-            // The candidate is a pure function of this frame's cursor: the
-            // first hit wins, with no memory of previous drag positions.
-            let candidate = self
-                .targets
-                .borrow_mut()
-                .take()
-                .map(|(destination, _)| destination);
-            Self::hover_candidate(state, &self.on_hover, shell, candidate);
+            // Pointer input and scrolling select from current painted bounds.
+            // Preview reflow alone must not chase its own moving placeholder.
+            if cursor_moved || after_scroll || !state.inside {
+                let candidate = self
+                    .targets
+                    .borrow_mut()
+                    .take()
+                    .map(|(destination, _)| destination);
+                Self::hover_candidate(state, &self.on_hover, shell, candidate);
+            } else if let Some((pending, _)) = &state.pending {
+                Self::hover_candidate(state, &self.on_hover, shell, pending.clone());
+            }
             state.position = Some(point);
             state.inside = true;
             state.scrolled = false;

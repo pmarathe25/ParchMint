@@ -115,7 +115,6 @@ struct HierarchyPointerDrag {
     /// A dragged group travels collapsed as one atomic card. These remember
     /// scopes the source group was expanded in so the drop (or cancel)
     /// restores exactly the pre-drag disclosure state.
-    target_grid: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
     collapsed_cards_group: Option<String>,
     collapsed_explorer_group: Option<String>,
 }
@@ -894,12 +893,12 @@ pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
     expanded: &'a BTreeSet<String>,
     details_expanded: &'a BTreeSet<String>,
+    disclosures: &'a BTreeMap<String, crate::motion::Disclosure>,
     section_id: &'a str,
     word_counts: Rc<BTreeMap<String, usize>>,
     scroll_offset: f32,
     measurements: &'a RefCell<BTreeMap<String, (u64, f32)>>,
     grid_cache: &'a RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
-    dragging: bool,
     drag_destination: Option<&'a DragDestination>,
     last_activated_document: Option<&'a str>,
     visible_metadata_labels: Vec<&'a str>,
@@ -947,6 +946,7 @@ pub(crate) struct CardsGridRow {
     pub start: usize,
     pub end: usize,
     pub height: f32,
+    pub disclosures: Vec<String>,
 }
 
 /// One ordered Cards item with effective visible metadata values.
@@ -1052,9 +1052,11 @@ impl<'a> CardsState<'a> {
             self.section_id,
             self.expanded,
             self.details_expanded,
-            self.dragging,
         )
             .hash(&mut hash);
+        for (id, disclosure) in self.disclosures {
+            (id, disclosure.visible_fraction().to_bits()).hash(&mut hash);
+        }
         let signature = hash.finish();
         if let Some((previous, rows)) = self.grid_cache.borrow().as_ref()
             && *previous == signature
@@ -1077,6 +1079,7 @@ impl<'a> CardsState<'a> {
             while groups.last().is_some_and(|(_, depth)| *depth >= item.depth) {
                 let (parent, depth) = groups.pop().expect("expanded parent");
                 rows.push(CardsGridRow {
+                    disclosures: Vec::new(),
                     start: index,
                     end: index,
                     height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1129,6 +1132,7 @@ impl<'a> CardsState<'a> {
                 row.height = row.height.max(height);
             } else {
                 rows.push(CardsGridRow {
+                    disclosures: Vec::new(),
                     add_to: None,
                     depth: item.depth,
                     start: index,
@@ -1139,6 +1143,7 @@ impl<'a> CardsState<'a> {
         }
         while let Some((parent, depth)) = groups.pop() {
             rows.push(CardsGridRow {
+                disclosures: Vec::new(),
                 start: ids.len(),
                 end: ids.len(),
                 height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1147,6 +1152,7 @@ impl<'a> CardsState<'a> {
             });
         }
         rows.push(CardsGridRow {
+            disclosures: Vec::new(),
             start: ids.len(),
             end: ids.len(),
             height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1172,20 +1178,28 @@ impl<'a> CardsState<'a> {
             }
         }
         for row in &mut compact {
-            if self.dragging
-                && row.start < row.end
-                && self.explorer.nodes[ids[row.start]].kind == HierarchyNodeKind::Group
-                && self.expanded.contains(ids[row.start])
-            {
-                row.height += 20.0;
-            }
             if row
                 .add_to
                 .as_deref()
                 .is_some_and(|id| id != self.section_id)
             {
-                row.height +=
-                    crate::cards_layout::GROUP_GAP + if self.dragging { 24.0 } else { 8.0 };
+                row.height += crate::cards_layout::GROUP_GAP + 8.0;
+            }
+            let mut ancestor = if row.start < row.end {
+                self.explorer.nodes[ids[row.start]].parent.as_deref()
+            } else {
+                row.add_to.as_deref()
+            };
+            while let Some(id) = ancestor {
+                if let Some(disclosure) = self.disclosures.get(id) {
+                    row.disclosures.push(id.to_owned());
+                    row.height *= disclosure.visible_fraction();
+                }
+                ancestor = self
+                    .explorer
+                    .nodes
+                    .get(id)
+                    .and_then(|node| node.parent.as_deref());
             }
         }
         let mut offsets = Vec::with_capacity(compact.len() + 1);
@@ -1986,11 +2000,13 @@ pub(crate) enum GlobalSearchRow<'a> {
 }
 
 pub(crate) const SEARCH_ROW_HEIGHT: f32 = 44.0;
-const SEARCH_WINDOW_ROWS: usize = 80;
+pub(crate) const SEARCH_WINDOW_ROWS: usize = 80;
 
 /// Global Search sidebar state.
 #[derive(Debug, Clone, Default)]
 pub struct GlobalSearchState {
+    outgoing: Option<(Box<GlobalSearchState>, crate::motion::Disclosure)>,
+    result_positions: crate::motion::Positions,
     query: String,
     replacement: String,
     replace_visible: bool,
@@ -1999,6 +2015,7 @@ pub struct GlobalSearchState {
     results: Vec<GlobalSearchResult>,
     groups: BTreeMap<String, Vec<usize>>,
     collapsed: BTreeSet<String>,
+    disclosures: BTreeMap<String, crate::motion::Disclosure>,
     query_generation: u64,
     complete: bool,
     error: Option<String>,
@@ -2056,7 +2073,14 @@ impl GlobalSearchState {
     }
 
     pub(crate) fn is_collapsed(&self, document: &str) -> bool {
-        self.collapsed.contains(document)
+        self.disclosures.get(document).map_or_else(
+            || self.collapsed.contains(document),
+            |motion| !motion.visible(),
+        )
+    }
+
+    pub(crate) fn disclosure(&self, document: &str) -> Option<crate::motion::Disclosure> {
+        self.disclosures.get(document).cloned()
     }
 
     pub fn document_count(&self) -> usize {
@@ -2067,10 +2091,36 @@ impl GlobalSearchState {
         self.scroll_offset
     }
 
+    pub(crate) fn outgoing(&self) -> Option<(&GlobalSearchState, crate::motion::Disclosure)> {
+        self.outgoing
+            .as_ref()
+            .map(|(state, motion)| (state.as_ref(), motion.clone()))
+    }
+    pub(crate) fn result_positions(&self) -> crate::motion::Positions {
+        self.result_positions.clone()
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.query_generation
+    }
+
     fn begin_query(&mut self) {
+        let outgoing = self.outgoing.take();
+        if crate::motion::enabled() && !self.results.is_empty() {
+            let previous = Box::new(self.clone());
+            let mut exit = crate::motion::Disclosure::new(true);
+            exit.set(false);
+            self.outgoing = Some((previous, exit));
+        } else if crate::motion::enabled() {
+            // Typing another character while the next result set is pending
+            // must not remove the already departing snapshot prematurely.
+            self.outgoing = outgoing;
+        }
+
         self.query_generation = self.query_generation.saturating_add(1);
+        self.result_positions = crate::motion::Positions::default();
         self.results.clear();
         self.groups.clear();
+        self.disclosures.clear();
         self.scroll_offset = 0.0;
         self.complete = false;
         self.error = None;
@@ -2143,16 +2193,111 @@ impl GlobalSearchState {
     }
 
     pub fn result_window_start(&self) -> usize {
-        ((self.scroll_offset.max(0.0) / SEARCH_ROW_HEIGHT) as usize)
-            .min(self.row_count().saturating_sub(1))
+        let mut offset = self.scroll_offset.max(0.0);
+        let mut skipped = 0;
+        for (document, matches) in &self.groups {
+            if offset < SEARCH_ROW_HEIGHT {
+                return skipped;
+            }
+            offset -= SEARCH_ROW_HEIGHT;
+            skipped += 1;
+            if self.collapsed.contains(document) {
+                continue;
+            }
+            let height = SEARCH_ROW_HEIGHT
+                * self
+                    .disclosures
+                    .get(document)
+                    .map_or(1.0, |motion| motion.visible_fraction());
+            let count = if height > 0.0 {
+                ((offset / height) as usize).min(matches.len())
+            } else {
+                matches.len()
+            };
+            skipped += count;
+            offset -= count as f32 * height;
+            if count < matches.len() {
+                return skipped;
+            }
+        }
+        skipped.min(self.row_count().saturating_sub(1))
+    }
+
+    fn height_before_rows(&self, mut count: usize) -> f32 {
+        let mut height = 0.0;
+        for (document, matches) in &self.groups {
+            if count == 0 {
+                break;
+            }
+            height += SEARCH_ROW_HEIGHT;
+            count -= 1;
+            if self.collapsed.contains(document) {
+                continue;
+            }
+            let taken = count.min(matches.len());
+            height += taken as f32
+                * SEARCH_ROW_HEIGHT
+                * self
+                    .disclosures
+                    .get(document)
+                    .map_or(1.0, |motion| motion.visible_fraction());
+            count -= taken;
+        }
+        height
+    }
+
+    /// Keep virtualized space on the same timeline as mounted match rows.
+    /// Static spans coalesce, so one disclosure never mounts all its matches.
+    pub(crate) fn padding_segments(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Vec<(f32, Option<(String, crate::motion::Disclosure)>)> {
+        let mut segments = Vec::new();
+        let mut ordinal: usize = 0;
+        let mut fixed = 0.0;
+        for (document, matches) in &self.groups {
+            if ordinal >= start && ordinal < end {
+                fixed += SEARCH_ROW_HEIGHT;
+            }
+            ordinal += 1;
+            if self.collapsed.contains(document) {
+                continue;
+            }
+            let next = ordinal.saturating_add(matches.len());
+            let count = next.min(end).saturating_sub(ordinal.max(start));
+            if count > 0 {
+                if let Some(motion) = self.disclosures.get(document) {
+                    if fixed > 0.0 {
+                        segments.push((fixed, None));
+                        fixed = 0.0;
+                    }
+                    segments.push((
+                        count as f32 * SEARCH_ROW_HEIGHT,
+                        Some((document.clone(), motion.clone())),
+                    ));
+                } else {
+                    fixed += count as f32 * SEARCH_ROW_HEIGHT;
+                }
+            }
+            ordinal = next;
+            if ordinal >= end {
+                break;
+            }
+        }
+        if fixed > 0.0 {
+            segments.push((fixed, None));
+        }
+        segments
     }
 
     pub fn result_window_bottom_padding(&self) -> f32 {
-        self.row_count().saturating_sub(
-            self.result_window_start()
-                .saturating_add(SEARCH_WINDOW_ROWS),
-        ) as f32
-            * SEARCH_ROW_HEIGHT
+        (self.height_before_rows(usize::MAX)
+            - self.height_before_rows(
+                self.result_window_start()
+                    .saturating_add(SEARCH_WINDOW_ROWS),
+            ))
+        .max(0.0)
     }
 
     pub const fn query_generation(&self) -> u64 {
@@ -4209,6 +4354,7 @@ pub enum ProjectMessage {
     },
     ToggleHierarchyExpanded(String),
     ToggleCardsExpanded(String),
+    FinishCardsGroupDisclosure(String),
     ToggleCardDetails(String),
     SetCardsSection(String),
     SelectAndToggleHierarchyExpanded(String),
@@ -4366,6 +4512,8 @@ pub enum ProjectMessage {
     SetGlobalSearchQuery(String),
     ToggleGlobalReplace,
     ToggleSearchDocument(String),
+    FinishSearchDisclosure(String),
+    FinishSearchResultsExit,
     OpenCommentDetails(String),
     SetGlobalReplacement(String),
     SetGlobalSearchOptions {
@@ -4582,12 +4730,14 @@ pub struct ProjectWorkspace {
     tree_clipboard: Option<TreeClipboard>,
     cards_section: String,
     cards_expanded: BTreeSet<String>,
+    cards_disclosures: BTreeMap<String, crate::motion::Disclosure>,
     card_details_expanded: BTreeSet<String>,
     cards_scroll_offset: f32,
     explorer_scroll_offset: f32,
     explorer_viewport_height: f32,
     explorer_viewport_measured: bool,
     pub(crate) card_positions: crate::motion::Positions,
+    pub(crate) card_field_positions: crate::motion::Positions,
     cards_measurements: RefCell<BTreeMap<String, (u64, f32)>>,
     cards_grid_cache: RefCell<Option<(u64, Rc<CardsGridLayout>)>>,
     cards_word_counts_cache: RefCell<Option<Rc<BTreeMap<String, usize>>>>,
@@ -4687,6 +4837,7 @@ impl ProjectWorkspace {
             project_title: "The Glass Harbor".to_owned(),
             sidebar,
             cards_expanded: explorer.nodes.keys().cloned().collect(),
+            cards_disclosures: BTreeMap::new(),
             card_details_expanded: BTreeSet::new(),
             explorer,
             tree_clipboard: None,
@@ -4696,6 +4847,7 @@ impl ProjectWorkspace {
             explorer_viewport_height: 720.0,
             explorer_viewport_measured: false,
             card_positions: crate::motion::Positions::default(),
+            card_field_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
             cards_word_counts_cache: RefCell::default(),
@@ -4772,6 +4924,7 @@ impl ProjectWorkspace {
             project_title: snapshot.project.display_title.clone(),
             sidebar: SidebarSurface::Explorer,
             cards_expanded: explorer.nodes.keys().cloned().collect(),
+            cards_disclosures: BTreeMap::new(),
             card_details_expanded: BTreeSet::new(),
             explorer,
             tree_clipboard: None,
@@ -4781,6 +4934,7 @@ impl ProjectWorkspace {
             explorer_viewport_height: 720.0,
             explorer_viewport_measured: false,
             card_positions: crate::motion::Positions::default(),
+            card_field_positions: crate::motion::Positions::default(),
             cards_measurements: RefCell::default(),
             cards_grid_cache: RefCell::default(),
             cards_word_counts_cache: RefCell::default(),
@@ -5094,7 +5248,6 @@ impl ProjectWorkspace {
                     DragDestination::EditorPane(_) => true,
                 });
         if valid {
-            drag.target_grid.borrow_mut().take();
             self.pointer_drag = Some(drag);
         } else {
             self.restore_drag_collapsed_group(&drag);
@@ -5245,6 +5398,14 @@ impl ProjectWorkspace {
             }
             HierarchyRowKind::Document => DragDestination::AfterSibling(node_id.to_owned()),
         })
+    }
+
+    pub(crate) fn cards_disclosure(&self, id: &str) -> Option<crate::motion::Disclosure> {
+        self.cards_disclosures.get(id).cloned()
+    }
+
+    pub(crate) fn cards_disclosures_active(&self) -> bool {
+        !self.cards_disclosures.is_empty()
     }
 
     pub fn hierarchy_drag_source(&self) -> Option<&str> {
@@ -5410,6 +5571,7 @@ impl ProjectWorkspace {
             .collect();
         CardsState {
             details_expanded: &self.card_details_expanded,
+            disclosures: &self.cards_disclosures,
             explorer: self.displayed_explorer(),
             expanded: self
                 .pointer_drag
@@ -5423,7 +5585,6 @@ impl ProjectWorkspace {
             scroll_offset: self.cards_scroll_offset,
             measurements: &self.cards_measurements,
             grid_cache: &self.cards_grid_cache,
-            dragging: self.pointer_drag.is_some(),
             drag_destination: self.cards_drag_destination.as_ref(),
             last_activated_document: self.last_activated_document.as_deref(),
             visible_metadata_labels: labels,
@@ -5431,102 +5592,6 @@ impl ProjectWorkspace {
             field_order: &self.settings.metadata_order,
             values: &self.metadata_values,
         }
-    }
-
-    /// Hit test the collapsed source layout, never the temporary insertion tree.
-    /// Preview movement cannot change the destination of a stationary cursor.
-    pub(crate) fn card_drop_at(&self, width: f32, point: iced::Point) -> Option<DragDestination> {
-        let drag = self.pointer_drag.as_ref()?;
-        let mut cards = self.cards();
-        cards.explorer = &self.explorer;
-        cards.expanded = &self.cards_expanded;
-        cards.grid_cache = &drag.target_grid;
-        let columns = crate::cards_layout::column_count(width);
-        let grid = cards.grid_rows(columns, width);
-        let index = grid
-            .offsets
-            .partition_point(|offset| *offset <= point.y)
-            .saturating_sub(1);
-        if let Some(row) = grid.rows.get(index) {
-            let top = grid.offsets[index];
-            let bottom = grid.offsets[index + 1];
-            let first = (row.start < row.end).then(|| cards.item(&grid.ids[row.start]).unwrap());
-            let mut inside = first
-                .as_ref()
-                .map(|item| item.node_id)
-                .or(row.add_to.as_deref())
-                .unwrap_or(cards.section_id);
-            loop {
-                let node = &self.explorer.nodes[inside];
-                let depth = self.explorer.depth(inside).saturating_sub(1);
-                let inset = crate::cards_layout::grid_indent(depth, width);
-                if inside == cards.section_id
-                    || (node.kind == HierarchyNodeKind::Group
-                        && self.cards_expanded.contains(inside)
-                        && point.x >= inset
-                        && point.x <= width - inset)
-                {
-                    break;
-                }
-                inside = node.parent.as_deref().unwrap_or(cards.section_id);
-            }
-            if let Some(group) = row.add_to.as_deref().filter(|id| *id != cards.section_id)
-                && point.y >= bottom - crate::cards_layout::GROUP_GAP - 24.0
-                && inside == group
-            {
-                return self
-                    .preview_destination(group, DragDestination::AfterSibling(group.to_owned()));
-            }
-            for (column, id) in grid.ids[row.start..row.end].iter().enumerate() {
-                let item = cards.item(id).unwrap();
-                let cell_width = item.grid_width(width, columns);
-                let x = item.grid_indent(width) + column as f32 * (cell_width + 12.0);
-                let leading = if item.kind == HierarchyRowKind::Group && item.expanded {
-                    20.0
-                } else {
-                    0.0
-                };
-                let bounds = iced::Rectangle {
-                    x,
-                    y: top + leading,
-                    width: cell_width,
-                    height: item.row_height(cell_width) - CARDS_ROW_GAP,
-                };
-                if point.x >= x && point.x <= x + cell_width && point.y <= bounds.y + bounds.height
-                {
-                    if self.dragged_subtree_contains(id) {
-                        return Some(DragDestination::BeforeSibling(drag.source_id.clone()));
-                    }
-                    let destination = if item.kind == HierarchyRowKind::Group {
-                        if point.y < bounds.y + 24.0 {
-                            self.explorer.nodes[id]
-                                .children
-                                .iter()
-                                .find(|child| !self.dragged_subtree_contains(child))
-                                .map(|child| DragDestination::BeforeSibling(child.clone()))
-                                .unwrap_or_else(|| DragDestination::IntoGroup(id.clone()))
-                        } else if !item.expanded && point.y >= bounds.y + bounds.height - 24.0 {
-                            DragDestination::AfterSibling(id.clone())
-                        } else {
-                            // A group header and its leading gap are inside the group.
-                            DragDestination::IntoGroup(id.clone())
-                        }
-                    } else if (columns > 1 && point.x < bounds.center_x())
-                        || (columns == 1 && point.y < bounds.center_y())
-                    {
-                        DragDestination::BeforeSibling(id.clone())
-                    } else {
-                        DragDestination::AfterSibling(id.clone())
-                    };
-                    return self.preview_destination(id, destination);
-                }
-            }
-            return self.preview_destination(inside, DragDestination::IntoGroup(inside.to_owned()));
-        }
-        self.preview_destination(
-            cards.section_id,
-            DragDestination::IntoGroup(cards.section_id.to_owned()),
-        )
     }
 
     pub fn explorer_active_panes(&self, node_id: &str) -> (bool, bool) {
@@ -6626,8 +6691,36 @@ impl ProjectWorkspace {
                     self.restore_drag_collapsed_group(&drag);
                 }
                 self.cards_drag_destination = None;
-                if !self.cards_expanded.remove(&node_id) {
+                let was_expanded = self.cards_disclosures.get(&node_id).map_or_else(
+                    || self.cards_expanded.contains(&node_id),
+                    |motion| motion.visible(),
+                );
+                if crate::motion::enabled() {
+                    self.cards_disclosures
+                        .entry(node_id.clone())
+                        .or_insert_with(|| crate::motion::Disclosure::new(was_expanded))
+                        .set(!was_expanded);
+                    // Keep closing rows mounted until their clipped exit finishes.
                     self.cards_expanded.insert(node_id);
+                } else if was_expanded {
+                    self.cards_expanded.remove(&node_id);
+                    self.cards_disclosures.remove(&node_id);
+                } else {
+                    self.cards_expanded.insert(node_id.clone());
+                    self.cards_disclosures.remove(&node_id);
+                }
+                self.cards_grid_cache.get_mut().take();
+                Vec::new()
+            }
+            ProjectMessage::FinishCardsGroupDisclosure(node_id) => {
+                if let Some(disclosure) = self.cards_disclosures.get(&node_id)
+                    && !disclosure.active()
+                {
+                    if !disclosure.visible() {
+                        self.cards_expanded.remove(&node_id);
+                    }
+                    self.cards_disclosures.remove(&node_id);
+                    self.cards_grid_cache.get_mut().take();
                 }
                 Vec::new()
             }
@@ -7317,17 +7410,18 @@ impl ProjectWorkspace {
                         self.cards_word_counts_cache.get_mut().take();
                     }
                 }
-                let origin_dest = DragDestination::BeforeSibling(source_id.clone());
-                let preview = self.projected_drop(&origin_dest);
                 if let Some(drag) = self.pointer_drag.as_mut() {
-                    drag.destination = Some(origin_dest.clone());
                     drag.surface = Some(HierarchySurface::Cards);
-                    drag.preview = preview;
-                    self.cards_drag_destination = Some(origin_dest);
                 }
                 effects
             }
             ProjectMessage::BeginHierarchyDrag { source_id, gesture } => {
+                for (id, disclosure) in std::mem::take(&mut self.cards_disclosures) {
+                    if !disclosure.visible() {
+                        self.cards_expanded.remove(&id);
+                    }
+                }
+                self.cards_grid_cache.get_mut().take();
                 if let Some(previous) = self.pointer_drag.take() {
                     self.restore_drag_collapsed_group(&previous);
                 }
@@ -7376,7 +7470,6 @@ impl ProjectWorkspace {
                         grab_offset: Point::new(20.0, 20.0),
                         card_width: 320.0,
                         from_card: false,
-                        target_grid: RefCell::new(None),
                         collapsed_cards_group,
                         collapsed_explorer_group,
                     });
@@ -7389,26 +7482,24 @@ impl ProjectWorkspace {
                 surface,
                 destination,
             } => {
-                let drag = match self.pointer_drag.as_ref() {
+                match self.pointer_drag.as_ref() {
                     Some(drag)
                         if drag.surface == Some(surface) && drag.destination == destination =>
                     {
                         return Vec::new();
                     }
-                    Some(drag) => drag,
+                    Some(_) => {}
                     None => return Vec::new(),
                 };
                 self.cards_grid_cache.get_mut().take();
                 self.cards_word_counts_cache.get_mut().take();
-                let source_id = drag.source_id.clone();
-                let origin_dest = DragDestination::BeforeSibling(source_id.clone());
                 let (preview, effective_dest) = if surface == HierarchySurface::Cards {
                     match destination
                         .as_ref()
                         .and_then(|d| self.projected_drop(d).map(|p| (p, d.clone())))
                     {
                         Some((p, d)) => (Some(p), Some(d)),
-                        None => (self.projected_drop(&origin_dest), Some(origin_dest)),
+                        None => (None, None),
                     }
                 } else {
                     (None, destination.clone())
@@ -7624,10 +7715,41 @@ impl ProjectWorkspace {
                 Vec::new()
             }
             ProjectMessage::ToggleSearchDocument(id) => {
-                if !self.global_search.collapsed.remove(&id) {
+                let visible = !self.global_search.is_collapsed(&id);
+                if crate::motion::enabled() {
+                    self.global_search
+                        .disclosures
+                        .entry(id.clone())
+                        .or_insert_with(|| crate::motion::Disclosure::new(visible))
+                        .set(!visible);
+                    self.global_search.collapsed.remove(&id);
+                } else if visible {
                     self.global_search.collapsed.insert(id);
+                } else {
+                    self.global_search.collapsed.remove(&id);
                 }
-                self.global_search.scroll_offset = 0.0;
+                Vec::new()
+            }
+            ProjectMessage::FinishSearchResultsExit => {
+                if self
+                    .global_search
+                    .outgoing
+                    .as_ref()
+                    .is_some_and(|(_, motion)| !motion.active())
+                {
+                    self.global_search.outgoing = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::FinishSearchDisclosure(id) => {
+                if let Some(motion) = self.global_search.disclosures.get(&id)
+                    && !motion.active()
+                {
+                    if !motion.visible() {
+                        self.global_search.collapsed.insert(id.clone());
+                    }
+                    self.global_search.disclosures.remove(&id);
+                }
                 Vec::new()
             }
             ProjectMessage::ToggleGlobalReplace => {
@@ -11080,85 +11202,30 @@ mod tests {
     }
 
     #[test]
-    fn card_targets_use_the_innermost_group_and_its_trailing_gap() {
+    fn beginning_a_card_drag_does_not_add_group_spacing() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        let mut nested = workspace.explorer.nodes["part-one"].clone();
-        nested.parent = Some("part-one".into());
-        nested.children = vec!["chapter-one".into(), "chapter-two".into()];
-        workspace.explorer.nodes.insert("nested".into(), nested);
-        workspace
-            .explorer
-            .nodes
-            .get_mut("part-one")
-            .unwrap()
-            .children = vec!["nested".into()];
-        for id in ["chapter-one", "chapter-two"] {
-            workspace.explorer.nodes.get_mut(id).unwrap().parent = Some("nested".into());
-        }
-        workspace.cards_expanded.insert("nested".into());
+        let before = workspace.cards().grid_rows(3, 800.0).offsets.clone();
         workspace.update(ProjectMessage::BeginCardDrag {
-            source_id: "chapter-three".into(),
+            source_id: "chapter-two".into(),
             grab_offset: Point::new(10.0, 10.0),
             width: 270.0,
         });
-        let grid = workspace.cards().grid_rows(3, 800.0);
-        let row = grid
-            .rows
-            .iter()
-            .position(|row| row.add_to.as_deref() == Some("nested"))
-            .unwrap();
-        let top = grid.offsets[row];
-        let bottom = grid.offsets[row + 1];
-        assert_eq!(
-            workspace.card_drop_at(800.0, iced::Point::new(30.0, top + 5.0)),
-            Some(DragDestination::IntoGroup("nested".into()))
-        );
-        assert_eq!(
-            workspace.card_drop_at(800.0, iced::Point::new(5.0, top + 5.0)),
-            Some(DragDestination::IntoGroup("part-one".into()))
-        );
-        assert_eq!(
-            workspace.card_drop_at(800.0, iced::Point::new(30.0, bottom - 2.0)),
-            Some(DragDestination::AfterSibling("nested".into()))
-        );
-    }
-
-    #[test]
-    fn card_targets_do_not_depend_on_previous_previews() {
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        workspace.update(ProjectMessage::BeginCardDrag {
-            source_id: "chapter-one".into(),
-            grab_offset: Point::new(10.0, 10.0),
-            width: 270.0,
+        assert_eq!(before, workspace.cards().grid_rows(3, 800.0).offsets);
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: None,
         });
-        let probes: Vec<_> = (0..50)
-            .flat_map(|y| {
-                (0..8).map(move |x| iced::Point::new(x as f32 * 100.0 + 5.0, y as f32 * 25.0))
-            })
-            .collect();
-        let before: Vec<_> = probes
-            .iter()
-            .map(|&point| workspace.card_drop_at(800.0, point))
-            .collect();
-        for destination in [
-            Some(DragDestination::IntoGroup("research".into())),
-            Some(DragDestination::AfterSibling("part-one".into())),
-            None,
-        ] {
-            workspace.update(ProjectMessage::PreviewHierarchyDrop {
-                surface: HierarchySurface::Cards,
-                destination,
-            });
-            let after: Vec<_> = probes
-                .iter()
-                .map(|&point| workspace.card_drop_at(800.0, point))
-                .collect();
-            assert_eq!(before, after);
-        }
+        assert!(workspace.hierarchy_drag_destination().is_none());
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .is_empty()
+        );
     }
 
     #[test]
     fn disclosure_after_a_drag_toggles_the_restored_state() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         workspace.update(ProjectMessage::BeginCardDrag {
             source_id: "part-one".into(),
@@ -11565,6 +11632,7 @@ mod tests {
 
     #[test]
     fn collapsing_search_documents_preserves_matches_and_window_geometry() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
         workspace.global_search.begin_query();
         workspace.global_search.append_results(
@@ -11597,7 +11665,101 @@ mod tests {
     }
 
     #[test]
+    fn search_disclosure_preserves_scroll_and_scales_virtualized_space() {
+        crate::motion::set_reduced(false);
+        let start = std::time::Instant::now();
+        let _clock = crate::motion::FixedTime::new(start);
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+        workspace.global_search.begin_query();
+        workspace.global_search.append_results(
+            (0..200)
+                .map(|i| GlobalSearchResult {
+                    document_id: "document".into(),
+                    match_id: format!("m{i}"),
+                    prefix: String::new(),
+                    matching_text: "river".into(),
+                    suffix: String::new(),
+                    indexed_revision: 1,
+                })
+                .collect(),
+        );
+        workspace.global_search.scroll_offset = 22.0;
+        workspace.update(ProjectMessage::ToggleSearchDocument("document".into()));
+        assert_eq!(workspace.global_search.scroll_offset, 22.0);
+        assert_eq!(
+            workspace.global_search.row_count(),
+            201,
+            "closing rows stay mounted"
+        );
+        let _later = crate::motion::FixedTime::new(start + crate::motion::LAYOUT / 2);
+        let search = workspace.global_search();
+        let full = SEARCH_ROW_HEIGHT * 201.0;
+        let visible = search.height_before_rows(usize::MAX);
+        assert!(visible > SEARCH_ROW_HEIGHT && visible < full);
+        let tail = search.padding_segments(80, usize::MAX);
+        assert_eq!(
+            tail.len(),
+            1,
+            "offscreen matches remain one animated spacer"
+        );
+        assert!(tail[0].1.is_some());
+        workspace.update(ProjectMessage::ToggleSearchDocument("document".into()));
+        assert_eq!(
+            workspace.global_search.height_before_rows(usize::MAX),
+            visible,
+            "reversal stays continuous"
+        );
+    }
+
+    #[test]
+    fn group_disclosure_retains_closing_rows_and_reverses_without_a_jump() {
+        let start = std::time::Instant::now();
+        let _clock = crate::motion::FixedTime::new(start);
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        assert!(workspace.cards_expanded.contains("part-one"));
+        let before = workspace
+            .cards()
+            .grid_rows(3, 800.0)
+            .offsets
+            .last()
+            .copied()
+            .unwrap();
+        let _clock = crate::motion::FixedTime::new(start + std::time::Duration::from_millis(80));
+        let during = workspace
+            .cards()
+            .grid_rows(3, 800.0)
+            .offsets
+            .last()
+            .copied()
+            .unwrap();
+        assert!(during < before);
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let reversed = workspace
+            .cards()
+            .grid_rows(3, 800.0)
+            .offsets
+            .last()
+            .copied()
+            .unwrap();
+        assert!((during - reversed).abs() < 0.01);
+        let _clock = crate::motion::FixedTime::new(start + std::time::Duration::from_millis(320));
+        workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
+            "part-one".into(),
+        ));
+        assert!(workspace.cards_expanded.contains("part-one"));
+        assert!(workspace.cards_disclosures.is_empty());
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let _clock = crate::motion::FixedTime::new(start + std::time::Duration::from_millis(600));
+        workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
+            "part-one".into(),
+        ));
+        assert!(!workspace.cards_expanded.contains("part-one"));
+    }
+
+    #[test]
     fn collapsed_groups_hide_extra_details_and_children() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
         let items = workspace.cards().items();
@@ -11657,6 +11819,25 @@ mod tests {
         }
         assert_eq!(headings, 2);
         assert_eq!(seen, (0..200).collect());
+    }
+
+    #[test]
+    fn search_query_retains_one_noninteractive_outgoing_snapshot() {
+        crate::motion::set_reduced(false);
+        let _clock = crate::motion::FixedTime::new(std::time::Instant::now());
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::GlobalSearch);
+        assert!(!workspace.global_search.results.is_empty());
+        let old_count = workspace.global_search.results.len();
+        workspace.global_search.begin_query();
+        assert!(workspace.global_search.results.is_empty());
+        let (old, exit) = workspace.global_search.outgoing().unwrap();
+        assert_eq!(old.results.len(), old_count);
+        assert!(old.outgoing.is_none());
+        assert!(exit.active());
+        workspace.global_search.begin_query();
+        let (old, _) = workspace.global_search.outgoing().unwrap();
+        assert_eq!(old.results.len(), old_count);
+        assert!(old.outgoing.is_none());
     }
 
     #[test]

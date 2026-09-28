@@ -168,12 +168,14 @@ shortcut. Type in the popover and press **Enter** to add the note; use
 selected text, outside exported manuscripts.
 
 Hover anywhere along an annotated line between the selection's endpoints to see
-its notes. Click a note in the popover to edit it. The **Notes** sidebar shows a
-card for each note, with its quoted text and content. Click the card to open the
-annotated passage in the editor, or use its pencil and trash buttons to edit or
-delete the note. Deletion asks for confirmation. Selecting a group shows notes
-from all its documents, labeled by document title. Older projects with comment
-threads retain every saved message as a separate note at the original anchor.
+its notes. Click a note body in the popover or **Notes** sidebar to edit it.
+Press **Enter** to save, **Escape** to cancel, or **Shift+Enter** or **Alt+Enter**
+to insert a line break. The sidebar shows a card for each note, with its quoted
+text set apart from the note body. Click the quote or card margin to open the
+annotated passage in the editor. The trash button deletes a note after
+confirmation. Selecting a group shows notes from all its documents, labeled by
+document title. Older projects with comment threads retain every saved message
+as a separate note at the original anchor.
 
 A draft stays attached to its original document and selection while you consult
 Research. If that document changes before submission, ParchMint keeps the draft

@@ -1247,7 +1247,20 @@ fn editor_pane_surface<'a>(
             .unwrap_or(crate::Rect::new(20.0, 20.0, 1.0, 20.0));
         crate::anchored_popover::anchored(
             body,
-            link_editor_popover(workspace, theme),
+            crate::motion::dismissible(
+                link_editor_popover(workspace, theme),
+                |message| {
+                    matches!(
+                        message,
+                        EditorCenterMessage::Workspace(
+                            EditorMessage::CancelLinkEditor | EditorMessage::ApplyLink
+                        )
+                    )
+                },
+                Some(EditorCenterMessage::Workspace(
+                    EditorMessage::CancelLinkEditor,
+                )),
+            ),
             anchor,
             crate::anchored_popover::Dismissal::OutsideClick,
             EditorCenterMessage::Workspace(EditorMessage::CancelLinkEditor),
@@ -1341,41 +1354,33 @@ fn comment_hover_overlay<'a>(
     workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
-    let quote = match thread.anchor() {
-        crate::CommentAnchor::Range { quote, .. }
-        | crate::CommentAnchor::Position { quote, .. }
-        | crate::CommentAnchor::Orphaned { quote, .. } => quote.clone(),
-        crate::CommentAnchor::Document { .. } => "Document note".to_owned(),
-    };
-    let quote = quote.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut card = column![
-        components::muted_label("Notes"),
-        container(components::muted_label(quote))
-            .height(18)
-            .clip(true),
-    ]
-    .spacing(4);
+    // The manuscript already displays the selected excerpt under this card.
+    let mut card = column![].spacing(8);
     for message in thread.messages() {
         let editing = workspace.editing_note_in_hover()
             && workspace.editing_comment_message() == Some((thread.id(), message.id()));
         let note = if editing {
             note_message_body(thread.id(), message, workspace, theme, true)
         } else {
-            mouse_area(
-                container(text(message.body().to_owned()).size(13).width(Length::Fill))
-                    .padding([2, 4])
-                    .width(Length::Fill),
+            stationary_tooltip::tooltip(
+                note_body_control(
+                    message.body().to_owned(),
+                    EditorCenterMessage::Workspace(EditorMessage::BeginEditHoveredNote {
+                        thread_id: thread.id().to_owned(),
+                        message_id: message.id().to_owned(),
+                        body: message.body().to_owned(),
+                    }),
+                    theme,
+                ),
+                text("Edit note").size(12),
+                components::surface(theme, Surface::Elevated, Interaction::Rest),
             )
-            .on_press(EditorCenterMessage::Workspace(
-                EditorMessage::BeginEditHoveredNote {
-                    thread_id: thread.id().to_owned(),
-                    message_id: message.id().to_owned(),
-                    body: message.body().to_owned(),
-                },
-            ))
-            .into()
         };
-        card = card.push(note);
+        card = card.push(
+            row![note, note_delete_button(thread.id(), message.id(), theme),]
+                .spacing(4)
+                .align_y(Vertical::Top),
+        );
     }
     anchored_comment_overlay(
         content,
@@ -1384,6 +1389,11 @@ fn comment_hover_overlay<'a>(
             .max_height(240)
             .into(),
         !workspace.editing_note_in_hover(),
+        if workspace.editing_note_in_hover() {
+            EditorMessage::CancelEditCommentMessage
+        } else {
+            EditorMessage::DismissCommentHover
+        },
         theme,
     )
 }
@@ -1391,16 +1401,97 @@ fn comment_hover_overlay<'a>(
 fn comment_key_binding(
     press: text_editor::KeyPress,
     submit: EditorMessage,
+    cancel: EditorMessage,
 ) -> Option<text_editor::Binding<EditorCenterMessage>> {
-    if press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) {
-        Some(if press.modifiers.shift() || press.modifiers.alt() {
-            text_editor::Binding::Enter
-        } else {
-            text_editor::Binding::Custom(EditorCenterMessage::Workspace(submit))
-        })
-    } else {
-        text_editor::Binding::from_key_press(press)
+    match &press.key {
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter) => {
+            Some(if press.modifiers.shift() || press.modifiers.alt() {
+                text_editor::Binding::Enter
+            } else {
+                text_editor::Binding::Custom(EditorCenterMessage::Workspace(submit))
+            })
+        }
+        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) => Some(
+            text_editor::Binding::Custom(EditorCenterMessage::Workspace(cancel)),
+        ),
+        _ => text_editor::Binding::from_key_press(press),
     }
+}
+
+pub(crate) fn note_body_control<'a, Message: Clone + 'a>(
+    body: String,
+    on_press: Message,
+    theme: ParchMintTheme,
+) -> Element<'a, Message> {
+    button(
+        text(body)
+            .size(14)
+            .wrapping(text::Wrapping::WordOrGlyph)
+            .color(theme.palette().primary_text)
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .padding([4, 6])
+    .on_press(on_press)
+    .style(move |_, status| {
+        components::button_style(theme, ButtonKind::Quiet, button_interaction(status, false))
+    })
+    .into()
+}
+
+fn note_delete_button<'a>(
+    thread_id: &str,
+    message_id: &str,
+    theme: ParchMintTheme,
+) -> Element<'a, EditorCenterMessage> {
+    stationary_tooltip::tooltip(
+        button(icon_sized(Icon::RecentlyDeleted, 15))
+            .padding(4)
+            .on_press(EditorCenterMessage::Workspace(
+                EditorMessage::RequestDeleteNote {
+                    thread_id: thread_id.to_owned(),
+                    message_id: message_id.to_owned(),
+                },
+            ))
+            .style(move |_, status| {
+                components::button_style(
+                    theme,
+                    ButtonKind::Quiet,
+                    button_interaction(status, false),
+                )
+            }),
+        text("Delete note").size(12),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
+    )
+}
+
+/// The source excerpt sits in its own quiet surface so it cannot be mistaken
+/// for either the note body or a field label.
+pub(crate) fn note_quote<'a, Message: 'a>(
+    quote: String,
+    theme: ParchMintTheme,
+    max_height: f32,
+) -> Element<'a, Message> {
+    container(
+        text(quote)
+            .size(12)
+            .color(theme.palette().secondary_text)
+            .width(Length::Fill),
+    )
+    .padding([6, 8])
+    .width(Length::Fill)
+    .max_height(max_height)
+    .clip(true)
+    .style(move |_| iced::widget::container::Style {
+        background: Some(theme.palette().sunken.into()),
+        border: iced::Border {
+            color: theme.palette().divider,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    })
+    .into()
 }
 
 fn comment_composer_overlay<'a>(
@@ -1410,10 +1501,6 @@ fn comment_composer_overlay<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let mut card = column![
-        text("New note").size(14).font(iced::Font {
-            weight: iced::font::Weight::Semibold,
-            ..iced::Font::DEFAULT
-        }),
         crate::scroll_gate::smooth(
             text_editor(workspace.comment_draft())
                 .id(HarnessTarget::CommentDraft.id())
@@ -1421,7 +1508,8 @@ fn comment_composer_overlay<'a>(
                     press,
                     EditorMessage::CreateComment {
                         document_level: false
-                    }
+                    },
+                    EditorMessage::CancelCommentComposer,
                 ))
                 .placeholder("Write a note")
                 .on_action(|action| {
@@ -1430,7 +1518,6 @@ fn comment_composer_overlay<'a>(
                 .height(Length::Fixed(76.0))
                 .style(move |_, status| multiline_field_style(theme, status))
         ),
-        components::muted_label("Enter adds · Shift+Enter new line"),
         row![
             Space::new().width(Length::Fill),
             comment_popover_action(
@@ -1456,7 +1543,14 @@ fn comment_composer_overlay<'a>(
                 .color(theme.palette().secondary_text),
         );
     }
-    anchored_comment_overlay(content, composer.anchor_bounds(), card.into(), false, theme)
+    anchored_comment_overlay(
+        content,
+        composer.anchor_bounds(),
+        card.into(),
+        false,
+        EditorMessage::CancelCommentComposer,
+        theme,
+    )
 }
 
 pub(crate) fn note_message_body<'a>(
@@ -1473,42 +1567,45 @@ pub(crate) fn note_message_body<'a>(
         let save_thread = thread_id.to_owned();
         let save_message = message_id.clone();
         let mut body = column![
-            text_editor(workspace.comment_edit_draft())
-                .id(HarnessTarget::CommentEdit.id())
-                .key_binding({
-                    let thread_id = thread_id.to_owned();
-                    let message_id = message_id.clone();
-                    move |press| {
-                        comment_key_binding(
-                            press,
-                            EditorMessage::SaveEditedCommentMessage {
-                                thread_id: thread_id.clone(),
-                                message_id: message_id.clone(),
-                            },
-                        )
-                    }
-                })
-                .placeholder("Edit note")
-                .on_action(move |action| EditorCenterMessage::Workspace(
-                    EditorMessage::EditCommentReplyDraft {
-                        thread_id: edit_thread.clone(),
-                        action
-                    }
-                ))
-                .height(Length::Fixed(76.0))
-                .style(move |_, status| multiline_field_style(theme, status)),
+            crate::scroll_gate::smooth(
+                text_editor(workspace.comment_edit_draft())
+                    .id(HarnessTarget::CommentEdit.id())
+                    .key_binding({
+                        let thread_id = thread_id.to_owned();
+                        let message_id = message_id.clone();
+                        move |press| {
+                            comment_key_binding(
+                                press,
+                                EditorMessage::SaveEditedCommentMessage {
+                                    thread_id: thread_id.clone(),
+                                    message_id: message_id.clone(),
+                                },
+                                EditorMessage::CancelEditCommentMessage,
+                            )
+                        }
+                    })
+                    .placeholder("Edit note")
+                    .on_action(move |action| EditorCenterMessage::Workspace(
+                        EditorMessage::EditCommentReplyDraft {
+                            thread_id: edit_thread.clone(),
+                            action
+                        }
+                    ))
+                    .height(Length::Fixed(76.0))
+                    .style(move |_, status| multiline_field_style(theme, status))
+            ),
             row![
+                comment_popover_action(
+                    "Cancel",
+                    EditorCenterMessage::Workspace(EditorMessage::CancelEditCommentMessage),
+                    theme,
+                ),
                 comment_popover_action(
                     "Save note",
                     EditorCenterMessage::Workspace(EditorMessage::SaveEditedCommentMessage {
                         thread_id: save_thread,
                         message_id: save_message,
                     }),
-                    theme,
-                ),
-                comment_popover_action(
-                    "Cancel",
-                    EditorCenterMessage::Workspace(EditorMessage::CancelEditCommentMessage),
                     theme,
                 ),
             ]
@@ -1525,7 +1622,7 @@ pub(crate) fn note_message_body<'a>(
         body.into()
     } else {
         text(message.body().to_owned())
-            .size(13)
+            .size(14)
             .width(Length::Fill)
             .into()
     }
@@ -1539,59 +1636,45 @@ pub(crate) fn comment_thread_card<'a>(
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     let thread_id = thread.id().to_owned();
-    let mut card = column![components::muted_label(format!(
-        "“{}”",
-        quote.split_whitespace().collect::<Vec<_>>().join(" ")
-    )),]
-    .spacing(4);
+    let mut card = column![note_quote(
+        quote.split_whitespace().collect::<Vec<_>>().join(" "),
+        theme,
+        92.0,
+    )]
+    .spacing(8);
     for message in thread.messages() {
-        let message_id = message.id().to_owned();
-        let actions = row![
-            Space::new().width(Length::Fill),
-            comment_popover_action(
-                "Edit",
+        let editing = workspace.editing_comment_message() == Some((thread.id(), message.id()));
+        let body = if editing {
+            note_message_body(&thread_id, message, workspace, theme, true)
+        } else {
+            note_body_control(
+                message.body().to_owned(),
                 EditorCenterMessage::Workspace(EditorMessage::BeginEditCommentMessage {
                     thread_id: thread_id.clone(),
-                    message_id: message_id.clone(),
+                    message_id: message.id().to_owned(),
                     body: message.body().to_owned(),
                 }),
                 theme,
-            ),
-            comment_popover_action(
-                "Delete",
-                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteNote {
-                    thread_id: thread_id.clone(),
-                    message_id: message_id.clone(),
-                }),
-                theme,
-            ),
-        ]
-        .spacing(4);
+            )
+        };
         card = card.push(
-            column![
-                actions,
-                note_message_body(&thread_id, message, workspace, theme, true),
-            ]
-            .spacing(4),
+            container(
+                row![body, note_delete_button(thread.id(), message.id(), theme)]
+                    .spacing(4)
+                    .align_y(Vertical::Top),
+            )
+            .padding(8)
+            .width(Length::Fill)
+            .style(move |_| iced::widget::container::Style {
+                background: Some(theme.palette().panel.into()),
+                border: iced::Border {
+                    color: theme.palette().divider,
+                    width: 1.0,
+                    radius: 5.0.into(),
+                },
+                ..Default::default()
+            }),
         );
-        if workspace.pending_delete_note() == Some((thread_id.as_str(), message_id.as_str())) {
-            card = card.push(
-                row![
-                    text("Delete this note?").size(12),
-                    comment_popover_action(
-                        "Delete note",
-                        EditorCenterMessage::Workspace(EditorMessage::ConfirmDeleteNote),
-                        theme
-                    ),
-                    comment_popover_action(
-                        "Cancel",
-                        EditorCenterMessage::Workspace(EditorMessage::CancelDeleteNote),
-                        theme
-                    ),
-                ]
-                .spacing(4),
-            );
-        }
     }
     card.into()
 }
@@ -1601,26 +1684,36 @@ fn anchored_comment_overlay<'a>(
     anchor: crate::Rect,
     card: Element<'a, EditorCenterMessage>,
     hover: bool,
+    cancel: EditorMessage,
     theme: ParchMintTheme,
 ) -> Element<'a, EditorCenterMessage> {
     crate::anchored_popover::anchored(
         content,
-        container(card)
-            .width(320)
-            .padding(8)
-            .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest))
-            .into(),
+        crate::motion::dismissible(
+            container(card)
+                .width(320)
+                .padding(8)
+                .style(move |_| components::surface(theme, Surface::Elevated, Interaction::Rest)),
+            |message| {
+                matches!(
+                    message,
+                    EditorCenterMessage::Workspace(
+                        EditorMessage::CancelCommentComposer
+                            | EditorMessage::CreateComment { .. }
+                            | EditorMessage::CancelEditCommentMessage
+                            | EditorMessage::SaveEditedCommentMessage { .. }
+                    )
+                )
+            },
+            (!hover).then_some(EditorCenterMessage::Workspace(cancel.clone())),
+        ),
         anchor,
         if hover {
             crate::anchored_popover::Dismissal::Hover
         } else {
             crate::anchored_popover::Dismissal::Explicit
         },
-        EditorCenterMessage::Workspace(if hover {
-            EditorMessage::DismissCommentHover
-        } else {
-            EditorMessage::CancelCommentComposer
-        }),
+        EditorCenterMessage::Workspace(cancel),
     )
 }
 
@@ -2153,43 +2246,48 @@ fn local_search_bar(
     ]
     .spacing(4)
     .align_y(Vertical::Center);
-    let content = if replace_visible {
-        column![
-            row![query, controls].spacing(4).align_y(Vertical::Center),
-            row![
-                text_input("Replace with", &draft)
-                    .id(HarnessTarget::LocalReplace(pane).id())
-                    .on_input(move |value| EditorCenterMessage::SetReplaceDraft { pane, value })
-                    .padding([5, 8])
-                    .style(move |_, status| components::field_style(
+    let content = column![
+        row![query, controls].spacing(4).align_y(Vertical::Center),
+        crate::motion::reveal(
+            replace_visible,
+            container(
+                row![
+                    text_input("Replace with", &draft)
+                        .id(HarnessTarget::LocalReplace(pane).id())
+                        .on_input(move |value| EditorCenterMessage::SetReplaceDraft { pane, value })
+                        .padding([5, 8])
+                        .style(move |_, status| components::field_style(
+                            theme,
+                            field_interaction(status)
+                        )),
+                    find_button(
+                        "Replace",
+                        pane,
+                        EditorMessage::ReplaceActiveMatch(draft.clone()),
                         theme,
-                        field_interaction(status)
-                    )),
-                find_button(
-                    "Replace",
-                    pane,
-                    EditorMessage::ReplaceActiveMatch(draft.clone()),
-                    theme,
-                    matches > 0,
-                ),
-                find_button(
-                    "Replace all",
-                    pane,
-                    EditorMessage::ReplaceAllMatches(draft.clone()),
-                    theme,
-                    matches > 0,
-                ),
-            ]
-            .spacing(4)
-            .align_y(Vertical::Center),
-        ]
-        .spacing(4)
-    } else {
-        column![row![query, controls].spacing(4).align_y(Vertical::Center)]
-    };
-    let mut body = column![content].spacing(3);
-    if !query_value.is_empty() {
-        body = body.push(
+                        matches > 0,
+                    ),
+                    find_button(
+                        "Replace all",
+                        pane,
+                        EditorMessage::ReplaceAllMatches(draft.clone()),
+                        theme,
+                        matches > 0,
+                    ),
+                ]
+                .spacing(4)
+                .align_y(Vertical::Center)
+            )
+            .padding(iced::Padding {
+                top: 4.0,
+                ..iced::Padding::ZERO
+            })
+        ),
+    ];
+    let body = column![
+        content,
+        crate::motion::reveal(
+            !query_value.is_empty(),
             text(if matches == 0 {
                 "No matches in this document.".to_owned()
             } else {
@@ -2201,8 +2299,9 @@ fn local_search_bar(
             })
             .size(11)
             .color(theme.palette().secondary_text),
-        );
-    }
+        )
+    ]
+    .spacing(3);
     container(body)
         .padding([4, 6])
         .width(Length::Fill)
@@ -2858,6 +2957,16 @@ mod tests {
             editor_center_surface(&workspace, theme, &slots, None),
         );
 
+        assert!(simulator.find("Notes").is_err());
+        let quote = match workspace.comment_thread(&comment_id).unwrap().anchor() {
+            crate::CommentAnchor::Range { quote, .. }
+            | crate::CommentAnchor::Position { quote, .. }
+            | crate::CommentAnchor::Orphaned { quote, .. } => quote.as_str(),
+            crate::CommentAnchor::Document { .. } => "",
+        };
+        if !quote.is_empty() {
+            assert!(simulator.find(format!("“{quote}”")).is_err());
+        }
         assert!(simulator.find("✓").is_err());
         assert!(simulator.find(HarnessTarget::CommentReply.id()).is_err());
         simulator
@@ -2877,6 +2986,7 @@ mod tests {
 
     #[test]
     fn anchored_comment_composer_routes_creation_without_using_the_inspector() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::BeginCommentAtSelection {
             pane: EditorPane::Primary,
@@ -2919,6 +3029,7 @@ mod tests {
 
     #[test]
     fn anchored_comment_composer_submits_enter_and_keeps_modified_enter_multiline() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::BeginCommentAtSelection {
             pane: EditorPane::Primary,
@@ -2957,6 +3068,11 @@ mod tests {
             }
             simulator.simulate([event]);
         }
+        assert_eq!(
+            simulator.tap_key(iced::keyboard::key::Named::Escape),
+            iced::event::Status::Captured,
+            "Escape must cancel the note composer"
+        );
         let messages = simulator.into_messages().collect::<Vec<_>>();
         assert!(messages.iter().any(|message| matches!(
             message,
@@ -2969,6 +3085,10 @@ mod tests {
             EditorCenterMessage::Workspace(EditorMessage::EditCommentDraft(
                 text_editor::Action::Edit(text_editor::Edit::Enter)
             ))
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            EditorCenterMessage::Workspace(EditorMessage::CancelCommentComposer)
         )));
     }
 

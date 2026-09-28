@@ -345,7 +345,10 @@ impl<'a, Message: Clone + 'a> Widget<Message, iced::Theme, iced::Renderer>
     ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
         let state = tree.state.downcast_mut::<State>();
         if !state.open {
-            return None;
+            state.motion.close();
+            if !state.motion.exiting() {
+                return None;
+            }
         }
         let bounds = layout.bounds();
         let width = self.width.min(viewport.width);

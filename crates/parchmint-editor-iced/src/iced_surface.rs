@@ -445,9 +445,10 @@ impl Default for SurfaceState {
 impl SurfaceState {
     const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
     const MULTI_CLICK_DISTANCE_SQUARED: f32 = 64.0;
+    const MOMENTUM_DECAY: f32 = 0.92;
+    const MOMENTUM_LIMIT: f32 = 480.0;
 
-    fn add_scroll_inertia(&mut self, delta: f32) {
-        let now = Instant::now();
+    fn add_scroll_inertia(&mut self, delta: f32, now: Instant) {
         // Symmetric in both directions, matching the scrollable smoothing:
         // a fresh (zero) prior never counts as continuing.
         let continuing = self.last_wheel.is_some_and(|previous| {
@@ -456,33 +457,41 @@ impl SurfaceState {
             && delta != 0.0
             && self.last_wheel_delta.signum() == delta.signum();
         self.scroll_inertia_y = if continuing {
-            (self.scroll_inertia_y * 0.60 + delta * 0.35).clamp(-160.0, 160.0)
+            (self.scroll_inertia_y * 0.70 + delta * 0.35)
+                .clamp(-Self::MOMENTUM_LIMIT, Self::MOMENTUM_LIMIT)
         } else {
-            (delta * 0.30).clamp(-160.0, 160.0)
+            (delta * 0.25).clamp(-Self::MOMENTUM_LIMIT, Self::MOMENTUM_LIMIT)
         };
         self.last_wheel = Some(now);
         self.last_wheel_delta = delta;
     }
 
-    fn wheel(&mut self, delta: f32) {
+    fn wheel(&mut self, delta: f32, now: Instant) {
         if self.pending_scroll_y * delta < 0.0 {
             self.pending_scroll_y = 0.0;
         }
-        self.add_scroll_inertia(delta);
+        self.add_scroll_inertia(delta, now);
         self.pending_scroll_y += delta;
     }
 
-    fn pixel_wheel(&mut self, delta: f32) {
+    fn pixel_wheel(&mut self, delta: f32, now: Instant) {
         self.pending_scroll_y = 0.0;
-        self.add_scroll_inertia(delta);
+        self.add_scroll_inertia(delta, now);
+    }
+
+    fn clear_scroll(&mut self) {
+        self.pending_scroll_y = 0.0;
+        self.scroll_inertia_y = 0.0;
+        self.last_wheel = None;
+        self.last_wheel_delta = 0.0;
+        self.last_scroll_step = None;
     }
 
     fn scroll_active(&self) -> bool {
         self.pending_scroll_y.abs() > f32::EPSILON || self.scroll_inertia_y.abs() > f32::EPSILON
     }
 
-    fn next_scroll_step(&mut self) -> f32 {
-        let now = Instant::now();
+    fn next_scroll_step(&mut self, now: Instant) -> f32 {
         let frames = self
             .last_scroll_step
             .replace(now)
@@ -496,12 +505,19 @@ impl SurfaceState {
             self.pending_scroll_y * (1.0 - 0.58_f32.powf(frames))
         };
         self.pending_scroll_y -= step;
-        let decay = 0.86_f32.powf(frames);
-        let inertia = self.scroll_inertia_y * (1.0 - decay) / (1.0 - 0.86);
-        self.scroll_inertia_y *= decay;
-        if self.scroll_inertia_y.abs() < 0.3 {
-            self.scroll_inertia_y = 0.0;
-        }
+        let inertia = if self.last_wheel.is_some_and(|previous| {
+            now.saturating_duration_since(previous) >= Duration::from_millis(32)
+        }) {
+            let decay = Self::MOMENTUM_DECAY.powf(frames);
+            let velocity = self.scroll_inertia_y * (1.0 - decay) / (1.0 - Self::MOMENTUM_DECAY);
+            self.scroll_inertia_y *= decay;
+            if self.scroll_inertia_y.abs() < 0.3 {
+                self.scroll_inertia_y = 0.0;
+            }
+            velocity
+        } else {
+            0.0
+        };
         step + inertia
     }
 
@@ -555,11 +571,19 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
             state.caret_visible = true;
             state.next_caret_blink = None;
         }
-        if let iced::Event::Window(iced::window::Event::RedrawRequested(_)) = event
+        if matches!(
+            event,
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { .. })
+                | iced::Event::Mouse(mouse::Event::ButtonPressed(_))
+                | iced::Event::Window(iced::window::Event::Unfocused)
+        ) {
+            state.clear_scroll();
+        }
+        if let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event
             && state.scroll_active()
         {
             return Some(Action::publish(MountedEditorMessage::Scroll {
-                delta_y: state.next_scroll_step(),
+                delta_y: state.next_scroll_step(*now),
                 viewport: viewport_from_bounds(bounds)?,
             }));
         }
@@ -692,13 +716,14 @@ impl canvas::Program<MountedEditorMessage> for EditorSurface {
                 Some(Action::capture())
             }
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if cursor.is_over(bounds) => {
+                let now = Instant::now();
                 let delta_y = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => {
-                        state.wheel(-*y * 60.0);
-                        state.next_scroll_step()
+                        state.wheel(-*y * 60.0, now);
+                        state.next_scroll_step(now)
                     }
                     mouse::ScrollDelta::Pixels { y, .. } => {
-                        state.pixel_wheel(-*y);
+                        state.pixel_wheel(-*y, now);
                         -*y
                     }
                 };
@@ -1974,6 +1999,35 @@ mod tests {
             line_height: 20.0,
             caret_width: 1.0,
         }
+    }
+
+    #[test]
+    fn editor_wheel_burst_accelerates_and_reversal_clears_pending_scroll() {
+        let start = Instant::now();
+        let mut state = SurfaceState::default();
+        for tick in 0..6 {
+            state.wheel(-180.0, start + Duration::from_millis(tick * 12));
+        }
+        assert!(state.scroll_inertia_y < -160.0);
+        assert!(state.scroll_inertia_y >= -SurfaceState::MOMENTUM_LIMIT);
+        state.wheel(60.0, start + Duration::from_millis(80));
+        assert_eq!(state.pending_scroll_y, 60.0);
+        assert!(state.scroll_inertia_y > 0.0);
+        state.clear_scroll();
+        assert!(!state.scroll_active());
+    }
+
+    #[test]
+    fn editor_momentum_retains_motion_after_a_short_flick() {
+        let start = Instant::now();
+        let mut state = SurfaceState::default();
+        state.wheel(-180.0, start);
+        state.last_scroll_step = Some(start + Duration::from_millis(32));
+        let initial = state.scroll_inertia_y;
+        for frame in 1..=10 {
+            state.next_scroll_step(start + Duration::from_millis(32 + frame * 16));
+        }
+        assert!(state.scroll_inertia_y.abs() > initial.abs() * 0.40);
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub(crate) fn without_momentum<T>(run: impl FnOnce() -> T) -> T {
 }
 
 const SCROLL_FRAME: Duration = Duration::from_millis(16);
+const MOMENTUM_DECAY: f32 = 0.92;
+const MOMENTUM_LIMIT: f32 = 480.0;
 
 #[derive(Default)]
 struct MotionAxis {
@@ -39,9 +41,9 @@ impl MotionAxis {
             && delta != 0.0
             && self.last_delta.signum() == delta.signum();
         self.inertia = if continuing {
-            (self.inertia * 0.60 + delta * 0.35).clamp(-160.0, 160.0)
+            (self.inertia * 0.70 + delta * 0.35).clamp(-MOMENTUM_LIMIT, MOMENTUM_LIMIT)
         } else {
-            (delta * 0.30).clamp(-160.0, 160.0)
+            (delta * 0.25).clamp(-MOMENTUM_LIMIT, MOMENTUM_LIMIT)
         };
         self.last_delta = delta;
         self.last_wheel = Some(now);
@@ -67,6 +69,9 @@ impl MotionAxis {
     fn clear(&mut self) {
         self.remaining = 0.0;
         self.inertia = 0.0;
+        self.last_delta = 0.0;
+        self.last_wheel = None;
+        self.last_step = None;
     }
 
     fn take_step(&mut self, now: Instant) -> f32 {
@@ -86,8 +91,8 @@ impl MotionAxis {
         let inertia = if self.last_wheel.is_some_and(|previous| {
             now.saturating_duration_since(previous) >= Duration::from_millis(32)
         }) {
-            let decay = 0.86_f32.powf(frames);
-            let velocity = self.inertia * (1.0 - decay) / (1.0 - 0.86);
+            let decay = MOMENTUM_DECAY.powf(frames);
+            let velocity = self.inertia * (1.0 - decay) / (1.0 - MOMENTUM_DECAY);
             self.inertia *= decay;
             if self.inertia.abs() < 0.3 {
                 self.inertia = 0.0;
@@ -311,7 +316,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for DropNone<'_, Mess
         if state.active() {
             // Scrollable may publish a viewport update without capturing the
             // wheel event. Its capture status cannot decide whether to keep
-            // the short, bounded momentum animation alive.
+            // the bounded momentum animation alive.
             shell.request_redraw_at(crate::motion::now() + SCROLL_FRAME);
         }
         if child_shell.is_event_captured() {
@@ -452,6 +457,31 @@ mod tests {
         assert!(state.y.inertia.abs() < tail.abs());
         state.wheel(60.0, start + Duration::from_millis(120));
         assert!(state.y.inertia > 0.0);
+    }
+
+    #[test]
+    fn rapid_wheel_burst_can_exceed_the_old_speed_ceiling() {
+        let start = Instant::now();
+        let mut axis = MotionAxis::default();
+        for tick in 0..6 {
+            axis.wheel(-180.0, start + Duration::from_millis(tick * 12));
+        }
+        assert!(axis.inertia < -160.0, "rapid wheel input should accelerate");
+        assert!(axis.inertia >= -MOMENTUM_LIMIT);
+        assert_eq!(axis.remaining, -1080.0);
+    }
+
+    #[test]
+    fn momentum_retains_motion_after_a_short_flick() {
+        let start = Instant::now();
+        let mut axis = MotionAxis::default();
+        axis.wheel(-180.0, start);
+        axis.last_step = Some(start + Duration::from_millis(32));
+        let initial = axis.inertia;
+        for frame in 1..=10 {
+            axis.take_step(start + Duration::from_millis(32 + frame * 16));
+        }
+        assert!(axis.inertia.abs() > initial.abs() * 0.40);
     }
 
     #[test]

@@ -108,12 +108,21 @@ notifications, autosave, and recovery. Clean windows have no polling timer;
 unchanged recovery projections are skipped. Animations schedule their own frames.
 
 `motion.rs` provides interruptible pane resizing, disclosures, card/tab reflow,
-and small entrances. Widgets request redraws only during transitions; typing and
+and small entrances. `motion/dismiss.rs` retains dialogs and context menus through
+an exit before dispatching their closing action once. Toolbar menus and anchored
+editor popovers also retain their closing surface. Reduced motion bypasses these
+visual delays. Search retains a noninteractive outgoing result snapshot and moves
+surviving rows when streamed groups insert above them. Widgets request redraws
+only during transitions; typing and
 pointer dragging remain immediate. Pane children stay mounted during focus and
-sidebar changes. Card drop targets use the destination layout while the cards
-move, avoiding feedback between animation and drag targeting. Reduced motion
+sidebar changes. Card drop targets use the same animated bounds as the cards and enclosing group
+frames. Blank group space targets its innermost container; only the exterior
+trailing gap targets a sibling after the group. Invalid hovers keep the source
+vacancy unpainted and release without moving the item. Reduced motion
 is an application preference. Headless workflows and captures settle motion;
-frame-level tests cover intermediate geometry and input. The interaction harness
+frame-level tests cover intermediate geometry and input. Group disclosures retain
+outgoing rows and reveal incoming content from the top, allocating space on a
+shared reversible timeline. The interaction harness
 can also advance a controlled frame clock for full-workspace motion captures.
 Incoming panes retain readable text widths; moving cards draw as complete layers,
 and drop placeholders stay at their destinations.

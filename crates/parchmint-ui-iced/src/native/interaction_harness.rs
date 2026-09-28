@@ -1828,6 +1828,7 @@ impl NativeDesktopHarness {
         destination: &HarnessNode,
         position: HarnessDropPosition,
     ) -> Result<(), HarnessError> {
+        self.redraw(window)?;
         let source_id = match surface {
             HarnessHierarchySurface::Explorer => harness_target::explorer_row_id(source.id()),
             HarnessHierarchySurface::Cards => harness_target::card_id(source.id()),
@@ -1836,7 +1837,8 @@ impl NativeDesktopHarness {
         let source_position = match surface {
             HarnessHierarchySurface::Explorer => source_bounds.center(),
             HarnessHierarchySurface::Cards => {
-                IcedPoint::new(source_bounds.center_x(), source_bounds.y + 24.0)
+                // Top padding is non-interactive for both documents and groups.
+                IcedPoint::new(source_bounds.x + 6.0, source_bounds.y + 6.0)
             }
         };
         let threshold_position = IcedPoint::new(source_position.x + 8.0, source_position.y);
@@ -1852,6 +1854,9 @@ impl NativeDesktopHarness {
                 }),
             ],
         )?;
+        // Collapsing the source changes layout; measure the frame that will
+        // actually be drawn before choosing its destination coordinates.
+        self.redraw(window)?;
         let destination_position = match surface {
             HarnessHierarchySurface::Explorer => {
                 let bounds =
@@ -1861,8 +1866,24 @@ impl NativeDesktopHarness {
             HarnessHierarchySurface::Cards => {
                 let bounds =
                     self.find_id_bounds(window, harness_target::card_id(destination.id()))?;
+                let frame = self
+                    .find_id_bounds(
+                        window,
+                        iced::widget::Id::from(format!("card-group-frame-{}", destination.id())),
+                    )
+                    .ok();
                 let list = self.find_id_bounds(window, HarnessTarget::CardsList.id())?;
-                if bounds.width < list.width * 0.75 {
+                if let Some(frame) = frame {
+                    match position {
+                        HarnessDropPosition::Before => {
+                            IcedPoint::new(bounds.center_x(), bounds.y + 10.0)
+                        }
+                        HarnessDropPosition::Into => bounds.center(),
+                        HarnessDropPosition::After => {
+                            IcedPoint::new(frame.center_x(), frame.y + frame.height + 4.0)
+                        }
+                    }
+                } else if bounds.width < list.width * 0.75 {
                     match position {
                         HarnessDropPosition::Before => {
                             IcedPoint::new(bounds.x + 16.0, bounds.center_y())

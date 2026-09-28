@@ -5,7 +5,9 @@ use crate::components::{
     semantic_pick_list as pick_list, word_count_label,
 };
 
-use crate::project_workspace::{EXPLORER_ROW_EXTENT, GlobalSearchRow, SEARCH_ROW_HEIGHT};
+use crate::project_workspace::{
+    EXPLORER_ROW_EXTENT, GlobalSearchRow, SEARCH_ROW_HEIGHT, SEARCH_WINDOW_ROWS,
+};
 use iced::widget::{
     Space, checkbox, column, container, mouse_area, opaque, responsive, rich_text, row, scrollable,
     sensor, span, stack, text, text_editor,
@@ -201,11 +203,7 @@ fn project_surface_with_layout<'a>(
         ribbon,
         center_view(workspace, destination, theme, editor_child, layout)
     ];
-    let center: Element<'a, ProjectSurfaceMessage> = if destination == RibbonDestination::Cards {
-        center.into()
-    } else {
-        crate::motion::enter(format!("{destination:?}"), center)
-    };
+    let center = crate::motion::enter(format!("{destination:?}"), center);
     let recovering = matches!(workspace.content_state(), ContentState::Recovery);
     let shows_explorer = !recovering
         && matches!(
@@ -228,7 +226,7 @@ fn project_surface_with_layout<'a>(
     let rail_width = if destination == RibbonDestination::GlobalSearch {
         360
     } else {
-        layout.explorer().width()
+        layout.explorer_width()
     };
     // Overview never exposes either sidebar. Building the Explorer tree and
     // Comments inspector here still runs on every scroll event, even though
@@ -277,7 +275,7 @@ fn project_surface_with_layout<'a>(
         crate::motion::slot(center, Length::Fill, true),
         crate::motion::slot(
             inspector_panel,
-            Length::Fixed(layout.inspector().width() as f32),
+            Length::Fixed(layout.inspector_width() as f32),
             shows_inspector && layout.inspector_is_visible(),
         ),
     ];
@@ -293,15 +291,16 @@ fn project_surface_with_layout<'a>(
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
-    if shows_status {
-        content = content.push(status_bar(
+    content = content.push(crate::motion::reveal(
+        shows_status,
+        status_bar(
             workspace,
             theme,
             shows_explorer && layout.explorer_is_visible(),
             shows_inspector && layout.inspector_is_visible(),
             destination == RibbonDestination::Editor,
-        ));
-    }
+        ),
+    ));
     let focused =
         destination == RibbonDestination::Editor && workspace.editor().expanded_pane().is_some();
     let content = crate::motion::row(vec![
@@ -433,6 +432,35 @@ fn project_surface_with_layout<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    } else if workspace.editor().pending_delete_note().is_some() {
+        let dialog = crate::motion::dismissible(
+            crate::motion::enter("note-delete-dialog", note_delete_dialog(theme)),
+            |message| {
+                matches!(
+                    message,
+                    ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        EditorMessage::CancelDeleteNote | EditorMessage::ConfirmDeleteNote
+                    ))
+                )
+            },
+            Some(ProjectSurfaceMessage::EditorCenter(
+                EditorCenterMessage::Workspace(EditorMessage::CancelDeleteNote),
+            )),
+        );
+        stack![
+            focus::input_scope(base, false),
+            opaque(
+                container(dialog)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .style(move |_| components::scrim(theme))
+            )
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     } else if let Some(modal) = workspace.modal() {
         let static_settings = matches!(&modal, ProjectModal::ManageSettings(_));
         let dragged_field = matches!(
@@ -449,6 +477,26 @@ fn project_surface_with_layout<'a>(
         } else {
             crate::motion::enter("dialog", dialog)
         };
+        let dialog = crate::motion::dismissible(
+            dialog,
+            |message| {
+                matches!(
+                    message,
+                    ProjectSurfaceMessage::Project(
+                        ProjectMessage::DismissModal
+                            | ProjectMessage::ConfirmDeleteMetadataField
+                            | ProjectMessage::ConfirmDeleteStyle
+                            | ProjectMessage::ConfirmHistoryRestore
+                            | ProjectMessage::ConfirmHistoryReinitialize
+                            | ProjectMessage::ConfirmDiscardSettings
+                            | ProjectMessage::DiscardClosingDraft
+                            | ProjectMessage::ConfirmFileDraft
+                            | ProjectMessage::SaveSettingsManager
+                    )
+                )
+            },
+            Some(ProjectSurfaceMessage::Project(ProjectMessage::DismissModal)),
+        );
         let scoped_base = focus::input_scope(base, false);
         let modal_layer = opaque(
             container(dialog)
@@ -580,7 +628,7 @@ fn project_selector<'a>(
     ]
     .spacing(8)
     .align_y(iced::alignment::Vertical::Center);
-    let contents = crate::motion::row(vec![
+    let contents = crate::motion::row_shrink(vec![
         crate::motion::slot(
             container(crate::icons::brand(36)).center(48),
             Length::Fixed(48.0),
@@ -603,16 +651,12 @@ fn project_selector<'a>(
     container(stationary_tooltip::tooltip(
         harness_target::target(
             HarnessTarget::ProjectMenu,
-            button(
-                container(contents)
-                    .width(if expanded { 48.0 + width as f32 } else { 48.0 })
-                    .height(48),
-            )
-            .padding(0)
-            .on_press(ProjectSurfaceMessage::ShowProjectChooser)
-            .style(move |_, status| {
-                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-            }),
+            button(container(contents).height(48))
+                .padding(0)
+                .on_press(ProjectSurfaceMessage::ShowProjectChooser)
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                }),
         ),
         components::muted_label(components::tooltip_label("Projects", "file.projects")),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
@@ -809,6 +853,10 @@ fn left_rail<'a>(
         ),
         SidebarSurface::GlobalSearch => global_search_rail(workspace, theme),
     };
+    let content = crate::motion::enter(
+        format!("sidebar-{:?}", workspace.sidebar_surface()),
+        content,
+    );
     container(column![Space::new().height(36), content].spacing(8))
         .padding(iced::Padding {
             top: 6.0,
@@ -1238,16 +1286,22 @@ fn hierarchy_context_overlay<'a>(
         .spacing(2);
         return stack![
             base,
-            container(opaque(hierarchy_drag::commit_on_click_away(
-                container(actions)
-                    .padding(6)
-                    .width(260)
-                    .style(move |_| components::surface(
-                        theme,
-                        Surface::Elevated,
-                        Interaction::Rest
-                    )),
-                ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
+            container(opaque(crate::motion::dismissible(
+                hierarchy_drag::commit_on_click_away(
+                    container(actions)
+                        .padding(6)
+                        .width(260)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Elevated,
+                            Interaction::Rest
+                        )),
+                    ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
+                ),
+                |_| true,
+                Some(ProjectSurfaceMessage::Project(
+                    ProjectMessage::CloseHierarchyContextMenu
+                ))
             )))
             .padding(iced::Padding {
                 left: point.x().min(window_width - 268.0).max(8.0),
@@ -1349,19 +1403,25 @@ fn hierarchy_context_overlay<'a>(
     let top = point.y().min(window_height - menu_height - 8.0).max(8.0);
     stack![
         base,
-        container(opaque(hierarchy_drag::commit_on_click_away(
-            crate::motion::enter(
-                "context menu",
-                container(actions)
-                    .padding(6)
-                    .width(HIERARCHY_CONTEXT_MENU_WIDTH)
-                    .style(move |_| components::surface(
-                        theme,
-                        Surface::Elevated,
-                        Interaction::Rest,
-                    ))
+        container(opaque(crate::motion::dismissible(
+            hierarchy_drag::commit_on_click_away(
+                crate::motion::enter(
+                    "context menu",
+                    container(actions)
+                        .padding(6)
+                        .width(HIERARCHY_CONTEXT_MENU_WIDTH)
+                        .style(move |_| components::surface(
+                            theme,
+                            Surface::Elevated,
+                            Interaction::Rest,
+                        ))
+                ),
+                ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
             ),
-            ProjectSurfaceMessage::Project(ProjectMessage::CloseHierarchyContextMenu),
+            |_| true,
+            Some(ProjectSurfaceMessage::Project(
+                ProjectMessage::CloseHierarchyContextMenu
+            ))
         )))
         .padding(iced::Padding {
             top,
@@ -1485,7 +1545,157 @@ fn global_search_rail<'a>(
     .align_y(iced::alignment::Vertical::Center)
     .spacing(2);
     let document_count = search.document_count();
+    let result_count = search.results().len();
+    let current_results = global_search_rows(workspace, search, theme, true);
+    let results: Element<'a, ProjectSurfaceMessage> = if let Some((previous, exit)) =
+        search.outgoing()
+    {
+        column![
+            crate::motion::disclosure(
+                exit,
+                focus::input_scope(global_search_rows(workspace, previous, theme, false), false),
+                Some(ProjectSurfaceMessage::Project(
+                    ProjectMessage::FinishSearchResultsExit
+                ))
+            ),
+            current_results
+        ]
+        .into()
+    } else {
+        current_results
+    };
+    let replacement_count = search
+        .results()
+        .iter()
+        .filter(|result| result.is_replaceable())
+        .count();
+    let replace = text_input("Replace with", search.replacement())
+        .id(global_replacement_input_id())
+        .on_input(|replacement| {
+            ProjectSurfaceMessage::Project(ProjectMessage::SetGlobalReplacement(replacement))
+        })
+        .padding([7, 8])
+        .width(Length::Fill)
+        .style(move |_, status| components::field_style(theme, field_interaction(status)));
+    let replace_action = harness_target::target(
+        HarnessTarget::GlobalReplacementReview,
+        button(
+            text(if search.replacement().is_empty() {
+                format!("Review {replacement_count} deletions")
+            } else if replacement_count == 1 {
+                "Review 1 replacement".to_owned()
+            } else {
+                format!("Review {replacement_count} replacements")
+            })
+            .size(13),
+        )
+        .on_press_maybe((search.is_complete() && replacement_count > 0).then_some(
+            ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
+        ))
+        .padding([5, 7])
+        .style(move |_, status| {
+            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+        }),
+    );
+    let active_trail: Element<'a, ProjectSurfaceMessage> = search
+        .active_match_id()
+        .and_then(|active| {
+            search
+                .results()
+                .iter()
+                .position(|result| result.match_id == active)
+        })
+        .map(|index| {
+            text(format!("Match {} of {}", index + 1, result_count,))
+                .size(11)
+                .color(theme.palette().secondary_text)
+                .into()
+        })
+        .unwrap_or_else(|| Space::new().height(0).into());
+    let mut content = column![
+        controls,
+        row![query, options]
+            .spacing(4)
+            .align_y(iced::alignment::Vertical::Center)
+    ]
+    .spacing(8);
+    {
+        if !workspace.replacement_preview().uses_middle_pane() {
+            content = content.push(harness_target::target(
+                HarnessTarget::GlobalReplaceToggle,
+                button(text("Replace…").size(13))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleGlobalReplace,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+            ));
+            content = content.push(crate::motion::reveal(
+                search.replace_visible(),
+                column![replace, replace_action].spacing(8),
+            ));
+        }
+        content = content.push(crate::motion::reveal(
+            !search.query().is_empty(),
+            text(if let Some(error) = search.error() {
+                error.to_owned()
+            } else if !search.is_complete() {
+                "Searching…".to_owned()
+            } else {
+                global_search_result_count_label(result_count, document_count)
+            })
+            .size(12)
+            .color(theme.palette().secondary_text),
+        ));
+    }
+    content
+        .push(
+            column![
+                active_trail,
+                crate::scroll_gate::smooth(
+                    scrollable(results)
+                        .id(HarnessTarget::GlobalSearchResults.id())
+                        .spacing(SPACING_4)
+                        .on_scroll(|viewport| ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
+                        ))
+                        .height(Length::Fill)
+                )
+            ]
+            .spacing(SPACING_12)
+            .height(Length::Fill),
+        )
+        .height(Length::Fill)
+        .into()
+}
+
+fn global_search_rows<'a>(
+    workspace: &'a ProjectWorkspace,
+    search: &'a crate::project_workspace::GlobalSearchState,
+    theme: ParchMintTheme,
+    virtual_padding: bool,
+) -> Element<'a, ProjectSurfaceMessage> {
+    let mut visible_keys = Vec::new();
     let results = search.windowed_rows().fold(column![], |column, row| {
+        let row_key = match &row {
+            GlobalSearchRow::Document { document_id, .. } => format!("document-{document_id}"),
+            GlobalSearchRow::Match(index) => format!("match-{}", search.results()[*index].match_id),
+        };
+        visible_keys.push(row_key.clone());
+        let disclosure = match &row {
+            GlobalSearchRow::Match(index) => {
+                let document = search.results()[*index].document_id.clone();
+                search
+                    .disclosure(&document)
+                    .map(|motion| (document, motion))
+            }
+            _ => None,
+        };
         let content: Element<'a, ProjectSurfaceMessage> = match row {
             GlobalSearchRow::Document {
                 document_id,
@@ -1611,131 +1821,65 @@ fn global_search_rail<'a>(
                 )
             }
         };
-        column.push(
-            container(content)
-                .height(SEARCH_ROW_HEIGHT)
-                .width(Length::Fill)
-                .clip(true),
-        )
+        let content: Element<'a, ProjectSurfaceMessage> = container(content)
+            .height(SEARCH_ROW_HEIGHT)
+            .width(Length::Fill)
+            .clip(true)
+            .into();
+        let content =
+            crate::motion::enter(format!("search-{}-{row_key}", search.generation()), content);
+        let content = crate::motion::reflow(
+            search.result_positions(),
+            row_key,
+            search.results().len() as u64,
+            true,
+            content,
+        );
+        column.push(if let Some((document, motion)) = disclosure {
+            crate::motion::disclosure(
+                motion,
+                content,
+                Some(ProjectSurfaceMessage::Project(
+                    ProjectMessage::FinishSearchDisclosure(document),
+                )),
+            )
+        } else {
+            content
+        })
     });
-    let result_count = search.results().len();
-    let results = if search.query().is_empty() {
+    search
+        .result_positions()
+        .retain(&visible_keys.iter().map(String::as_str).collect::<Vec<_>>());
+    let padding = |start, end| {
+        search.padding_segments(start, end).into_iter().fold(
+            column![],
+            |column, (height, disclosure)| {
+                let space: Element<'a, ProjectSurfaceMessage> = Space::new().height(height).into();
+                column.push(if let Some((document, motion)) = disclosure {
+                    crate::motion::disclosure(
+                        motion,
+                        space,
+                        Some(ProjectSurfaceMessage::Project(
+                            ProjectMessage::FinishSearchDisclosure(document),
+                        )),
+                    )
+                } else {
+                    space
+                })
+            },
+        )
+    };
+    let start = search.result_window_start();
+    let results = if !virtual_padding || search.query().is_empty() {
         results
     } else {
         column![
-            Space::new().height(search.result_window_start() as f32 * SEARCH_ROW_HEIGHT),
+            padding(0, start),
             results,
-            Space::new().height(search.result_window_bottom_padding()),
+            padding(start.saturating_add(SEARCH_WINDOW_ROWS), usize::MAX)
         ]
     };
-    let replacement_count = search
-        .results()
-        .iter()
-        .filter(|result| result.is_replaceable())
-        .count();
-    let replace = text_input("Replace with", search.replacement())
-        .id(global_replacement_input_id())
-        .on_input(|replacement| {
-            ProjectSurfaceMessage::Project(ProjectMessage::SetGlobalReplacement(replacement))
-        })
-        .padding([7, 8])
-        .width(Length::Fill)
-        .style(move |_, status| components::field_style(theme, field_interaction(status)));
-    let replace_action = harness_target::target(
-        HarnessTarget::GlobalReplacementReview,
-        button(
-            text(if search.replacement().is_empty() {
-                format!("Review {replacement_count} deletions")
-            } else if replacement_count == 1 {
-                "Review 1 replacement".to_owned()
-            } else {
-                format!("Review {replacement_count} replacements")
-            })
-            .size(13),
-        )
-        .on_press_maybe((search.is_complete() && replacement_count > 0).then_some(
-            ProjectSurfaceMessage::Project(ProjectMessage::OpenReplacementPreview),
-        ))
-        .padding([5, 7])
-        .style(move |_, status| {
-            components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-        }),
-    );
-    let active_trail: Element<'a, ProjectSurfaceMessage> = search
-        .active_match_id()
-        .and_then(|active| {
-            search
-                .results()
-                .iter()
-                .position(|result| result.match_id == active)
-        })
-        .map(|index| {
-            text(format!("Match {} of {}", index + 1, result_count,))
-                .size(11)
-                .color(theme.palette().secondary_text)
-                .into()
-        })
-        .unwrap_or_else(|| Space::new().height(0).into());
-    let mut content = column![
-        controls,
-        row![query, options]
-            .spacing(4)
-            .align_y(iced::alignment::Vertical::Center)
-    ]
-    .spacing(8);
-    {
-        if !workspace.replacement_preview().uses_middle_pane() {
-            content = content.push(harness_target::target(
-                HarnessTarget::GlobalReplaceToggle,
-                button(text("Replace…").size(13))
-                    .on_press(ProjectSurfaceMessage::Project(
-                        ProjectMessage::ToggleGlobalReplace,
-                    ))
-                    .style(move |_, status| {
-                        components::button_style(
-                            theme,
-                            ButtonKind::Quiet,
-                            interaction(status, false),
-                        )
-                    }),
-            ));
-            if search.replace_visible() {
-                content = content.push(column![replace, replace_action].spacing(8));
-            }
-        }
-        if !search.query().is_empty() {
-            content = content.push(
-                text(if let Some(error) = search.error() {
-                    error.to_owned()
-                } else if !search.is_complete() {
-                    "Searching…".to_owned()
-                } else {
-                    global_search_result_count_label(result_count, document_count)
-                })
-                .size(12)
-                .color(theme.palette().secondary_text),
-            );
-        }
-    }
-    content
-        .push(
-            column![
-                active_trail,
-                crate::scroll_gate::smooth(
-                    scrollable(results)
-                        .id(HarnessTarget::GlobalSearchResults.id())
-                        .spacing(SPACING_4)
-                        .on_scroll(|viewport| ProjectSurfaceMessage::Project(
-                            ProjectMessage::SetGlobalSearchScroll(viewport.absolute_offset().y)
-                        ))
-                        .height(Length::Fill)
-                )
-            ]
-            .spacing(SPACING_12)
-            .height(Length::Fill),
-        )
-        .height(Length::Fill)
-        .into()
+    results.into()
 }
 
 pub(crate) fn global_search_query_input_id() -> iced::widget::Id {
@@ -1968,7 +2112,6 @@ pub(crate) fn cards_grid<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let cards = workspace.cards();
     let targets = hierarchy_drag::targets();
-    let stable_targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
     let window = cards.viewport_window(columns, width, height);
     let coverage = CardsWindowCoverage {
@@ -1992,6 +2135,9 @@ pub(crate) fn cards_grid<'a>(
             .chain(add_ids.iter().map(String::as_str))
             .collect::<Vec<_>>(),
     );
+    workspace
+        .card_field_positions
+        .retain_card_fields(&visible.iter().map(|item| item.node_id).collect::<Vec<_>>());
     let generation = window.generation;
     let mut items = visible.into_iter().peekable();
     let mut frames: Vec<crate::card_frames::GroupFrame> = Vec::new();
@@ -2001,14 +2147,11 @@ pub(crate) fn cards_grid<'a>(
     for (row_index, grid_row) in window.rows.iter().enumerate() {
         // Iced omits a zero-height spacer from the column's child list.
         let row_index = row_index + usize::from(window.top_padding > 0.0);
-        let is_dragging = workspace.hierarchy_drag_source().is_some();
         let closes_group = grid_row
             .add_to
             .as_deref()
             .is_some_and(|id| id != cards.section_id());
-        let trailing = if is_dragging && closes_group {
-            crate::cards_layout::GROUP_GAP + 24.0
-        } else if closes_group {
+        let trailing = if closes_group {
             crate::cards_layout::GROUP_GAP + 8.0
         } else {
             0.0
@@ -2018,18 +2161,6 @@ pub(crate) fn cards_grid<'a>(
         let own_group = first
             .filter(|item| item.kind == HierarchyRowKind::Group && item.expanded)
             .map(|item| item.node_id);
-        let leading = if is_dragging && own_group.is_some() {
-            20.0
-        } else {
-            0.0
-        };
-        let own_first_child: Option<String> = own_group.and_then(|group_id| {
-            workspace
-                .displayed_explorer()
-                .row(group_id)
-                .and_then(|row| row.child_ids.first().map(|child| (*child).to_owned()))
-        });
-        let closed_group = closes_group.then(|| grid_row.add_to.as_deref().unwrap().to_owned());
         let mut current = first
             .map(|item| item.node_id)
             .or(grid_row.add_to.as_deref());
@@ -2057,13 +2188,30 @@ pub(crate) fn cards_grid<'a>(
                     starts_here: own_group == Some(id),
                     ends_here: false,
                     last_card_id: last_card_id.clone(),
+                    last_row_disclosures: grid_row.disclosures.len(),
+                    members: Vec::new(),
                 });
                 frames.len() - 1
             });
             frames[index].last_row = row_index;
             frames[index].ends_here = grid_row.add_to.as_deref() == Some(id);
             frames[index].last_card_id = last_card_id.clone();
+            frames[index].last_row_disclosures = grid_row.disclosures.len();
         }
+        let reveal_row = |mut content: Element<'a, ProjectSurfaceMessage>| {
+            for id in &grid_row.disclosures {
+                if let Some(disclosure) = workspace.cards_disclosure(id) {
+                    content = crate::motion::disclosure(
+                        disclosure,
+                        content,
+                        Some(ProjectSurfaceMessage::Project(
+                            ProjectMessage::FinishCardsGroupDisclosure(id.clone()),
+                        )),
+                    );
+                }
+            }
+            content
+        };
         let add_control = |parent: &str, depth: usize| {
             let indent = crate::cards_layout::grid_indent(depth, width);
             let control = crate::card_frames::placeholder(
@@ -2075,7 +2223,7 @@ pub(crate) fn cards_grid<'a>(
                 workspace.card_positions.clone(),
                 format!("add:{parent}"),
                 generation,
-                workspace.hierarchy_drag_source().is_some(),
+                !workspace.cards_disclosures_active(),
                 control,
             )
         };
@@ -2084,40 +2232,18 @@ pub(crate) fn cards_grid<'a>(
         {
             let indent = crate::cards_layout::grid_indent(grid_row.depth, width);
             let control = add_control(parent, grid_row.depth);
-            let slot_parent = parent.clone();
-            let row_closed_group = closed_group.clone();
-            let slot = hierarchy_drag::target_with_zone(
+            for frame in frames
+                .iter_mut()
+                .filter(|frame| frame.last_row == row_index)
+            {
+                frame.members.push((row_index, format!("add:{parent}")));
+            }
+            let slot =
                 container(row![Space::new().width(indent), control]).padding(iced::Padding {
-                    top: leading,
                     bottom: crate::project_workspace::CARDS_ROW_GAP + trailing,
                     ..iced::Padding::ZERO
-                }),
-                None,
-                &targets,
-                move |bounds, point| {
-                    if !bounds.contains(point) {
-                        return None;
-                    }
-                    if trailing > 0.0
-                        && closes_group
-                        && point.y > bounds.y + bounds.height - trailing
-                    {
-                        if let Some(group_id) = row_closed_group.as_deref() {
-                            return workspace
-                                .preview_destination(
-                                    group_id,
-                                    DragDestination::AfterSibling(group_id.to_owned()),
-                                )
-                                .map(|destination| (destination, bounds));
-                        }
-                    }
-                    let destination = DragDestination::IntoGroup(slot_parent.clone());
-                    workspace
-                        .preview_destination(&slot_parent, destination)
-                        .map(|destination| (destination, bounds))
-                },
-            );
-            grid = grid.push(slot);
+                });
+            grid = grid.push(reveal_row(slot.into()));
             continue;
         }
         let first = items.peek().expect("projected grid row");
@@ -2131,8 +2257,10 @@ pub(crate) fn cards_grid<'a>(
             .to_owned();
         let mut last_node = first.node_id.to_owned();
         let mut cells = row![].spacing(12);
+        let mut row_members = Vec::new();
         for item in items.by_ref().take(grid_row.end - grid_row.start) {
             last_node = item.node_id.to_owned();
+            row_members.push((row_index, item.node_id.to_owned()));
             cells = cells.push(outline_card(
                 workspace, theme, item, cell_width, columns, &targets, generation, false,
             ));
@@ -2145,22 +2273,14 @@ pub(crate) fn cards_grid<'a>(
             frame.last_card_id = last_card_id.clone();
         }
         if let Some(parent) = &grid_row.add_to {
-            let control = add_control(parent, grid_row.depth);
-            let slot_parent = parent.clone();
-            cells = cells.push(hierarchy_drag::target_with_zone(
-                control,
-                None,
-                &targets,
-                move |bounds, point| {
-                    if !bounds.contains(point) {
-                        return None;
-                    }
-                    let destination = DragDestination::IntoGroup(slot_parent.clone());
-                    workspace
-                        .preview_destination(&slot_parent, destination)
-                        .map(|destination| (destination, bounds))
-                },
-            ));
+            row_members.push((row_index, format!("add:{parent}")));
+            cells = cells.push(add_control(parent, grid_row.depth));
+        }
+        for frame in frames
+            .iter_mut()
+            .filter(|frame| frame.last_row == row_index)
+        {
+            frame.members.extend(row_members.iter().cloned());
         }
         let context_parent = parent.clone();
         let body = right_click::right_click_area(
@@ -2172,66 +2292,20 @@ pub(crate) fn cards_grid<'a>(
                 })
             },
         );
-        let row_parent = parent.clone();
-        let row_own_group = own_group.map(str::to_owned);
-        let row_first_child = own_first_child.clone();
-        let row_closed_group = closed_group.clone();
-        grid = grid.push(hierarchy_drag::target(
-            container(body).padding(iced::Padding {
-                top: leading,
-                bottom: trailing,
-                ..iced::Padding::ZERO
-            }),
-            None,
-            &targets,
-            move |bounds, point| {
-                if !bounds.contains(point) {
-                    return None;
-                }
-                if leading > 0.0 && point.y < bounds.y + leading {
-                    if let Some(first_child) = row_first_child.as_deref() {
-                        return workspace.preview_destination(
-                            first_child,
-                            DragDestination::BeforeSibling(first_child.to_owned()),
-                        );
-                    }
-                    if let Some(group_id) = row_own_group.as_deref() {
-                        return workspace.preview_destination(
-                            group_id,
-                            DragDestination::IntoGroup(group_id.to_owned()),
-                        );
-                    }
-                }
-                if trailing > 0.0 && closes_group && point.y > bounds.y + bounds.height - trailing {
-                    if let Some(group_id) = row_closed_group.as_deref() {
-                        return workspace.preview_destination(
-                            group_id,
-                            DragDestination::AfterSibling(group_id.to_owned()),
-                        );
-                    }
-                }
-                workspace.preview_destination(
-                    &row_parent,
-                    DragDestination::IntoGroup(row_parent.clone()),
-                )
-            },
+        grid = grid.push(reveal_row(
+            container(body)
+                .padding(iced::Padding {
+                    bottom: trailing,
+                    ..iced::Padding::ZERO
+                })
+                .into(),
         ));
     }
-    let section_id = cards.section_id().to_owned();
-    grid = grid.push(hierarchy_drag::target(
+    grid = grid.push(
         Space::new()
             .height(window.bottom_padding.max(120.0))
             .width(Length::Fill),
-        None,
-        &targets,
-        move |bounds, point| {
-            if !bounds.contains(point) {
-                return None;
-            }
-            workspace
-                .preview_destination(&section_id, DragDestination::IntoGroup(section_id.clone()))
-        },
-    ));
+    );
     if window.rows.is_empty() {
         grid = grid.push(text("Add a document or group to start your outline.").size(13));
     }
@@ -2272,30 +2346,25 @@ pub(crate) fn cards_grid<'a>(
             right_click::right_click_area(
                 crate::scroll_gate::drop_none(
                     scrollable(
-                        hierarchy_drag::target(
-                            crate::card_frames::groups(
-                                grid,
-                                frames,
-                                workspace.card_positions.clone(),
-                                theme,
-                                workspace.hierarchy_drag_destination().cloned(),
-                            ),
-                            None,
-                            &stable_targets,
-                            move |bounds, point| {
-                                bounds
-                                    .contains(point)
-                                    .then(|| {
-                                        workspace.card_drop_at(
-                                            width,
-                                            iced::Point::new(
-                                                point.x - bounds.x,
-                                                point.y - bounds.y,
-                                            ),
-                                        )
-                                    })
-                                    .flatten()
-                            }
+                        crate::card_frames::groups(
+                            grid,
+                            frames,
+                            workspace.card_positions.clone(),
+                            theme,
+                            workspace.hierarchy_drag_destination().cloned(),
+                            Some(crate::card_frames::GroupDropTargets::new(
+                                targets.clone(),
+                                cards.section_id().to_owned(),
+                                move |destination| {
+                                    let node = match &destination {
+                                        DragDestination::BeforeSibling(id)
+                                        | DragDestination::AfterSibling(id)
+                                        | DragDestination::IntoGroup(id) => id.clone(),
+                                        DragDestination::EditorPane(_) => return None,
+                                    };
+                                    workspace.preview_destination(&node, destination)
+                                },
+                            )),
                         )
                         .map(Some)
                     )
@@ -2322,7 +2391,7 @@ pub(crate) fn cards_grid<'a>(
                     }
                 )
             ),
-            stable_targets,
+            targets,
             workspace.hierarchy_drag_source().is_some(),
             |destination| ProjectSurfaceMessage::Project(ProjectMessage::PreviewHierarchyDrop {
                 surface: crate::HierarchySurface::Cards,
@@ -2474,6 +2543,7 @@ fn outline_card<'a>(
             width,
             item.synopsis_height(width),
             item.details_expanded,
+            !floating,
         )
     ]
     .spacing(4);
@@ -2481,6 +2551,7 @@ fn outline_card<'a>(
     let middle_active =
         drag_destination.as_ref() == Some(&DragDestination::IntoGroup(node_id.clone()));
     let source_active = drag_source.as_deref() == Some(node_id.as_str());
+    let hide_source_slot = source_active && !floating && drag_destination.is_none();
     let in_dragged_subtree = !floating && workspace.dragged_subtree_contains(node_id.as_str());
     let card_content = if source_active && !floating {
         container(
@@ -2495,8 +2566,7 @@ fn outline_card<'a>(
     let card = container(crate::motion::resize_height(
         node_id.clone(),
         container(card_content)
-            .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0)
-            .clip(true),
+            .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0),
     ))
     .clip(true)
     .padding(SPACING_12)
@@ -2534,6 +2604,12 @@ fn outline_card<'a>(
         // title card leaving its contents behind.
         if in_dragged_subtree && !source_active && !floating {
             style.background = Some(theme.palette().accent_subtle.into());
+        }
+        // Invalid hovers keep the source vacancy for snap-back, but do not
+        // paint it as an accepted destination.
+        if hide_source_slot {
+            style.background = None;
+            style.border.color = Color::TRANSPARENT;
         }
         if floating {
             style.background = Some(theme.palette().control_hover.into());
@@ -2597,25 +2673,68 @@ fn outline_card<'a>(
     } else {
         cards_drop_indicator(&target_node, drag_destination.as_ref(), theme, horizontal)
     };
-    let card = crate::motion::reflow(
-        workspace.card_positions.clone(),
-        node_id.clone(),
-        generation,
-        // Animate insertion previews. Disclosure changes replace entire rows,
-        // so their cards and creation slots must settle together.
-        !source_active && drag_source.is_some(),
-        card,
-    );
+    let source_destination = drag_destination
+        .clone()
+        .unwrap_or_else(|| DragDestination::BeforeSibling(node_id.clone()));
     let card = hierarchy_drag::target_with_zone(card, indicator, targets, move |bounds, point| {
-        if source_active {
+        if !bounds.contains(point) {
+            // Only the exterior gap below a collapsed group is outside it.
+            if group
+                && !expanded
+                && point.x >= bounds.x
+                && point.x <= bounds.x + bounds.width
+                && point.y >= bounds.y + bounds.height
+                && point.y < bounds.y + bounds.height + crate::project_workspace::CARDS_ROW_GAP
+            {
+                return workspace
+                    .preview_destination(
+                        &target_node,
+                        DragDestination::AfterSibling(target_node.clone()),
+                    )
+                    .map(|d| (d, bounds));
+            }
             return None;
         }
-        let destination = cards_drop_destination(kind, &target_node, bounds, point, horizontal)?;
-        let zone = cards_drop_zone(kind, &destination, bounds, horizontal);
+        if source_active {
+            return Some((source_destination.clone(), bounds));
+        }
+        let destination = if group {
+            if point.y < bounds.y + 24.0 {
+                workspace
+                    .displayed_explorer()
+                    .row(&target_node)
+                    .and_then(|row| {
+                        row.child_ids
+                            .into_iter()
+                            .find(|id| !workspace.dragged_subtree_contains(id))
+                    })
+                    .map(|id| DragDestination::BeforeSibling(id.to_owned()))
+                    .unwrap_or_else(|| DragDestination::IntoGroup(target_node.clone()))
+            } else {
+                DragDestination::IntoGroup(target_node.clone())
+            }
+        } else {
+            cards_drop_destination(kind, &target_node, bounds, point, horizontal)?
+        };
+        let zone = if group {
+            bounds
+        } else {
+            cards_drop_zone(kind, &destination, bounds, horizontal)
+        };
         workspace
             .preview_destination(&target_node, destination)
             .map(|destination| (destination, zone))
     });
+    let card = crate::motion::reflow_card(
+        workspace.card_positions.clone(),
+        node_id.clone(),
+        generation,
+        // Disclosure rows already move through height allocation. Once they
+        // finish, animate the final compact-grid packing and its siblings.
+        // Targets remain inside the same moving layer as their cards.
+        !source_active && (group || !workspace.cards_disclosures_active()),
+        card,
+    );
     column![
         card,
         Space::new().height(crate::project_workspace::CARDS_ROW_GAP)
@@ -5149,8 +5268,15 @@ fn outline_fields<'a>(
     width: f32,
     synopsis_height: f32,
     full: bool,
+    animate_fields: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let selected_id = selected.to_owned();
+    let field_motion = crate::motion::LocalPositions::new(if animate_fields {
+        workspace.card_field_positions.clone()
+    } else {
+        crate::motion::Positions::default()
+    });
+    let generation = u64::from(full);
     let inspector = workspace.inspector();
     let metadata_items = inspector
         .metadata_items(selected)
@@ -5232,17 +5358,20 @@ fn outline_fields<'a>(
                 format!("metadata-{selected}-{}", item.field_id).into(),
                 value,
             );
-            column![
-                container(
-                    text(item.label)
-                        .size(12)
-                        .color(theme.palette().secondary_text)
-                )
-                .height(Length::Shrink),
-                value,
-            ]
-            .spacing(2)
-            .into()
+            field_motion.item(
+                format!("{selected}\0{}", item.field_id),
+                generation,
+                column![
+                    container(
+                        text(item.label)
+                            .size(12)
+                            .color(theme.palette().secondary_text)
+                    )
+                    .height(Length::Shrink),
+                    value,
+                ]
+                .spacing(2),
+            )
         })
         .collect::<Vec<Element<'a, ProjectSurfaceMessage>>>();
     let mut metadata_rows = column![].spacing(6);
@@ -5300,8 +5429,12 @@ fn outline_fields<'a>(
         synopsis_editor,
         theme,
     );
-    let synopsis = harness_target::target_id(format!("synopsis-{selected}").into(), synopsis);
-    if has_metadata {
+    let synopsis = field_motion.item(
+        format!("{selected}\0synopsis"),
+        generation,
+        harness_target::target_id(format!("synopsis-{selected}").into(), synopsis),
+    );
+    let content: Element<'a, ProjectSurfaceMessage> = if has_metadata {
         if expanded_group {
             let metadata_width =
                 field_width * metadata_columns as f32 + (metadata_columns - 1) as f32 * 8.0;
@@ -5321,7 +5454,8 @@ fn outline_fields<'a>(
         }
     } else {
         synopsis
-    }
+    };
+    field_motion.group(content)
 }
 
 fn inspector<'a>(
@@ -5375,138 +5509,86 @@ fn inspector<'a>(
                 let editing = editor.editing_comment_message()
                     == Some((thread_id.as_str(), message_id.as_str()))
                     && !editor.editing_note_in_hover();
-                let note_body = crate::iced_editor_surface::note_message_body(
-                    &thread_id,
-                    message,
-                    editor,
-                    theme,
-                    !editor.editing_note_in_hover(),
-                )
-                .map(ProjectSurfaceMessage::EditorCenter);
                 let note_body: Element<'a, ProjectSurfaceMessage> = if editing {
-                    note_body
+                    crate::iced_editor_surface::note_message_body(
+                        &thread_id, message, editor, theme, true,
+                    )
+                    .map(ProjectSurfaceMessage::EditorCenter)
                 } else {
-                    container(note_body).max_height(72).clip(true).into()
+                    container(crate::iced_editor_surface::note_body_control(
+                        message.body().to_owned(),
+                        ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                            EditorMessage::BeginEditCommentMessage {
+                                thread_id: thread_id.clone(),
+                                message_id: message_id.clone(),
+                                body: message.body().to_owned(),
+                            },
+                        )),
+                        theme,
+                    ))
+                    .max_height(72)
+                    .clip(true)
+                    .into()
                 };
-                let actions: Element<'a, ProjectSurfaceMessage> = if selected_note || editing {
-                    let edit = stationary_tooltip::tooltip(
-                        harness_target::target_id(
-                            iced::widget::Id::from(format!("note-edit-{message_id}")),
-                            button(icon_sized(Icon::Rename, 15))
-                                .padding(4)
-                                .on_press(ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::BeginEditCommentMessage {
-                                            thread_id: thread_id.clone(),
-                                            message_id: message_id.clone(),
-                                            body: message.body().to_owned(),
-                                        },
-                                    ),
-                                ))
-                                .style(move |_, status| {
-                                    components::button_style(
-                                        theme,
-                                        ButtonKind::Quiet,
-                                        interaction(status, false),
-                                    )
+                let delete = stationary_tooltip::tooltip(
+                    harness_target::target_id(
+                        HarnessTarget::NoteDelete(count - 1).id(),
+                        button(icon_sized(Icon::RecentlyDeleted, 15))
+                            .padding(4)
+                            .on_press(ProjectSurfaceMessage::EditorCenter(
+                                EditorCenterMessage::Workspace(EditorMessage::RequestDeleteNote {
+                                    thread_id: thread_id.clone(),
+                                    message_id: message_id.clone(),
                                 }),
-                        ),
-                        text("Edit note").size(12),
-                        components::surface(theme, Surface::Elevated, Interaction::Rest),
-                    );
-                    let delete = stationary_tooltip::tooltip(
-                        harness_target::target_id(
-                            HarnessTarget::NoteDelete(count - 1).id(),
-                            button(icon_sized(Icon::RecentlyDeleted, 15))
-                                .padding(4)
-                                .on_press(ProjectSurfaceMessage::EditorCenter(
-                                    EditorCenterMessage::Workspace(
-                                        EditorMessage::RequestDeleteNote {
-                                            thread_id: thread_id.clone(),
-                                            message_id: message_id.clone(),
-                                        },
-                                    ),
-                                ))
-                                .style(move |_, status| {
-                                    components::button_style(
-                                        theme,
-                                        ButtonKind::Quiet,
-                                        interaction(status, false),
-                                    )
-                                }),
-                        ),
-                        text("Delete note").size(12),
-                        components::surface(theme, Surface::Elevated, Interaction::Rest),
-                    );
-                    row![edit, delete]
-                        .spacing(2)
-                        .align_y(iced::alignment::Vertical::Center)
-                        .into()
-                } else {
-                    Space::new().width(0).height(0).into()
-                };
-                let header_label = document_title.clone().unwrap_or_else(|| "Note".to_owned());
-                let mut card = column![
+                            ))
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, false),
+                                )
+                            }),
+                    ),
+                    text("Delete note").size(12),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest),
+                );
+                let mut card = column![].spacing(SPACING_8);
+                if let Some(document_title) = &document_title {
+                    card = card.push(components::muted_label(document_title.clone()));
+                }
+                card = card.push(
                     row![
-                        components::muted_label(header_label).width(Length::Fill),
-                        actions,
+                        crate::iced_editor_surface::note_quote(quote.clone(), theme, 52.0),
+                        delete,
                     ]
                     .spacing(4)
                     .align_y(iced::alignment::Vertical::Center),
-                    container(components::muted_label(quote.clone()))
-                        .max_height(18)
-                        .clip(true),
-                    note_body,
-                ]
-                .spacing(4);
-                if editor.pending_delete_note() == Some((thread_id.as_str(), message_id.as_str())) {
-                    card = card.push(
-                        column![
-                            text("Delete this note?").size(12),
-                            row![
-                                button("Delete")
-                                    .on_press(ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::ConfirmDeleteNote
-                                        )
-                                    ))
-                                    .style(move |_, status| components::button_style(
-                                        theme,
-                                        ButtonKind::Destructive,
-                                        interaction(status, false)
-                                    )),
-                                button("Cancel")
-                                    .on_press(ProjectSurfaceMessage::EditorCenter(
-                                        EditorCenterMessage::Workspace(
-                                            EditorMessage::CancelDeleteNote
-                                        )
-                                    ))
-                                    .style(move |_, status| components::button_style(
-                                        theme,
-                                        ButtonKind::Quiet,
-                                        interaction(status, false)
-                                    )),
-                            ]
-                            .spacing(6),
-                        ]
-                        .spacing(4),
-                    );
-                }
+                );
+                card = card.push(note_body);
                 notes = notes.push(
                     mouse_area(
                         container(card)
-                            .padding(SPACING_8)
+                            .padding(SPACING_12)
                             .width(Length::Fill)
-                            .style(move |_| {
-                                components::surface(
-                                    theme,
-                                    Surface::Panel,
+                            .style(move |_| iced::widget::container::Style {
+                                background: Some(
                                     if selected_note {
-                                        Interaction::Selected
+                                        theme.palette().accent_subtle
                                     } else {
-                                        Interaction::Rest
+                                        theme.palette().panel
+                                    }
+                                    .into(),
+                                ),
+                                border: Border {
+                                    color: if selected_note {
+                                        theme.palette().accent
+                                    } else {
+                                        theme.palette().divider
                                     },
-                                )
+                                    width: 1.0,
+                                    radius: 5.0.into(),
+                                },
+                                ..Default::default()
                             }),
                     )
                     .on_press(ProjectSurfaceMessage::EditorCenter(
@@ -5712,6 +5794,48 @@ fn status_pane_button<'a>(
         container(text(components::tooltip_label(label, command)).size(12)).padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     )
+}
+
+fn note_delete_dialog(theme: ParchMintTheme) -> Element<'static, ProjectSurfaceMessage> {
+    container(
+        column![
+            text("Delete note?").size(18),
+            text("Remove this note from the document?").size(13),
+            row![
+                Space::new().width(Length::Fill),
+                focus::region(
+                    focus::modal_cancel_id(),
+                    button("Cancel")
+                        .on_press(ProjectSurfaceMessage::EditorCenter(
+                            EditorCenterMessage::Workspace(EditorMessage::CancelDeleteNote)
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Secondary,
+                            interaction(status, false)
+                        )),
+                ),
+                focus::region(
+                    focus::modal_confirm_id(),
+                    button("Delete note")
+                        .on_press(ProjectSurfaceMessage::EditorCenter(
+                            EditorCenterMessage::Workspace(EditorMessage::ConfirmDeleteNote)
+                        ))
+                        .style(move |_, status| components::button_style(
+                            theme,
+                            ButtonKind::Destructive,
+                            interaction(status, false)
+                        )),
+                )
+            ]
+            .spacing(8),
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .width(Length::Fixed(440.0))
+    .style(move |_| components::surface(theme, Surface::Dialog, Interaction::Rest))
+    .into()
 }
 
 fn modal_view<'a>(
@@ -7000,7 +7124,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_comment_is_rendered_first_in_the_read_only_inspector_index() {
+    fn note_body_edits_inline_and_unselected_notes_keep_delete_control() {
         let (mut workspace, ids) = production_workspace();
         workspace.update(ProjectMessage::ToggleHierarchyExpanded(ids.group));
         workspace.update(ProjectMessage::SelectHierarchy {
@@ -7066,8 +7190,28 @@ mod tests {
             .messages()[0]
             .id()
             .to_owned();
+        let unselected_thread = workspace.editor().inspector_comments()[0].id().to_owned();
+        simulator.click(HarnessTarget::NoteDelete(0).id()).unwrap();
+        assert!(matches!(
+            simulator.into_messages().collect::<Vec<_>>().as_slice(),
+            [ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                EditorMessage::RequestDeleteNote { thread_id, .. }
+            ))] if thread_id == &unselected_thread
+        ));
+        let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(1_440.0, 900.0),
+            native_project_surface(
+                &workspace,
+                RibbonDestination::Editor,
+                theme,
+                text("Editor").into(),
+                &layout,
+                [true; 3],
+            ),
+        );
         simulator
-            .click(iced::widget::Id::from(format!("note-edit-{message_id}")))
+            .click("A long selected comment that must leave room for its unresolved status")
             .unwrap();
         assert!(
             matches!(simulator.into_messages().collect::<Vec<_>>().as_slice(),
@@ -7556,6 +7700,7 @@ mod tests {
 
     #[test]
     fn hierarchy_context_actions_publish_their_project_commands() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::OpenHierarchyContextMenu {
             node_id: "part-one".to_owned(),
@@ -7700,6 +7845,7 @@ mod tests {
 
     #[test]
     fn hierarchy_context_delete_action_targets_the_right_clicked_document() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         workspace.update(ProjectMessage::OpenHierarchyContextMenu {
             node_id: "chapter-one".to_owned(),
@@ -8127,6 +8273,7 @@ mod tests {
 
     #[test]
     fn rendered_organize_cards_and_editor_flow_share_selection_and_mutation_intent() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
 
         let messages = interact(&workspace, RibbonDestination::Editor, |explorer| {
@@ -8417,6 +8564,7 @@ mod tests {
 
     #[test]
     fn rendered_history_restore_confirms_before_emitting_its_project_effect() {
+        let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::History);
 
         let messages = interact(&workspace, RibbonDestination::History, |history| {

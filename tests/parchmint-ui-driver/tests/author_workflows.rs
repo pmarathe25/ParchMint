@@ -964,8 +964,8 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         "the Inspector is a document-level index of the newly attached thread"
     );
     harness
-        .click_text(HarnessWindow::Project, "Verify the weather detail.")
-        .expect("navigate to a newly created, unsaved comment from the Inspector");
+        .click_text(HarnessWindow::Project, "“lighthouse keeper”")
+        .expect("navigate to the annotated manuscript text from the Inspector quote");
     harness
         .press_command_key(HarnessWindow::Project, 'c')
         .unwrap();
@@ -981,7 +981,7 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
         .expect("hover the attached comment anchor");
     assert!(
-        visible(&harness, "Notes"),
+        visible(&harness, "Verify the weather detail."),
         "the attached-note preview should appear beside the manuscript anchor; hover state: {}",
         harness
             .comment_hover_status()
@@ -991,14 +991,14 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "keeper")
         .expect("move within the commented selection");
     assert!(
-        visible(&harness, "Notes"),
+        visible(&harness, "Verify the weather detail."),
         "the preview must remain anchored while the cursor moves within its commented text"
     );
     harness
         .move_pointer_to_editor_text(HarnessWindow::Project, EditorPane::Primary, "storm.")
         .expect("move away from the attached comment anchor");
     assert!(
-        !visible(&harness, "Notes"),
+        !visible(&harness, "Verify the weather detail."),
         "the transient note preview should dismiss after the pointer leaves its anchor; hover state: {}",
         harness
             .comment_hover_status()
@@ -1010,16 +1010,40 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_text(HarnessWindow::Project, "Verify the weather detail.")
         .expect("edit the hovered note in place");
+    assert!(
+        harness
+            .target_is_focused(HarnessWindow::Project, HarnessTarget::CommentEdit)
+            .expect("inspect inline note focus"),
+        "clicking a note body should place the caret in its editor"
+    );
+    harness
+        .replace_target(
+            HarnessWindow::Project,
+            HarnessTarget::CommentEdit,
+            "Discard this temporary change.",
+        )
+        .expect("replace the note body in the anchored editor");
+    harness
+        .press_key(HarnessWindow::Project, HarnessKey::Escape)
+        .expect("Escape cancels an inline note edit");
+    harness
+        .move_pointer_to_comment_anchor(HarnessWindow::Project, EditorPane::Primary)
+        .expect("show the original note after cancelling its edit");
+    assert!(visible(&harness, "Verify the weather detail."));
+    assert!(!visible(&harness, "Discard this temporary change."));
+    harness
+        .click_text(HarnessWindow::Project, "Verify the weather detail.")
+        .expect("reopen the inline note editor");
     harness
         .replace_target(
             HarnessWindow::Project,
             HarnessTarget::CommentEdit,
             "Verify the storm detail.",
         )
-        .expect("replace the note body in the anchored editor");
+        .expect("replace the note body again");
     harness
-        .click_text(HarnessWindow::Project, "Save note")
-        .expect("save the edited note");
+        .press_key(HarnessWindow::Project, HarnessKey::Enter)
+        .expect("Enter commits an inline note edit");
     assert!(visible(&harness, "Verify the storm detail."));
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ToggleInspector)
@@ -1028,9 +1052,9 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::NoteDelete(0))
         .expect("request note deletion through its icon");
-    assert!(visible(&harness, "Delete this note?"));
+    assert!(visible(&harness, "Delete note?"));
     harness
-        .click_text(HarnessWindow::Project, "Delete")
+        .click_text(HarnessWindow::Project, "Delete note")
         .expect("confirm note deletion");
     assert!(!visible(&harness, "Verify the storm detail."));
     harness

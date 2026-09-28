@@ -14,15 +14,23 @@ pub struct IsolatedRun {
 impl IsolatedRun {
     pub fn new(label: &str) -> std::io::Result<Self> {
         static NEXT_RUN: AtomicU64 = AtomicU64::new(1);
-        let root = fs::canonicalize(std::env::temp_dir())?.join(format!(
-            "parchmint-ui-{label}-{}-{}",
-            std::process::id(),
-            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
-        ));
-        if root.exists() {
-            fs::remove_dir_all(&root)?;
-        }
-        fs::create_dir_all(&root)?;
+        let temporary = fs::canonicalize(std::env::temp_dir())?;
+        let root = loop {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let candidate = temporary.join(format!(
+                "parchmint-ui-{label}-{}-{stamp}-{}",
+                std::process::id(),
+                NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&candidate) {
+                Ok(()) => break candidate,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
         Ok(Self { root })
     }
 

@@ -1,7 +1,7 @@
 //! Popovers anchored to editor geometry, with one continuous hover region.
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
-    widget::{Operation, Tree},
+    widget::{Operation, Tree, tree},
 };
 use iced::{Element, Event, Length, Point, Rectangle, Size, Vector};
 
@@ -34,7 +34,20 @@ struct Anchored<'a, M> {
     dismissal: Dismissal,
     dismiss: M,
 }
+struct PopoverMotion {
+    disclosure: crate::motion::Disclosure,
+    delivered: bool,
+}
 impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Anchored<'_, M> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<PopoverMotion>()
+    }
+    fn state(&self) -> tree::State {
+        tree::State::new(PopoverMotion {
+            disclosure: crate::motion::Disclosure::new(true),
+            delivered: false,
+        })
+    }
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.body), Tree::new(&self.card)]
     }
@@ -129,6 +142,7 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Anchored<'_, M> {
             height: self.anchor.height(),
         };
         Some(overlay::Element::new(Box::new(Popover {
+            motion: tree.state.downcast_mut::<PopoverMotion>(),
             card: &mut self.card,
             tree: &mut tree.children[1],
             anchor,
@@ -139,6 +153,7 @@ impl<M: Clone> Widget<M, iced::Theme, iced::Renderer> for Anchored<'_, M> {
     }
 }
 struct Popover<'a, 'b, M> {
+    motion: &'a mut PopoverMotion,
     card: &'a mut Element<'b, M>,
     tree: &'a mut Tree,
     anchor: Rectangle,
@@ -174,6 +189,26 @@ impl<M: Clone> overlay::Overlay<M, iced::Theme, iced::Renderer> for Popover<'_, 
         clipboard: &mut dyn Clipboard,
         shell: &mut Shell<'_, M>,
     ) {
+        if !self.motion.disclosure.visible() {
+            if let Event::Window(iced::window::Event::RedrawRequested(_)) = event {
+                if self.motion.disclosure.active() {
+                    shell.request_redraw();
+                } else if !self.motion.delivered {
+                    self.motion.delivered = true;
+                    shell.publish(self.dismiss.clone());
+                }
+            }
+            // A hover returning during the exit reverses the same surface.
+            if self.dismissal == Dismissal::Hover
+                && (cursor.is_over(layout.bounds()) || cursor.is_over(self.anchor))
+            {
+                self.motion.disclosure.set(true);
+                self.motion.delivered = false;
+                shell.request_redraw();
+            } else {
+                return;
+            }
+        }
         self.card.as_widget_mut().update(
             self.tree,
             event,
@@ -213,7 +248,12 @@ impl<M: Clone> overlay::Overlay<M, iced::Theme, iced::Renderer> for Popover<'_, 
                         ))
                     )))
         {
-            shell.publish(self.dismiss.clone());
+            if crate::motion::enabled() {
+                self.motion.disclosure.set(false);
+                shell.request_redraw();
+            } else {
+                shell.publish(self.dismiss.clone());
+            }
         }
         // Empty space and disabled controls belong to the popover too. Never
         // let their pointer events place a caret in the document underneath.
@@ -229,9 +269,28 @@ impl<M: Clone> overlay::Overlay<M, iced::Theme, iced::Renderer> for Popover<'_, 
         layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
-        self.card
-            .as_widget()
-            .draw(self.tree, r, theme, style, layout, cursor, &self.viewport);
+        use renderer::Renderer;
+        let bounds = layout.bounds();
+        let fraction = self.motion.disclosure.visible_fraction();
+        if fraction > 0.0 {
+            r.with_layer(
+                Rectangle {
+                    height: bounds.height * fraction,
+                    ..bounds
+                },
+                |r| {
+                    self.card.as_widget().draw(
+                        self.tree,
+                        r,
+                        theme,
+                        style,
+                        layout,
+                        cursor,
+                        &self.viewport,
+                    );
+                },
+            );
+        }
     }
     fn mouse_interaction(
         &self,
@@ -266,6 +325,7 @@ mod tests {
 
     #[test]
     fn hover_bridge_and_card_keep_the_anchor_stable_then_dismiss_outside() {
+        let _settled = crate::motion::SettledMotion::new();
         let card = container(button(text("Reply")).on_press("reply"))
             .width(220)
             .height(120);

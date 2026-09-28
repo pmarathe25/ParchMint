@@ -1,5 +1,8 @@
 //! Short, interruptible motion driven only by requested redraws.
 
+mod dismiss;
+pub(crate) use dismiss::dismissible;
+
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, overlay, renderer,
     widget::{Operation, Tree, tree},
@@ -8,10 +11,11 @@ use iced::{Element, Event, Length, Point, Rectangle, Size, Vector, mouse};
 use std::{
     cell::Cell,
     collections::BTreeMap,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
-pub(crate) const LAYOUT: Duration = Duration::from_millis(220);
+pub(crate) const LAYOUT: Duration = Duration::from_millis(200);
 const ENTRANCE: Duration = Duration::from_millis(140);
 thread_local! {
     static CAPTURE: Cell<bool> = const { Cell::new(false) };
@@ -85,6 +89,55 @@ fn clipped_cursor(cursor: mouse::Cursor, bounds: Rectangle) -> mouse::Cursor {
     }
 }
 
+/// Material's standard curve: accelerate promptly, then settle gently. Solving
+/// the cubic's X coordinate keeps timing correct (the Bezier parameter is not
+/// elapsed time). Used by shared surfaces, panes, disclosures and reordering.
+fn standard_easing(time: f32) -> f32 {
+    if time <= 0.0 || time >= 1.0 {
+        return time.clamp(0.0, 1.0);
+    }
+    let mut low: f32 = 0.0;
+    let mut high: f32 = 1.0;
+    for _ in 0..16 {
+        let t = (low + high) * 0.5;
+        let x = 3.0 * (1.0 - t).powi(2) * t * 0.4 + 3.0 * (1.0 - t) * t * t * 0.2 + t * t * t;
+        if x < time {
+            low = t;
+        } else {
+            high = t;
+        }
+    }
+    let t = (low + high) * 0.5;
+    3.0 * (1.0 - t) * t * t + t * t * t
+}
+
+/// A single interruptible timeline shared by every row of a disclosure.
+/// Keeping this in workspace state lets newly mounted rows join the same
+/// expansion and keeps outgoing rows mounted until their collapse finishes.
+#[derive(Clone, Debug)]
+pub(crate) struct Disclosure(Tween);
+impl Disclosure {
+    pub(crate) fn new(visible: bool) -> Self {
+        Self(Tween::new(f32::from(visible), now(), LAYOUT))
+    }
+    pub(crate) fn set(&mut self, visible: bool) {
+        self.0.set(f32::from(visible), now(), enabled());
+    }
+    pub(crate) fn visible_fraction(&self) -> f32 {
+        if enabled() {
+            self.0.value(now())
+        } else {
+            self.0.target
+        }
+    }
+    pub(crate) fn active(&self) -> bool {
+        enabled() && self.0.active(now())
+    }
+    pub(crate) fn visible(&self) -> bool {
+        self.0.target > 0.0
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Tween {
     from: f32,
@@ -105,7 +158,7 @@ impl Tween {
         let t = (now.saturating_duration_since(self.started).as_secs_f32()
             / self.duration.as_secs_f32())
         .clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - t).powi(3);
+        let eased = standard_easing(t);
         self.from + (self.target - self.from) * eased
     }
     fn active(&self, now: Instant) -> bool {
@@ -143,6 +196,7 @@ pub(crate) fn row<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a,
     Element::new(MotionRow {
         slots,
         animated: true,
+        shrink: false,
         page: String::new(),
     })
 }
@@ -158,7 +212,20 @@ pub(crate) fn row_for_page<'a, Message: 'a>(
     Element::new(MotionRow {
         slots,
         animated: true,
+        shrink: false,
         page: page.into(),
+    })
+}
+
+/// A compact fixed-slot row whose outside bounds follow the reveal itself.
+/// Used by shared header controls so an outer container cannot cut the exit
+/// short by snapping immediately to the final collapsed width.
+pub(crate) fn row_shrink<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        shrink: true,
+        page: String::new(),
     })
 }
 
@@ -166,12 +233,14 @@ pub(crate) fn row_instant<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Ele
     Element::new(MotionRow {
         slots,
         animated: false,
+        shrink: false,
         page: String::new(),
     })
 }
 struct MotionRow<'a, Message> {
     slots: Vec<Slot<'a, Message>>,
     animated: bool,
+    shrink: bool,
     page: String,
 }
 struct RowState {
@@ -236,7 +305,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         );
     }
     fn size(&self) -> Size<Length> {
-        Size::new(Length::Fill, Length::Fill)
+        Size::new(
+            if self.shrink {
+                Length::Shrink
+            } else {
+                Length::Fill
+            },
+            Length::Fill,
+        )
     }
     fn layout(
         &mut self,
@@ -245,7 +321,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         limits: &layout::Limits,
     ) -> layout::Node {
         let state = tree.state.downcast_mut::<RowState>();
-        let size = limits.max();
+        let mut size = limits.max();
         let fractions: Vec<f32> = self
             .slots
             .iter()
@@ -267,6 +343,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 _ => 0.0,
             })
             .sum();
+        if self.shrink {
+            size.width = fixed.min(size.width);
+        }
         let weight: f32 = self
             .slots
             .iter()
@@ -522,6 +601,9 @@ pub(crate) fn enter<'a, Message: 'a>(
         content: content.into(),
         reveal: None,
         resize: false,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -533,6 +615,9 @@ pub(crate) fn reveal<'a, Message: 'a>(
         content: content.into(),
         reveal: Some(visible),
         resize: false,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
     })
 }
 /// Animate allocated height so following rows move with the card boundary.
@@ -545,19 +630,45 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         content: content.into(),
         reveal: Some(true),
         resize: true,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
     })
 }
+/// Reveal rows from their top edge without sliding their text against the
+/// movement of the containing group. Pass a completion message on one row per
+/// group so the workspace can discard retained collapsing descendants.
+pub(crate) fn disclosure<'a, Message: 'a>(
+    timeline: Disclosure,
+    content: impl Into<Element<'a, Message>>,
+    on_complete: Option<Message>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: String::new(),
+        content: content.into(),
+        reveal: Some(timeline.visible()),
+        resize: false,
+        disclosure: Some(timeline),
+        on_complete,
+        origin: None,
+    })
+}
+
 struct Entrance<'a, Message> {
     key: String,
     content: Element<'a, Message>,
     reveal: Option<bool>,
     resize: bool,
+    disclosure: Option<Disclosure>,
+    on_complete: Option<Message>,
+    origin: Option<Rc<Cell<Point>>>,
 }
 struct EntranceState {
     height: f32,
     key: String,
     progress: Tween,
     now: Instant,
+    completed: Option<Instant>,
 }
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -566,13 +677,18 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
     fn state(&self) -> tree::State {
         let now = now();
         let duration = if self.resize { LAYOUT } else { ENTRANCE };
-        let mut progress = Tween::new(f32::from(self.reveal.unwrap_or(false)), now, duration);
+        let mut progress = Tween::new(
+            f32::from(self.reveal.unwrap_or(self.origin.is_some())),
+            now,
+            duration,
+        );
         progress.set(f32::from(self.reveal.unwrap_or(true)), now, enabled());
         tree::State::new(EntranceState {
             height: 0.0,
             key: self.key.clone(),
             progress,
             now,
+            completed: None,
         })
     }
     fn children(&self) -> Vec<Tree> {
@@ -582,6 +698,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         let state = tree.state.downcast_mut::<EntranceState>();
         if state.key != self.key {
             state.key = self.key.clone();
+            // Virtualized rows reuse widget trees. A new identity has no
+            // relationship to the previous card's measured height.
+            if self.resize {
+                state.height = 0.0;
+            }
             state.now = now();
             state.progress =
                 Tween::new(0.0, state.now, if self.resize { LAYOUT } else { ENTRANCE });
@@ -607,12 +728,14 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         limits: &layout::Limits,
     ) -> layout::Node {
         let state = tree.state.downcast_mut::<EntranceState>();
-        let progress = if enabled() {
+        let progress = if let Some(disclosure) = &self.disclosure {
+            disclosure.visible_fraction()
+        } else if enabled() {
             state.progress.value(state.now)
         } else {
             f32::from(self.reveal.unwrap_or(true))
         };
-        let offset = if self.reveal.is_none() {
+        let offset = if self.reveal.is_none() && self.origin.is_none() {
             8.0 * (1.0 - progress)
         } else {
             0.0
@@ -632,7 +755,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             state.now = now;
             size.height = state.progress.value(now);
         } else if self.reveal.is_some() {
-            if self.reveal == Some(true) || state.height == 0.0 {
+            if self.disclosure.is_some() || self.reveal == Some(true) || state.height == 0.0 {
                 state.height = size.height;
             }
             size.height = state.height * progress;
@@ -650,14 +773,26 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if let Some(origin) = &self.origin {
+            origin.set(layout.position());
+        }
         let state = tree.state.downcast_mut::<EntranceState>();
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            if state.progress.active(state.now) {
+            let progress = self
+                .disclosure
+                .as_ref()
+                .map_or(&state.progress, |value| &value.0);
+            if progress.active(state.now) {
                 shell.invalidate_layout();
             }
             state.now = *now;
-            if enabled() && state.progress.active(*now) {
+            if enabled() && progress.active(*now) {
                 shell.request_redraw();
+            } else if self.disclosure.is_some() && state.completed != Some(progress.started) {
+                state.completed = Some(progress.started);
+                if let Some(message) = self.on_complete.take() {
+                    shell.publish(message);
+                }
             }
         }
         if self.reveal == Some(false) {
@@ -748,6 +883,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         if self.reveal == Some(false) {
             return mouse::Interaction::None;
         }
+        let cursor = if self.reveal.is_some() {
+            clipped_cursor(cursor, layout.bounds())
+        } else {
+            cursor
+        };
         self.content.as_widget().mouse_interaction(
             &tree.children[0],
             layout.child(0),
@@ -779,11 +919,60 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct Positions(std::sync::Arc<std::sync::Mutex<BTreeMap<String, Placement>>>);
+/// Position field blocks relative to their own card, so card travel and field
+/// rearrangement compose without applying the parent's translation twice.
+#[derive(Clone)]
+pub(crate) struct LocalPositions {
+    positions: Positions,
+    origin: Rc<Cell<Point>>,
+}
+impl LocalPositions {
+    pub(crate) fn new(positions: Positions) -> Self {
+        Self {
+            positions,
+            origin: Rc::new(Cell::new(Point::ORIGIN)),
+        }
+    }
+    pub(crate) fn item<'a, Message: 'a>(
+        &self,
+        id: String,
+        generation: u64,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        Element::new(Reflow {
+            positions: self.positions.clone(),
+            id,
+            generation,
+            animate: true,
+            origin: Some(self.origin.clone()),
+            both_axes: true,
+            morph_width: false,
+            content: content.into(),
+        })
+    }
+    pub(crate) fn group<'a, Message: 'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        Element::new(Entrance {
+            key: String::new(),
+            content: content.into(),
+            reveal: None,
+            resize: false,
+            disclosure: None,
+            on_complete: None,
+            origin: Some(self.origin.clone()),
+        })
+    }
+}
+
 #[derive(Debug)]
 struct Placement {
     generation: u64,
     target: Point,
     width: f32,
+    width_motion: Tween,
+    height_motion: Tween,
     x: Tween,
     y: Tween,
 }
@@ -793,6 +982,13 @@ impl Positions {
             .lock()
             .expect("motion positions")
             .retain(|id, _| ids.contains(&id.as_str()));
+    }
+
+    pub(crate) fn retain_card_fields(&self, ids: &[&str]) {
+        self.0.lock().expect("motion positions").retain(|key, _| {
+            key.split_once('\0')
+                .is_some_and(|(node, _)| ids.contains(&node))
+        });
     }
 
     pub(crate) fn vertical_offset(&self, id: &str, now: Instant) -> f32 {
@@ -816,14 +1012,42 @@ pub(crate) fn reflow<'a, Message: 'a>(
         id: id.into(),
         generation,
         animate,
+        origin: None,
+        both_axes: false,
+        morph_width: false,
         content: content.into(),
     })
 }
+/// Overview card surfaces change width while their content remains real text.
+/// The grid reserves final slots; the moving surface interpolates its measured
+/// width rather than scaling typography or snapping between card and heading.
+pub(crate) fn reflow_card<'a, Message: 'a>(
+    positions: Positions,
+    id: impl Into<String>,
+    generation: u64,
+    animate: bool,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Reflow {
+        positions,
+        id: id.into(),
+        generation,
+        animate,
+        origin: None,
+        both_axes: true,
+        morph_width: true,
+        content: content.into(),
+    })
+}
+
 struct Reflow<'a, Message> {
     positions: Positions,
     id: String,
     generation: u64,
     animate: bool,
+    origin: Option<Rc<Cell<Point>>>,
+    both_axes: bool,
+    morph_width: bool,
     content: Element<'a, Message>,
 }
 struct ReflowState {
@@ -865,11 +1089,38 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
         } else {
             Vector::ZERO
         };
-        let child = self
-            .content
-            .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits);
-        layout::Node::with_children(child.size(), vec![child.move_to(Point::ORIGIN + offset)])
+        let mut child =
+            self.content
+                .as_widget_mut()
+                .layout(&mut tree.children[0], renderer, limits);
+        let allocated = child.size();
+        if self.morph_width {
+            let at = now();
+            let width = {
+                let mut positions = self.positions.0.lock().expect("motion positions");
+                positions.get_mut(&self.id).map(|place| {
+                    place
+                        .width_motion
+                        .set(allocated.width, at, self.animate && enabled());
+                    let morphing = place.width_motion.active(at) || place.height_motion.active(at);
+                    place.height_motion.set(
+                        allocated.height,
+                        at,
+                        self.animate && enabled() && morphing,
+                    );
+                    place.width_motion.value(at)
+                })
+            };
+            if let Some(width) = width.filter(|width| (*width - allocated.width).abs() > 0.1) {
+                let full = Size::new(width.max(1.0), limits.max().height);
+                child = self.content.as_widget_mut().layout(
+                    &mut tree.children[0],
+                    renderer,
+                    &layout::Limits::new(Size::new(full.width, 0.0), full),
+                );
+            }
+        }
+        layout::Node::with_children(allocated, vec![child.move_to(Point::ORIGIN + offset)])
     }
     fn update(
         &mut self,
@@ -883,7 +1134,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
         viewport: &Rectangle,
     ) {
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            let target = layout.position();
+            let target = self.origin.as_ref().map_or(layout.position(), |origin| {
+                Point::ORIGIN + (layout.position() - origin.get())
+            });
             let mut positions = self.positions.0.lock().expect("motion positions");
             let place = positions
                 .entry(self.id.clone())
@@ -891,15 +1144,21 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     generation: self.generation,
                     target,
                     width: layout.bounds().width,
+                    width_motion: Tween::new(layout.bounds().width, *now, LAYOUT),
+                    height_motion: Tween::new(layout.bounds().height, *now, LAYOUT),
                     x: Tween::new(target.x, *now, LAYOUT),
                     y: Tween::new(target.y, *now, LAYOUT),
                 });
             let resized = (place.width - layout.bounds().width).abs() > 0.5;
             if place.target != target || resized || !self.animate || !enabled() {
-                // A full-width group heading cannot travel through its former
-                // compact card slot without covering neighboring cards.
-                let animate =
-                    self.animate && enabled() && !resized && place.generation != self.generation;
+                // Growing to a full-width heading cannot travel through the
+                // former compact row without covering its neighbors. A heading
+                // that has become compact can travel back into its packed row.
+                let grew = layout.bounds().width > place.width + 0.5;
+                let animate = self.animate
+                    && enabled()
+                    && (!grew || self.both_axes)
+                    && place.generation != self.generation;
                 if animate {
                     // Material motion: list elements travel vertically from
                     // their start to their end. A group expanding downward
@@ -913,7 +1172,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     let dx = (target.x - current_x).abs();
                     let dy = (target.y - current_y).abs();
                     let animate_y = dy >= 1.0;
-                    let animate_x = dx >= 1.0 && dy < 1.0;
+                    let animate_x = dx >= 1.0 && (dy < 1.0 || self.both_axes);
                     place.x.set(target.x, *now, animate_x);
                     place.y.set(target.y, *now, animate_y);
                 } else {
@@ -924,6 +1183,20 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             place.generation = self.generation;
             place.target = target;
             place.width = layout.bounds().width;
+            if !self.morph_width {
+                place.width_motion.set(place.width, *now, false);
+                place.height_motion.set(layout.bounds().height, *now, false);
+            }
+            if self.morph_width {
+                if place.width_motion.active(*now)
+                    || (layout.child(0).bounds().width - place.width).abs() > 0.1
+                {
+                    shell.invalidate_layout();
+                }
+                if place.width_motion.active(*now) || place.height_motion.active(*now) {
+                    shell.request_redraw();
+                }
+            }
             let offset = if enabled() {
                 Vector::new(
                     place.x.value(*now) - target.x,
@@ -941,6 +1214,21 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                 shell.request_redraw();
             }
         }
+        // A redraw can advance the translation before Iced lays out the next
+        // frame. Hit testing must use the same correction as drawing, so card
+        // targets follow the visible card even on that first moving frame.
+        let correction = tree.state.downcast_ref::<ReflowState>().offset
+            - (layout.child(0).position() - layout.position());
+        let cursor = cursor
+            .position()
+            .map_or(mouse::Cursor::Unavailable, |point| {
+                mouse::Cursor::Available(point - correction)
+            });
+        let viewport = Rectangle {
+            x: viewport.x - correction.x,
+            y: viewport.y - correction.y,
+            ..*viewport
+        };
         self.content.as_widget_mut().update(
             &mut tree.children[0],
             event,
@@ -949,7 +1237,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             renderer,
             clipboard,
             shell,
-            viewport,
+            &viewport,
         );
     }
     fn draw(
@@ -969,8 +1257,31 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             Vector::ZERO
         };
         let correction = desired - (layout.child(0).position() - layout.position());
-        // A settled card needs no extra GPU layer; keep clipping while it moves.
-        if correction == Vector::ZERO {
+        let visible_height = self
+            .morph_width
+            .then(|| {
+                self.positions
+                    .0
+                    .lock()
+                    .expect("motion positions")
+                    .get(&self.id)
+                    .filter(|place| enabled() && place.height_motion.active(now()))
+                    .map(|place| place.height_motion.value(now()))
+            })
+            .flatten();
+        let clip = visible_height
+            .and_then(|height| {
+                viewport.intersection(&Rectangle {
+                    x: layout.child(0).bounds().x + correction.x,
+                    y: layout.child(0).bounds().y + correction.y,
+                    width: layout.child(0).bounds().width,
+                    height,
+                })
+            })
+            .unwrap_or(*viewport);
+        // Retain the source height when packing moves a header into a new row
+        // and therefore mounts a fresh child widget tree.
+        if correction == Vector::ZERO && visible_height.is_none() {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
@@ -982,7 +1293,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             );
             return;
         }
-        renderer.with_layer(*viewport, |renderer| {
+        renderer.with_layer(clip, |renderer| {
             renderer.with_translation(correction, |renderer| {
                 self.content.as_widget().draw(
                     &tree.children[0],
@@ -1062,7 +1373,7 @@ impl Default for MenuMotion {
     fn default() -> Self {
         let now = now();
         Self {
-            progress: Tween::new(1.0, now, ENTRANCE),
+            progress: Tween::new(0.0, now, ENTRANCE),
             now,
         }
     }
@@ -1070,8 +1381,13 @@ impl Default for MenuMotion {
 impl MenuMotion {
     pub(crate) fn start(&mut self) {
         self.now = now();
-        self.progress = Tween::new(0.0, self.now, ENTRANCE);
         self.progress.set(1.0, self.now, enabled());
+    }
+    pub(crate) fn close(&mut self) {
+        self.progress.set(0.0, now(), enabled());
+    }
+    pub(crate) fn exiting(&self) -> bool {
+        enabled() && self.progress.target == 0.0 && self.progress.active(now())
     }
     pub(crate) fn overlay<'a, Message: 'a>(
         &'a mut self,
@@ -1116,6 +1432,9 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer> for MenuEnt
                 shell.request_redraw();
             }
         }
+        if self.motion.progress.target == 0.0 {
+            return;
+        }
         self.content
             .as_overlay_mut()
             .update(event, layout, cursor, renderer, clipboard, shell);
@@ -1128,9 +1447,27 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer> for MenuEnt
         layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
-        self.content
-            .as_overlay()
-            .draw(renderer, theme, style, layout, cursor);
+        use renderer::Renderer;
+        let bounds = layout.bounds();
+        let fraction = if enabled() {
+            self.motion.progress.value(self.motion.now)
+        } else {
+            self.motion.progress.target
+        };
+        if fraction <= 0.0 {
+            return;
+        }
+        renderer.with_layer(
+            Rectangle {
+                height: bounds.height * fraction,
+                ..bounds
+            },
+            |renderer| {
+                self.content
+                    .as_overlay()
+                    .draw(renderer, theme, style, layout, cursor);
+            },
+        );
     }
     fn operate(
         &mut self,
@@ -1164,6 +1501,282 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer> for MenuEnt
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn project_selector_width_follows_its_exit_instead_of_clipping_it_immediately() {
+        set_reduced(false);
+        let at = now();
+        let _clock = FixedTime::new(at);
+        let renderer = renderer();
+        let make = |visible| {
+            row_shrink(vec![
+                slot(
+                    iced::widget::Space::new().width(48).height(48),
+                    Length::Fixed(48.0),
+                    true,
+                ),
+                slot(
+                    iced::widget::Space::new().width(280).height(48),
+                    Length::Fixed(280.0),
+                    visible,
+                ),
+            ])
+        };
+        let mut element: Element<'_, ()> = make(true);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(900.0, 48.0));
+        let original = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(original.size().width, 328.0);
+        element = make(false);
+        tree.diff(&element);
+        let initial = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(initial.size().width, 328.0);
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &initial,
+            at + LAYOUT / 2,
+        );
+        let middle = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert!(middle.size().width > 48.0 && middle.size().width < 328.0);
+        frame(&mut element, &mut tree, &renderer, &middle, at + LAYOUT);
+        assert_eq!(
+            element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .width,
+            48.0
+        );
+    }
+
+    #[test]
+    fn fields_move_on_both_axes_in_card_coordinates_when_the_card_itself_moves() {
+        set_reduced(false);
+        let at = now();
+        let _clock = FixedTime::new(at);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let make = |generation, left, top| {
+            let fields = LocalPositions::new(positions.clone());
+            fields.group(
+                iced::widget::container(fields.item(
+                    "field".into(),
+                    generation,
+                    iced::widget::Space::new().width(80).height(30),
+                ))
+                .padding(iced::Padding {
+                    left,
+                    top,
+                    ..iced::Padding::ZERO
+                }),
+            )
+        };
+        let mut element: Element<'_, ()> = make(0, 0.0, 100.0);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let original = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(20.0, 40.0));
+        frame(&mut element, &mut tree, &renderer, &original, at);
+        element = make(1, 300.0, 0.0);
+        tree.diff(&element);
+        let destination = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(100.0, 200.0));
+        frame(&mut element, &mut tree, &renderer, &destination, at);
+        {
+            let values = positions.0.lock().unwrap();
+            let field = &values["field"];
+            assert_eq!(field.target, Point::new(300.0, 0.0));
+            assert_eq!(field.x.value(at), 0.0);
+            assert_eq!(field.y.value(at), 100.0);
+        }
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &destination,
+            at + LAYOUT / 2,
+        );
+        let values = positions.0.lock().unwrap();
+        assert!(values["field"].x.value(at + LAYOUT / 2) > 0.0);
+        assert!(values["field"].y.value(at + LAYOUT / 2) < 100.0);
+    }
+
+    #[test]
+    fn moving_card_hit_target_matches_the_first_rendered_animation_frame() {
+        set_reduced(false);
+        let at = now();
+        let _clock = FixedTime::new(at);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let targets = crate::hierarchy_drag::targets();
+        let make = |generation| {
+            reflow(
+                positions.clone(),
+                "card",
+                generation,
+                true,
+                crate::hierarchy_drag::target(
+                    iced::widget::Space::new().width(100).height(40),
+                    None,
+                    &targets,
+                    |bounds, point| bounds.contains(point).then_some("card"),
+                ),
+            )
+        };
+        let mut card: Element<'_, ()> = make(0);
+        let mut tree = Tree::new(&card);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(400.0, 900.0));
+        let initial = card
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(0.0, 20.0));
+        frame(&mut card, &mut tree, &renderer, &initial, at);
+        card = make(1);
+        tree.diff(&card);
+        let destination = card
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(0.0, 220.0));
+        let mut messages = Vec::new();
+        card.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(at)),
+            Layout::new(&destination),
+            mouse::Cursor::Available(Point::new(30.0, 40.0)),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(Size::new(400.0, 900.0)),
+        );
+        assert_eq!(targets.borrow().as_ref().map(|(id, _)| *id), Some("card"));
+    }
+
+    #[test]
+    fn material_standard_curve_is_monotonic_and_settles_exactly() {
+        assert_eq!(standard_easing(0.0), 0.0);
+        assert_eq!(standard_easing(1.0), 1.0);
+        let samples: Vec<_> = (0..=100)
+            .map(|i| standard_easing(i as f32 / 100.0))
+            .collect();
+        assert!(samples.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(standard_easing(0.1) < 0.1, "surfaces accelerate from rest");
+        assert!(
+            standard_easing(0.5) > 0.7,
+            "surfaces decelerate before settling"
+        );
+    }
+
+    #[test]
+    fn recycled_card_height_does_not_inherit_an_unrelated_card_animation() {
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let mut card: Element<'_, ()> =
+            resize_height("old", iced::widget::Space::new().height(192));
+        let mut tree = Tree::new(&card);
+        card.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        card = resize_height("new", iced::widget::Space::new().height(400));
+        tree.diff(&card);
+        assert_eq!(
+            card.as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            400.0
+        );
+    }
+
+    #[test]
+    fn disclosure_rows_reveal_downward_and_reverse_without_jumping() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let mut timeline = Disclosure::new(false);
+        timeline.set(true);
+        let make =
+            |timeline| disclosure(timeline, iced::widget::Space::new().height(200), None::<()>);
+        let mut row = make(timeline.clone());
+        let mut tree = Tree::new(&row);
+        let start = row.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(start.size().height, 0.0);
+        FRAME_TIME.set(Some(now() + LAYOUT / 2));
+        let middle = row.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert!(middle.size().height > 0.0 && middle.size().height < 200.0);
+        assert_eq!(
+            middle.children()[0].bounds().y,
+            0.0,
+            "content stays anchored to the group top"
+        );
+        assert_eq!(
+            middle.children()[0].size().height,
+            200.0,
+            "text keeps its natural geometry"
+        );
+        timeline.set(false);
+        row = make(timeline.clone());
+        tree.diff(&row);
+        let reversed = row.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(reversed.size().height, middle.size().height);
+        FRAME_TIME.set(Some(now() + LAYOUT));
+        assert!(!timeline.active());
+        assert_eq!(
+            row.as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            0.0
+        );
+    }
+
+    #[test]
+    fn disclosure_completion_is_sent_once_and_reduced_motion_settles() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let mut timeline = Disclosure::new(true);
+        timeline.set(false);
+        let mut row = disclosure(
+            timeline.clone(),
+            iced::widget::Space::new().height(200),
+            Some("done"),
+        );
+        let mut tree = Tree::new(&row);
+        let node = row.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        let mut messages = Vec::new();
+        FRAME_TIME.set(Some(now() + LAYOUT));
+        for _ in 0..2 {
+            row.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(now())),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(320.0, 900.0)),
+            );
+        }
+        assert_eq!(messages, vec!["done"]);
+        timeline.set(true);
+        set_reduced(true);
+        assert_eq!(timeline.visible_fraction(), 1.0);
+        assert!(!timeline.active());
+        set_reduced(false);
+    }
+
     #[test]
     fn expanded_height_moves_following_rows_without_overlap() {
         let _clock = FixedTime::new(Instant::now());
@@ -1545,7 +2158,173 @@ mod tests {
     }
 
     #[test]
-    fn a_group_changing_width_does_not_slide_over_its_previous_row() {
+    fn group_header_width_morphs_without_scaling_or_changing_row_allocation() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let positions = Positions::default();
+        let make = |width, generation| {
+            reflow_card(
+                positions.clone(),
+                "header",
+                generation,
+                true,
+                iced::widget::Space::new().width(width).height(100),
+            )
+        };
+        let mut element: Element<'_, ()> = make(800.0, 1);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(&mut element, &mut tree, &renderer, &node, now());
+        element = make(200.0, 2);
+        tree.diff(&element);
+        let start = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(start.size().width, 200.0);
+        assert_eq!(start.children()[0].size().width, 800.0);
+        FRAME_TIME.set(Some(now() + LAYOUT / 2));
+        let middle = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert!(middle.children()[0].size().width > 200.0);
+        assert!(middle.children()[0].size().width < 800.0);
+        assert_eq!(middle.children()[0].size().height, 100.0);
+        FRAME_TIME.set(Some(now() + LAYOUT));
+        let end = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        assert_eq!(end.children()[0].size().width, 200.0);
+    }
+
+    #[test]
+    fn packed_header_retains_its_height_when_the_grid_mounts_a_new_widget_tree() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let positions = Positions::default();
+        let mut expanded: Element<'_, ()> = reflow_card(
+            positions.clone(),
+            "header",
+            1,
+            true,
+            iced::widget::Space::new().width(800).height(84),
+        );
+        let mut tree = Tree::new(&expanded);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let node = expanded
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(&mut expanded, &mut tree, &renderer, &node, now());
+        let mut packed: Element<'_, ()> = reflow_card(
+            positions.clone(),
+            "header",
+            2,
+            true,
+            iced::widget::Space::new().width(200).height(112),
+        );
+        let mut new_tree = Tree::new(&packed);
+        packed
+            .as_widget_mut()
+            .layout(&mut new_tree, &renderer, &limits);
+        assert_eq!(
+            positions.0.lock().unwrap()["header"]
+                .height_motion
+                .value(now()),
+            84.0
+        );
+        FRAME_TIME.set(Some(now() + LAYOUT));
+        assert_eq!(
+            positions.0.lock().unwrap()["header"]
+                .height_motion
+                .value(now()),
+            112.0
+        );
+    }
+
+    #[test]
+    fn menu_exit_retains_geometry_and_reverses_without_restarting() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let mut menu = MenuMotion::default();
+        assert!(!menu.exiting());
+        menu.start();
+        FRAME_TIME.set(Some(now() + ENTRANCE));
+        menu.close();
+        assert!(menu.exiting());
+        FRAME_TIME.set(Some(now() + ENTRANCE / 2));
+        let middle = menu.progress.value(now());
+        assert!(middle > 0.0 && middle < 1.0);
+        menu.start();
+        assert_eq!(menu.progress.value(now()), middle);
+        set_reduced(true);
+        menu.close();
+        assert!(!menu.exiting());
+        set_reduced(false);
+    }
+
+    #[test]
+    fn overlay_escape_retains_content_and_delivers_action_once_after_exit() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let mut element = dismissible(
+            iced::widget::Space::new().width(100).height(100),
+            |_| true,
+            Some("close"),
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let mut messages = Vec::new();
+        let escape = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Escape),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::empty(),
+            text: None,
+            repeat: false,
+        });
+        for (advance, event) in [
+            (Duration::ZERO, escape),
+            (
+                ENTRANCE / 2,
+                Event::Window(iced::window::Event::RedrawRequested(now() + ENTRANCE / 2)),
+            ),
+            (
+                ENTRANCE,
+                Event::Window(iced::window::Event::RedrawRequested(now() + ENTRANCE)),
+            ),
+            (
+                ENTRANCE,
+                Event::Window(iced::window::Event::RedrawRequested(now() + ENTRANCE)),
+            ),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(Size::new(320.0, 900.0)),
+            );
+            if advance < ENTRANCE {
+                assert!(messages.is_empty());
+            }
+        }
+        assert_eq!(messages, vec!["close"]);
+    }
+
+    #[test]
+    fn a_group_growing_to_full_width_does_not_slide_over_its_previous_row() {
         set_reduced(false);
         let renderer = renderer();
         let positions = Positions::default();
@@ -1583,6 +2362,59 @@ mod tests {
             &expanded,
             start + Duration::from_millis(16),
         );
+        assert_eq!(
+            tree.state.downcast_ref::<ReflowState>().offset,
+            Vector::ZERO
+        );
+    }
+
+    #[test]
+    fn collapsing_group_travels_back_to_its_compact_row_after_content_reveal() {
+        set_reduced(false);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let mut element: Element<'_, ()> = reflow(
+            positions.clone(),
+            "group",
+            1,
+            false,
+            iced::widget::Space::new().width(800).height(100),
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let start = Instant::now();
+        let expanded = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(0.0, 120.0));
+        frame(&mut element, &mut tree, &renderer, &expanded, start);
+        element = reflow(
+            positions,
+            "group",
+            2,
+            true,
+            iced::widget::Space::new().width(200).height(100),
+        );
+        tree.diff(&element);
+        let compact = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(220.0, 0.0));
+        frame(&mut element, &mut tree, &renderer, &compact, start);
+        assert_eq!(
+            tree.state.downcast_ref::<ReflowState>().offset,
+            Vector::new(0.0, 120.0)
+        );
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &compact,
+            start + LAYOUT / 2,
+        );
+        let middle = tree.state.downcast_ref::<ReflowState>().offset;
+        assert!(middle.y > 0.0 && middle.y < 120.0);
+        frame(&mut element, &mut tree, &renderer, &compact, start + LAYOUT);
         assert_eq!(
             tree.state.downcast_ref::<ReflowState>().offset,
             Vector::ZERO

@@ -982,3 +982,90 @@ fn close(harness: DesktopInteractionHarness) {
         .expect("close project");
     harness.shutdown().expect("stop application");
 }
+
+#[test]
+fn nested_group_drop_stays_inside_its_rendered_destination() {
+    use std::time::Duration;
+    let run = IsolatedRun::new("nested-group-hover").unwrap();
+    let harness = create_project(&run, &run.root().join("chapters.parchmint"), "Chapters");
+    harness
+        .resize(HarnessWindow::Project, 1280.0, 900.0)
+        .unwrap();
+    create_group(&harness, "Manuscript", "Part I");
+    create_group(&harness, "Part I", "Chapter 1");
+    create_group(&harness, "Part I", "Chapter 2");
+    for title in ["Station", "Map room", "Door"] {
+        create_document(&harness, "Chapter 1", title);
+    }
+    for title in ["Copper wire", "Night watch"] {
+        create_document(&harness, "Chapter 2", title);
+    }
+    harness
+        .click_target(
+            HarnessWindow::Project,
+            HarnessTarget::Ribbon(RibbonDestination::Cards),
+        )
+        .unwrap();
+    let source = harness.hierarchy_node("Chapter 1").unwrap();
+    let destination = harness.hierarchy_node("Chapter 2").unwrap();
+    let original = harness.hierarchy_titles().unwrap();
+    // Repeat from the same hierarchy so a cancelled prior route cannot poison
+    // the next hover. Advance through the moving preview without pointer input.
+    for attempt in 0..3 {
+        harness
+            .preview_hierarchy_move(
+                HarnessWindow::Project,
+                HarnessHierarchySurface::Cards,
+                source.clone(),
+                destination.clone(),
+                HarnessDropPosition::Into,
+            )
+            .unwrap();
+        harness
+            .advance_motion(HarnessWindow::Project, Duration::from_millis(140))
+            .unwrap();
+        let preview = harness.preview_hierarchy_titles().unwrap();
+        assert_order(
+            &preview,
+            &["Chapter 2", "Copper wire", "Night watch", "Chapter 1"],
+        );
+        for _ in 0..4 {
+            harness
+                .advance_motion(HarnessWindow::Project, Duration::from_millis(60))
+                .unwrap();
+            assert_eq!(harness.preview_hierarchy_titles().unwrap(), preview);
+        }
+        if attempt < 2 {
+            harness
+                .move_pointer_outside(HarnessWindow::Project)
+                .unwrap();
+            harness
+                .release_hierarchy_drag(HarnessWindow::Project)
+                .unwrap();
+            assert_eq!(harness.hierarchy_titles().unwrap(), original);
+        } else {
+            harness
+                .release_hierarchy_drag(HarnessWindow::Project)
+                .unwrap();
+            let entries = harness.hierarchy().unwrap();
+            let chapter1 = entries
+                .iter()
+                .find(|entry| entry.title == "Chapter 1")
+                .unwrap();
+            let chapter2 = entries
+                .iter()
+                .find(|entry| entry.title == "Chapter 2")
+                .unwrap();
+            assert_eq!(chapter1.parent_id.as_deref(), Some(chapter2.id.as_str()));
+            assert!(
+                harness
+                    .cards_node_is_visible(
+                        HarnessWindow::Project,
+                        harness.hierarchy_node("Station").unwrap()
+                    )
+                    .unwrap()
+            );
+        }
+    }
+    close(harness);
+}
