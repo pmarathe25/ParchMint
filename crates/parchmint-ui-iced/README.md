@@ -78,12 +78,21 @@ History opens from the clicked tab or outline entry, independently of editor
 focus. Document restores replace that document's sessions while retaining other
 documents' undo.
 
+Loading notes for an Explorer group only hydrates missing documents and their
+notes. It neither marks the project dirty nor enters the save lane. Re-submitting
+unchanged project fields also avoids command dispatch and saving.
+
 Overview has independent section and disclosure state. Groups share the document
 card surface and enclose their nested contents. Group frames follow allocated row
 heights during animations and remain continuous across virtualized windows.
 Creation slots use muted icons, transparent fills, and dashed borders.
 Group headings toggle their children; group synopsis and metadata remain fully
-visible. Document cards place a compact metadata grid below the synopsis.
+visible. Opening a group first morphs its compact card into a wide heading,
+then reveals descendants downward; these phases must not overlap because the
+heading becomes shorter and would pull visible descendants upwards. Closing
+reverses that order. Space released by the heading stays at the group bottom
+until the children fill it, keeping following groups from moving up and then down.
+Document cards place a compact metadata grid below the synopsis.
 Collapsed cards show fields marked visible, including dashes for empty
 values; dragging between the named Settings sections changes that visibility with
 the same threshold, floating copy, and drop indicator as cards. New fields start
@@ -103,9 +112,10 @@ rendered controls and delayed completion delivery.
 
 ## Motion
 
-One deadline subscription handles pending spelling, Inspector edits, layout writes,
+One deadline subscription handles pending spelling, Inspector edits,
 notifications, autosave, and recovery. Clean windows have no polling timer;
-unchanged recovery projections are skipped. Animations schedule their own frames.
+unchanged recovery projections are skipped. Workspace layout stays in memory until
+explicit Save, a completed content save, or close. Animations schedule their own frames.
 
 `motion.rs` provides interruptible pane resizing, disclosures, card/tab reflow,
 and small entrances. `motion/dismiss.rs` retains dialogs and context menus through

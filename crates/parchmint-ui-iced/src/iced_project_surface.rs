@@ -791,33 +791,45 @@ fn ribbon<'a>(
             .width(Length::Fill),
         ),
     );
-    let mut content = row![tools]
-        .align_y(iced::alignment::Vertical::Center)
-        .spacing(8);
-    if let Some(pane) = expanded {
-        content = content.push(focus::f6_region(
-            F6Region::ModeSwitch,
-            harness_target::target(
-                HarnessTarget::PaneFocus(pane),
-                button(
-                    row![
-                        icon_sized(Icon::RestoreLayout, 16),
-                        text("Exit focus").size(13)
-                    ]
-                    .spacing(6),
-                )
-                .on_press(ProjectSurfaceMessage::EditorCenter(
-                    EditorCenterMessage::Workspace(crate::EditorMessage::TogglePaneFocus(pane)),
-                ))
-                .style(move |_, status| {
-                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
-                }),
-            ),
-        ));
-    }
+    let pane = expanded.unwrap_or(workspace.editor().focused_pane());
+    let exit = focus::f6_region(
+        F6Region::ModeSwitch,
+        harness_target::target(
+            HarnessTarget::PaneFocus(pane),
+            button(
+                row![
+                    icon_sized(Icon::RestoreLayout, 16),
+                    text("Exit focus").size(13)
+                ]
+                .spacing(6)
+                .align_y(iced::alignment::Vertical::Center),
+            )
+            .height(32)
+            .on_press(ProjectSurfaceMessage::EditorCenter(
+                EditorCenterMessage::Workspace(crate::EditorMessage::TogglePaneFocus(pane)),
+            ))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            }),
+        ),
+    );
+    let content = row![
+        tools,
+        container(crate::motion::row_shrink(vec![crate::motion::slot(
+            container(exit).padding(iced::Padding {
+                left: 8.0,
+                ..iced::Padding::ZERO
+            }),
+            Length::Fixed(120.0),
+            expanded.is_some(),
+        )]))
+        .height(32),
+    ]
+    .align_y(iced::alignment::Vertical::Center);
     container(content)
         .padding([6, 12])
         .height(f32::from(RIBBON_HEIGHT))
+        .align_y(iced::alignment::Vertical::Center)
         .width(Length::Fill)
         .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
         .into()
@@ -2210,6 +2222,9 @@ pub(crate) fn cards_grid<'a>(
                     );
                 }
             }
+            if grid_row.tail_reserve > 0.0 {
+                content = column![content, Space::new().height(grid_row.tail_reserve)].into();
+            }
             content
         };
         let add_control = |parent: &str, depth: usize| {
@@ -2423,6 +2438,11 @@ fn outline_card<'a>(
     let drag_destination = workspace.hierarchy_drag_destination().cloned();
     let node_id = item.node_id.to_owned();
     let group = item.kind == HierarchyRowKind::Group;
+    let heading_motion = crate::motion::LocalPositions::new(if !floating {
+        workspace.card_field_positions.clone()
+    } else {
+        crate::motion::Positions::default()
+    });
     let title = text(item.title)
         .size(item.title_size())
         .font(item.title_font())
@@ -2430,13 +2450,28 @@ fn outline_card<'a>(
         .wrapping(text::Wrapping::WordOrGlyph)
         .width(Length::Fill);
     let mut heading = row![].spacing(6).align_y(iced::alignment::Vertical::Center);
+    let title: Element<'a, ProjectSurfaceMessage> = if group {
+        heading_motion.item(
+            format!("{node_id}\0title"),
+            u64::from(item.expanded),
+            container(title)
+                .height(item.heading_height(width))
+                .clip(true),
+        )
+    } else {
+        title.into()
+    };
     heading = heading.push(title);
-    heading = heading.push(
-        text(word_count_label(item.words))
-            .font(crate::cards_layout::CARD_FONT)
-            .size(12)
-            .color(theme.palette().secondary_text),
-    );
+    let count = text(word_count_label(item.words))
+        .font(crate::cards_layout::CARD_FONT)
+        .size(12)
+        .color(theme.palette().secondary_text);
+    let count: Element<'a, ProjectSurfaceMessage> = if group {
+        heading_motion.item(format!("{node_id}\0words"), u64::from(item.expanded), count)
+    } else {
+        count.into()
+    };
+    heading = heading.push(count);
     let heading: Element<'a, ProjectSurfaceMessage> = if group {
         row![
             harness_target::target_id(
@@ -2468,6 +2503,11 @@ fn outline_card<'a>(
         .into()
     } else {
         heading.into()
+    };
+    let heading = if group {
+        heading_motion.group(heading)
+    } else {
+        heading
     };
     let heading: Element<'a, ProjectSurfaceMessage> = if let Some((id, draft)) = workspace
         .hierarchy_rename()
@@ -2528,7 +2568,7 @@ fn outline_card<'a>(
         container(heading)
             .width(Length::Fill)
             .height(item.heading_height(width))
-            .clip(true)
+            .clip(!group)
     ]
     .spacing(4);
     if !group && (item.details_expanded || item.needs_expansion(width)) {
@@ -2563,65 +2603,69 @@ fn outline_card<'a>(
     } else {
         card_content
     };
-    let card = container(crate::motion::resize_height(
-        node_id.clone(),
-        container(card_content)
-            .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0),
-    ))
-    .clip(true)
-    .padding(SPACING_12)
-    .width(Length::Fill)
-    .style(move |_| {
-        let mut style = iced::widget::container::Style {
-            background: (!(group && item.expanded && !floating) && (item.depth == 0 || floating))
-                .then_some(theme.palette().panel.into()),
-            border: Border {
-                color: theme.palette().divider,
-                width: if group && item.expanded && !floating {
-                    0.0
-                } else {
-                    1.0
+    let content = container(card_content)
+        .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0);
+    let content = if group {
+        crate::motion::resize_group_height(node_id.clone(), content)
+    } else {
+        crate::motion::resize_height(node_id.clone(), content)
+    };
+    let card = container(content)
+        .clip(!group)
+        .padding(SPACING_12)
+        .width(Length::Fill)
+        .style(move |_| {
+            let mut style = iced::widget::container::Style {
+                background: (!(group && item.expanded && !floating)
+                    && (item.depth == 0 || floating))
+                    .then_some(theme.palette().panel.into()),
+                border: Border {
+                    color: theme.palette().divider,
+                    width: if group && item.expanded && !floating {
+                        0.0
+                    } else {
+                        1.0
+                    },
+                    radius: 5.0.into(),
                 },
-                radius: 5.0.into(),
-            },
-            ..Default::default()
-        };
-        if !floating && !group && (item.selected || source_active || middle_active) {
-            style.border.color = theme.palette().accent;
-            style.border.width = 1.0;
-        }
-        if group && item.selected {
-            style.background = Some(theme.palette().control_hover.into());
-        }
-        if group && middle_active {
-            style.border.color = Color::TRANSPARENT;
-        }
-        if !floating && (source_active || middle_active) {
-            style.background = Some(theme.palette().accent_subtle.into());
-        }
-        // A dragged group's descendants travel with it: tint the whole
-        // subtree so the drag reads as one atomic unit instead of a lone
-        // title card leaving its contents behind.
-        if in_dragged_subtree && !source_active && !floating {
-            style.background = Some(theme.palette().accent_subtle.into());
-        }
-        // Invalid hovers keep the source vacancy for snap-back, but do not
-        // paint it as an accepted destination.
-        if hide_source_slot {
-            style.background = None;
-            style.border.color = Color::TRANSPARENT;
-        }
-        if floating {
-            style.background = Some(theme.palette().control_hover.into());
-            style.border.color = theme.palette().strong_border;
-            style.shadow = iced::Shadow {
-                color: theme.palette().scrim.scale_alpha(0.4),
-                offset: iced::Vector::new(2.0, 4.0),
-                blur_radius: 10.0,
+                ..Default::default()
             };
-        }
-        style
-    });
+            if !floating && !group && (item.selected || source_active || middle_active) {
+                style.border.color = theme.palette().accent;
+                style.border.width = 1.0;
+            }
+            if group && item.selected {
+                style.background = Some(theme.palette().control_hover.into());
+            }
+            if group && middle_active {
+                style.border.color = Color::TRANSPARENT;
+            }
+            if !floating && (source_active || middle_active) {
+                style.background = Some(theme.palette().accent_subtle.into());
+            }
+            // A dragged group's descendants travel with it: tint the whole
+            // subtree so the drag reads as one atomic unit instead of a lone
+            // title card leaving its contents behind.
+            if in_dragged_subtree && !source_active && !floating {
+                style.background = Some(theme.palette().accent_subtle.into());
+            }
+            // Invalid hovers keep the source vacancy for snap-back, but do not
+            // paint it as an accepted destination.
+            if hide_source_slot {
+                style.background = None;
+                style.border.color = Color::TRANSPARENT;
+            }
+            if floating {
+                style.background = Some(theme.palette().control_hover.into());
+                style.border.color = theme.palette().strong_border;
+                style.shadow = iced::Shadow {
+                    color: theme.palette().scrim.scale_alpha(0.4),
+                    offset: iced::Vector::new(2.0, 4.0),
+                    blur_radius: 10.0,
+                };
+            }
+            style
+        });
     if floating {
         return card.into();
     }
@@ -2725,7 +2769,7 @@ fn outline_card<'a>(
             .preview_destination(&target_node, destination)
             .map(|destination| (destination, zone))
     });
-    let card = crate::motion::reflow_card(
+    let card = crate::motion::reflow_card_height(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
@@ -2733,6 +2777,7 @@ fn outline_card<'a>(
         // finish, animate the final compact-grid packing and its siblings.
         // Targets remain inside the same moving layer as their cards.
         !source_active && (group || !workspace.cards_disclosures_active()),
+        group.then(|| item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP),
         card,
     );
     column![
@@ -5221,7 +5266,7 @@ fn inline_outline_field<'a>(
     value: &'a str,
     placeholder: &'a str,
     size: u16,
-    height: f32,
+    height: Length,
     editor: Option<Element<'a, ProjectSurfaceMessage>>,
     theme: ParchMintTheme,
 ) -> Element<'a, ProjectSurfaceMessage> {
@@ -5284,11 +5329,11 @@ fn outline_fields<'a>(
         .filter(|item| full || item.visible_on_cards)
         .collect::<Vec<_>>();
     let has_metadata = !metadata_items.is_empty();
-    let expanded_group = full
-        && workspace
-            .explorer()
-            .row(selected)
-            .is_some_and(|row| row.kind == HierarchyRowKind::Group);
+    let group = workspace
+        .explorer()
+        .row(selected)
+        .is_some_and(|row| row.kind == HierarchyRowKind::Group);
+    let expanded_group = full && group;
     let metadata_columns =
         crate::cards_layout::metadata_columns(width, expanded_group, metadata_items.len());
     let field_width = crate::cards_layout::metadata_width(width, expanded_group, metadata_columns);
@@ -5350,7 +5395,11 @@ fn outline_fields<'a>(
                 value,
                 "—",
                 13,
-                height,
+                if expanded_group {
+                    Length::Shrink
+                } else {
+                    Length::Fixed(height)
+                },
                 editor,
                 theme,
             );
@@ -5425,7 +5474,11 @@ fn outline_fields<'a>(
             .map_or("", |item| item.synopsis),
         "What happens here?",
         14,
-        synopsis_height,
+        if expanded_group {
+            Length::Shrink
+        } else {
+            Length::Fixed(synopsis_height)
+        },
         synopsis_editor,
         theme,
     );
@@ -6257,6 +6310,32 @@ mod tests {
 
     use super::*;
     use crate::EditorPane;
+
+    #[test]
+    fn formatting_controls_are_centered_in_the_ribbon() {
+        let workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        for width in [600, 1000] {
+            let mut simulator = Simulator::<ProjectSurfaceMessage>::with_size(
+                Settings::default(),
+                Size::new(width as f32, f32::from(RIBBON_HEIGHT)),
+                ribbon(
+                    &workspace,
+                    "Project",
+                    RibbonDestination::Editor,
+                    theme,
+                    width,
+                ),
+            );
+            for target in [HarnessTarget::Bold, HarnessTarget::ListBulleted] {
+                let bounds = simulator.find(target.id()).unwrap().bounds();
+                assert!(
+                    (bounds.center_y() - f32::from(RIBBON_HEIGHT) / 2.0).abs() < 0.5,
+                    "{target:?} is vertically offset: {bounds:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn cards_scroll_rebuilds_before_the_viewport_leaves_mounted_rows() {

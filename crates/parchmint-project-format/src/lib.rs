@@ -227,6 +227,23 @@ impl CanonicalManifest {
     pub fn value(&self) -> &toml::Value {
         &self.0
     }
+
+    /// Compares authored values, excluding the persistence frontier and revision
+    /// counters. These counters must remain in saved files for recovery, but a
+    /// change to them alone is not a new version of the author's project.
+    pub fn authored_eq(&self, other: &Self) -> bool {
+        let authored = |manifest: &Self| {
+            let mut value = manifest.0.clone();
+            if let Some(root) = value.as_table_mut() {
+                root.remove("parchmint-persistence");
+                if let Some(project) = root.get_mut("project").and_then(toml::Value::as_table_mut) {
+                    project.remove("revision");
+                }
+            }
+            value
+        };
+        authored(self) == authored(other)
+    }
 }
 
 /// A canonical semantic stylesheet.

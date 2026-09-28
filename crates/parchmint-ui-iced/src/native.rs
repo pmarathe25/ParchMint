@@ -1278,7 +1278,6 @@ struct NativeProjectState {
     /// snapshot, so generated files never silently omit current writing.
     pending_export: Option<PendingExport>,
     autosave: AutosaveState,
-    workspace_persist_due: Option<Instant>,
     /// The most recent project-wide search entered while a mounted draft is
     /// being persisted. The search starts from the freshly indexed snapshot.
     pending_global_search: Option<SearchRequest>,
@@ -1324,7 +1323,6 @@ impl NativeProjectState {
         persistence
             .into_iter()
             .chain(self.pending_spellchecks.values().copied())
-            .chain(self.workspace_persist_due)
             .chain(
                 self.deferred_inspector_commits
                     .pending
@@ -1691,6 +1689,7 @@ fn next_persistent_mutation_lane(
 #[derive(Debug, Clone)]
 enum PersistentMutationTerminal {
     ProjectSucceeded(ProjectMutationTicket),
+    ProjectUnchanged(ProjectMutationTicket),
     ProjectDiscarded(ProjectMutationTicket),
     ProjectEffectFailed(ProjectMutationTicket),
     ProjectSaveFailed(ProjectMutationTicket),
@@ -2834,6 +2833,11 @@ impl NativeDesktop {
                 state.autosave.save_in_flight = false;
                 let close_after_save = state.autosave.close_after_save;
                 state.autosave.close_after_save = false;
+                let persist = if run.result.is_ok() {
+                    Self::workspace_persist_task(window, state)
+                } else {
+                    Task::none()
+                };
                 match run.result {
                     Ok(completion) => {
                         state.autosave.finish_save(&ticket);
@@ -2848,31 +2852,33 @@ impl NativeDesktop {
                             && !state.project_mutations.blocks_close()
                             && !state.opaque_mutations.blocks_close()
                         {
-                            return self.continue_close_window(window);
+                            return persist.chain(self.continue_close_window(window));
                         } else if close_after_save {
                             state.autosave.close_after_save = true;
                         } else if state.autosave.explicit_save_waiting
                             && !state.project_mutations.blocks_close()
                             && !state.opaque_mutations.blocks_close()
                         {
-                            return self.start_projection_save(window, ProjectSaveKind::Explicit);
+                            return persist.chain(
+                                self.start_projection_save(window, ProjectSaveKind::Explicit),
+                            );
                         } else if let Some(export) = state.pending_export.take() {
-                            return Self::export_task(
+                            return persist.chain(Self::export_task(
                                 window,
                                 export.ticket,
                                 export.ports,
                                 export.selection,
                                 export.options,
-                            );
+                            ));
                         } else if let Some(request) = state.pending_global_search.take()
                             && let Some(workspace) = state.workspace.as_mut()
                         {
-                            return Self::start_global_search(
+                            return persist.chain(Self::start_global_search(
                                 window,
                                 workspace,
                                 state.service_feeds.as_ref(),
                                 request,
-                            );
+                            ));
                         }
                     }
                     Err(outcome) => {
@@ -2911,11 +2917,16 @@ impl NativeDesktop {
                             && !state.project_mutations.blocks_close()
                             && !state.opaque_mutations.blocks_close()
                         {
-                            return self.start_projection_save(window, ProjectSaveKind::Explicit);
+                            return persist.chain(
+                                self.start_projection_save(window, ProjectSaveKind::Explicit),
+                            );
                         }
                     }
                 }
-                Self::launch_next_persistent_mutation(window, state)
+                Task::batch([
+                    persist,
+                    Self::launch_next_persistent_mutation(window, state),
+                ])
             }
             Message::RecoveryProjectionPersisted {
                 window,
@@ -3029,6 +3040,7 @@ impl NativeDesktop {
                 purpose,
                 result,
             } => {
+                let mut persist = Task::none();
                 let mut terminal = None;
                 let mut terminal_error = None;
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
@@ -3038,6 +3050,9 @@ impl NativeDesktop {
                     state.autosave.save_in_flight = false;
                     match result {
                         Ok(revision) => {
+                            if matches!(purpose, SavePurpose::Untracked) {
+                                persist = Self::workspace_persist_task(window, state);
+                            }
                             if let Some(workspace) = state.workspace.as_mut() {
                                 workspace.update(ProjectMessage::SaveCompleted(revision));
                             }
@@ -3074,7 +3089,7 @@ impl NativeDesktop {
                         }
                     }
                 }
-                if let Some(terminal) = terminal {
+                let next = if let Some(terminal) = terminal {
                     self.after_persistent_mutation_terminal(window, terminal, terminal_error)
                 } else if terminal_error.is_some() {
                     Task::none()
@@ -3094,7 +3109,8 @@ impl NativeDesktop {
                         }
                         _ => Task::none(),
                     }
-                }
+                };
+                Task::batch([persist, next])
             }
             Message::ProjectEffectFinished {
                 window,
@@ -5070,7 +5086,7 @@ impl NativeDesktop {
         ) && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id)
             && state.resizing.take().is_some()
         {
-            return Self::workspace_persist_task(id, state);
+            return Task::none();
         }
         if matches!(
             event,
@@ -5544,7 +5560,7 @@ impl NativeDesktop {
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.resizing.take().is_some() {
-                    return Self::workspace_persist_task(id, state);
+                    return Task::none();
                 }
             }
             Event::Window(window::Event::Resized(size) | window::Event::Opened { size, .. }) => {
@@ -6194,8 +6210,7 @@ impl NativeDesktop {
                                         },
                                     )
                                 });
-                        let persist = Self::workspace_persist_task(id, state);
-                        return Task::batch([load, maintenance, persist]);
+                        return Task::batch([load, maintenance]);
                     }
                     workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                         ticket,
@@ -6225,8 +6240,7 @@ impl NativeDesktop {
                                 result,
                             }
                         });
-                        let persist = Self::workspace_persist_task(id, state);
-                        return Task::batch([preview, persist]);
+                        return preview;
                     }
                     workspace.accept_completion(ProjectTaskCompletion::for_ticket(
                         ticket,
@@ -6244,7 +6258,7 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
-                Task::batch([restore, Self::workspace_persist_task(id, state)])
+                restore
             }
             ProjectSurfaceMessage::ShowProjectChooser
             | ProjectSurfaceMessage::OpenDocumentHistory(_) => unreachable!(),
@@ -6258,14 +6272,14 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
-                Task::batch([restore, Self::workspace_persist_task(id, state)])
+                restore
             }
             ProjectSurfaceMessage::ToggleInspector => {
                 let visible = workspace.editor().expanded_pane().is_some()
                     || !state.shell.layout().inspector_is_visible();
                 state.shell.layout_mut().set_inspector_visible(visible);
                 workspace.editor_mut().exit_pane_focus();
-                Self::workspace_persist_task(id, state)
+                Task::none()
             }
 
             ProjectSurfaceMessage::BeginResize(panel) => {
@@ -7377,7 +7391,6 @@ impl NativeDesktop {
                 } else {
                     Self::launch_next_persistent_mutation(id, state)
                 });
-                tasks.push(Self::workspace_persist_task(id, state));
                 Task::batch(tasks)
             }
             ProjectSurfaceMessage::EditorCenter(message) => {
@@ -7754,8 +7767,6 @@ impl NativeDesktop {
                             }
                             if !update.document_changed() {
                                 return if presentation_changed {
-                                    state.workspace_persist_due =
-                                        Some(Instant::now() + Duration::from_millis(500));
                                     pane_focus_task
                                 } else {
                                     Task::none()
@@ -7845,13 +7856,9 @@ impl NativeDesktop {
                         let save = self.start_projection_save(id, ProjectSaveKind::Explicit);
                         return Task::batch([editor_tasks, save, persist]);
                     }
-                    return Task::batch([
-                        editor_tasks,
-                        Self::workspace_persist_task(id, state),
-                        pane_focus_task,
-                    ]);
+                    return Task::batch([editor_tasks, pane_focus_task]);
                 }
-                Task::batch([Self::workspace_persist_task(id, state), pane_focus_task])
+                pane_focus_task
             }
         }
     }
@@ -8002,12 +8009,18 @@ impl NativeDesktop {
         let mut resume_explicit = false;
         let mut close_filed_tab = None;
         let had_error = error.is_some();
+        let succeeded = matches!(
+            terminal,
+            PersistentMutationTerminal::ProjectSucceeded(_)
+                | PersistentMutationTerminal::OpaqueSucceeded(_)
+        );
         let next = {
             let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                 return Task::none();
             };
             match terminal {
-                PersistentMutationTerminal::ProjectSucceeded(ticket) => {
+                PersistentMutationTerminal::ProjectSucceeded(ticket)
+                | PersistentMutationTerminal::ProjectUnchanged(ticket) => {
                     if matches!(ticket.effect, ProjectEffect::FileDraft { .. }) {
                         close_filed_tab = state
                             .workspace
@@ -8019,7 +8032,8 @@ impl NativeDesktop {
                         .as_ref()
                         .and_then(|commit| state.synopsis_commits.finish(commit, true));
                     state.project_mutations.succeed(&ticket);
-                    if let Some(message) = project_effect_notification(&ticket.effect) {
+                    if succeeded && let Some(message) = project_effect_notification(&ticket.effect)
+                    {
                         append_workspace_notification(
                             &mut state.notifications,
                             WorkspaceNotification::information(message),
@@ -8091,7 +8105,11 @@ impl NativeDesktop {
                     && !state.project_mutations.blocks_close()
                     && !state.opaque_mutations.blocks_close();
             }
-            next
+            if succeeded {
+                Task::batch([Self::workspace_persist_task(window, state), next])
+            } else {
+                next
+            }
         };
         let next = if let Some((pane, document_id)) = close_filed_tab {
             Task::batch([
@@ -9112,7 +9130,7 @@ impl NativeDesktop {
         match result {
             Ok(ProjectEffectCompletion::Unchanged) => {
                 let terminal = mutation
-                    .map(PersistentMutationTerminal::ProjectDiscarded)
+                    .map(PersistentMutationTerminal::ProjectUnchanged)
                     .or_else(|| opaque_mutation.map(PersistentMutationTerminal::OpaqueDiscarded));
                 terminal.map_or_else(Task::none, |terminal| {
                     self.after_persistent_mutation_terminal(window, terminal, None)
@@ -9450,6 +9468,34 @@ impl NativeDesktop {
                     terminal,
                 ])
             }
+            Ok(ProjectEffectCompletion::LoadedCommentDocuments(snapshot)) => {
+                let previously_loaded = state
+                    .project
+                    .project_ui
+                    .as_ref()
+                    .map(|ui| {
+                        ui.snapshot
+                            .documents
+                            .iter()
+                            .map(|document| document.document_id)
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                Self::accept_hydrated_snapshot(state, *snapshot);
+                if let Some(project_ui) = state.project.project_ui.as_ref()
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    for document in &project_ui.snapshot.documents {
+                        if !previously_loaded.contains(&document.document_id) {
+                            workspace.editor_mut().reconcile_document_comments(
+                                &stable_id_string(document.document_id.as_bytes()),
+                                &document.comments,
+                            );
+                        }
+                    }
+                }
+                Task::none()
+            }
             Ok(ProjectEffectCompletion::RefreshedSnapshot(snapshot)) => {
                 let snapshot = *snapshot;
                 Self::prune_deleted_document_sessions(state, &snapshot);
@@ -9657,7 +9703,7 @@ impl NativeDesktop {
                 if let Some(workspace) = state.workspace.as_mut() {
                     workspace.update(ProjectMessage::SaveCompleted(revision));
                 }
-                Task::none()
+                Self::workspace_persist_task(window, state)
             }
             Ok(ProjectEffectCompletion::FocusRecoveredEditor) => {
                 if let Some(workspace) = state.workspace.as_mut() {
@@ -11520,10 +11566,6 @@ impl NativeDesktop {
                 continue;
             };
             expire_workspace_notifications(&mut state.notifications, now);
-            if state.workspace_persist_due.is_some_and(|due| due <= now) {
-                state.workspace_persist_due = None;
-                tasks.push(Self::workspace_persist_task(*window, state));
-            }
             let due_spellchecks = state
                 .pending_spellchecks
                 .iter()
@@ -11851,7 +11893,6 @@ impl NativeDesktop {
                 export_destination: None,
                 pending_export: None,
                 autosave: AutosaveState::default(),
-                workspace_persist_due: None,
                 pending_global_search: None,
                 next_spellcheck_generation: 0,
                 spellcheck_generation: BTreeMap::new(),
@@ -15146,6 +15187,69 @@ mod tests {
             assert_eq!(state.project_mutations.active, Some(ticket));
             assert!(state.project_mutations.queued.is_empty());
         }
+    }
+
+    #[test]
+    fn unchanged_synopsis_completion_still_runs_the_newer_queued_edit() {
+        let project = legacy_project(PathBuf::from("/tmp/unchanged-synopsis.parchmint"), 253);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let first = SynopsisCommit {
+            node_id: "chapter".into(),
+            synopsis: "Unchanged".into(),
+        };
+        let next = SynopsisCommit {
+            node_id: "chapter".into(),
+            synopsis: "Newer edit".into(),
+        };
+        assert_eq!(
+            state.synopsis_commits.enqueue(first.clone()),
+            Some(first.clone())
+        );
+        assert_eq!(state.synopsis_commits.enqueue(next.clone()), None);
+        let ticket = ProjectMutationTicket {
+            effect: ProjectEffect::CommitSynopsis {
+                node_id: first.node_id.clone(),
+                synopsis: first.synopsis.clone(),
+            },
+            history_action: None,
+            synopsis_commit: Some(first),
+        };
+        state.project_mutations.active = Some(ticket.clone());
+        // Hold the next command so we can inspect the queued durable edit.
+        state.autosave.recovery_projection_in_flight = true;
+        let notifications = state.notifications.len();
+        let task = desktop.finish_project_effect(
+            window,
+            Some(ticket),
+            None,
+            Ok(ProjectEffectCompletion::Unchanged),
+        );
+        let NativeWindow::Project(state) = &desktop.windows[&window] else {
+            unreachable!()
+        };
+        assert_eq!(state.synopsis_commits.in_flight.as_ref(), Some(&next));
+        assert_eq!(
+            state
+                .project_mutations
+                .queued
+                .front()
+                .unwrap()
+                .synopsis_commit
+                .as_ref(),
+            Some(&next)
+        );
+        assert_eq!(state.notifications.len(), notifications);
+        assert!(iced_test::runtime::task::into_stream(task).is_none());
     }
 
     #[test]

@@ -135,6 +135,14 @@ impl ProjectVersion {
             .collect()
     }
 
+    pub fn with_manifest_suffix(mut self, suffix: &str) -> Self {
+        let path = CanonicalRelativePath::parse("project.toml").unwrap();
+        let (bytes, hash) = self.resources.get_mut(&path).unwrap();
+        bytes.extend_from_slice(suffix.as_bytes());
+        *hash = ContentHash::of_bytes(bytes);
+        self
+    }
+
     pub fn bytes(&self) -> BTreeMap<CanonicalRelativePath, Vec<u8>> {
         self.resources
             .iter()

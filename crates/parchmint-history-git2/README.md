@@ -23,7 +23,11 @@ verifies objects, and records the save intent's checkpoint ID. Automatic line-en
 conversion, executable-mode tracking, and symlink tracking are disabled. Absolute,
 escaping, and unexpected paths are rejected.
 
-Named snapshots use empty commits when needed. Restore reads a checkpoint
+Ordinary saves reuse the latest checkpoint when authored resources are unchanged.
+Manifest revision counters and recovery bookkeeping do not create new versions;
+current files still retain that bookkeeping. Listing also omits older consecutive
+versions with only bookkeeping changes without rewriting stored commits. Named
+snapshots use empty commits when needed. Restore reads a checkpoint
 without moving `main`; the normal save path writes the restoration. History
 listing reads only the requested page and returns a continuation cursor.
 

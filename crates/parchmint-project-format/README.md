@@ -33,6 +33,8 @@ layout are separate from canonical resources; see
 `ProjectFormatCodec` implements the current v1 format and assembles domain
 projects and persistence revision lists. Its concrete methods decode manifests,
 styles, dictionaries, and saved revisions, and encode complete domain projects.
+`CanonicalManifest::authored_eq` compares authored values while excluding revision
+counters and recovery bookkeeping, for History duplicate detection.
 See [lib.rs](src/lib.rs).
 
 [contracts](../parchmint-contracts/README.md) defines annotation JSON records.

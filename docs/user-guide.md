@@ -45,6 +45,10 @@ counts, save state, and sidebar controls.
 Drag dividers to resize sidebars and panes. Press **F6** to move focus between
 workspace regions.
 
+Layout, open tabs, scroll positions, and expanded groups are remembered when you
+save content, use **Save**, or close the project. Navigating alone does not save
+the project or create a History revision.
+
 ## Organize documents
 
 In Overview, each creation placeholder has two halves: the document icon creates
@@ -205,6 +209,10 @@ plus **S** to request a save now. If saving fails while closing, choose **Keep
 working**, **Try again**, or **Exit without saving**. Exiting skips the final save;
 existing recovery records remain available on reopening.
 
+History adds a revision only when authored content or project settings change.
+Named milestones can mark an unchanged version. Internal save counters do not
+create revisions.
+
 Choose **History** in the navigation rail to open project history.
 For one document, right-click its Explorer entry or Overview card and choose
 **History**. The page names the document and its location; switching panes does not change that target.
@@ -223,7 +231,8 @@ Formatting-only changes show HTML differences; project style changes show CSS.
 **Restore project** replaces the whole project. **Restore document** replaces
 only the selected document's text, formatting, and notes; its name, location,
 planning details, other documents, and project settings stay unchanged. Both
-actions ask for confirmation and create a new History entry. A document cannot
+actions ask for confirmation and create a new History entry if they change the
+current project. A document cannot
 be restored from a version that predates it.
 
 Notifications appear at the bottom right without moving the workspace. Popovers

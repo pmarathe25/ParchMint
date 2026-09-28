@@ -366,10 +366,11 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
         .padding([4, 6]),
         components::surface(theme, Surface::Elevated, Interaction::Rest),
     );
-    let mut layers = stack![center].width(Length::Fill).height(Length::Fill);
-    if expanded.is_none() {
-        layers = layers.push(
-            container(companion_toggle)
+    let layers = stack![center]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .push(
+            container(crate::motion::reveal(expanded.is_none(), companion_toggle))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Horizontal::Right)
@@ -381,7 +382,6 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
                     left: 0.0,
                 }),
         );
-    }
     layers.into()
 }
 
@@ -768,7 +768,9 @@ pub(crate) fn formatting_toolbar_for_width(
                     .align_y(Vertical::Center),
                 iced::widget::rule::horizontal(1),
                 text("Paragraph").size(12),
-                row![paragraphs, paragraph_options(workspace, theme), breaks].spacing(12),
+                row![paragraphs, paragraph_options(workspace, theme), breaks]
+                    .spacing(12)
+                    .align_y(Vertical::Center),
             ]
             .spacing(10)
             .into(),

@@ -123,6 +123,16 @@ impl Disclosure {
     pub(crate) fn set(&mut self, visible: bool) {
         self.0.set(f32::from(visible), now(), enabled());
     }
+    /// The compact group card is taller than its wide heading. Revealing its
+    /// children while that heading shrinks pulls them upwards. Finish the
+    /// heading's layout transition before revealing newly mounted descendants.
+    pub(crate) fn set_after_heading(&mut self, visible: bool) {
+        let opening_from_closed = visible && self.visible_fraction() == 0.0;
+        self.set(visible);
+        if opening_from_closed && enabled() {
+            self.0.started += LAYOUT;
+        }
+    }
     pub(crate) fn visible_fraction(&self) -> f32 {
         if enabled() {
             self.0.value(now())
@@ -393,6 +403,18 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                     }
                     _ => (size.width - fixed).max(0.0) * fraction / weight.max(0.001),
                 };
+                // Fully hidden panes have no geometry to paint or hit. In
+                // particular, do not lay out a second rich-text editor on
+                // every animation frame when the companion pane is closed.
+                if width <= 0.5 && !slot.visible {
+                    let child = layout::Node::with_children(
+                        Size::new(width, size.height),
+                        vec![layout::Node::new(Size::ZERO)],
+                    )
+                    .move_to(Point::new(x, 0.0));
+                    x += width;
+                    return child;
+                }
                 let content_width = match slot.width {
                     Length::Fixed(w) => w,
                     _ => {
@@ -469,6 +491,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 && let Some(viewport) = viewport
                     .intersection(&layout.bounds())
                     .filter(|bounds| bounds.width > 0.5)
+                    .or_else(|| {
+                        // A just-opened pane already owns focus even on its
+                        // zero-width first frame. Text input is not hit testing.
+                        matches!(event, Event::Keyboard(_) | Event::InputMethod(_))
+                            .then(|| layout.child(0).bounds())
+                    })
             {
                 slot.content.as_widget_mut().update(
                     tree,
@@ -550,7 +578,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             .iter()
             .zip(&tree.children)
             .zip(layout.children())
-            .filter(|((slot, _), _)| slot.visible)
+            .filter(|((slot, _), layout)| slot.visible && layout.bounds().width > 0.5)
             .filter_map(|((slot, tree), layout)| {
                 let clip = viewport.intersection(&layout.bounds())?;
                 Some(slot.content.as_widget().mouse_interaction(
@@ -577,7 +605,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             .iter_mut()
             .zip(&mut tree.children)
             .zip(layout.children())
-            .filter(|((slot, _), _)| slot.visible)
+            .filter(|((slot, _), layout)| slot.visible && layout.bounds().width > 0.5)
             .filter_map(|((slot, tree), layout)| {
                 slot.content.as_widget_mut().overlay(
                     tree,
@@ -601,6 +629,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         content: content.into(),
         reveal: None,
         resize: false,
+        clip_resize: true,
         disclosure: None,
         on_complete: None,
         origin: None,
@@ -615,6 +644,7 @@ pub(crate) fn reveal<'a, Message: 'a>(
         content: content.into(),
         reveal: Some(visible),
         resize: false,
+        clip_resize: true,
         disclosure: None,
         on_complete: None,
         origin: None,
@@ -630,6 +660,25 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         content: content.into(),
         reveal: Some(true),
         resize: true,
+        clip_resize: true,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
+    })
+}
+/// Group fields retain their own trajectories while the header surface resizes.
+/// Their visual envelope may exceed the allocated header until they settle;
+/// the enclosing group already reserves this space and the scroll viewport clips it.
+pub(crate) fn resize_group_height<'a, Message: 'a>(
+    key: impl Into<String>,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: key.into(),
+        content: content.into(),
+        reveal: Some(true),
+        resize: true,
+        clip_resize: false,
         disclosure: None,
         on_complete: None,
         origin: None,
@@ -648,6 +697,7 @@ pub(crate) fn disclosure<'a, Message: 'a>(
         content: content.into(),
         reveal: Some(timeline.visible()),
         resize: false,
+        clip_resize: true,
         disclosure: Some(timeline),
         on_complete,
         origin: None,
@@ -659,6 +709,7 @@ struct Entrance<'a, Message> {
     content: Element<'a, Message>,
     reveal: Option<bool>,
     resize: bool,
+    clip_resize: bool,
     disclosure: Option<Disclosure>,
     on_complete: Option<Message>,
     origin: Option<Rc<Cell<Point>>>,
@@ -676,7 +727,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
     }
     fn state(&self) -> tree::State {
         let now = now();
-        let duration = if self.resize { LAYOUT } else { ENTRANCE };
+        let duration = if self.reveal.is_some() {
+            LAYOUT
+        } else {
+            ENTRANCE
+        };
         let mut progress = Tween::new(
             f32::from(self.reveal.unwrap_or(self.origin.is_some())),
             now,
@@ -704,8 +759,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                 state.height = 0.0;
             }
             state.now = now();
-            state.progress =
-                Tween::new(0.0, state.now, if self.resize { LAYOUT } else { ENTRANCE });
+            state.progress = Tween::new(
+                0.0,
+                state.now,
+                if self.reveal.is_some() {
+                    LAYOUT
+                } else {
+                    ENTRANCE
+                },
+            );
             state.progress.set(1.0, state.now, enabled());
         }
         if let Some(visible) = self.reveal.filter(|_| !self.resize) {
@@ -825,7 +887,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         viewport: &Rectangle,
     ) {
         use renderer::Renderer;
-        if self.reveal.is_some() {
+        if self.reveal.is_some() && (!self.resize || self.clip_resize) {
             if let Some(clip) = viewport
                 .intersection(&layout.bounds())
                 .filter(|bounds| bounds.height > 0.0)
@@ -946,7 +1008,8 @@ impl LocalPositions {
             animate: true,
             origin: Some(self.origin.clone()),
             both_axes: true,
-            morph_width: false,
+            morph_width: true,
+            allocation_height: None,
             content: content.into(),
         })
     }
@@ -959,6 +1022,7 @@ impl LocalPositions {
             content: content.into(),
             reveal: None,
             resize: false,
+            clip_resize: true,
             disclosure: None,
             on_complete: None,
             origin: Some(self.origin.clone()),
@@ -991,6 +1055,19 @@ impl Positions {
         });
     }
 
+    pub(crate) fn frame_horizontal(&self, id: &str, at: Instant) -> Option<(f32, f32)> {
+        self.0
+            .lock()
+            .expect("motion positions")
+            .get(id)
+            .map(|place| {
+                (
+                    place.x.value(at) - place.target.x,
+                    place.width_motion.value(at),
+                )
+            })
+    }
+
     pub(crate) fn vertical_offset(&self, id: &str, now: Instant) -> f32 {
         self.0
             .lock()
@@ -1015,17 +1092,30 @@ pub(crate) fn reflow<'a, Message: 'a>(
         origin: None,
         both_axes: false,
         morph_width: false,
+        allocation_height: None,
         content: content.into(),
     })
 }
 /// Overview card surfaces change width while their content remains real text.
 /// The grid reserves final slots; the moving surface interpolates its measured
 /// width rather than scaling typography or snapping between card and heading.
+#[cfg(test)]
 pub(crate) fn reflow_card<'a, Message: 'a>(
     positions: Positions,
     id: impl Into<String>,
     generation: u64,
     animate: bool,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    reflow_card_height(positions, id, generation, animate, None, content)
+}
+
+pub(crate) fn reflow_card_height<'a, Message: 'a>(
+    positions: Positions,
+    id: impl Into<String>,
+    generation: u64,
+    animate: bool,
+    allocation_height: Option<f32>,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Reflow {
@@ -1036,6 +1126,7 @@ pub(crate) fn reflow_card<'a, Message: 'a>(
         origin: None,
         both_axes: true,
         morph_width: true,
+        allocation_height,
         content: content.into(),
     })
 }
@@ -1048,8 +1139,22 @@ struct Reflow<'a, Message> {
     origin: Option<Rc<Cell<Point>>>,
     both_axes: bool,
     morph_width: bool,
+    allocation_height: Option<f32>,
     content: Element<'a, Message>,
 }
+fn resize_shell_width(node: &layout::Node, original: f32, width: f32) -> layout::Node {
+    if (node.size().width - original).abs() > 0.1 {
+        return node.clone();
+    }
+    let children = if node.children().len() == 1 {
+        vec![resize_shell_width(&node.children()[0], original, width)]
+    } else {
+        node.children().to_vec()
+    };
+    layout::Node::with_children(Size::new(width, node.size().height), children)
+        .move_to(node.bounds().position())
+}
+
 struct ReflowState {
     id: String,
     offset: Vector,
@@ -1093,7 +1198,10 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             self.content
                 .as_widget_mut()
                 .layout(&mut tree.children[0], renderer, limits);
-        let allocated = child.size();
+        let mut allocated = child.size();
+        if let Some(height) = self.allocation_height {
+            allocated.height = height;
+        }
         if self.morph_width {
             let at = now();
             let width = {
@@ -1111,13 +1219,70 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     place.width_motion.value(at)
                 })
             };
+            let width = width.map(|width| {
+                if let Some((node, "synopsis")) = self.id.split_once('\0') {
+                    if (width - allocated.width).abs() > 0.1 {
+                        let full = Size::new(width.max(1.0), f32::INFINITY);
+                        child = self.content.as_widget_mut().layout(
+                            &mut tree.children[0],
+                            renderer,
+                            &layout::Limits::new(Size::new(full.width, 0.0), full),
+                        );
+                    }
+                    let positions = self.positions.0.lock().expect("motion positions");
+                    if let Some(synopsis) = positions.get(&self.id) {
+                        let left = synopsis.x.value(at);
+                        let top = synopsis.y.value(at);
+                        let bottom = top + child.size().height;
+                        let minimum = synopsis.width_motion.from.min(synopsis.width_motion.target);
+                        return positions
+                            .iter()
+                            .filter(|(id, _)| {
+                                id.split_once('\0').is_some_and(|(other, field)| {
+                                    other == node
+                                        && !matches!(field, "synopsis" | "title" | "words")
+                                })
+                            })
+                            .fold(width, |width, (_, metadata)| {
+                                let metadata_top = metadata.y.value(at);
+                                let metadata_bottom =
+                                    metadata_top + metadata.height_motion.value(at);
+                                let available = metadata.x.value(at) - left - 12.0;
+                                if metadata_top < bottom
+                                    && metadata_bottom > top
+                                    && available >= 32.0
+                                {
+                                    width.min(available.max(minimum))
+                                } else {
+                                    width
+                                }
+                            });
+                    }
+                }
+                width
+            });
             if let Some(width) = width.filter(|width| (*width - allocated.width).abs() > 0.1) {
-                let full = Size::new(width.max(1.0), limits.max().height);
-                child = self.content.as_widget_mut().layout(
-                    &mut tree.children[0],
-                    renderer,
-                    &layout::Limits::new(Size::new(full.width, 0.0), full),
-                );
+                if self.allocation_height.is_some() {
+                    // The shell paints and receives hits at the animated width.
+                    // Padding marks the boundary of its content: leave that
+                    // subtree at final width so local field trajectories have
+                    // stable destinations on both opening and closing.
+                    child = resize_shell_width(&child, child.size().width, width.max(1.0));
+                } else {
+                    let full = Size::new(
+                        width.max(1.0),
+                        if self.origin.is_some() {
+                            f32::INFINITY
+                        } else {
+                            limits.max().height
+                        },
+                    );
+                    child = self.content.as_widget_mut().layout(
+                        &mut tree.children[0],
+                        renderer,
+                        &layout::Limits::new(Size::new(full.width, 0.0), full),
+                    );
+                }
             }
         }
         layout::Node::with_children(allocated, vec![child.move_to(Point::ORIGIN + offset)])
@@ -1257,18 +1422,18 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             Vector::ZERO
         };
         let correction = desired - (layout.child(0).position() - layout.position());
-        let visible_height = self
-            .morph_width
-            .then(|| {
-                self.positions
-                    .0
-                    .lock()
-                    .expect("motion positions")
-                    .get(&self.id)
-                    .filter(|place| enabled() && place.height_motion.active(now()))
-                    .map(|place| place.height_motion.value(now()))
-            })
-            .flatten();
+        let visible_height =
+            (self.morph_width && self.origin.is_none() && self.allocation_height.is_none())
+                .then(|| {
+                    self.positions
+                        .0
+                        .lock()
+                        .expect("motion positions")
+                        .get(&self.id)
+                        .filter(|place| enabled() && place.height_motion.active(now()))
+                        .map(|place| place.height_motion.value(now()))
+                })
+                .flatten();
         let clip = visible_height
             .and_then(|height| {
                 viewport.intersection(&Rectangle {
@@ -1698,6 +1863,67 @@ mod tests {
     }
 
     #[test]
+    fn group_children_never_travel_up_while_the_compact_header_shrinks() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 900.0));
+        let mut timeline = Disclosure::new(false);
+        let make = |height, timeline: &Disclosure| -> Element<'_, ()> {
+            iced::widget::column![
+                resize_height("heading", iced::widget::Space::new().height(height)),
+                disclosure(
+                    timeline.clone(),
+                    iced::widget::Space::new().height(200),
+                    None
+                ),
+                disclosure(
+                    timeline.clone(),
+                    iced::widget::Space::new().height(200),
+                    None
+                ),
+            ]
+            .into()
+        };
+        let mut group = make(210, &timeline);
+        let mut tree = Tree::new(&group);
+        group.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        timeline.set_after_heading(true);
+        group = make(100, &timeline);
+        tree.diff(&group);
+        let mut previous = [None, None];
+        for millis in (0..=448).step_by(16) {
+            let at = start + Duration::from_millis(millis);
+            FRAME_TIME.set(Some(at));
+            let node = group.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            frame(&mut group, &mut tree, &renderer, &node, at);
+            let node = group.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            for (row, previous) in node.children()[1..].iter().zip(&mut previous) {
+                if row.size().height > 0.5 {
+                    if let Some(y) = *previous {
+                        assert!(
+                            row.bounds().y >= y - 0.01,
+                            "visible child moved up at {millis}ms"
+                        );
+                    }
+                    *previous = Some(row.bounds().y);
+                }
+            }
+        }
+        assert!(previous.iter().all(Option::is_some));
+        timeline.set_after_heading(false);
+        FRAME_TIME.set(Some(now() + LAYOUT / 2));
+        let partial = timeline.visible_fraction();
+        timeline.set_after_heading(true);
+        assert_eq!(
+            timeline.visible_fraction(),
+            partial,
+            "reversing does not pause or jump"
+        );
+    }
+
+    #[test]
     fn disclosure_rows_reveal_downward_and_reverse_without_jumping() {
         set_reduced(false);
         let _clock = FixedTime::new(Instant::now());
@@ -1913,7 +2139,7 @@ mod tests {
             .layout(&mut tree, &renderer, &limits);
         assert_eq!(final_frame.children()[0].size().width, 800.0);
         assert_eq!(final_frame.children()[1].size().width, 0.0);
-        assert!(final_frame.children()[1].children()[0].size().width >= 160.0);
+        assert_eq!(final_frame.children()[1].children()[0].size(), Size::ZERO);
         assert_eq!(
             frame(
                 &mut element,
@@ -1996,6 +2222,62 @@ mod tests {
     }
 
     #[test]
+    fn incoming_zero_width_pane_accepts_focus_and_immediate_typing() {
+        set_reduced(false);
+        let _clock = FixedTime::new(Instant::now());
+        let renderer = renderer();
+        let make = |visible| -> Element<'_, String> {
+            row(vec![
+                slot(
+                    iced::widget::Space::new().width(Length::Fill),
+                    Length::Fill,
+                    true,
+                ),
+                slot(
+                    iced::widget::text_input("", "")
+                        .id("incoming")
+                        .on_input(std::convert::identity),
+                    Length::Fill,
+                    visible,
+                ),
+            ])
+        };
+        let mut pane = make(false);
+        let mut tree = Tree::new(&pane);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        pane.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        pane = make(true);
+        tree.diff(&pane);
+        let node = pane.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(node.children()[1].size().width, 0.0);
+        let mut focus =
+            iced::advanced::widget::operation::focusable::focus::<()>("incoming".into());
+        pane.as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut focus);
+        let event = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character("x".into()),
+            modified_key: iced::keyboard::Key::Character("x".into()),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyX),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::empty(),
+            text: Some("x".into()),
+            repeat: false,
+        });
+        let mut messages = Vec::new();
+        pane.as_widget_mut().update(
+            &mut tree,
+            &event,
+            Layout::new(&node),
+            mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(Size::new(800.0, 600.0)),
+        );
+        assert_eq!(messages, ["x"]);
+    }
+
+    #[test]
     fn incoming_panes_reveal_at_their_final_text_width() {
         set_reduced(false);
         let start = Instant::now();
@@ -2035,7 +2317,11 @@ mod tests {
                 .as_widget_mut()
                 .layout(&mut tree, &renderer, &limits);
             let incoming = &node.children()[1];
-            assert_eq!(incoming.children()[0].size().width, 400.0);
+            assert_eq!(
+                incoming.children()[0].size().width,
+                400.0,
+                "incoming panes need real layout even before revealing, so focus operations can reach them"
+            );
             assert!(incoming.size().width <= 400.0);
         }
     }
@@ -2155,6 +2441,108 @@ mod tests {
             tree.state.downcast_ref::<ReflowState>().offset,
             Vector::ZERO
         );
+    }
+
+    #[test]
+    fn wrapped_synopsis_keeps_natural_height_during_width_morph() {
+        set_reduced(false);
+        let at = Instant::now();
+        let _clock = FixedTime::new(at);
+        let renderer = renderer();
+        let fields = LocalPositions::new(Positions::default());
+        let make = |generation| {
+            fields.item(
+                "group\0synopsis".into(),
+                generation,
+                iced::widget::text(
+                    "An unfamiliar station, an impossible map, and a door that remembers heat.",
+                )
+                .size(14)
+                .width(Length::Fill),
+            )
+        };
+        let mut field: Element<'_, ()> = make(0);
+        let mut tree = Tree::new(&field);
+        let compact = layout::Limits::new(Size::ZERO, Size::new(180.0, 200.0));
+        let initial = field.as_widget_mut().layout(&mut tree, &renderer, &compact);
+        let height = initial.children()[0].size().height;
+        assert!(height > 20.0);
+        frame(&mut field, &mut tree, &renderer, &initial, at);
+        field = make(1);
+        tree.diff(&field);
+        let expanded = layout::Limits::new(Size::ZERO, Size::new(800.0, 20.0));
+        let opening = field
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &expanded);
+        assert_eq!(
+            opening.children()[0].size().height,
+            height,
+            "destination row height must not clip the still-wrapped synopsis"
+        );
+    }
+
+    #[test]
+    fn shell_morph_preserves_padded_content_layout() {
+        let content = layout::Node::new(Size::new(176.0, 80.0)).move_to(Point::new(12.0, 12.0));
+        let shell = layout::Node::with_children(Size::new(200.0, 104.0), vec![content]);
+        let wrapper = layout::Node::with_children(shell.size(), vec![shell]);
+        let animated = resize_shell_width(&wrapper, 200.0, 500.0);
+        assert_eq!(animated.size().width, 500.0);
+        assert_eq!(animated.children()[0].size().width, 500.0);
+        assert_eq!(animated.children()[0].children()[0].size().width, 176.0);
+    }
+
+    #[test]
+    fn expanding_heading_never_gives_its_synopsis_zero_width() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let make = |expanded| {
+            let content: Element<'_, ()> = if expanded {
+                iced::widget::row![
+                    iced::widget::Space::new().width(Length::Fill).height(60),
+                    iced::widget::Space::new().width(520).height(60),
+                ]
+                .into()
+            } else {
+                iced::widget::Space::new()
+                    .width(Length::Fill)
+                    .height(200)
+                    .into()
+            };
+            reflow_card_height(
+                positions.clone(),
+                "heading",
+                u64::from(expanded),
+                true,
+                Some(if expanded { 100.0 } else { 200.0 }),
+                content,
+            )
+        };
+        let mut heading = make(false);
+        let mut tree = Tree::new(&heading);
+        let compact = layout::Limits::new(Size::ZERO, Size::new(220.0, 900.0));
+        let node = heading
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &compact);
+        frame(&mut heading, &mut tree, &renderer, &node, start);
+        heading = make(true);
+        tree.diff(&heading);
+        let wide = layout::Limits::new(Size::ZERO, Size::new(800.0, 900.0));
+        for millis in (0..=224).step_by(16) {
+            let at = start + Duration::from_millis(millis);
+            FRAME_TIME.set(Some(at));
+            let node = heading.as_widget_mut().layout(&mut tree, &renderer, &wide);
+            frame(&mut heading, &mut tree, &renderer, &node, at);
+            let synopsis = &node.children()[0].children()[0];
+            assert!(
+                synopsis.size().width >= 220.0,
+                "metadata stole synopsis width at {millis}ms: {:?}",
+                synopsis.size()
+            );
+        }
     }
 
     #[test]

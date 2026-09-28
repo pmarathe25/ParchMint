@@ -22,7 +22,7 @@ use parchmint_history_api::{
     HistoryStore, MaintenanceBudget, MaintenanceReport, RestorePlan, SnapshotName, SnapshotPreview,
     SnapshotResourcePaths,
 };
-use parchmint_project_format::{CanonicalRelativePath, ContentHash};
+use parchmint_project_format::{CanonicalRelativePath, ContentHash, ProjectFormatCodec};
 use parchmint_project_fs::{
     NativeProjectFileSystem, ProjectFileSystem, ProjectRootCapability as NativeProjectRoot,
 };
@@ -221,22 +221,16 @@ impl HistoryStore for Git2HistoryStore {
 
             let tree_id = build_tree(&repository, &self.root, &input)?;
             // Autosave, explicit save, and structural persistence can all be
-            // requested after a prior operation has already made the exact
-            // same canonical tree durable. A new commit would be visually
+            // requested after a prior operation has already made the same
+            // authored values durable. A new commit would be visually
             // indistinguishable in History and turns an active session into a
             // wall of empty versions. A named milestone remains an intentional
-            // marker, and restoration remains an auditable event, even when
-            // their tree happens to match the current one.
-            if !matches!(
-                input.category,
-                CheckpointCategory::NamedSnapshot | CheckpointCategory::Restoration
-            ) && records
-                .first()
-                .is_some_and(|current| current.tree_id == tree_id)
+            // marker even when its authored values match the current version.
+            if !matches!(input.category, CheckpointCategory::NamedSnapshot)
+                && let Some(current) = records.first()
+                && trees_have_same_authored_content(&repository, current.tree_id, tree_id)?
             {
-                return Ok(checkpoint_id(
-                    records.first().expect("current record was observed").oid,
-                ));
+                return Ok(checkpoint_id(current.oid));
             }
             let sequence = u64::try_from(records.len())
                 .ok()
@@ -1190,6 +1184,20 @@ fn list_history(
             continue;
         }
         if belongs_to_filter {
+            // Older releases recorded bookkeeping-only revisions. Keep those
+            // objects addressable for restores and tombstones, but omit them
+            // from the timeline just as we omit new empty ordinary saves.
+            if !matches!(metadata.category, CheckpointCategory::NamedSnapshot)
+                && let Some(parent) = next
+            {
+                let parent = repository
+                    .find_commit(parent)
+                    .map_err(|error| corrupt_git("load checkpoint parent", error))?;
+                if trees_have_same_authored_content(repository, parent.tree_id(), commit.tree_id())?
+                {
+                    continue;
+                }
+            }
             matches.push(HistoryRecord {
                 oid,
                 tree_id: commit.tree_id(),
@@ -1306,6 +1314,55 @@ fn load_snapshot_resource(
         .map_err(|error| corrupt_git("load checkpoint resource", error))?;
     let bytes = blob.content().to_vec();
     Ok((ContentHash::of_bytes(&bytes), bytes))
+}
+
+fn trees_have_same_authored_content(
+    repository: &Repository,
+    before: Oid,
+    after: Oid,
+) -> Result<bool, HistoryError> {
+    if before == after {
+        return Ok(true);
+    }
+    let before = repository
+        .find_tree(before)
+        .map_err(|error| corrupt_git("compare checkpoint tree", error))?;
+    let after = repository
+        .find_tree(after)
+        .map_err(|error| corrupt_git("compare checkpoint tree", error))?;
+    // Git skips identical subtrees. Timeline pagination must not materialize
+    // every document path for each checkpoint just to detect counter changes.
+    let diff = repository
+        .diff_tree_to_tree(Some(&before), Some(&after), None)
+        .map_err(|error| corrupt_git("compare checkpoint tree", error))?;
+    let mut changes = diff.deltas();
+    let Some(change) = changes.next() else {
+        return Ok(false);
+    };
+    if changes.next().is_some()
+        || change.status() != git2::Delta::Modified
+        || change.old_file().path() != Some(Path::new("project.toml"))
+        || change.new_file().path() != Some(Path::new("project.toml"))
+        || change.old_file().mode() != git2::FileMode::Blob
+        || change.new_file().mode() != git2::FileMode::Blob
+    {
+        return Ok(false);
+    }
+    let before = repository
+        .find_blob(change.old_file().id())
+        .map_err(|error| corrupt_git("compare checkpoint manifest", error))?;
+    let after = repository
+        .find_blob(change.new_file().id())
+        .map_err(|error| corrupt_git("compare checkpoint manifest", error))?;
+    let codec = ProjectFormatCodec::default();
+    let (Ok(before), Ok(after)) = (
+        codec.decode_manifest(before.content()),
+        codec.decode_manifest(after.content()),
+    ) else {
+        // Never discard a difference we cannot interpret.
+        return Ok(false);
+    };
+    Ok(before.authored_eq(&after))
 }
 
 fn snapshot_resource_paths(

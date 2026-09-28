@@ -12,9 +12,10 @@ snapshot and any `WorkspaceWarning`. See [lib.rs](src/lib.rs).
 
 ## Persistence and recovery
 
-The UI retains splitter movement in memory and saves the settled layout on
-pointer release and coalesces editor scroll updates after a 500 ms pause.
-Closing flushes the latest position. Identical snapshots require no write.
+The UI keeps navigation, disclosure, pane, and scroll changes in memory.
+Explicit Save, completed content saves, and closing flush the latest workspace
+snapshot. Navigation alone schedules no disk writes. Identical snapshots require
+no write.
 The store writes a versioned temporary file, flushes it, and
 replaces the previous file. Separate projects save independent layouts.
 

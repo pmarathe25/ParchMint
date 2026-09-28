@@ -8,6 +8,74 @@ use parchmint_desktop::{
 use parchmint_ui_driver::{IsolatedRun, create_project};
 
 #[test]
+fn navigation_defers_workspace_writes_until_save_or_close() {
+    let run = IsolatedRun::new("navigation-persistence").unwrap();
+    let project = run.root().join("navigation.parchmint");
+    let harness = create_project(&run, &project, "Navigation");
+    parchmint_ui_driver::create_group(&harness, "Manuscript", "Chapter");
+    parchmint_ui_driver::create_document(&harness, "Chapter", "Scene");
+    let window = HarnessWindow::Project;
+    harness.press_command_key(window, 's').unwrap();
+    let workspaces = run.root().join("data/workspaces");
+    let snapshot = || {
+        fs::read_dir(&workspaces)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read_to_string(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let initial_workspace = snapshot();
+    let manifest = fs::read(project.join("project.toml")).unwrap();
+    let head = fs::read(project.join(".git/refs/heads/main")).unwrap();
+    let chapter = harness.hierarchy_node("Chapter").unwrap();
+    harness.click_hierarchy_node(window, chapter).unwrap();
+    harness
+        .click_target(window, HarnessTarget::ToggleInspector)
+        .unwrap();
+    harness
+        .click_target(window, HarnessTarget::Ribbon(RibbonDestination::Cards))
+        .unwrap();
+    harness.elapse_notifications().unwrap();
+    assert_eq!(
+        snapshot(),
+        initial_workspace,
+        "navigation should remain in memory"
+    );
+    assert_eq!(fs::read(project.join("project.toml")).unwrap(), manifest);
+    assert_eq!(
+        fs::read(project.join(".git/refs/heads/main")).unwrap(),
+        head
+    );
+
+    harness.press_command_key(window, 's').unwrap();
+    let saved_workspace = snapshot();
+    assert_ne!(
+        saved_workspace, initial_workspace,
+        "explicit save flushes layout even with clean content"
+    );
+    assert_eq!(
+        fs::read(project.join(".git/refs/heads/main")).unwrap(),
+        head
+    );
+    harness
+        .click_target(window, HarnessTarget::Ribbon(RibbonDestination::Editor))
+        .unwrap();
+    harness
+        .click_target(window, HarnessTarget::ToggleInspector)
+        .unwrap();
+    assert_eq!(snapshot(), saved_workspace);
+    close(harness);
+    assert_ne!(
+        snapshot(),
+        saved_workspace,
+        "close flushes the final layout"
+    );
+}
+
+#[test]
 fn global_search_keeps_later_matches_reachable_and_resets_scroll_for_a_new_query() {
     let run = IsolatedRun::new("search-result-scrolling").unwrap();
     let project = run.root().join("search-result-scrolling.parchmint");

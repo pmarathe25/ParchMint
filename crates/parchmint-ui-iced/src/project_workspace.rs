@@ -947,6 +947,7 @@ pub(crate) struct CardsGridRow {
     pub end: usize,
     pub height: f32,
     pub disclosures: Vec<String>,
+    pub tail_reserve: f32,
 }
 
 /// One ordered Cards item with effective visible metadata values.
@@ -1080,6 +1081,7 @@ impl<'a> CardsState<'a> {
                 let (parent, depth) = groups.pop().expect("expanded parent");
                 rows.push(CardsGridRow {
                     disclosures: Vec::new(),
+                    tail_reserve: 0.0,
                     start: index,
                     end: index,
                     height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1133,6 +1135,7 @@ impl<'a> CardsState<'a> {
             } else {
                 rows.push(CardsGridRow {
                     disclosures: Vec::new(),
+                    tail_reserve: 0.0,
                     add_to: None,
                     depth: item.depth,
                     start: index,
@@ -1144,6 +1147,7 @@ impl<'a> CardsState<'a> {
         while let Some((parent, depth)) = groups.pop() {
             rows.push(CardsGridRow {
                 disclosures: Vec::new(),
+                tail_reserve: 0.0,
                 start: ids.len(),
                 end: ids.len(),
                 height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1153,6 +1157,7 @@ impl<'a> CardsState<'a> {
         }
         rows.push(CardsGridRow {
             disclosures: Vec::new(),
+            tail_reserve: 0.0,
             start: ids.len(),
             end: ids.len(),
             height: crate::cards_layout::ADD_HEIGHT + CARDS_ROW_GAP,
@@ -1177,6 +1182,7 @@ impl<'a> CardsState<'a> {
                 compact.push(row);
             }
         }
+        let mut natural_heights = Vec::with_capacity(compact.len());
         for row in &mut compact {
             if row
                 .add_to
@@ -1185,6 +1191,7 @@ impl<'a> CardsState<'a> {
             {
                 row.height += crate::cards_layout::GROUP_GAP + 8.0;
             }
+            natural_heights.push(row.height);
             let mut ancestor = if row.start < row.end {
                 self.explorer.nodes[ids[row.start]].parent.as_deref()
             } else {
@@ -1201,6 +1208,43 @@ impl<'a> CardsState<'a> {
                     .get(id)
                     .and_then(|node| node.parent.as_deref());
             }
+        }
+        // A compact group can be taller than its full-width heading. Keep
+        // that released space at the END of the group while its hidden header
+        // morphs, so following groups never get pulled up before moving down.
+        let mut openings = self
+            .disclosures
+            .iter()
+            .filter_map(|(id, _)| self.item(id).map(|item| (id, item)))
+            .collect::<Vec<_>>();
+        openings.sort_by_key(|(_, item)| std::cmp::Reverse(item.depth));
+        for (id, mut item) in openings {
+            let Some(first) = compact
+                .iter()
+                .position(|row| row.start < row.end && ids[row.start] == id)
+            else {
+                continue;
+            };
+            let Some(last) = compact
+                .iter()
+                .position(|row| row.add_to.as_ref() == Some(id))
+            else {
+                continue;
+            };
+            item.expanded = false;
+            item.details_expanded = false;
+            let mut minimum = item.row_height(item.grid_width(width, columns.max(1)));
+            let final_height: f32 = natural_heights[first..=last].iter().sum();
+            // An empty group may finish shorter than its compact card. In
+            // that case release the surplus continuously, never at completion.
+            minimum += (final_height - minimum).min(0.0) * self.disclosures[id].visible_fraction();
+            for ancestor in &compact[first].disclosures {
+                minimum *= self.disclosures[ancestor].visible_fraction();
+            }
+            let current: f32 = compact[first..=last].iter().map(|row| row.height).sum();
+            let reserve = (minimum - current).max(0.0);
+            compact[last].tail_reserve += reserve;
+            compact[last].height += reserve;
         }
         let mut offsets = Vec::with_capacity(compact.len() + 1);
         offsets.push(0.0);
@@ -6699,7 +6743,7 @@ impl ProjectWorkspace {
                     self.cards_disclosures
                         .entry(node_id.clone())
                         .or_insert_with(|| crate::motion::Disclosure::new(was_expanded))
-                        .set(!was_expanded);
+                        .set_after_heading(!was_expanded);
                     // Keep closing rows mounted until their clipped exit finishes.
                     self.cards_expanded.insert(node_id);
                 } else if was_expanded {
@@ -11708,6 +11752,58 @@ mod tests {
             workspace.global_search.height_before_rows(usize::MAX),
             visible,
             "reversal stays continuous"
+        );
+    }
+
+    #[test]
+    fn opening_group_reserves_its_compact_extent_until_children_fill_it() {
+        crate::motion::set_reduced(false);
+        let start = std::time::Instant::now();
+        let _clock = crate::motion::FixedTime::new(start);
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        {
+            let _settled = crate::motion::SettledMotion::new();
+            workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        }
+        let cards = workspace.cards();
+        let compact = cards.item("part-one").unwrap();
+        let initial = compact.row_height(compact.grid_width(800.0, 3));
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let mut previous = initial;
+        for millis in (0..=416).step_by(16) {
+            let _frame =
+                crate::motion::FixedTime::new(start + std::time::Duration::from_millis(millis));
+            let cards = workspace.cards();
+            let rows = cards.grid_rows(3, 800.0);
+            let first = rows
+                .iter()
+                .position(|row| row.start < row.end && rows.ids[row.start] == "part-one")
+                .unwrap();
+            let last = rows
+                .iter()
+                .position(|row| row.add_to.as_deref() == Some("part-one"))
+                .unwrap();
+            let extent = rows.offsets[last + 1] - rows.offsets[first];
+            assert!(
+                extent >= previous - 0.01,
+                "following sibling moved up at {millis}ms: {previous} -> {extent}"
+            );
+            previous = extent;
+        }
+        let _finished =
+            crate::motion::FixedTime::new(start + std::time::Duration::from_millis(416));
+        workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
+            "part-one".into(),
+        ));
+        let cards = workspace.cards();
+        let rows = cards.grid_rows(3, 800.0);
+        let last = rows
+            .iter()
+            .position(|row| row.add_to.as_deref() == Some("part-one"))
+            .unwrap();
+        assert!(
+            rows[last].tail_reserve == 0.0,
+            "completion adds no residual space"
         );
     }
 

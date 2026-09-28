@@ -216,6 +216,103 @@ fn unchanged_ordinary_saves_reuse_the_current_checkpoint() {
 }
 
 #[test]
+fn bookkeeping_only_saves_do_not_create_history_but_authored_manifest_edits_do() {
+    let project = LockedProject::new("bookkeeping-save");
+    let version = |revision, title: &str| {
+        ProjectVersion::named("Stable draft").with_manifest_suffix(&format!(
+            "\n[project]\ntitle = {title:?}\nrevision = {revision}\n\
+             [parchmint-persistence]\nrecovery-project-revision = {revision}\n\
+             save-identity = \"save-{revision}\"\n\
+             [parchmint-persistence.document-revisions]\nchapter = {revision}\n"
+        ))
+    };
+    let first = version(1, "A book");
+    project.write(&first);
+    let store = project.initialize();
+    let initial = checkpoint(&store, 1, &first, CheckpointCategory::ExplicitSave).unwrap();
+    let bookkeeping = version(9, "A book");
+    project.write(&bookkeeping);
+    for (intent, category) in [
+        (2, CheckpointCategory::Autosave),
+        (3, CheckpointCategory::StructuralChange),
+        (4, CheckpointCategory::ExplicitSave),
+        (6, CheckpointCategory::Restoration),
+    ] {
+        assert_eq!(
+            checkpoint(&store, intent, &bookkeeping, category).unwrap(),
+            initial
+        );
+    }
+    assert_eq!(
+        fs::read(project.path.join("project.toml")).unwrap(),
+        bookkeeping.bytes()
+            [&parchmint_project_format::CanonicalRelativePath::parse("project.toml").unwrap()]
+    );
+    let renamed = version(10, "A different book");
+    project.write(&renamed);
+    let changed = checkpoint(&store, 5, &renamed, CheckpointCategory::StructuralChange).unwrap();
+    assert_ne!(changed, initial);
+    assert_eq!(
+        store
+            .list(HistoryPageQuery::newest_first(10))
+            .unwrap()
+            .checkpoints
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn legacy_empty_versions_are_hidden_without_rewriting_history() {
+    let project = LockedProject::new("legacy-empty-history");
+    let first = ProjectVersion::named("First draft");
+    project.write(&first);
+    let store = project.initialize();
+    let initial = checkpoint(&store, 1, &first, CheckpointCategory::ExplicitSave).unwrap();
+    let repository = git2::Repository::open(&project.path).unwrap();
+    let parent = repository.head().unwrap().peel_to_commit().unwrap();
+    let message = parent
+        .message()
+        .unwrap()
+        .replace("sequence=1", "sequence=2")
+        .replace(&"01".repeat(32), &"02".repeat(32));
+    let legacy = repository
+        .commit(
+            Some("refs/heads/main"),
+            &parent.author(),
+            &parent.committer(),
+            &message,
+            &parent.tree().unwrap(),
+            &[&parent],
+        )
+        .unwrap();
+    let second = ProjectVersion::named("Second draft");
+    project.write(&second);
+    let changed = checkpoint(&store, 3, &second, CheckpointCategory::Autosave).unwrap();
+    let first_page = store.list(HistoryPageQuery::newest_first(1)).unwrap();
+    assert_eq!(first_page.checkpoints[0].id, changed);
+    let mut query = HistoryPageQuery::newest_first(1);
+    query.cursor = first_page.next_cursor;
+    let second_page = store.list(query).unwrap();
+    assert_eq!(second_page.checkpoints[0].id, initial);
+    assert!(second_page.next_cursor.is_none());
+    assert!(
+        repository.find_commit(legacy).is_ok(),
+        "old objects remain intact"
+    );
+    assert_eq!(
+        repository
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .parent_id(0)
+            .unwrap(),
+        legacy
+    );
+}
+
+#[test]
 fn checkpoint_resource_bytes_are_immutable_and_survive_reopen() {
     let project = LockedProject::new("resource-read-reopen");
     let first = ProjectVersion::named("Checkpoint body");

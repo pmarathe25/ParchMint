@@ -414,7 +414,7 @@ impl NativeProjectEffectExecutor {
                         self.ports.load_document(document).await?;
                     }
                 }
-                Ok(ProjectEffectCompletion::RefreshedSnapshot(Box::new(
+                Ok(ProjectEffectCompletion::LoadedCommentDocuments(Box::new(
                     self.ports.snapshot().await?,
                 )))
             }
@@ -761,6 +761,12 @@ impl NativeProjectEffectExecutor {
                 })?
                 .project;
         }
+        // Re-submitting an unchanged title, synopsis, setting, or style must
+        // not allocate an undo entry, advance revisions, or request a save.
+        simulated.revision = self.snapshot.project.revision;
+        if simulated == self.snapshot.project {
+            return Ok(ProjectEffectCompletion::Unchanged);
+        }
         for command in commands {
             self.ports.execute(command).await?;
         }
@@ -823,6 +829,7 @@ impl NativeProjectEffectExecutor {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ProjectEffectCompletion {
     Unchanged,
+    LoadedCommentDocuments(Box<ProjectSnapshot>),
     RefreshedSnapshot(Box<ProjectSnapshot>),
     WorkflowSnapshot(Box<ProjectSnapshot>),
     TreePaste {
@@ -2820,6 +2827,31 @@ mod tests {
                 generation: 3,
             })
         );
+    }
+
+    #[test]
+    fn unchanged_field_submission_does_not_execute_a_project_command() {
+        let (snapshot, node, _, _) = fixture();
+        let before = snapshot.project.clone();
+        let title = before.nodes.get(node).unwrap().title.clone();
+        let synopsis = before.nodes.get(node).unwrap().synopsis.clone();
+        let (executor, ports) = executor(snapshot);
+        for effect in [
+            ProjectEffect::CommitNodeTitle {
+                node_id: stable_id_string(node.as_bytes()),
+                title,
+            },
+            ProjectEffect::CommitSynopsis {
+                node_id: stable_id_string(node.as_bytes()),
+                synopsis,
+            },
+        ] {
+            assert_eq!(
+                block_on(executor.clone().execute_project_effect(effect)).unwrap(),
+                ProjectEffectCompletion::Unchanged
+            );
+            assert_eq!(ports.snapshot.lock().unwrap().project, before);
+        }
     }
 
     #[test]

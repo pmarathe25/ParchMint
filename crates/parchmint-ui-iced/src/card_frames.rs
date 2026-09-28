@@ -101,10 +101,14 @@ fn frame_bounds<'a>(
         };
         bottom = bottom.max(row.y + offset + row.height - trailing_gap);
     }
+    let (motion_x, frame_width) = positions
+        .filter(|_| frame.starts_here && crate::motion::enabled())
+        .and_then(|positions| positions.frame_horizontal(&frame.id, at))
+        .unwrap_or((0.0, width - 2.0 * indent));
     let bounds = Rectangle {
-        x: first.x + indent,
+        x: first.x + indent + motion_x,
         y: top,
-        width: width - 2.0 * indent,
+        width: frame_width.min(width - 2.0 * indent),
         height: bottom - top,
     };
     FrameBounds {
@@ -499,6 +503,74 @@ mod tests {
             last_row_disclosures: 0,
             members: Vec::new(),
         }
+    }
+
+    #[test]
+    fn group_frame_paint_and_hits_follow_the_heading_width() {
+        use iced::widget::Space;
+        use iced::{Point, Size};
+        let at = std::time::Instant::now();
+        let _clock = crate::motion::FixedTime::new(at);
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let positions = crate::motion::Positions::default();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(500.0, 900.0));
+        let mut element: Element<'_, ()> = crate::motion::reflow_card(
+            positions.clone(),
+            "heading",
+            0,
+            true,
+            Space::new().width(200).height(100),
+        );
+        let mut tree = Tree::new(&element);
+        let initial = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Window(iced::window::Event::RedrawRequested(at)),
+            Layout::new(&initial),
+            mouse::Cursor::Unavailable,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut Vec::new()),
+            &Rectangle::with_size(Size::new(500.0, 900.0)),
+        );
+        element = crate::motion::reflow_card(
+            positions.clone(),
+            "heading",
+            1,
+            true,
+            Space::new().width(500).height(100),
+        );
+        tree.diff(&element);
+        let destination = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let frame = group("heading", 0, 0, 0);
+        let bounds = [frame_bounds(
+            &frame,
+            &[Layout::new(&destination)],
+            500.0,
+            Some(&positions),
+        )];
+        assert_eq!(bounds[0].bounds.width, 200.0);
+        assert_eq!(
+            group_destination(&bounds, Point::new(300.0, 30.0), "root").0,
+            DragDestination::IntoGroup("root".into())
+        );
+        let _clock = crate::motion::FixedTime::new(at + std::time::Duration::from_millis(100));
+        let bounds = frame_bounds(
+            &frame,
+            &[Layout::new(&destination)],
+            500.0,
+            Some(&positions),
+        );
+        assert!(bounds.bounds.width > 200.0 && bounds.bounds.width < 500.0);
     }
 
     #[test]

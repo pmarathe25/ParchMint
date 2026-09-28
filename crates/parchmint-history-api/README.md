@@ -16,12 +16,16 @@ A checkpoint verifies the written files against the commit receipt. Retrying the
 same intent and file hashes returns the same `CheckpointId`. Categories distinguish
 autosave, explicit save, structural change, named snapshot, and restoration.
 Named snapshots can create a checkpoint even when files have not changed.
+Other saves reuse the current checkpoint when only manifest revision counters or
+recovery bookkeeping differ. Current files retain the latest bookkeeping.
 
 Checkpoints contain the manifest, documents, styles, project dictionary,
 annotations, deletion tombstones, and format control. Recovery, caches, workspace
 layout, appearance, and the global dictionary stay outside History.
 
 Lists are paginated, with a continuation cursor and optional document filter.
+Legacy consecutive revisions without authored changes are omitted from lists;
+their stored IDs remain readable and restorable.
 Document timelines include that document's changes and all named snapshots.
 Preview and restore read complete project snapshots. A `RestorePlan`
 describes writes through the normal save path, creating a new restoration

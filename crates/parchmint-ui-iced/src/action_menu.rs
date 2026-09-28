@@ -525,11 +525,15 @@ pub(crate) fn symbol_menu<'a, Message: Clone + 'a>(
         menu_content: None,
         on_toggle: None,
         trigger: components::semantic_button(
-            row![icon_sized(icon, 20), icon_sized(Icon::ChevronDown, 10)]
-                .spacing(2)
-                .align_y(iced::alignment::Vertical::Center),
+            container(
+                row![icon_sized(icon, 20), icon_sized(Icon::ChevronDown, 10)]
+                    .spacing(2)
+                    .align_y(iced::alignment::Vertical::Center),
+            )
+            .center(Length::Fill),
         )
-        .padding([4, 3])
+        .padding([0, 3])
+        .width(38)
         .height(32)
         .on_press(())
         .style(move |_, status| {
@@ -816,6 +820,45 @@ mod tests {
     use super::*;
     use iced::advanced::{overlay::Overlay, renderer::Headless};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn symbol_and_action_menu_icons_share_the_control_center() {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let theme = ParchMintTheme::new(parchmint_preferences::ResolvedAppearance::Light);
+        for mut menu in [
+            symbol_menu(Icon::AlignLeft, vec![(Icon::AlignLeft, "Left", ())], theme),
+            action_menu(Icon::LineSpacing, vec![("Single", ())], true, theme),
+        ] {
+            let mut tree = Tree::new(&menu);
+            let node = menu.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, Size::new(40.0, 32.0)),
+            );
+            assert!(
+                node.size().width <= 38.0,
+                "centering must preserve compact trigger width"
+            );
+            fn check(layout: Layout<'_>, count: &mut usize) {
+                let children: Vec<_> = layout.children().collect();
+                if children.is_empty() && [10.0, 20.0].contains(&layout.bounds().height) {
+                    assert_eq!(layout.bounds().center_y(), 16.0, "icon is not centered");
+                    *count += 1;
+                }
+                for child in children {
+                    check(child, count);
+                }
+            }
+            let mut count = 0;
+            check(Layout::new(&node), &mut count);
+            assert_eq!(count, 2);
+        }
+    }
 
     #[test]
     fn menu_tooltip_can_invalidate_layout_and_open_its_nested_overlay() {
