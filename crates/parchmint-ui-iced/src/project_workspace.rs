@@ -5514,6 +5514,16 @@ impl ProjectWorkspace {
         Some(preview)
     }
 
+    fn preview_changes_hierarchy(&self, preview: &ExplorerState) -> bool {
+        self.explorer.nodes.iter().any(|(id, node)| {
+            preview.nodes.get(id).is_none_or(|projected| {
+                projected.parent != node.parent
+                    || projected.children != node.children
+                    || projected.section_id != node.section_id
+            })
+        })
+    }
+
     pub fn explorer(&self) -> &ExplorerState {
         &self.explorer
     }
@@ -6855,6 +6865,7 @@ impl ProjectWorkspace {
                     self.restore_drag_collapsed_group(&drag);
                 }
                 self.cards_drag_destination = None;
+                self.drop_preview = None;
                 // A closing row can unmount on its final frame before its
                 // completion message is delivered. Never let that finished
                 // timeline override the settled disclosure state on a later
@@ -7733,6 +7744,7 @@ impl ProjectWorkspace {
             ProjectMessage::CommitHierarchyDrag => {
                 let drag = self.pointer_drag.take();
                 self.cards_drag_destination = None;
+                self.drop_preview = None;
                 let Some(destination) = drag.as_ref().and_then(|drag| drag.destination.clone())
                 else {
                     if let Some(drag) = &drag {
@@ -7742,6 +7754,15 @@ impl ProjectWorkspace {
                     return Vec::new();
                 };
                 let drag = drag.expect("destination checked");
+                if drag
+                    .preview
+                    .as_ref()
+                    .is_some_and(|preview| !self.preview_changes_hierarchy(preview))
+                {
+                    self.restore_drag_selection(&drag);
+                    self.restore_drag_collapsed_group(&drag);
+                    return Vec::new();
+                }
                 let effects = self.drop_hierarchy(drag.source_id.clone(), destination);
                 if effects.is_empty() {
                     self.restore_drag_selection(&drag);
@@ -7767,6 +7788,7 @@ impl ProjectWorkspace {
                 if let Some(drag) = self.pointer_drag.take() {
                     self.restore_drag_selection(&drag);
                     self.restore_drag_collapsed_group(&drag);
+                    self.drop_preview = None;
                 }
                 self.cards_drag_destination = None;
                 Vec::new()
@@ -11573,6 +11595,39 @@ mod tests {
         let _settled = crate::motion::SettledMotion::new();
         workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
         assert!(!workspace.cards_expanded.contains("part-one"));
+    }
+
+    #[test]
+    fn adjacent_drop_into_the_original_slot_does_not_retain_a_preview() {
+        let _settled = crate::motion::SettledMotion::new();
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        let before = workspace
+            .explorer
+            .preorder_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-two".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::AfterSibling("chapter-one".into())),
+        });
+        assert_eq!(workspace.displayed_explorer().preorder_ids(), before);
+        assert!(
+            workspace
+                .update(ProjectMessage::CommitHierarchyDrag)
+                .is_empty()
+        );
+        assert!(workspace.drop_preview.is_none());
+        assert!(workspace.pointer_drag.is_none());
+        assert!(workspace.cards_drag_destination.is_none());
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        assert!(!workspace.cards_expanded.contains("part-one"));
+        assert!(!workspace.cards().item_by_id("chapter-two").unwrap().visible);
     }
 
     #[test]

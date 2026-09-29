@@ -285,13 +285,17 @@ fn project_surface_with_layout<'a>(
         // Keyed by destination so switching pages snaps the sidebars instead
         // of replaying their collapse/expand motion. Same-page sidebar
         // toggles keep the same key and animate as before.
-        crate::motion::row_for_page(format!("{destination:?}"), body_slots)
+        if destination == RibbonDestination::Editor {
+            crate::motion::row_for_focus_page(format!("{destination:?}"), body_slots)
+        } else {
+            crate::motion::row_for_page(format!("{destination:?}"), body_slots)
+        }
     };
     let mut content = column![body]
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
-    content = content.push(crate::motion::reveal(
+    content = content.push(crate::motion::reveal_focus(
         shows_status,
         status_bar(
             workspace,
@@ -303,7 +307,7 @@ fn project_surface_with_layout<'a>(
     ));
     let focused =
         destination == RibbonDestination::Editor && workspace.editor().expanded_pane().is_some();
-    let content = crate::motion::row(vec![
+    let content = crate::motion::row_focus(vec![
         crate::motion::slot(
             navigation_rail(destination, theme),
             Length::Fixed(48.0),
@@ -336,7 +340,7 @@ fn project_surface_with_layout<'a>(
         } else {
             Length::Fixed(48.0)
         }),
-        crate::motion::reveal(
+        crate::motion::reveal_focus(
             !focused,
             project_selector(
                 project_title,
@@ -629,7 +633,7 @@ fn project_selector<'a>(
     ]
     .spacing(8)
     .align_y(iced::alignment::Vertical::Center);
-    let contents = crate::motion::row_shrink(vec![
+    let contents = crate::motion::row_shrink_focus(vec![
         crate::motion::slot(
             container(crate::icons::brand(36)).center(48),
             Length::Fixed(48.0),
@@ -816,7 +820,7 @@ fn ribbon<'a>(
     );
     let content = row![
         tools,
-        container(crate::motion::row_shrink(vec![crate::motion::slot(
+        container(crate::motion::row_shrink_focus(vec![crate::motion::slot(
             container(exit).padding(iced::Padding {
                 left: 8.0,
                 ..iced::Padding::ZERO

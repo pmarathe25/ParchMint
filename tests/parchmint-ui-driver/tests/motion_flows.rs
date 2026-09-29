@@ -354,7 +354,13 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
         assert_eq!(harness.hierarchy_titles().unwrap(), original);
     }
     harness.toggle_cards_group(WINDOW, act_one.clone()).unwrap();
+    harness
+        .advance_motion(WINDOW, Duration::from_millis(240))
+        .unwrap();
     harness.toggle_cards_group(WINDOW, act_one.clone()).unwrap();
+    harness
+        .advance_motion(WINDOW, Duration::from_millis(240))
+        .unwrap();
     for (name, destination, position) in [
         ("card-reorder", departure, HarnessDropPosition::After),
         ("card-move-group", act_two, HarnessDropPosition::Into),

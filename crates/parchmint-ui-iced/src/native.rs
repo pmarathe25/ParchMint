@@ -5689,13 +5689,21 @@ impl NativeDesktop {
             RibbonDestination::Editor | RibbonDestination::GlobalSearch
         ) {
             let breadcrumbs = workspace.active_editor_breadcrumbs();
-            crate::iced_editor_surface::editor_center_surface_with_breadcrumbs(
+            let content_width = (destination == RibbonDestination::Editor).then(|| {
+                if workspace.editor().expanded_pane().is_some() {
+                    layout.ribbon().width() as f32
+                } else {
+                    layout.center().width().saturating_sub(48) as f32
+                }
+            });
+            crate::iced_editor_surface::editor_center_surface_with_breadcrumbs_at_width(
                 workspace.editor(),
                 theme,
                 editor_hosts,
                 spelling_menu,
                 &breadcrumbs,
                 workspace.hierarchy_drag_source().is_some(),
+                content_width,
             )
             .map(ProjectSurfaceMessage::EditorCenter)
         } else {

@@ -247,6 +247,7 @@ pub(crate) fn editor_center_surface<'a>(
 }
 
 /// Composes the editor center with pane-specific hierarchy context.
+#[cfg(any(test, feature = "visual-verification"))]
 pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
     workspace: &'a EditorWorkspace,
     theme: ParchMintTheme,
@@ -255,6 +256,39 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
     breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
     hierarchy_drag_active: bool,
 ) -> Element<'a, EditorCenterMessage> {
+    editor_center_surface_with_breadcrumbs_at_width(
+        workspace,
+        theme,
+        slots,
+        spelling_menu,
+        breadcrumbs,
+        hierarchy_drag_active,
+        None,
+    )
+}
+
+pub(crate) fn editor_center_surface_with_breadcrumbs_at_width<'a>(
+    workspace: &'a EditorWorkspace,
+    theme: ParchMintTheme,
+    slots: &EditorHostSlots,
+    spelling_menu: Option<&SpellingMenu>,
+    breadcrumbs: &BTreeMap<EditorPane, Vec<String>>,
+    hierarchy_drag_active: bool,
+    content_width: Option<f32>,
+) -> Element<'a, EditorCenterMessage> {
+    let companion_visible = workspace.companion_is_visible();
+    let expanded = workspace.expanded_pane();
+    let ratio = workspace.split_ratio() as f32;
+    let (primary_measure, companion_measure) = content_width.map_or((None, None), |width| {
+        if expanded == Some(EditorPane::Primary) || !companion_visible {
+            (Some(width), None)
+        } else if expanded == Some(EditorPane::Companion) {
+            (None, Some(width))
+        } else {
+            let available = (width - 8.0).max(1.0);
+            (Some(available * ratio), Some(available * (1.0 - ratio)))
+        }
+    });
     let primary = editor_pane_surface(
         workspace,
         EditorPane::Primary,
@@ -266,9 +300,8 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
             .get(&EditorPane::Primary)
             .cloned()
             .unwrap_or_default(),
+        primary_measure,
     );
-    let companion_visible = workspace.companion_is_visible();
-    let expanded = workspace.expanded_pane();
     let primary_portion = (workspace.split_ratio() * 1000.0).round() as u16;
     let companion = editor_pane_surface(
         workspace,
@@ -281,6 +314,7 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
             .get(&EditorPane::Companion)
             .cloned()
             .unwrap_or_default(),
+        companion_measure,
     );
     let splitter = mouse_area(
         stack![
@@ -314,7 +348,7 @@ pub(crate) fn editor_center_surface_with_breadcrumbs<'a>(
     )
     .on_press(EditorCenterMessage::BeginSplitResize)
     .interaction(iced::mouse::Interaction::ResizingHorizontally);
-    let panes = crate::motion::row(vec![
+    let panes = crate::motion::row_editor(vec![
         crate::motion::slot(
             primary,
             Length::FillPortion(primary_portion),
@@ -1081,6 +1115,10 @@ fn link_editor_popover(
         .into()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "pane content has independent rendering inputs"
+)]
 fn editor_pane_surface<'a>(
     workspace: &'a EditorWorkspace,
     pane: EditorPane,
@@ -1089,6 +1127,7 @@ fn editor_pane_surface<'a>(
     spelling_menu: Option<&SpellingMenu>,
     hierarchy_drag_active: bool,
     breadcrumb: Vec<String>,
+    measure_width: Option<f32>,
 ) -> Element<'a, EditorCenterMessage> {
     let state = workspace.pane(pane);
     let tabs = tab_strip(
@@ -1273,7 +1312,12 @@ fn editor_pane_surface<'a>(
     let body = container(container(body).max_width(800))
         .center_x(Length::Fill)
         .height(Length::Fill);
-    let body = body.into();
+    let body: Element<'a, EditorCenterMessage> = body.into();
+    let body = if let Some(width) = measure_width {
+        crate::motion::stable_measure(body, width)
+    } else {
+        body
+    };
     let body = if workspace.focused_pane() == pane {
         focus::f6_region(F6Region::FocusedEditor, body)
     } else {

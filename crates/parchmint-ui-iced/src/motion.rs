@@ -16,6 +16,7 @@ use std::{
 };
 
 pub(crate) const LAYOUT: Duration = Duration::from_millis(200);
+pub(crate) const FOCUS_LAYOUT: Duration = Duration::from_millis(320);
 const ENTRANCE: Duration = Duration::from_millis(140);
 thread_local! {
     static CAPTURE: Cell<bool> = const { Cell::new(false) };
@@ -192,12 +193,38 @@ pub(crate) fn slot<'a, Message>(
         visible,
     }
 }
+#[cfg(test)]
 pub(crate) fn row<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
     Element::new(MotionRow {
         slots,
         animated: true,
         shrink: false,
         page: String::new(),
+        duration: LAYOUT,
+        anchor_leading: false,
+    })
+}
+
+pub(crate) fn row_focus<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        shrink: false,
+        page: String::new(),
+        duration: FOCUS_LAYOUT,
+        anchor_leading: false,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn row_shrink<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        shrink: true,
+        page: String::new(),
+        duration: LAYOUT,
+        anchor_leading: false,
     })
 }
 
@@ -214,18 +241,38 @@ pub(crate) fn row_for_page<'a, Message: 'a>(
         animated: true,
         shrink: false,
         page: page.into(),
+        duration: LAYOUT,
+        anchor_leading: false,
+    })
+}
+
+pub(crate) fn row_for_focus_page<'a, Message: 'a>(
+    page: impl Into<String>,
+    slots: Vec<Slot<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        shrink: false,
+        page: page.into(),
+        duration: FOCUS_LAYOUT,
+        anchor_leading: false,
     })
 }
 
 /// A compact fixed-slot row whose outside bounds follow the reveal itself.
 /// Used by shared header controls so an outer container cannot cut the exit
 /// short by snapping immediately to the final collapsed width.
-pub(crate) fn row_shrink<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+pub(crate) fn row_shrink_focus<'a, Message: 'a>(
+    slots: Vec<Slot<'a, Message>>,
+) -> Element<'a, Message> {
     Element::new(MotionRow {
         slots,
         animated: true,
         shrink: true,
         page: String::new(),
+        duration: FOCUS_LAYOUT,
+        anchor_leading: false,
     })
 }
 
@@ -235,6 +282,18 @@ pub(crate) fn row_instant<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Ele
         animated: false,
         shrink: false,
         page: String::new(),
+        duration: LAYOUT,
+        anchor_leading: false,
+    })
+}
+pub(crate) fn row_editor<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    Element::new(MotionRow {
+        slots,
+        animated: true,
+        shrink: false,
+        page: String::new(),
+        duration: FOCUS_LAYOUT,
+        anchor_leading: true,
     })
 }
 struct MotionRow<'a, Message> {
@@ -242,6 +301,8 @@ struct MotionRow<'a, Message> {
     animated: bool,
     shrink: bool,
     page: String,
+    duration: Duration,
+    anchor_leading: bool,
 }
 struct RowState {
     reveals: Vec<Tween>,
@@ -260,7 +321,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             reveals: self
                 .slots
                 .iter()
-                .map(|slot| Tween::new(if slot.visible { 1.0 } else { 0.0 }, now, LAYOUT))
+                .map(|slot| Tween::new(if slot.visible { 1.0 } else { 0.0 }, now, self.duration))
                 .collect(),
             now,
             page: self.page.clone(),
@@ -285,8 +346,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         state.widths.resize(self.slots.len(), 320.0);
         state
             .reveals
-            .resize_with(self.slots.len(), || Tween::new(0.0, now, LAYOUT));
+            .resize_with(self.slots.len(), || Tween::new(0.0, now, self.duration));
         for (index, (reveal, slot)) in state.reveals.iter_mut().zip(&self.slots).enumerate() {
+            reveal.duration = self.duration;
             // Toggling a pane within a screen animates. Mounting entirely new
             // slots snaps in instead: sliding sidebars on structural changes
             // is disruptive. Page changes snap via the page key above.
@@ -434,7 +496,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                         Size::new(content_width, size.height),
                     ),
                 );
-                let content = if matches!(slot.width, Length::Fixed(_)) {
+                let content = if matches!(slot.width, Length::Fixed(_)) || self.anchor_leading {
                     content
                 } else {
                     content.move_to(Point::new((width - content_width).min(0.0), 0.0))
@@ -610,6 +672,154 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
     }
 }
 
+/// Keep manuscript line breaks at their destination width while the pane
+/// around them moves. Only the body is measured this way; the pane surface,
+/// tabs, and breadcrumbs still fill their animated bounds.
+pub(crate) fn stable_measure<'a, Message: 'a>(
+    content: impl Into<Element<'a, Message>>,
+    destination_width: f32,
+) -> Element<'a, Message> {
+    Element::new(StableMeasure {
+        content: content.into(),
+        destination_width: destination_width.max(1.0),
+    })
+}
+
+struct StableMeasure<'a, Message> {
+    content: Element<'a, Message>,
+    destination_width: f32,
+}
+
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StableMeasure<'_, Message> {
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+    fn layout(
+        &mut self,
+        tree: &mut Tree,
+        renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let size = limits.max();
+        let width = self.destination_width;
+        let child = self.content.as_widget_mut().layout(
+            &mut tree.children[0],
+            renderer,
+            &layout::Limits::new(Size::new(width, size.height), Size::new(width, size.height)),
+        );
+        let center = |width: f32| (width - width.min(800.0)) * 0.5;
+        layout::Node::with_children(
+            size,
+            vec![child.move_to(Point::new(center(size.width) - center(width), 0.0))],
+        )
+    }
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        if let Some(clip) = viewport.intersection(&layout.bounds()) {
+            self.content.as_widget_mut().update(
+                &mut tree.children[0],
+                event,
+                layout.child(0),
+                clipped_cursor(cursor, clip),
+                renderer,
+                clipboard,
+                shell,
+                &clip,
+            );
+        }
+    }
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        theme: &iced::Theme,
+        style: &renderer::Style,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        use renderer::Renderer;
+        if let Some(clip) = viewport.intersection(&layout.bounds()) {
+            renderer.with_layer(clip, |renderer| {
+                self.content.as_widget().draw(
+                    &tree.children[0],
+                    renderer,
+                    theme,
+                    style,
+                    layout.child(0),
+                    clipped_cursor(cursor, clip),
+                    &clip,
+                );
+            });
+        }
+    }
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout.child(0),
+            renderer,
+            operation,
+        );
+    }
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        viewport: &Rectangle,
+        renderer: &iced::Renderer,
+    ) -> mouse::Interaction {
+        viewport
+            .intersection(&layout.bounds())
+            .map_or(mouse::Interaction::default(), |clip| {
+                self.content.as_widget().mouse_interaction(
+                    &tree.children[0],
+                    layout.child(0),
+                    clipped_cursor(cursor, clip),
+                    &clip,
+                    renderer,
+                )
+            })
+    }
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(
+            &mut tree.children[0],
+            layout.child(0),
+            renderer,
+            viewport,
+            translation,
+        )
+    }
+}
+
 pub(crate) fn enter<'a, Message: 'a>(
     key: impl Into<String>,
     content: impl Into<Element<'a, Message>>,
@@ -625,6 +835,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: None,
+        focus_duration: false,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -642,6 +853,25 @@ pub(crate) fn reveal<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: None,
+        focus_duration: false,
+    })
+}
+pub(crate) fn reveal_focus<'a, Message: 'a>(
+    visible: bool,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: String::new(),
+        content: content.into(),
+        reveal: Some(visible),
+        resize: false,
+        clip_resize: true,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
+        slide_from_top: false,
+        clip_below: None,
+        focus_duration: true,
     })
 }
 /// Reveal a row from the edge above it while allocating its height. The
@@ -661,6 +891,7 @@ pub(crate) fn reveal_down<'a, Message: 'a>(
         origin: None,
         slide_from_top: true,
         clip_below: None,
+        focus_duration: true,
     })
 }
 /// Animate allocated height so following rows move with the card boundary.
@@ -679,6 +910,7 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: None,
+        focus_duration: false,
     })
 }
 /// Group fields retain their own trajectories while the header surface resizes.
@@ -699,6 +931,7 @@ pub(crate) fn resize_group_height<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: None,
+        focus_duration: false,
     })
 }
 /// Reveal rows from their top edge without sliding their text against the
@@ -720,6 +953,7 @@ pub(crate) fn disclosure<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: None,
+        focus_duration: false,
     })
 }
 
@@ -744,6 +978,7 @@ pub(crate) fn disclosure_below_card<'a, Message: 'a>(
         origin: None,
         slide_from_top: false,
         clip_below: Some((positions, card_id)),
+        focus_duration: false,
     })
 }
 
@@ -758,6 +993,7 @@ struct Entrance<'a, Message> {
     origin: Option<Rc<Cell<Point>>>,
     slide_from_top: bool,
     clip_below: Option<(Positions, String)>,
+    focus_duration: bool,
 }
 struct EntranceState {
     height: f32,
@@ -772,7 +1008,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
     }
     fn state(&self) -> tree::State {
         let now = now();
-        let duration = if self.reveal.is_some() {
+        let duration = if self.focus_duration {
+            FOCUS_LAYOUT
+        } else if self.reveal.is_some() {
             LAYOUT
         } else {
             ENTRANCE
@@ -808,7 +1046,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                 0.0,
                 state.now,
                 if self.reveal.is_some() {
-                    LAYOUT
+                    if self.focus_duration {
+                        FOCUS_LAYOUT
+                    } else {
+                        LAYOUT
+                    }
                 } else {
                     ENTRANCE
                 },
@@ -817,6 +1059,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         }
         if let Some(visible) = self.reveal.filter(|_| !self.resize) {
             state.now = now();
+            state.progress.duration = if self.focus_duration {
+                FOCUS_LAYOUT
+            } else {
+                LAYOUT
+            };
             state.progress.set(f32::from(visible), state.now, enabled());
         }
         tree.diff_children(std::slice::from_ref(&self.content));
@@ -1098,6 +1345,7 @@ impl LocalPositions {
             origin: Some(self.origin.clone()),
             slide_from_top: false,
             clip_below: None,
+            focus_duration: false,
         })
     }
 }
