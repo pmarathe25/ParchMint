@@ -889,6 +889,7 @@ pub(crate) struct ExplorerRowWindow<'a> {
 }
 
 /// Cards-specific projection over the shared hierarchy state.
+#[derive(Clone)]
 pub struct CardsState<'a> {
     explorer: &'a ExplorerState,
     expanded: &'a BTreeSet<String>,
@@ -1150,6 +1151,7 @@ impl<'a> CardsState<'a> {
                 });
             }
         }
+        drop(measurements);
         while let Some((parent, depth)) = groups.pop() {
             rows.push(CardsGridRow {
                 disclosures: Vec::new(),
@@ -1252,6 +1254,81 @@ impl<'a> CardsState<'a> {
             compact[last].tail_reserve += reserve;
             compact[last].height += reserve;
         }
+        // Retained descendants separate rows that will share one compact row
+        // after collapse. Release the joining row's allocation on the same
+        // disclosure timeline, including its closing group gap. Otherwise a
+        // last subgroup leaves an entire creation row until unmounting.
+        if !self.disclosures.is_empty() {
+            let mut collapsed = (*self.expanded).clone();
+            for id in self.disclosures.keys() {
+                collapsed.remove(id);
+            }
+            let no_disclosures = BTreeMap::new();
+            let settled_cache = RefCell::new(None);
+            let settled = CardsState {
+                expanded: &collapsed,
+                disclosures: &no_disclosures,
+                grid_cache: &settled_cache,
+                ..self.clone()
+            }
+            .grid_rows(columns, width);
+            let mut current_rows = BTreeMap::new();
+            for (index, row) in compact.iter().enumerate() {
+                for &id in &ids[row.start..row.end] {
+                    current_rows.insert(id.to_owned(), index);
+                }
+                if let Some(parent) = &row.add_to {
+                    current_rows.insert(format!("add:{parent}"), index);
+                }
+            }
+            for final_row in &settled.rows {
+                let mut joining = settled.ids[final_row.start..final_row.end]
+                    .iter()
+                    .filter_map(|id| current_rows.get(id).copied())
+                    .collect::<BTreeSet<_>>();
+                if let Some(parent) = &final_row.add_to
+                    && let Some(&index) = current_rows.get(&format!("add:{parent}"))
+                {
+                    joining.insert(index);
+                }
+                let joining = joining.into_iter().collect::<Vec<_>>();
+                let Some((&first, rest)) =
+                    joining.split_first().filter(|(_, rest)| !rest.is_empty())
+                else {
+                    continue;
+                };
+                let last = *rest.last().expect("joining row");
+                let fraction = compact[first + 1..=last]
+                    .iter()
+                    .flat_map(|row| &row.disclosures)
+                    .chain(&settled.ids[final_row.start..final_row.end])
+                    .filter_map(|id| self.disclosures.get(id))
+                    .map(crate::motion::Disclosure::visible_fraction)
+                    .reduce(f32::min);
+                if let Some(fraction) = fraction {
+                    // The compact row now reserves the complete card extent.
+                    // An opening heading's old tail reserve would count that
+                    // space a second time before its children fill the group.
+                    for id in settled.ids[final_row.start..final_row.end]
+                        .iter()
+                        .filter(|id| self.disclosures.contains_key(*id))
+                    {
+                        if let Some(row) = compact
+                            .iter_mut()
+                            .find(|row| row.add_to.as_ref() == Some(id))
+                        {
+                            row.height -= row.tail_reserve;
+                            row.tail_reserve = 0.0;
+                        }
+                    }
+                    compact[first].height +=
+                        (final_row.height - natural_heights[first]) * (1.0 - fraction);
+                    for &index in rest {
+                        compact[index].height *= fraction;
+                    }
+                }
+            }
+        }
         let mut offsets = Vec::with_capacity(compact.len() + 1);
         offsets.push(0.0);
         for row in &compact {
@@ -1277,9 +1354,59 @@ impl<'a> CardsState<'a> {
             .map_or(0.0, |row| row.tail_reserve)
     }
 
+    pub(crate) fn live_row_height(&self, columns: usize, width: f32, key: &str) -> f32 {
+        let rows = self.grid_rows(columns, width);
+        rows.iter()
+            .find(|row| {
+                (row.start < row.end && rows.ids[row.start] == key)
+                    || (row.start == row.end && row.add_to.as_deref() == key.strip_prefix("add:"))
+            })
+            .map_or(0.0, |row| row.height)
+    }
+
+    fn settled_grid_rows(&self, columns: usize, width: f32) -> Rc<CardsGridLayout> {
+        let no_disclosures = BTreeMap::new();
+        let settled_cache = RefCell::new(None);
+        let settled = CardsState {
+            disclosures: &no_disclosures,
+            grid_cache: &settled_cache,
+            ..self.clone()
+        };
+        settled.grid_rows(columns, width)
+    }
+
     /// Cards joining the compact group's row travel diagonally into their
     /// final cell. Rows that stay below the group follow the shrinking row
     /// allocation alone; shifting those rows vertically makes them overshoot.
+    pub(crate) fn closing_packing_anchor(
+        &self,
+        columns: usize,
+        width: f32,
+        id: &str,
+    ) -> Option<(String, iced::Vector)> {
+        let rows = self.settled_grid_rows(columns, width);
+        for row in rows.iter().filter(|row| row.start < row.end) {
+            let ids = &rows.ids[row.start..row.end];
+            let column = ids.iter().position(|item| item == id).or_else(|| {
+                row.add_to
+                    .as_ref()
+                    .filter(|parent| format!("add:{parent}") == id)
+                    .map(|_| ids.len())
+            });
+            if let Some(column) = column {
+                let first = self.item(&ids[0])?;
+                return Some((
+                    ids[0].clone(),
+                    iced::Vector::new(
+                        column as f32 * (first.grid_width(width, columns) + 12.0),
+                        0.0,
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
     pub(crate) fn closing_packing_offsets(
         &self,
         columns: usize,
@@ -1289,26 +1416,7 @@ impl<'a> CardsState<'a> {
             return BTreeMap::new();
         }
         let current = self.grid_rows(columns, width);
-        let no_disclosures = BTreeMap::new();
-        let settled_cache = RefCell::new(None);
-        let settled = CardsState {
-            explorer: self.explorer,
-            expanded: self.expanded,
-            details_expanded: self.details_expanded,
-            disclosures: &no_disclosures,
-            section_id: self.section_id,
-            word_counts: Rc::clone(&self.word_counts),
-            scroll_offset: self.scroll_offset,
-            measurements: self.measurements,
-            grid_cache: &settled_cache,
-            drag_destination: self.drag_destination,
-            last_activated_document: self.last_activated_document,
-            visible_metadata_labels: self.visible_metadata_labels.clone(),
-            definitions: self.definitions,
-            field_order: self.field_order,
-            values: self.values,
-        };
-        let final_rows = settled.grid_rows(columns, width);
+        let final_rows = self.settled_grid_rows(columns, width);
         let placements = |cards: &CardsState<'_>, layout: &CardsGridLayout| {
             let mut result = BTreeMap::new();
             for (row_index, row) in layout.rows.iter().enumerate() {
@@ -1342,7 +1450,7 @@ impl<'a> CardsState<'a> {
             result
         };
         let from = placements(self, &current);
-        let to = placements(&settled, &final_rows);
+        let to = placements(self, &final_rows);
         from.into_iter()
             .filter_map(|(id, start)| {
                 let end = to.get(&id)?;
@@ -2233,9 +2341,6 @@ impl GlobalSearchState {
     }
     pub(crate) fn result_positions(&self) -> crate::motion::Positions {
         self.result_positions.clone()
-    }
-    pub(crate) fn generation(&self) -> u64 {
-        self.query_generation
     }
 
     fn begin_query(&mut self) {
@@ -5585,10 +5690,8 @@ impl ProjectWorkspace {
         self.cards_disclosures.get(id).cloned()
     }
 
-    pub(crate) fn cards_disclosures_active(&self) -> bool {
-        self.cards_disclosures
-            .values()
-            .any(|motion| motion.active())
+    pub(crate) fn cards_disclosures_mounted(&self) -> bool {
+        !self.cards_disclosures.is_empty()
     }
 
     pub fn hierarchy_drag_source(&self) -> Option<&str> {
@@ -12111,6 +12214,135 @@ mod tests {
                 .filter(|item| item.node_id == "chapter-one")
                 .all(|item| !item.visible)
         );
+    }
+
+    #[test]
+    fn last_subgroup_releases_packed_rows_before_disclosure_unmounts() {
+        crate::motion::set_reduced(false);
+        for (columns, width) in [(1, 360.0), (2, 700.0), (3, 1100.0)] {
+            let start = std::time::Instant::now();
+            let _clock = crate::motion::FixedTime::new(start);
+            let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+            let mut parent = HierarchyNode::new(
+                "parent",
+                "Parent",
+                "manuscript",
+                Some("manuscript"),
+                HierarchyNodeKind::Group,
+            );
+            parent.children = vec!["chapter-three".into(), "part-one".into()];
+            workspace.explorer.nodes.insert("parent".into(), parent);
+            workspace
+                .explorer
+                .nodes
+                .get_mut("manuscript")
+                .unwrap()
+                .children = vec!["parent".into()];
+            for id in ["part-one", "chapter-three"] {
+                workspace.explorer.nodes.get_mut(id).unwrap().parent = Some("parent".into());
+            }
+            workspace.cards_expanded.insert("parent".into());
+            workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+            if columns == 3 {
+                let (anchor, offset) = workspace
+                    .cards()
+                    .closing_packing_anchor(columns, width, "add:parent")
+                    .unwrap();
+                assert_eq!(anchor, "chapter-three");
+                assert!(offset.x > 0.0);
+                assert_eq!(offset.y, 0.0);
+            }
+            let extent = || {
+                workspace
+                    .cards()
+                    .grid_rows(columns, width)
+                    .offsets
+                    .last()
+                    .copied()
+                    .unwrap()
+            };
+            let mut previous = extent();
+            for millis in (0..=200).step_by(8) {
+                let _frame =
+                    crate::motion::FixedTime::new(start + std::time::Duration::from_millis(millis));
+                let current = extent();
+                let cards = workspace.cards();
+                let rows = cards.grid_rows(columns, width);
+                for row in rows.iter().filter(|row| row.start == row.end) {
+                    let key = format!("add:{}", row.add_to.as_deref().unwrap());
+                    assert_eq!(cards.live_row_height(columns, width, &key), row.height);
+                }
+                assert!(
+                    current <= previous + 0.01,
+                    "collapse reversed at {millis}ms ({columns} columns): {previous} -> {current}"
+                );
+                previous = current;
+            }
+            let _frame =
+                crate::motion::FixedTime::new(start + std::time::Duration::from_millis(200));
+            workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
+                "part-one".into(),
+            ));
+            let settled = workspace
+                .cards()
+                .grid_rows(columns, width)
+                .offsets
+                .last()
+                .copied()
+                .unwrap();
+            assert!(
+                (previous - settled).abs() < 0.01,
+                "unmount changed extent ({columns} columns): {previous} -> {settled}"
+            );
+            let opening = start + std::time::Duration::from_millis(220);
+            let _frame = crate::motion::FixedTime::new(opening);
+            workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+            let initial = workspace
+                .cards()
+                .grid_rows(columns, width)
+                .offsets
+                .last()
+                .copied()
+                .unwrap();
+            assert!(
+                (initial - settled).abs() < 0.01,
+                "opening jumped ({columns} columns): {settled} -> {initial}"
+            );
+            previous = initial;
+            for millis in (0..=200).step_by(8) {
+                let _frame = crate::motion::FixedTime::new(
+                    opening + std::time::Duration::from_millis(millis),
+                );
+                let current = workspace
+                    .cards()
+                    .grid_rows(columns, width)
+                    .offsets
+                    .last()
+                    .copied()
+                    .unwrap();
+                assert!(
+                    current >= previous - 0.01,
+                    "opening reversed at {millis}ms ({columns} columns): {previous} -> {current}"
+                );
+                previous = current;
+            }
+            let _frame =
+                crate::motion::FixedTime::new(opening + std::time::Duration::from_millis(200));
+            workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
+                "part-one".into(),
+            ));
+            let settled = workspace
+                .cards()
+                .grid_rows(columns, width)
+                .offsets
+                .last()
+                .copied()
+                .unwrap();
+            assert!(
+                (previous - settled).abs() < 0.01,
+                "opening completion changed extent ({columns} columns): {previous} -> {settled}"
+            );
+        }
     }
 
     #[test]

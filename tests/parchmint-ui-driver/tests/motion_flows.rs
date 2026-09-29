@@ -442,6 +442,31 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
 }
 
 #[test]
+fn last_subgroup_collapse_packs_the_parent_creation_slot_continuously() {
+    let run = IsolatedRun::new("last-subgroup-motion").unwrap();
+    let harness = create_project(&run, &run.root().join("novel.parchmint"), "Nested motion");
+    create_group(&harness, "Manuscript", "Parent");
+    create_document(&harness, "Parent", "Before subgroup");
+    create_group(&harness, "Parent", "Last subgroup");
+    create_document(&harness, "Last subgroup", "Nested document");
+    create_group(&harness, "Manuscript", "Following group");
+    click(&harness, HarnessTarget::Ribbon(RibbonDestination::Cards));
+    harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
+    frames(&harness, "last-subgroup-before");
+    let subgroup = harness.hierarchy_node("Last subgroup").unwrap();
+    harness
+        .toggle_cards_group(WINDOW, subgroup.clone())
+        .unwrap();
+    frames(&harness, "last-subgroup-collapse");
+    harness.toggle_cards_group(WINDOW, subgroup).unwrap();
+    frames(&harness, "last-subgroup-expand");
+    click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
+    frames(&harness, "navigation-editor");
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
 fn overview_group_collapse_and_expand_use_one_motion_timeline() {
     let run = IsolatedRun::new("group-motion").unwrap();
     let harness = create_project(&run, &run.root().join("novel.parchmint"), "Group motion");

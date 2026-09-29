@@ -89,7 +89,11 @@ Creation slots use muted icons, transparent fills, and dashed borders.
 Group headings toggle their children; group synopsis and metadata remain fully
 visible. The compact card morphs into a wide heading while descendants reveal
 on the same timeline. Released heading space stays at the group bottom until
-the children fill it, keeping following groups moving steadily.
+the children fill it, keeping following groups moving steadily. When a last
+subgroup collapses, rows joining its compact row release their allocation on
+that timeline, including the parent's creation slot and closing gap. Joining
+cards and creation slots anchor their destinations to the compact row's first
+card, so relayout cannot leave a stale vertical destination.
 Document cards place a compact metadata grid below the synopsis.
 Collapsed cards show fields marked visible, including dashes for empty
 values; dragging between the named Settings sections changes that visibility with
@@ -123,7 +127,11 @@ visual delays. Search retains a noninteractive outgoing result snapshot and move
 surviving rows when streamed groups insert above them. Widgets request redraws
 only during transitions; typing and
 pointer dragging remain immediate. Pane children stay mounted during focus and
-sidebar changes. Card drop targets use the same animated bounds as the cards and enclosing group
+sidebar changes. Screen navigation places page content and shared chrome at
+their final positions immediately; Focus and sidebar toggles within a screen
+still animate. Group surface tweens share the disclosure's start time so delayed
+frames catch up to the same transition. Card drop targets use the same animated
+bounds as the cards and enclosing group
 frames. Blank cells beside a document target the position after that document;
 remaining group space targets its innermost container, and the exterior trailing
 gap targets a sibling after the group. Invalid hovers keep the source

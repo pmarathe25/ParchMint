@@ -212,12 +212,20 @@ pub(crate) fn row<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a,
     })
 }
 
+#[cfg(test)]
 pub(crate) fn row_focus<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
+    row_for_focus_page("", slots)
+}
+
+pub(crate) fn row_shrink_focus_for_page<'a, Message: 'a>(
+    page: impl Into<String>,
+    slots: Vec<Slot<'a, Message>>,
+) -> Element<'a, Message> {
     Element::new(MotionRow {
         slots,
         animated: true,
-        shrink: false,
-        page: String::new(),
+        shrink: true,
+        page: page.into(),
         duration: FOCUS_LAYOUT,
         anchor_leading: false,
     })
@@ -377,7 +385,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         let state = tree.state.downcast_mut::<RowState>();
         let now = now();
         // A page change snaps every reveal instantly: navigating must not
-        // replay sidebar motion. The whole-page entrance (if any) still plays.
+        // replay sidebar motion.
         let navigated = state.page != self.page;
         if navigated {
             state.page.clone_from(&self.page);
@@ -916,6 +924,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: None,
         focus_duration: false,
+        allocated_height: None,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -934,14 +943,16 @@ pub(crate) fn reveal<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: None,
         focus_duration: false,
+        allocated_height: None,
     })
 }
-pub(crate) fn reveal_focus<'a, Message: 'a>(
+pub(crate) fn reveal_focus_for_page<'a, Message: 'a>(
+    page: impl Into<String>,
     visible: bool,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Entrance {
-        key: String::new(),
+        key: page.into(),
         content: content.into(),
         reveal: Some(visible),
         resize: false,
@@ -952,6 +963,7 @@ pub(crate) fn reveal_focus<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: None,
         focus_duration: true,
+        allocated_height: None,
     })
 }
 /// Reveal a row from the edge above it while allocating its height. The
@@ -972,6 +984,7 @@ pub(crate) fn reveal_down<'a, Message: 'a>(
         slide_from_top: true,
         clip_below: None,
         focus_duration: true,
+        allocated_height: None,
     })
 }
 /// Animate allocated height so following rows move with the card boundary.
@@ -991,6 +1004,7 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: None,
         focus_duration: false,
+        allocated_height: None,
     })
 }
 /// Group fields retain their own trajectories while the header surface resizes.
@@ -998,6 +1012,7 @@ pub(crate) fn resize_height<'a, Message: 'a>(
 /// the enclosing group already reserves this space and the scroll viewport clips it.
 pub(crate) fn resize_group_height<'a, Message: 'a>(
     key: impl Into<String>,
+    timeline: Option<Disclosure>,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Entrance {
@@ -1006,12 +1021,13 @@ pub(crate) fn resize_group_height<'a, Message: 'a>(
         reveal: Some(true),
         resize: true,
         clip_resize: false,
-        disclosure: None,
+        disclosure: timeline,
         on_complete: None,
         origin: None,
         slide_from_top: false,
         clip_below: None,
         focus_duration: false,
+        allocated_height: None,
     })
 }
 /// Reveal rows from their top edge without sliding their text against the
@@ -1034,6 +1050,7 @@ pub(crate) fn disclosure<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: None,
         focus_duration: false,
+        allocated_height: None,
     })
 }
 
@@ -1059,6 +1076,7 @@ pub(crate) fn disclosure_below_card<'a, Message: 'a>(
         slide_from_top: false,
         clip_below: Some((positions, card_id)),
         focus_duration: false,
+        allocated_height: None,
     })
 }
 
@@ -1068,6 +1086,28 @@ pub(crate) fn disclosure_below_card<'a, Message: 'a>(
 pub(crate) fn live_height<'a, Message: 'a>(height: impl Fn() -> f32 + 'a) -> Element<'a, Message> {
     Element::new(LiveHeight {
         height: Box::new(height),
+    })
+}
+
+/// Follow the projected grid allocation without clipping cards traveling into
+/// a neighboring row. The nested disclosures own redraws and child clipping.
+pub(crate) fn allocate_height<'a, Message: 'a>(
+    height: impl Fn() -> Option<f32> + 'a,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: String::new(),
+        content: content.into(),
+        reveal: Some(true),
+        resize: false,
+        clip_resize: false,
+        disclosure: None,
+        on_complete: None,
+        origin: None,
+        slide_from_top: false,
+        clip_below: None,
+        focus_duration: false,
+        allocated_height: Some(Box::new(height)),
     })
 }
 
@@ -1118,6 +1158,7 @@ struct Entrance<'a, Message> {
     slide_from_top: bool,
     clip_below: Option<(Positions, String)>,
     focus_duration: bool,
+    allocated_height: Option<Box<dyn Fn() -> Option<f32> + 'a>>,
 }
 struct EntranceState {
     height: f32,
@@ -1167,7 +1208,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             }
             state.now = now();
             state.progress = Tween::new(
-                0.0,
+                f32::from(self.reveal.unwrap_or(false)),
                 state.now,
                 if self.reveal.is_some() {
                     if self.focus_duration {
@@ -1179,7 +1220,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                     ENTRANCE
                 },
             );
-            state.progress.set(1.0, state.now, enabled());
+            state.progress.set(
+                f32::from(self.reveal.unwrap_or(true)),
+                state.now,
+                enabled() && self.reveal.is_none(),
+            );
         }
         if let Some(visible) = self.reveal.filter(|_| !self.resize) {
             state.now = now();
@@ -1217,7 +1262,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             .content
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
-        let offset = if self.slide_from_top {
+        let offset = if self.allocated_height.is_some() {
+            0.0
+        } else if self.slide_from_top {
             // The tab strip and breadcrumbs emerge from the toolbar edge.
             // Sliding a full row height kept their labels clipped until late
             // in the transition, so they appeared abruptly after the panes
@@ -1232,11 +1279,15 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         let mut size = child.size();
         if self.resize {
             let now = now();
+            let started = self
+                .disclosure
+                .as_ref()
+                .map_or(now, |disclosure| disclosure.0.started);
             if state.height == 0.0 {
                 state.progress = Tween::new(size.height, now, LAYOUT);
             }
             state.height = size.height;
-            state.progress.set(size.height, now, enabled());
+            state.progress.set(size.height, started, enabled());
             state.now = now;
             size.height = state.progress.value(now);
         } else if self.reveal.is_some() {
@@ -1244,6 +1295,9 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                 state.height = size.height;
             }
             size.height = state.height * progress;
+        }
+        if let Some(height) = self.allocated_height.as_ref().and_then(|height| height()) {
+            size.height = height.max(0.0);
         }
         layout::Node::with_children(size, vec![child.move_to(Point::new(0.0, offset))])
     }
@@ -1310,7 +1364,10 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
         viewport: &Rectangle,
     ) {
         use renderer::Renderer;
-        if self.reveal.is_some() && (!self.resize || self.clip_resize) {
+        if self.allocated_height.is_none()
+            && self.reveal.is_some()
+            && (!self.resize || self.clip_resize)
+        {
             if let Some(mut clip) = viewport
                 .intersection(&layout.bounds())
                 .filter(|bounds| bounds.height > 0.0)
@@ -1454,7 +1511,8 @@ impl LocalPositions {
             origin: Some(self.origin.clone()),
             morph_width: true,
             allocation_height: None,
-            target_shift: Vector::ZERO,
+            timeline: None,
+            destination: Box::new(|point| point),
             content: content.into(),
         })
     }
@@ -1474,6 +1532,7 @@ impl LocalPositions {
             slide_from_top: false,
             clip_below: None,
             focus_duration: false,
+            allocated_height: None,
         })
     }
 }
@@ -1490,6 +1549,13 @@ struct Placement {
     y: Tween,
 }
 impl Positions {
+    pub(crate) fn layout_position(&self, id: &str) -> Option<Point> {
+        self.0
+            .lock()
+            .expect("motion positions")
+            .get(id)
+            .map(|place| place.layout_target)
+    }
     pub(crate) fn retain(&self, ids: &[&str]) {
         self.0
             .lock()
@@ -1549,7 +1615,8 @@ pub(crate) fn reflow<'a, Message: 'a>(
         origin: None,
         morph_width: false,
         allocation_height: None,
-        target_shift: Vector::ZERO,
+        timeline: None,
+        destination: Box::new(|point| point),
         content: content.into(),
     })
 }
@@ -1557,7 +1624,7 @@ pub(crate) fn reflow_to<'a, Message: 'a>(
     positions: Positions,
     id: impl Into<String>,
     generation: u64,
-    shift: Vector,
+    destination: impl Fn(Point) -> Point + 'a,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Reflow {
@@ -1568,7 +1635,8 @@ pub(crate) fn reflow_to<'a, Message: 'a>(
         origin: None,
         morph_width: false,
         allocation_height: None,
-        target_shift: shift,
+        timeline: None,
+        destination: Box::new(destination),
         content: content.into(),
     })
 }
@@ -1589,7 +1657,7 @@ pub(crate) fn reflow_card<'a, Message: 'a>(
         generation,
         animate,
         None,
-        Vector::ZERO,
+        |point| point,
         content,
     )
 }
@@ -1599,8 +1667,8 @@ pub(crate) fn reflow_card_height_to<'a, Message: 'a>(
     id: impl Into<String>,
     generation: u64,
     animate: bool,
-    allocation_height: Option<f32>,
-    target_shift: Vector,
+    allocation: Option<(f32, Option<Disclosure>)>,
+    destination: impl Fn(Point) -> Point + 'a,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Reflow {
@@ -1610,8 +1678,9 @@ pub(crate) fn reflow_card_height_to<'a, Message: 'a>(
         animate,
         origin: None,
         morph_width: true,
-        allocation_height,
-        target_shift,
+        allocation_height: allocation.as_ref().map(|(height, _)| *height),
+        timeline: allocation.and_then(|(_, timeline)| timeline),
+        destination: Box::new(destination),
         content: content.into(),
     })
 }
@@ -1624,7 +1693,8 @@ struct Reflow<'a, Message> {
     origin: Option<Rc<Cell<Point>>>,
     morph_width: bool,
     allocation_height: Option<f32>,
-    target_shift: Vector,
+    timeline: Option<Disclosure>,
+    destination: Box<dyn Fn(Point) -> Point + 'a>,
     content: Element<'a, Message>,
 }
 fn resize_shell_width(node: &layout::Node, original: f32, width: f32) -> layout::Node {
@@ -1643,6 +1713,20 @@ fn resize_shell_width(node: &layout::Node, original: f32, width: f32) -> layout:
 struct ReflowState {
     id: String,
     offset: Vector,
+}
+
+fn node_from_layout(layout: Layout<'_>) -> layout::Node {
+    let position = layout.position();
+    layout::Node::with_children(
+        layout.bounds().size(),
+        layout
+            .children()
+            .map(|child| {
+                let offset = child.position() - position;
+                node_from_layout(child).move_to(Point::ORIGIN + offset)
+            })
+            .collect(),
+    )
 }
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -1689,16 +1773,20 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
         }
         if self.morph_width {
             let at = now();
+            let started = self
+                .timeline
+                .as_ref()
+                .map_or(at, |timeline| timeline.0.started);
             let width = {
                 let mut positions = self.positions.0.lock().expect("motion positions");
                 positions.get_mut(&self.id).map(|place| {
                     place
                         .width_motion
-                        .set(allocated.width, at, self.animate && enabled());
+                        .set(allocated.width, started, self.animate && enabled());
                     let morphing = place.width_motion.active(at) || place.height_motion.active(at);
                     place.height_motion.set(
                         allocated.height,
-                        at,
+                        started,
                         self.animate && enabled() && morphing,
                     );
                     place.width_motion.value(at)
@@ -1787,7 +1875,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             let layout_target = self.origin.as_ref().map_or(layout.position(), |origin| {
                 Point::ORIGIN + (layout.position() - origin.get())
             });
-            let target = layout_target + self.target_shift;
+            let target = (self.destination)(layout_target);
+            let target_shift = target - layout_target;
             let mut positions = self.positions.0.lock().expect("motion positions");
             let place = positions
                 .entry(self.id.clone())
@@ -1838,9 +1927,13 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     } else {
                         LAYOUT
                     };
-                    place.x.set(target.x, *now, animate_x);
-                    place.y.set(target.y, *now, animate_y);
-                } else if self.target_shift != Vector::ZERO && self.animate && enabled() {
+                    let started = self
+                        .timeline
+                        .as_ref()
+                        .map_or(*now, |timeline| timeline.0.started);
+                    place.x.set(target.x, started, animate_x);
+                    place.y.set(target.y, started, animate_y);
+                } else if target_shift != Vector::ZERO && self.animate && enabled() {
                     // The closing rows change their allocated heights every
                     // frame. Their settled target can drift a few pixels as
                     // the grid width and height resolve. Retarget the same
@@ -2021,12 +2114,28 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
         renderer: &iced::Renderer,
         operation: &mut dyn Operation,
     ) {
-        self.content.as_widget_mut().operate(
-            &mut tree.children[0],
-            layout.child(0),
-            renderer,
-            operation,
-        );
+        let desired = if enabled() {
+            tree.state.downcast_ref::<ReflowState>().offset
+        } else {
+            Vector::ZERO
+        };
+        let child = layout.child(0);
+        let correction = desired - (child.position() - layout.position());
+        if correction == Vector::ZERO {
+            self.content
+                .as_widget_mut()
+                .operate(&mut tree.children[0], child, renderer, operation);
+        } else {
+            // Redraw can advance the painted translation before layout catches
+            // up. Queries and focus operations must see those same bounds.
+            let node = node_from_layout(child).move_to(child.position() + correction);
+            self.content.as_widget_mut().operate(
+                &mut tree.children[0],
+                Layout::new(&node),
+                renderer,
+                operation,
+            );
+        }
     }
     fn mouse_interaction(
         &self,
@@ -2855,6 +2964,87 @@ mod tests {
     }
 
     #[test]
+    fn navigating_snaps_project_label_and_focus_chrome() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let make_label = |page, expanded| -> Element<'_, ()> {
+            row_shrink_focus_for_page(
+                page,
+                vec![
+                    slot(
+                        iced::widget::Space::new().width(48).height(48),
+                        Length::Fixed(48.0),
+                        true,
+                    ),
+                    slot(
+                        iced::widget::Space::new().width(240).height(48),
+                        Length::Fixed(240.0),
+                        expanded,
+                    ),
+                ],
+            )
+        };
+        let mut label = make_label("Cards", false);
+        let mut tree = Tree::new(&label);
+        label.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        label = make_label("Editor", true);
+        tree.diff(&label);
+        let snapped = label.as_widget_mut().layout(&mut tree, &renderer, &limits);
+        assert_eq!(snapped.size().width, 288.0);
+        assert_eq!(
+            frame(&mut label, &mut tree, &renderer, &snapped, start),
+            iced::window::RedrawRequest::Wait
+        );
+        label = make_label("Editor", false);
+        tree.diff(&label);
+        assert!(tree.state.downcast_ref::<RowState>().reveals[1].active(start));
+
+        let chrome = |page, visible| -> Element<'_, ()> {
+            reveal_focus_for_page(
+                page,
+                visible,
+                iced::widget::Space::new().width(240).height(48),
+            )
+        };
+        let mut element = chrome("Editor", false);
+        let mut tree = Tree::new(&element);
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = chrome("Cards", true);
+        tree.diff(&element);
+        assert_eq!(
+            element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            48.0
+        );
+        element = chrome("Editor", false);
+        tree.diff(&element);
+        assert_eq!(
+            element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .size()
+                .height,
+            0.0
+        );
+        element = chrome("Editor", true);
+        tree.diff(&element);
+        assert!(
+            tree.state
+                .downcast_ref::<EntranceState>()
+                .progress
+                .active(start)
+        );
+    }
+
+    #[test]
     fn page_change_snaps_sidebars_while_same_page_toggles_animate() {
         set_reduced(false);
         let renderer = renderer();
@@ -3026,6 +3216,119 @@ mod tests {
             );
             assert!(incoming.size().width <= 400.0);
         }
+    }
+
+    #[test]
+    fn moving_card_queries_follow_the_painted_translation_before_relayout() {
+        struct Bounds(Option<Rectangle>);
+        impl Operation for Bounds {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn container(&mut self, id: Option<&iced::widget::Id>, bounds: Rectangle) {
+                if id == Some(&iced::widget::Id::from("moving-card")) {
+                    self.0 = Some(bounds);
+                }
+            }
+        }
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let make = |generation| -> Element<'_, ()> {
+            reflow(
+                positions.clone(),
+                "card",
+                generation,
+                true,
+                iced::widget::container(iced::widget::Space::new().width(80).height(40))
+                    .id("moving-card"),
+            )
+        };
+        let mut element = make(1);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        element = make(2);
+        tree.diff(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(200.0, 100.0));
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        let mut bounds = Bounds(None);
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut bounds);
+        assert_eq!(bounds.0.unwrap().position(), Point::ORIGIN);
+        frame(&mut element, &mut tree, &renderer, &node, start + LAYOUT);
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut bounds);
+        assert_eq!(bounds.0.unwrap().position(), Point::new(200.0, 100.0));
+    }
+
+    #[test]
+    fn packing_target_stays_fixed_when_rows_shrink_without_a_view_rebuild() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let positions = Positions::default();
+        let shift = Rc::new(Cell::new(Vector::new(0.0, -320.0)));
+        let mut element: Element<'_, ()> = reflow(
+            positions.clone(),
+            "add:parent",
+            1,
+            true,
+            iced::widget::Space::new().width(80).height(40),
+        );
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .move_to(Point::new(0.0, 400.0));
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        element = reflow_to(
+            positions.clone(),
+            "add:parent",
+            2,
+            {
+                let shift = Rc::clone(&shift);
+                move |point| point + shift.get()
+            },
+            iced::widget::Space::new().width(80).height(40),
+        );
+        tree.diff(&element);
+        frame(&mut element, &mut tree, &renderer, &node, start);
+        let mut previous = 400.0;
+        for (millis, row_y) in [
+            (40, 330.0),
+            (80, 220.0),
+            (120, 150.0),
+            (160, 100.0),
+            (200, 80.0),
+        ] {
+            shift.set(Vector::new(0.0, 80.0 - row_y));
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits)
+                .move_to(Point::new(0.0, row_y));
+            let at = start + Duration::from_millis(millis);
+            frame(&mut element, &mut tree, &renderer, &node, at);
+            let positions = positions.0.lock().unwrap();
+            let place = &positions["add:parent"];
+            assert_eq!(place.target.y, 80.0);
+            let y = place.y.value(at);
+            assert!(y >= 80.0 && y <= previous);
+            previous = y;
+        }
+        assert_eq!(previous, 80.0);
     }
 
     #[test]
@@ -3219,8 +3522,8 @@ mod tests {
                 "heading",
                 u64::from(expanded),
                 true,
-                Some(if expanded { 100.0 } else { 200.0 }),
-                Vector::ZERO,
+                Some((if expanded { 100.0 } else { 200.0 }, None)),
+                |point| point,
                 content,
             )
         };

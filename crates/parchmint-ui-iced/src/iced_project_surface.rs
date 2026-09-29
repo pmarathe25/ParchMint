@@ -203,7 +203,7 @@ fn project_surface_with_layout<'a>(
         ribbon,
         center_view(workspace, destination, theme, editor_child, layout)
     ];
-    let center = crate::motion::enter(format!("{destination:?}"), center);
+    let center: Element<'a, ProjectSurfaceMessage> = center.into();
     let recovering = matches!(workspace.content_state(), ContentState::Recovery);
     let shows_explorer = !recovering
         && matches!(
@@ -295,7 +295,8 @@ fn project_surface_with_layout<'a>(
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
-    content = content.push(crate::motion::reveal_focus(
+    content = content.push(crate::motion::reveal_focus_for_page(
+        format!("{destination:?}"),
         shows_status,
         status_bar(
             workspace,
@@ -307,14 +308,17 @@ fn project_surface_with_layout<'a>(
     ));
     let focused =
         destination == RibbonDestination::Editor && workspace.editor().expanded_pane().is_some();
-    let content = crate::motion::row_focus(vec![
-        crate::motion::slot(
-            navigation_rail(destination, theme),
-            Length::Fixed(48.0),
-            !focused,
-        ),
-        crate::motion::slot(content, Length::Fill, true),
-    ]);
+    let content = crate::motion::row_for_focus_page(
+        format!("{destination:?}"),
+        vec![
+            crate::motion::slot(
+                navigation_rail(destination, theme),
+                Length::Fixed(48.0),
+                !focused,
+            ),
+            crate::motion::slot(content, Length::Fill, true),
+        ],
+    );
     let base: Element<'a, ProjectSurfaceMessage> = container(content)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -340,13 +344,15 @@ fn project_surface_with_layout<'a>(
         } else {
             Length::Fixed(48.0)
         }),
-        crate::motion::reveal_focus(
+        crate::motion::reveal_focus_for_page(
+            format!("{destination:?}"),
             !focused,
             project_selector(
                 project_title,
                 shows_explorer && layout.explorer_is_visible(),
                 rail_width,
-                theme
+                theme,
+                destination,
             )
         )
     ];
@@ -383,7 +389,7 @@ fn project_surface_with_layout<'a>(
                 1,
                 &hierarchy_drag::targets(),
                 0,
-                iced::Vector::ZERO,
+                |point| point,
                 true,
             );
             stack![
@@ -624,6 +630,7 @@ fn project_selector<'a>(
     expanded: bool,
     width: u32,
     theme: ParchMintTheme,
+    destination: RibbonDestination,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let label = row![
         container(text(title).size(14).wrapping(text::Wrapping::None))
@@ -633,26 +640,29 @@ fn project_selector<'a>(
     ]
     .spacing(8)
     .align_y(iced::alignment::Vertical::Center);
-    let contents = crate::motion::row_shrink_focus(vec![
-        crate::motion::slot(
-            container(crate::icons::brand(36)).center(48),
-            Length::Fixed(48.0),
-            true,
-        ),
-        crate::motion::slot(
-            container(label)
-                .width(Length::Fill)
-                .padding(iced::Padding {
-                    left: 8.0,
-                    right: 12.0,
-                    ..iced::Padding::ZERO
-                })
-                .center_y(48)
-                .clip(true),
-            Length::Fixed(width as f32),
-            expanded,
-        ),
-    ]);
+    let contents = crate::motion::row_shrink_focus_for_page(
+        format!("{destination:?}"),
+        vec![
+            crate::motion::slot(
+                container(crate::icons::brand(36)).center(48),
+                Length::Fixed(48.0),
+                true,
+            ),
+            crate::motion::slot(
+                container(label)
+                    .width(Length::Fill)
+                    .padding(iced::Padding {
+                        left: 8.0,
+                        right: 12.0,
+                        ..iced::Padding::ZERO
+                    })
+                    .center_y(48)
+                    .clip(true),
+                Length::Fixed(width as f32),
+                expanded,
+            ),
+        ],
+    );
     container(stationary_tooltip::tooltip(
         harness_target::target(
             HarnessTarget::ProjectMenu,
@@ -870,10 +880,6 @@ fn left_rail<'a>(
         ),
         SidebarSurface::GlobalSearch => global_search_rail(workspace, theme),
     };
-    let content = crate::motion::enter(
-        format!("sidebar-{:?}", workspace.sidebar_surface()),
-        content,
-    );
     container(column![Space::new().height(36), content].spacing(8))
         .padding(iced::Padding {
             top: 6.0,
@@ -1843,8 +1849,6 @@ fn global_search_rows<'a>(
             .width(Length::Fill)
             .clip(true)
             .into();
-        let content =
-            crate::motion::enter(format!("search-{}-{row_key}", search.generation()), content);
         let content = crate::motion::reflow(
             search.result_positions(),
             row_key,
@@ -2216,6 +2220,11 @@ pub(crate) fn cards_grid<'a>(
             frames[index].last_card_id = last_card_id.clone();
             frames[index].last_row_disclosures = grid_row.disclosures.len();
         }
+        let row_key = first
+            .map(|item| item.node_id.to_owned())
+            .unwrap_or_else(|| {
+                format!("add:{}", grid_row.add_to.as_deref().expect("creation row"))
+            });
         let reveal_row = |mut content: Element<'a, ProjectSurfaceMessage>| {
             for id in &grid_row.disclosures {
                 if let Some(disclosure) = workspace.cards_disclosure(id) {
@@ -2253,7 +2262,15 @@ pub(crate) fn cards_grid<'a>(
             } else if grid_row.tail_reserve > 0.0 {
                 content = column![content, Space::new().height(grid_row.tail_reserve)].into();
             }
-            content
+            let key = row_key.clone();
+            crate::motion::allocate_height(
+                move || {
+                    workspace
+                        .cards_disclosures_mounted()
+                        .then(|| workspace.cards().live_row_height(columns, width, &key))
+                },
+                content,
+            )
         };
         let add_control = |parent: &str, depth: usize| {
             let id = format!("add:{parent}");
@@ -2263,12 +2280,19 @@ pub(crate) fn cards_grid<'a>(
                     .width((width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32),
                 theme,
             );
-            if let Some(shift) = closing_packing_offsets.get(&id) {
+            if closing_packing_offsets.contains_key(&id) {
+                let destination = packing_destination(
+                    workspace,
+                    columns,
+                    width,
+                    &id,
+                    closing_packing_offsets[&id],
+                );
                 crate::motion::reflow_to(
                     workspace.card_positions.clone(),
                     id,
                     generation,
-                    *shift,
+                    destination,
                     control,
                 )
             } else {
@@ -2276,7 +2300,7 @@ pub(crate) fn cards_grid<'a>(
                     workspace.card_positions.clone(),
                     id,
                     generation,
-                    !workspace.cards_disclosures_active(),
+                    !workspace.cards_disclosures_mounted(),
                     control,
                 )
             }
@@ -2319,6 +2343,8 @@ pub(crate) fn cards_grid<'a>(
                 .get(item.node_id)
                 .copied()
                 .unwrap_or(iced::Vector::ZERO);
+            let destination =
+                packing_destination(workspace, columns, width, item.node_id, target_shift);
             cells = cells.push(outline_card(
                 workspace,
                 theme,
@@ -2327,7 +2353,7 @@ pub(crate) fn cards_grid<'a>(
                 columns,
                 &targets,
                 generation,
-                target_shift,
+                destination,
                 false,
             ));
         }
@@ -2473,6 +2499,32 @@ pub(crate) fn cards_grid<'a>(
     .into()
 }
 
+// Anchor compact-row destinations to their first card, whose layout position
+// follows the containing group. A captured vertical delta becomes stale while
+// disclosure rows relayout without rebuilding the view.
+fn packing_destination<'a>(
+    workspace: &'a ProjectWorkspace,
+    columns: usize,
+    width: f32,
+    id: &str,
+    shift: iced::Vector,
+) -> impl Fn(iced::Point) -> iced::Point + 'a {
+    let anchor = (shift != iced::Vector::ZERO)
+        .then(|| workspace.cards().closing_packing_anchor(columns, width, id))
+        .flatten();
+    move |point| {
+        anchor
+            .as_ref()
+            .and_then(|(id, offset)| {
+                workspace
+                    .card_positions
+                    .layout_position(id)
+                    .map(|point| point + *offset)
+            })
+            .unwrap_or(point + shift)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn outline_card<'a>(
     workspace: &'a ProjectWorkspace,
@@ -2482,10 +2534,11 @@ fn outline_card<'a>(
     columns: usize,
     targets: &hierarchy_drag::HoverTargets<DragDestination>,
     generation: u64,
-    target_shift: iced::Vector,
+    target_shift: impl Fn(iced::Point) -> iced::Point + 'a,
     floating: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let horizontal = columns > 1;
+    let shifted = target_shift(iced::Point::ORIGIN) != iced::Point::ORIGIN;
     let drag_source = workspace.hierarchy_drag_source().map(str::to_owned);
     let drag_destination = workspace.hierarchy_drag_destination().cloned();
     let node_id = item.node_id.to_owned();
@@ -2658,7 +2711,11 @@ fn outline_card<'a>(
     let content = container(card_content)
         .height(item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP - 24.0);
     let content = if group {
-        crate::motion::resize_group_height(node_id.clone(), content)
+        crate::motion::resize_group_height(
+            node_id.clone(),
+            workspace.cards_disclosure(&node_id),
+            content,
+        )
     } else {
         crate::motion::resize_height(node_id.clone(), content)
     };
@@ -2829,10 +2886,15 @@ fn outline_card<'a>(
         // group's heading reflows. Other cards follow their allocated rows;
         // compact-grid packing resumes when the disclosure finishes.
         !source_active
-            && (!workspace.cards_disclosures_active()
+            && (!workspace.cards_disclosures_mounted()
                 || (group && workspace.cards_disclosure(&node_id).is_some())
-                || target_shift != iced::Vector::ZERO),
-        group.then(|| item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP),
+                || shifted),
+        group.then(|| {
+            (
+                item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP,
+                workspace.cards_disclosure(&node_id),
+            )
+        }),
         target_shift,
         card,
     );
@@ -4083,14 +4145,11 @@ fn settings_center<'a>(
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
         static_divider(theme),
-        container(crate::motion::enter(
-            format!("{category:?}"),
-            settings_content(workspace, category, theme, true)
-        ))
-        .padding([SPACING_24, SPACING_24])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
+        container(settings_content(workspace, category, theme, true))
+            .padding([SPACING_24, SPACING_24])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
     ]
     .height(Length::Fill)
     .into()
@@ -6543,6 +6602,7 @@ mod tests {
                     expanded,
                     240,
                     ParchMintTheme::new(ResolvedAppearance::Dark),
+                    RibbonDestination::Editor,
                 ),
             );
             surface.click(HarnessTarget::ProjectMenu.id()).unwrap();
