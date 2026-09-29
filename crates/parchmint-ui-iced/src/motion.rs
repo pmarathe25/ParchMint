@@ -982,6 +982,50 @@ pub(crate) fn disclosure_below_card<'a, Message: 'a>(
     })
 }
 
+/// Space whose height is read during layout. Disclosure rows already request
+/// layout on every frame; a reserve captured while building the view would
+/// otherwise remain at its opening value while the children keep growing.
+pub(crate) fn live_height<'a, Message: 'a>(height: impl Fn() -> f32 + 'a) -> Element<'a, Message> {
+    Element::new(LiveHeight {
+        height: Box::new(height),
+    })
+}
+
+struct LiveHeight<'a> {
+    height: Box<dyn Fn() -> f32 + 'a>,
+}
+
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for LiveHeight<'_> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Shrink, Length::Shrink)
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::atomic(
+            limits,
+            Length::Shrink,
+            Length::Fixed((self.height)().max(0.0)),
+        )
+    }
+
+    fn draw(
+        &self,
+        _tree: &Tree,
+        _renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &renderer::Style,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+    }
+}
+
 struct Entrance<'a, Message> {
     key: String,
     content: Element<'a, Message>,
@@ -2361,6 +2405,34 @@ mod tests {
                 .height,
             0.0
         );
+    }
+
+    #[test]
+    fn live_reserve_shrinks_as_disclosure_grows_without_rebuilding_the_view() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let limits = layout::Limits::new(Size::ZERO, Size::new(320.0, 900.0));
+        let mut timeline = Disclosure::new(false);
+        timeline.set(true);
+        let reserve = timeline.clone();
+        let children = disclosure(timeline, iced::widget::Space::new().height(200), None::<()>);
+        let mut group: Element<'_, ()> = iced::widget::column![
+            children,
+            live_height(move || 200.0 * (1.0 - reserve.visible_fraction()))
+        ]
+        .into();
+        let mut tree = Tree::new(&group);
+        for millis in [0, 32, 96, 160, 200] {
+            FRAME_TIME.set(Some(start + Duration::from_millis(millis)));
+            let node = group.as_widget_mut().layout(&mut tree, &renderer, &limits);
+            assert!(
+                (node.size().height - 200.0).abs() < 0.01,
+                "group extent changed at {millis} ms: {}",
+                node.size().height
+            );
+        }
     }
 
     #[test]

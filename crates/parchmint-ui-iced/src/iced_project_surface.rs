@@ -2238,7 +2238,22 @@ pub(crate) fn cards_grid<'a>(
                     };
                 }
             }
-            if grid_row.tail_reserve > 0.0 {
+            if let Some(group_id) = grid_row
+                .add_to
+                .as_deref()
+                .filter(|id| workspace.cards_disclosure(id).is_some())
+            {
+                let group_id = group_id.to_owned();
+                content = column![
+                    content,
+                    crate::motion::live_height(move || {
+                        workspace
+                            .cards()
+                            .group_tail_reserve(columns, width, &group_id)
+                    })
+                ]
+                .into();
+            } else if grid_row.tail_reserve > 0.0 {
                 content = column![content, Space::new().height(grid_row.tail_reserve)].into();
             }
             content

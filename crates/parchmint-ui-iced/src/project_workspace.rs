@@ -1267,6 +1267,16 @@ impl<'a> CardsState<'a> {
         layout
     }
 
+    /// The mounted window starts at an arbitrary grid row, so resolve a live
+    /// disclosure reserve by group identity rather than the window row index.
+    pub(crate) fn group_tail_reserve(&self, columns: usize, width: f32, group_id: &str) -> f32 {
+        self.grid_rows(columns, width)
+            .rows
+            .iter()
+            .find(|row| row.add_to.as_deref() == Some(group_id))
+            .map_or(0.0, |row| row.tail_reserve)
+    }
+
     /// During a close, retained child rows still own layout space. Give the
     /// surviving cards and creation slot their settled positions immediately
     /// so they travel with the heading instead of starting a second reflow
