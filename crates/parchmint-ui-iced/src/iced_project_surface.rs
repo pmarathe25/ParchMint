@@ -379,6 +379,7 @@ fn project_surface_with_layout<'a>(
                 1,
                 &hierarchy_drag::targets(),
                 0,
+                iced::Vector::ZERO,
                 true,
             );
             stack![
@@ -2126,6 +2127,10 @@ pub(crate) fn cards_grid<'a>(
     let targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
     let window = cards.viewport_window(columns, width, height);
+    let closing_offsets = cards.closing_offsets(columns, width);
+    // Keep cards close to their allocated rows while closing children still
+    // occupy layout space. The remaining distance is animated after unmount.
+    const MAX_CLOSING_SHIFT: f32 = 80.0;
     let coverage = CardsWindowCoverage {
         mounted_start: window.top_padding,
         mounted_end: window.top_padding + window.rows.iter().map(|row| row.height).sum::<f32>(),
@@ -2213,13 +2218,20 @@ pub(crate) fn cards_grid<'a>(
         let reveal_row = |mut content: Element<'a, ProjectSurfaceMessage>| {
             for id in &grid_row.disclosures {
                 if let Some(disclosure) = workspace.cards_disclosure(id) {
-                    content = crate::motion::disclosure(
-                        disclosure,
-                        content,
-                        Some(ProjectSurfaceMessage::Project(
-                            ProjectMessage::FinishCardsGroupDisclosure(id.clone()),
-                        )),
-                    );
+                    let complete = Some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::FinishCardsGroupDisclosure(id.clone()),
+                    ));
+                    content = if disclosure.visible() {
+                        crate::motion::disclosure(disclosure, content, complete)
+                    } else {
+                        crate::motion::disclosure_below_card(
+                            disclosure,
+                            workspace.card_positions.clone(),
+                            id.clone(),
+                            content,
+                            complete,
+                        )
+                    };
                 }
             }
             if grid_row.tail_reserve > 0.0 {
@@ -2228,19 +2240,30 @@ pub(crate) fn cards_grid<'a>(
             content
         };
         let add_control = |parent: &str, depth: usize| {
+            let id = format!("add:{parent}");
             let indent = crate::cards_layout::grid_indent(depth, width);
             let control = crate::card_frames::placeholder(
                 container(overview_add(parent, parent == cards.section_id(), theme))
                     .width((width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32),
                 theme,
             );
-            crate::motion::reflow(
-                workspace.card_positions.clone(),
-                format!("add:{parent}"),
-                generation,
-                !workspace.cards_disclosures_active(),
-                control,
-            )
+            if let Some(shift) = closing_offsets.get(&id) {
+                crate::motion::reflow_to(
+                    workspace.card_positions.clone(),
+                    id,
+                    generation,
+                    iced::Vector::new(shift.x, shift.y.max(-MAX_CLOSING_SHIFT)),
+                    control,
+                )
+            } else {
+                crate::motion::reflow(
+                    workspace.card_positions.clone(),
+                    id,
+                    generation,
+                    !workspace.cards_disclosures_active(),
+                    control,
+                )
+            }
         };
         if let Some(parent) = &grid_row.add_to
             && grid_row.start == grid_row.end
@@ -2276,8 +2299,22 @@ pub(crate) fn cards_grid<'a>(
         for item in items.by_ref().take(grid_row.end - grid_row.start) {
             last_node = item.node_id.to_owned();
             row_members.push((row_index, item.node_id.to_owned()));
+            let target_shift = closing_offsets
+                .get(item.node_id)
+                .copied()
+                .unwrap_or(iced::Vector::ZERO);
+            let target_shift =
+                iced::Vector::new(target_shift.x, target_shift.y.max(-MAX_CLOSING_SHIFT));
             cells = cells.push(outline_card(
-                workspace, theme, item, cell_width, columns, &targets, generation, false,
+                workspace,
+                theme,
+                item,
+                cell_width,
+                columns,
+                &targets,
+                generation,
+                target_shift,
+                false,
             ));
         }
         last_card_id = Some(last_node.clone());
@@ -2431,6 +2468,7 @@ fn outline_card<'a>(
     columns: usize,
     targets: &hierarchy_drag::HoverTargets<DragDestination>,
     generation: u64,
+    target_shift: iced::Vector,
     floating: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let horizontal = columns > 1;
@@ -2769,7 +2807,7 @@ fn outline_card<'a>(
             .preview_destination(&target_node, destination)
             .map(|destination| (destination, zone))
     });
-    let card = crate::motion::reflow_card_height(
+    let card = crate::motion::reflow_card_height_to(
         workspace.card_positions.clone(),
         node_id.clone(),
         generation,
@@ -2778,8 +2816,10 @@ fn outline_card<'a>(
         // compact-grid packing resumes when the disclosure finishes.
         !source_active
             && (!workspace.cards_disclosures_active()
-                || (group && workspace.cards_disclosure(&node_id).is_some())),
+                || (group && workspace.cards_disclosure(&node_id).is_some())
+                || target_shift != iced::Vector::ZERO),
         group.then(|| item.row_height(width) - crate::project_workspace::CARDS_ROW_GAP),
+        target_shift,
         card,
     );
     column![

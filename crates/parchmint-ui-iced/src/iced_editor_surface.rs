@@ -1280,43 +1280,43 @@ fn editor_pane_surface<'a>(
         body
     };
     let search_open = search.is_open();
+    let header = column![
+        tabs,
+        container(
+            row![
+                text(breadcrumb.join(" > "))
+                    .size(12)
+                    .color(theme.palette().secondary_text)
+                    .width(Length::Fill),
+                stationary_tooltip::tooltip(
+                    harness_target::target_id(
+                        iced::widget::Id::from(format!("breadcrumb-search-{pane:?}")),
+                        button(icon_sized(Icon::Search, 16))
+                            .padding(3)
+                            .on_press(EditorCenterMessage::PaneWorkspace {
+                                pane,
+                                message: if search.is_open() {
+                                    EditorMessage::CloseLocalFind
+                                } else {
+                                    EditorMessage::OpenLocalFind
+                                }
+                            })
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                button_interaction(status, search_open)
+                            ))
+                    ),
+                    text("Find in document").size(12),
+                    components::surface(theme, Surface::Elevated, Interaction::Rest)
+                )
+            ]
+            .align_y(Vertical::Center)
+        )
+        .padding([2, 12])
+    ];
     let content = column![
-        crate::motion::reveal_down(workspace.expanded_pane().is_none(), tabs),
-        crate::motion::reveal_down(
-            workspace.expanded_pane().is_none(),
-            container(
-                row![
-                    text(breadcrumb.join(" > "))
-                        .size(12)
-                        .color(theme.palette().secondary_text)
-                        .width(Length::Fill),
-                    stationary_tooltip::tooltip(
-                        harness_target::target_id(
-                            iced::widget::Id::from(format!("breadcrumb-search-{pane:?}")),
-                            button(icon_sized(Icon::Search, 16))
-                                .padding(3)
-                                .on_press(EditorCenterMessage::PaneWorkspace {
-                                    pane,
-                                    message: if search.is_open() {
-                                        EditorMessage::CloseLocalFind
-                                    } else {
-                                        EditorMessage::OpenLocalFind
-                                    }
-                                })
-                                .style(move |_, status| components::button_style(
-                                    theme,
-                                    ButtonKind::Quiet,
-                                    button_interaction(status, search_open)
-                                ))
-                        ),
-                        text("Find in document").size(12),
-                        components::surface(theme, Surface::Elevated, Interaction::Rest)
-                    )
-                ]
-                .align_y(Vertical::Center)
-            )
-            .padding([2, 12])
-        ),
+        crate::motion::reveal_down(workspace.expanded_pane().is_none(), header),
         crate::motion::reveal(
             search.is_open(),
             container(local_search_bar(search, pane, theme, slots)).padding([6, 0])

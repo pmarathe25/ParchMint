@@ -624,6 +624,7 @@ pub(crate) fn enter<'a, Message: 'a>(
         on_complete: None,
         origin: None,
         slide_from_top: false,
+        clip_below: None,
     })
 }
 pub(crate) fn reveal<'a, Message: 'a>(
@@ -640,6 +641,7 @@ pub(crate) fn reveal<'a, Message: 'a>(
         on_complete: None,
         origin: None,
         slide_from_top: false,
+        clip_below: None,
     })
 }
 /// Reveal a row from the edge above it while allocating its height. The
@@ -658,6 +660,7 @@ pub(crate) fn reveal_down<'a, Message: 'a>(
         on_complete: None,
         origin: None,
         slide_from_top: true,
+        clip_below: None,
     })
 }
 /// Animate allocated height so following rows move with the card boundary.
@@ -675,6 +678,7 @@ pub(crate) fn resize_height<'a, Message: 'a>(
         on_complete: None,
         origin: None,
         slide_from_top: false,
+        clip_below: None,
     })
 }
 /// Group fields retain their own trajectories while the header surface resizes.
@@ -694,6 +698,7 @@ pub(crate) fn resize_group_height<'a, Message: 'a>(
         on_complete: None,
         origin: None,
         slide_from_top: false,
+        clip_below: None,
     })
 }
 /// Reveal rows from their top edge without sliding their text against the
@@ -714,6 +719,31 @@ pub(crate) fn disclosure<'a, Message: 'a>(
         on_complete,
         origin: None,
         slide_from_top: false,
+        clip_below: None,
+    })
+}
+
+/// On collapse, the compact heading travels across the outgoing child rows.
+/// Paint those rows only below its current lower edge so their text cannot
+/// cross over the moving heading.
+pub(crate) fn disclosure_below_card<'a, Message: 'a>(
+    timeline: Disclosure,
+    positions: Positions,
+    card_id: String,
+    content: impl Into<Element<'a, Message>>,
+    on_complete: Option<Message>,
+) -> Element<'a, Message> {
+    Element::new(Entrance {
+        key: String::new(),
+        content: content.into(),
+        reveal: Some(timeline.visible()),
+        resize: false,
+        clip_resize: true,
+        disclosure: Some(timeline),
+        on_complete,
+        origin: None,
+        slide_from_top: false,
+        clip_below: Some((positions, card_id)),
     })
 }
 
@@ -727,6 +757,7 @@ struct Entrance<'a, Message> {
     on_complete: Option<Message>,
     origin: Option<Rc<Cell<Point>>>,
     slide_from_top: bool,
+    clip_below: Option<(Positions, String)>,
 }
 struct EntranceState {
     height: f32,
@@ -816,7 +847,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             .as_widget_mut()
             .layout(&mut tree.children[0], renderer, limits);
         let offset = if self.slide_from_top {
-            -child.size().height * (1.0 - progress)
+            // The tab strip and breadcrumbs emerge from the toolbar edge.
+            // Sliding a full row height kept their labels clipped until late
+            // in the transition, so they appeared abruptly after the panes
+            // had already moved. A short travel keeps them visible earlier
+            // while the allocated rows still expand on the shared timeline.
+            -6.0 * (1.0 - progress)
         } else if self.reveal.is_none() && self.origin.is_none() {
             8.0 * (1.0 - progress)
         } else {
@@ -904,10 +940,27 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
     ) {
         use renderer::Renderer;
         if self.reveal.is_some() && (!self.resize || self.clip_resize) {
-            if let Some(clip) = viewport
+            if let Some(mut clip) = viewport
                 .intersection(&layout.bounds())
                 .filter(|bounds| bounds.height > 0.0)
             {
+                if let Some((positions, card_id)) = &self.clip_below
+                    && let Some(bottom) = positions.visual_bottom(card_id, now())
+                {
+                    // Clear the heading's lower edge plus the child card's
+                    // first text line. Clipping precisely at the edge leaves
+                    // partial glyphs visible for a frame as the two move.
+                    let top = if bottom > clip.y {
+                        bottom + 28.0
+                    } else {
+                        clip.y
+                    };
+                    clip.height = (clip.y + clip.height - top).max(0.0);
+                    clip.y = top;
+                }
+                if clip.height <= 0.0 {
+                    return;
+                }
                 renderer.with_layer(clip, |renderer| {
                     self.content.as_widget().draw(
                         &tree.children[0],
@@ -1026,6 +1079,7 @@ impl LocalPositions {
             both_axes: true,
             morph_width: true,
             allocation_height: None,
+            target_shift: Vector::ZERO,
             content: content.into(),
         })
     }
@@ -1043,6 +1097,7 @@ impl LocalPositions {
             on_complete: None,
             origin: Some(self.origin.clone()),
             slide_from_top: false,
+            clip_below: None,
         })
     }
 }
@@ -1051,6 +1106,7 @@ impl LocalPositions {
 struct Placement {
     generation: u64,
     target: Point,
+    layout_target: Point,
     width: f32,
     width_motion: Tween,
     height_motion: Tween,
@@ -1079,7 +1135,7 @@ impl Positions {
             .get(id)
             .map(|place| {
                 (
-                    place.x.value(at) - place.target.x,
+                    place.x.value(at) - place.layout_target.x,
                     place.width_motion.value(at),
                 )
             })
@@ -1090,8 +1146,16 @@ impl Positions {
             .lock()
             .expect("motion positions")
             .get(id)
-            .map(|place| place.y.value(now) - place.target.y)
+            .map(|place| place.y.value(now) - place.layout_target.y)
             .unwrap_or(0.0)
+    }
+
+    fn visual_bottom(&self, id: &str, at: Instant) -> Option<f32> {
+        self.0
+            .lock()
+            .expect("motion positions")
+            .get(id)
+            .map(|place| place.y.value(at) + place.height_motion.value(at))
     }
 }
 pub(crate) fn reflow<'a, Message: 'a>(
@@ -1110,6 +1174,27 @@ pub(crate) fn reflow<'a, Message: 'a>(
         both_axes: false,
         morph_width: false,
         allocation_height: None,
+        target_shift: Vector::ZERO,
+        content: content.into(),
+    })
+}
+pub(crate) fn reflow_to<'a, Message: 'a>(
+    positions: Positions,
+    id: impl Into<String>,
+    generation: u64,
+    shift: Vector,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Element::new(Reflow {
+        positions,
+        id: id.into(),
+        generation,
+        animate: true,
+        origin: None,
+        both_axes: true,
+        morph_width: false,
+        allocation_height: None,
+        target_shift: shift,
         content: content.into(),
     })
 }
@@ -1124,15 +1209,24 @@ pub(crate) fn reflow_card<'a, Message: 'a>(
     animate: bool,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    reflow_card_height(positions, id, generation, animate, None, content)
+    reflow_card_height_to(
+        positions,
+        id,
+        generation,
+        animate,
+        None,
+        Vector::ZERO,
+        content,
+    )
 }
 
-pub(crate) fn reflow_card_height<'a, Message: 'a>(
+pub(crate) fn reflow_card_height_to<'a, Message: 'a>(
     positions: Positions,
     id: impl Into<String>,
     generation: u64,
     animate: bool,
     allocation_height: Option<f32>,
+    target_shift: Vector,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Reflow {
@@ -1144,6 +1238,7 @@ pub(crate) fn reflow_card_height<'a, Message: 'a>(
         both_axes: true,
         morph_width: true,
         allocation_height,
+        target_shift,
         content: content.into(),
     })
 }
@@ -1157,6 +1252,7 @@ struct Reflow<'a, Message> {
     both_axes: bool,
     morph_width: bool,
     allocation_height: Option<f32>,
+    target_shift: Vector,
     content: Element<'a, Message>,
 }
 fn resize_shell_width(node: &layout::Node, original: f32, width: f32) -> layout::Node {
@@ -1316,15 +1412,17 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
         viewport: &Rectangle,
     ) {
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            let target = self.origin.as_ref().map_or(layout.position(), |origin| {
+            let layout_target = self.origin.as_ref().map_or(layout.position(), |origin| {
                 Point::ORIGIN + (layout.position() - origin.get())
             });
+            let target = layout_target + self.target_shift;
             let mut positions = self.positions.0.lock().expect("motion positions");
             let place = positions
                 .entry(self.id.clone())
                 .or_insert_with(|| Placement {
                     generation: self.generation,
                     target,
+                    layout_target,
                     width: layout.bounds().width,
                     width_motion: Tween::new(layout.bounds().width, *now, LAYOUT),
                     height_motion: Tween::new(layout.bounds().height, *now, LAYOUT),
@@ -1332,6 +1430,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     y: Tween::new(target.y, *now, LAYOUT),
                 });
             let resized = (place.width - layout.bounds().width).abs() > 0.5;
+            let was_shifted = place.target != place.layout_target;
             if place.target != target || resized || !self.animate || !enabled() {
                 // Growing to a full-width heading cannot travel through the
                 // former compact row without covering its neighbors. A heading
@@ -1373,6 +1472,31 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     };
                     place.x.set(target.x, *now, animate_x);
                     place.y.set(target.y, *now, animate_y);
+                    if self.target_shift.y < -1.0 && self.target_shift.x.abs() > 1.0 {
+                        // A card returning from below a closing group clears
+                        // the wide heading horizontally before rising. Its
+                        // vertical target stays near the allocated row until
+                        // the child rows are gone, so it remains paintable.
+                        place.x.duration = LAYOUT / 2;
+                        place.y.duration = LAYOUT - Duration::from_millis(50);
+                        place.y.started = *now + Duration::from_millis(50);
+                    }
+                } else if self.target_shift != Vector::ZERO && self.animate && enabled() {
+                    // The closing rows change their allocated heights every
+                    // frame. Their settled target can drift a few pixels as
+                    // the grid width and height resolve. Retarget the same
+                    // tween without restarting it or snapping to the new
+                    // target on each frame.
+                    place.x.target = target.x;
+                    place.y.target = target.y;
+                } else if was_shifted && self.animate && enabled() {
+                    // The closing rows have unmounted. Continue from the
+                    // card's current painted position into its new allocated
+                    // row, without a discontinuity at the handoff.
+                    place.x.duration = LAYOUT / 2;
+                    place.y.duration = LAYOUT / 2;
+                    place.x.set(target.x, *now, true);
+                    place.y.set(target.y, *now, true);
                 } else {
                     place.x.set(target.x, *now, false);
                     place.y.set(target.y, *now, false);
@@ -1380,6 +1504,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             }
             place.generation = self.generation;
             place.target = target;
+            place.layout_target = layout_target;
             place.width = layout.bounds().width;
             if !self.morph_width {
                 place.width_motion.set(place.width, *now, false);
@@ -1397,8 +1522,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             }
             let offset = if enabled() {
                 Vector::new(
-                    place.x.value(*now) - target.x,
-                    place.y.value(*now) - target.y,
+                    place.x.value(*now) - layout_target.x,
+                    place.y.value(*now) - layout_target.y,
                 )
             } else {
                 Vector::ZERO
@@ -2536,12 +2661,13 @@ mod tests {
                     .height(200)
                     .into()
             };
-            reflow_card_height(
+            reflow_card_height_to(
                 positions.clone(),
                 "heading",
                 u64::from(expanded),
                 true,
                 Some(if expanded { 100.0 } else { 200.0 }),
+                Vector::ZERO,
                 content,
             )
         };

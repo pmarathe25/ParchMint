@@ -970,6 +970,12 @@ pub struct CardItem<'a> {
 }
 
 impl<'a> CardsState<'a> {
+    fn group_mounted(&self, id: &str) -> bool {
+        // The zero-height closing rows must remain mounted for one final
+        // redraw so their completion message can clear the disclosure.
+        self.expanded.contains(id) || self.disclosures.contains_key(id)
+    }
+
     pub fn section_id(&self) -> &str {
         self.section_id
     }
@@ -1089,7 +1095,7 @@ impl<'a> CardsState<'a> {
                     depth: depth + 1,
                 });
             }
-            if item.kind == HierarchyRowKind::Group && item.expanded {
+            if item.kind == HierarchyRowKind::Group && self.group_mounted(node_id) {
                 groups.push((node_id.to_owned(), item.depth));
             }
 
@@ -1261,6 +1267,82 @@ impl<'a> CardsState<'a> {
         layout
     }
 
+    /// During a close, retained child rows still own layout space. Give the
+    /// surviving cards and creation slot their settled positions immediately
+    /// so they travel with the heading instead of starting a second reflow
+    /// when those zero-height rows unmount.
+    pub(crate) fn closing_offsets(
+        &self,
+        columns: usize,
+        width: f32,
+    ) -> BTreeMap<String, iced::Vector> {
+        if !self.disclosures.values().any(|motion| !motion.visible()) {
+            return BTreeMap::new();
+        }
+        let current = self.grid_rows(columns, width);
+        let no_disclosures = BTreeMap::new();
+        let settled_cache = RefCell::new(None);
+        let settled = CardsState {
+            explorer: self.explorer,
+            expanded: self.expanded,
+            details_expanded: self.details_expanded,
+            disclosures: &no_disclosures,
+            section_id: self.section_id,
+            word_counts: Rc::clone(&self.word_counts),
+            scroll_offset: self.scroll_offset,
+            measurements: self.measurements,
+            grid_cache: &settled_cache,
+            drag_destination: self.drag_destination,
+            last_activated_document: self.last_activated_document,
+            visible_metadata_labels: self.visible_metadata_labels.clone(),
+            definitions: self.definitions,
+            field_order: self.field_order,
+            values: self.values,
+        };
+        let final_rows = settled.grid_rows(columns, width);
+        let placements = |cards: &CardsState<'_>, layout: &CardsGridLayout| {
+            let mut result = BTreeMap::new();
+            for (row_index, row) in layout.rows.iter().enumerate() {
+                let y = layout.offsets[row_index];
+                if row.start < row.end {
+                    let first = cards.item(&layout.ids[row.start]).expect("grid card");
+                    let indent = first.grid_indent(width);
+                    let cell_width = first.grid_width(width, columns);
+                    for (column, id) in layout.ids[row.start..row.end].iter().enumerate() {
+                        result.insert(
+                            id.clone(),
+                            Point::new(indent + column as f32 * (cell_width + 12.0), y),
+                        );
+                    }
+                    if let Some(parent) = &row.add_to {
+                        result.insert(
+                            format!("add:{parent}"),
+                            Point::new(
+                                indent + (row.end - row.start) as f32 * (cell_width + 12.0),
+                                y,
+                            ),
+                        );
+                    }
+                } else if let Some(parent) = &row.add_to {
+                    result.insert(
+                        format!("add:{parent}"),
+                        Point::new(crate::cards_layout::grid_indent(row.depth, width), y),
+                    );
+                }
+            }
+            result
+        };
+        let from = placements(self, &current);
+        let to = placements(&settled, &final_rows);
+        from.into_iter()
+            .filter_map(|(id, start)| {
+                let end = to.get(&id)?;
+                let delta = iced::Vector::new(end.x() - start.x(), end.y() - start.y());
+                (delta.x.abs() > 0.5 || delta.y.abs() > 0.5).then_some((id, delta))
+            })
+            .collect()
+    }
+
     pub(crate) fn item_window(&self, columns: usize, width: f32) -> CardsWindow {
         let rows = self.grid_rows(columns, width);
         let maximum_start = rows.len().saturating_sub(CARDS_WINDOW_SIZE);
@@ -1343,7 +1425,7 @@ impl<'a> CardsState<'a> {
                 .explorer
                 .ancestors(node_id)
                 .iter()
-                .all(|id| self.expanded.contains(*id))
+                .all(|id| self.group_mounted(id))
     }
 
     fn item(&self, node_id: &str) -> Option<CardItem<'a>> {
@@ -5411,6 +5493,27 @@ impl ProjectWorkspace {
         Some(preview)
     }
 
+    /// While a card has no drop target, its source is in flight rather than
+    /// occupying a hidden slot. Keep the nodes for the floating card, but
+    /// remove the moving roots from their parents' visible child lists.
+    fn projected_card_vacancy(&self) -> Option<ExplorerState> {
+        let mut preview = self.explorer.clone();
+        preview.expanded = self.cards_expanded.clone();
+        let moving = self.explorer.normalized_selected_ids();
+        if moving.is_empty() {
+            return None;
+        }
+        for id in moving {
+            let parent = preview.nodes.get(id)?.parent.clone()?;
+            preview
+                .nodes
+                .get_mut(&parent)?
+                .children
+                .retain(|child| child != id);
+        }
+        Some(preview)
+    }
+
     pub fn explorer(&self) -> &ExplorerState {
         &self.explorer
     }
@@ -5464,7 +5567,9 @@ impl ProjectWorkspace {
     }
 
     pub(crate) fn cards_disclosures_active(&self) -> bool {
-        !self.cards_disclosures.is_empty()
+        self.cards_disclosures
+            .values()
+            .any(|motion| motion.active())
     }
 
     pub fn hierarchy_drag_source(&self) -> Option<&str> {
@@ -6750,6 +6855,17 @@ impl ProjectWorkspace {
                     self.restore_drag_collapsed_group(&drag);
                 }
                 self.cards_drag_destination = None;
+                // A closing row can unmount on its final frame before its
+                // completion message is delivered. Never let that finished
+                // timeline override the settled disclosure state on a later
+                // click.
+                if self
+                    .cards_disclosures
+                    .get(&node_id)
+                    .is_some_and(|motion| !motion.active())
+                {
+                    self.cards_disclosures.remove(&node_id);
+                }
                 let was_expanded = self.cards_disclosures.get(&node_id).map_or_else(
                     || self.cards_expanded.contains(&node_id),
                     |motion| motion.visible(),
@@ -6759,8 +6875,14 @@ impl ProjectWorkspace {
                         .entry(node_id.clone())
                         .or_insert_with(|| crate::motion::Disclosure::new(was_expanded))
                         .set(!was_expanded);
-                    // Keep closing rows mounted until their clipped exit finishes.
-                    self.cards_expanded.insert(node_id);
+                    // Pack the heading on the same timeline as the outgoing
+                    // children; the disclosure keeps those rows mounted until
+                    // their clipped exit finishes.
+                    if was_expanded {
+                        self.cards_expanded.remove(&node_id);
+                    } else {
+                        self.cards_expanded.insert(node_id);
+                    }
                 } else if was_expanded {
                     self.cards_expanded.remove(&node_id);
                     self.cards_disclosures.remove(&node_id);
@@ -7472,6 +7594,10 @@ impl ProjectWorkspace {
                 if let Some(drag) = self.pointer_drag.as_mut() {
                     drag.surface = Some(HierarchySurface::Cards);
                 }
+                let vacancy = self.projected_card_vacancy();
+                if let Some(drag) = self.pointer_drag.as_mut() {
+                    drag.preview = vacancy;
+                }
                 effects
             }
             ProjectMessage::BeginHierarchyDrag { source_id, gesture } => {
@@ -7558,7 +7684,7 @@ impl ProjectWorkspace {
                         .and_then(|d| self.projected_drop(d).map(|p| (p, d.clone())))
                     {
                         Some((p, d)) => (Some(p), Some(d)),
-                        None => (None, None),
+                        None => (self.projected_card_vacancy(), None),
                     }
                 } else {
                     (None, destination.clone())
@@ -11203,10 +11329,9 @@ mod tests {
     fn card_drag_preserves_editing_geometry_and_cancel_restores_order() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         let editing = |workspace: &ProjectWorkspace| {
-            workspace
-                .cards()
-                .items()
+            ["part-one", "chapter-one", "chapter-two", "chapter-three"]
                 .into_iter()
+                .filter_map(|id| workspace.cards().item_by_id(id))
                 .map(|item| (item.node_id.to_owned(), item.row_height(320.0)))
                 .collect::<BTreeMap<_, _>>()
         };
@@ -11236,15 +11361,17 @@ mod tests {
             workspace.displayed_explorer().preorder_ids(),
             order.iter().map(String::as_str).collect::<Vec<_>>()
         );
-        // An invalid hover clears back to the base layout so the placeholder
-        // stays in its original slot and bounces back there if released.
+        // An invalid hover leaves the card in flight, without reserving its
+        // original slot or moving its neighbors again.
         workspace.update(ProjectMessage::PreviewHierarchyDrop {
             surface: HierarchySurface::Cards,
             destination: None,
         });
-        assert_eq!(
-            workspace.displayed_explorer().preorder_ids(),
-            order.iter().map(String::as_str).collect::<Vec<_>>()
+        assert!(
+            !workspace
+                .displayed_explorer()
+                .preorder_ids()
+                .contains(&"chapter-two")
         );
         workspace.update(ProjectMessage::CancelHierarchyDrag);
         assert_eq!(editing(&workspace), before);
@@ -11255,24 +11382,60 @@ mod tests {
     }
 
     #[test]
-    fn beginning_a_card_drag_does_not_add_group_spacing() {
+    fn beginning_a_card_drag_removes_its_source_slot() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        let before = workspace.cards().grid_rows(3, 800.0).offsets.clone();
         workspace.update(ProjectMessage::BeginCardDrag {
             source_id: "chapter-two".into(),
             grab_offset: Point::new(10.0, 10.0),
             width: 270.0,
         });
-        assert_eq!(before, workspace.cards().grid_rows(3, 800.0).offsets);
+        assert!(
+            !workspace
+                .displayed_explorer()
+                .preorder_ids()
+                .contains(&"chapter-two")
+        );
         workspace.update(ProjectMessage::PreviewHierarchyDrop {
             surface: HierarchySurface::Cards,
             destination: None,
         });
         assert!(workspace.hierarchy_drag_destination().is_none());
         assert!(
+            !workspace
+                .displayed_explorer()
+                .preorder_ids()
+                .contains(&"chapter-two")
+        );
+        assert!(
             workspace
                 .update(ProjectMessage::CommitHierarchyDrag)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalid_card_hover_returns_to_the_same_vacant_layout() {
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::BeginCardDrag {
+            source_id: "chapter-two".into(),
+            grab_offset: Point::new(10.0, 10.0),
+            width: 270.0,
+        });
+        let vacant = workspace.cards().grid_rows(3, 800.0).rows.clone();
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: Some(DragDestination::BeforeSibling("chapter-one".into())),
+        });
+        workspace.update(ProjectMessage::PreviewHierarchyDrop {
+            surface: HierarchySurface::Cards,
+            destination: None,
+        });
+        assert_eq!(workspace.cards().grid_rows(3, 800.0).rows, vacant);
+        assert!(
+            !workspace
+                .displayed_explorer()
+                .preorder_ids()
+                .contains(&"chapter-two")
         );
     }
 
@@ -11828,7 +11991,8 @@ mod tests {
         let _clock = crate::motion::FixedTime::new(start);
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
         workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
-        assert!(workspace.cards_expanded.contains("part-one"));
+        assert!(!workspace.cards_expanded.contains("part-one"));
+        assert!(workspace.cards().group_mounted("part-one"));
         let before = workspace
             .cards()
             .grid_rows(3, 800.0)
@@ -11845,15 +12009,12 @@ mod tests {
             .copied()
             .unwrap();
         assert!(during < before);
+        let fraction = workspace.cards_disclosures["part-one"].visible_fraction();
         workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
-        let reversed = workspace
-            .cards()
-            .grid_rows(3, 800.0)
-            .offsets
-            .last()
-            .copied()
-            .unwrap();
-        assert!((during - reversed).abs() < 0.01);
+        assert!(
+            (workspace.cards_disclosures["part-one"].visible_fraction() - fraction).abs() < 0.01
+        );
+        assert!(workspace.cards().group_mounted("part-one"));
         let _clock = crate::motion::FixedTime::new(start + std::time::Duration::from_millis(320));
         workspace.update(ProjectMessage::FinishCardsGroupDisclosure(
             "part-one".into(),
@@ -11866,6 +12027,17 @@ mod tests {
             "part-one".into(),
         ));
         assert!(!workspace.cards_expanded.contains("part-one"));
+    }
+
+    #[test]
+    fn closing_group_targets_following_cards_before_children_unmount() {
+        let _clock = crate::motion::FixedTime::new(std::time::Instant::now());
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let offsets = workspace.cards().closing_offsets(3, 800.0);
+        assert!(offsets["chapter-three"].y < 0.0);
+        assert!(offsets["add:manuscript"].y < 0.0);
+        assert!(!offsets.contains_key("chapter-one"));
     }
 
     #[test]

@@ -23,7 +23,7 @@ fn frames(harness: &DesktopInteractionHarness, name: &str) {
 fn window_frames(harness: &DesktopInteractionHarness, window: HarnessWindow, name: &str) {
     let mut elapsed = 0;
     // Sample the shared group and compact-grid transition.
-    for delta in [0, 16, 32, 48, 64, 100, 200] {
+    for delta in [0, 16, 32, 48, 64, 20, 20, 20, 40, 200] {
         elapsed += delta;
         harness
             .advance_motion(window, Duration::from_millis(delta))
@@ -323,6 +323,7 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
     click(&harness, HarnessTarget::Ribbon(RibbonDestination::Cards));
     let act_one = harness.hierarchy_node("Act One").unwrap();
     let arrival = harness.hierarchy_node("Arrival").unwrap();
+    let letter = harness.hierarchy_node("The letter").unwrap();
     let departure = harness.hierarchy_node("Departure").unwrap();
     let act_two = harness.hierarchy_node("Act Two").unwrap();
     harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
@@ -334,14 +335,17 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
                 WINDOW,
                 HarnessHierarchySurface::Cards,
                 arrival.clone(),
-                arrival.clone(),
-                HarnessDropPosition::After,
+                letter.clone(),
+                HarnessDropPosition::Before,
             )
+            .unwrap();
+        harness
+            .advance_motion(WINDOW, Duration::from_millis(120))
             .unwrap();
         assert_eq!(
             harness.preview_hierarchy_titles().unwrap(),
             original,
-            "lifting a card inside its own slot must not move its siblings"
+            "returning a card to its original slot must not move its siblings"
         );
         if attempt == 0 {
             frames(&harness, "card-original-slot");
@@ -378,9 +382,9 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
         assert_eq!(harness.hierarchy_titles().unwrap(), original);
     }
     harness.toggle_cards_group(WINDOW, act_one.clone()).unwrap();
-    frames(&harness, "group-collapse");
+    frames(&harness, "group-toggle-a");
     harness.toggle_cards_group(WINDOW, act_one).unwrap();
-    frames(&harness, "group-expand");
+    frames(&harness, "group-toggle-b");
     harness.click_text(WINDOW, "What happens here?").unwrap();
     frames(&harness, "synopsis-edit");
     harness.type_focused(WINDOW, "A sealed letter arrives at the harbor. Mara must decide whether to open it before the tide carries the sender away.").unwrap();
@@ -390,6 +394,38 @@ fn overview_dragging_and_disclosures_remain_stable_between_frames() {
     harness.right_click_cards_node(WINDOW, arrival).unwrap();
     frames(&harness, "card-context");
     harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
+fn overview_group_collapse_and_expand_use_one_motion_timeline() {
+    let run = IsolatedRun::new("group-motion").unwrap();
+    let harness = create_project(&run, &run.root().join("novel.parchmint"), "Group motion");
+    create_group(&harness, "Manuscript", "Act One");
+    create_document(&harness, "Act One", "Arrival");
+    create_document(&harness, "Manuscript", "Afterward");
+    click(&harness, HarnessTarget::Ribbon(RibbonDestination::Cards));
+    let group = harness.hierarchy_node("Act One").unwrap();
+    let arrival = harness.hierarchy_node("Arrival").unwrap();
+    harness
+        .advance_motion(WINDOW, Duration::from_millis(260))
+        .unwrap();
+    assert!(
+        harness
+            .cards_node_is_visible(WINDOW, arrival.clone())
+            .unwrap()
+    );
+    harness.toggle_cards_group(WINDOW, group.clone()).unwrap();
+    frames(&harness, "group-collapse");
+    assert!(
+        !harness
+            .cards_node_is_visible(WINDOW, arrival.clone())
+            .unwrap()
+    );
+    harness.toggle_cards_group(WINDOW, group).unwrap();
+    frames(&harness, "group-expand");
+    assert!(harness.cards_node_is_visible(WINDOW, arrival).unwrap());
     harness.close(WINDOW).unwrap();
     harness.shutdown().unwrap();
 }
