@@ -2131,10 +2131,7 @@ pub(crate) fn cards_grid<'a>(
     let targets = hierarchy_drag::targets();
     let columns = crate::cards_layout::column_count(width);
     let window = cards.viewport_window(columns, width, height);
-    let closing_offsets = cards.closing_offsets(columns, width);
-    // Keep cards close to their allocated rows while closing children still
-    // occupy layout space. The remaining distance is animated after unmount.
-    const MAX_CLOSING_SHIFT: f32 = 80.0;
+    let closing_packing_offsets = cards.closing_packing_offsets(columns, width);
     let coverage = CardsWindowCoverage {
         mounted_start: window.top_padding,
         mounted_end: window.top_padding + window.rows.iter().map(|row| row.height).sum::<f32>(),
@@ -2266,12 +2263,12 @@ pub(crate) fn cards_grid<'a>(
                     .width((width - 2.0 * indent - (columns - 1) as f32 * 12.0) / columns as f32),
                 theme,
             );
-            if let Some(shift) = closing_offsets.get(&id) {
+            if let Some(shift) = closing_packing_offsets.get(&id) {
                 crate::motion::reflow_to(
                     workspace.card_positions.clone(),
                     id,
                     generation,
-                    iced::Vector::new(shift.x, shift.y.max(-MAX_CLOSING_SHIFT)),
+                    *shift,
                     control,
                 )
             } else {
@@ -2318,12 +2315,10 @@ pub(crate) fn cards_grid<'a>(
         for item in items.by_ref().take(grid_row.end - grid_row.start) {
             last_node = item.node_id.to_owned();
             row_members.push((row_index, item.node_id.to_owned()));
-            let target_shift = closing_offsets
+            let target_shift = closing_packing_offsets
                 .get(item.node_id)
                 .copied()
                 .unwrap_or(iced::Vector::ZERO);
-            let target_shift =
-                iced::Vector::new(target_shift.x, target_shift.y.max(-MAX_CLOSING_SHIFT));
             cells = cells.push(outline_card(
                 workspace,
                 theme,

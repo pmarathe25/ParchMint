@@ -307,6 +307,43 @@ fn workspace_transitions_keep_writing_and_controls_available() {
 }
 
 #[test]
+fn widescreen_focus_keeps_both_panes_and_writing_available() {
+    let run = IsolatedRun::new("widescreen-focus-motion").unwrap();
+    let harness = create_project(
+        &run,
+        &run.root().join("novel.parchmint"),
+        "Widescreen focus",
+    );
+    harness.resize(WINDOW, 1920.0, 1080.0).unwrap();
+    harness
+        .type_into_target(
+            WINDOW,
+            HarnessTarget::EditorPrimary,
+            "A wide editor passage.",
+        )
+        .unwrap();
+    click(&harness, HarnessTarget::ToggleCompanion);
+    harness
+        .advance_motion(WINDOW, Duration::from_millis(400))
+        .unwrap();
+    for pane in [EditorPane::Primary, EditorPane::Companion] {
+        click(&harness, HarnessTarget::PaneFocus(pane));
+        frames(&harness, &format!("widescreen-focus-{pane:?}-enter"));
+        click(&harness, HarnessTarget::PaneFocus(pane));
+        frames(&harness, &format!("widescreen-focus-{pane:?}-exit"));
+    }
+    click(&harness, HarnessTarget::EditorPrimary);
+    assert!(
+        harness
+            .active_editor_body()
+            .unwrap()
+            .contains("A wide editor passage.")
+    );
+    harness.close(WINDOW).unwrap();
+    harness.shutdown().unwrap();
+}
+
+#[test]
 fn overview_dragging_and_disclosures_remain_stable_between_frames() {
     let run = IsolatedRun::new("overview-motion").unwrap();
     let harness = create_project(

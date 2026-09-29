@@ -90,6 +90,13 @@ fn clipped_cursor(cursor: mouse::Cursor, bounds: Rectangle) -> mouse::Cursor {
     }
 }
 
+fn encloses(outer: Rectangle, inner: Rectangle) -> bool {
+    inner.x >= outer.x - 0.5
+        && inner.y >= outer.y - 0.5
+        && inner.x + inner.width <= outer.x + outer.width + 0.5
+        && inner.y + inner.height <= outer.y + outer.height + 0.5
+}
+
 /// Material's standard curve: accelerate promptly, then settle gently. Solving
 /// the cubic's X coordinate keeps timing correct (the Bezier parameter is not
 /// elapsed time). Used by shared surfaces, panes, disclosures and reordering.
@@ -306,9 +313,38 @@ struct MotionRow<'a, Message> {
 }
 struct RowState {
     reveals: Vec<Tween>,
+    shares: Vec<Tween>,
     widths: Vec<f32>,
     now: Instant,
     page: String,
+}
+
+/// Interpolate pane shares directly. Normalizing each frame's revealed weights
+/// makes the remaining pane surge toward its destination near the end of a
+/// Focus transition, even when the reveal tween itself is smooth.
+fn fill_shares<Message>(slots: &[Slot<'_, Message>]) -> Vec<f32> {
+    let total: f32 = slots
+        .iter()
+        .filter(|slot| slot.visible)
+        .map(|slot| match slot.width {
+            Length::FillPortion(weight) => f32::from(weight),
+            Length::Fill => 1.0,
+            _ => 0.0,
+        })
+        .sum();
+    slots
+        .iter()
+        .map(|slot| {
+            if !slot.visible {
+                return 0.0;
+            }
+            match slot.width {
+                Length::FillPortion(weight) => f32::from(weight) / total.max(0.001),
+                Length::Fill => 1.0 / total.max(0.001),
+                _ => 0.0,
+            }
+        })
+        .collect()
 }
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Message> {
     fn tag(&self) -> tree::Tag {
@@ -318,6 +354,10 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         let now = now();
         tree::State::new(RowState {
             widths: vec![320.0; self.slots.len()],
+            shares: fill_shares(&self.slots)
+                .into_iter()
+                .map(|share| Tween::new(share, now, self.duration))
+                .collect(),
             reveals: self
                 .slots
                 .iter()
@@ -347,14 +387,24 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         state
             .reveals
             .resize_with(self.slots.len(), || Tween::new(0.0, now, self.duration));
+        state
+            .shares
+            .resize_with(self.slots.len(), || Tween::new(0.0, now, self.duration));
+        let target_shares = fill_shares(&self.slots);
         for (index, (reveal, slot)) in state.reveals.iter_mut().zip(&self.slots).enumerate() {
             reveal.duration = self.duration;
+            state.shares[index].duration = self.duration;
             // Toggling a pane within a screen animates. Mounting entirely new
             // slots snaps in instead: sliding sidebars on structural changes
             // is disruptive. Page changes snap via the page key above.
             let added = index >= previous_len;
             reveal.set(
                 if slot.visible { 1.0 } else { 0.0 },
+                now,
+                self.animated && enabled() && !added && !navigated,
+            );
+            state.shares[index].set(
+                target_shares[index],
                 now,
                 self.animated && enabled() && !added && !navigated,
             );
@@ -408,16 +458,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         if self.shrink {
             size.width = fixed.min(size.width);
         }
-        let weight: f32 = self
-            .slots
-            .iter()
-            .zip(&fractions)
-            .map(|(slot, f)| match slot.width {
-                Length::FillPortion(w) => f32::from(w) * f,
-                Length::Fill => *f,
-                _ => 0.0,
-            })
-            .sum();
         let target_fixed: f32 = self
             .slots
             .iter()
@@ -447,13 +487,19 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
             .zip(&mut tree.children)
             .zip(fractions)
             .zip(&mut state.widths)
-            .map(|(((slot, tree), fraction), previous_width)| {
+            .enumerate()
+            .map(|(index, (((slot, tree), fraction), previous_width))| {
                 let width = match slot.width {
                     Length::Fixed(w) => w * fraction,
-                    Length::FillPortion(w) => {
-                        (size.width - fixed).max(0.0) * f32::from(w) * fraction / weight.max(0.001)
+                    Length::FillPortion(_) | Length::Fill => {
+                        let share = if self.animated && enabled() {
+                            state.shares[index].value(state.now)
+                        } else {
+                            state.shares[index].target
+                        };
+                        (size.width - fixed).max(0.0) * share
                     }
-                    _ => (size.width - fixed).max(0.0) * fraction / weight.max(0.001),
+                    _ => 0.0,
                 };
                 // Fully hidden panes have no geometry to paint or hit. In
                 // particular, do not lay out a second rich-text editor on
@@ -496,8 +542,28 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                         Size::new(content_width, size.height),
                     ),
                 );
-                let content = if matches!(slot.width, Length::Fixed(_)) || self.anchor_leading {
-                    content
+                let content = if matches!(slot.width, Length::Fixed(_)) {
+                    // Side panels travel with the edge from which they enter.
+                    // Keeping their full layout width avoids rewrapping labels
+                    // while the visible slot crosses the screen.
+                    let offset = if self.shrink || self.anchor_leading {
+                        0.0
+                    } else if index == 0 {
+                        width - content_width
+                    } else {
+                        0.0
+                    };
+                    content.move_to(Point::new(offset, 0.0))
+                } else if self.anchor_leading {
+                    // The primary editor leaves through the left edge when
+                    // the companion takes Focus. Move its full-width content
+                    // with that edge instead of clipping its first glyphs
+                    // into a narrow stationary column.
+                    if index == 0 && width < content_width {
+                        content.move_to(Point::new(width - content_width, 0.0))
+                    } else {
+                        content
+                    }
                 } else {
                     content.move_to(Point::new((width - content_width).min(0.0), 0.0))
                 };
@@ -523,12 +589,16 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
     ) {
         let state = tree.state.downcast_mut::<RowState>();
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            let was_active = state.reveals.iter().any(|reveal| reveal.active(state.now));
+            let was_active = state.reveals.iter().any(|reveal| reveal.active(state.now))
+                || state.shares.iter().any(|share| share.active(state.now));
             state.now = *now;
             if was_active {
                 shell.invalidate_layout();
             }
-            if self.animated && enabled() && state.reveals.iter().any(|reveal| reveal.active(*now))
+            if self.animated
+                && enabled()
+                && (state.reveals.iter().any(|reveal| reveal.active(*now))
+                    || state.shares.iter().any(|share| share.active(*now)))
             {
                 shell.request_redraw();
             }
@@ -579,7 +649,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                 .intersection(&layout.bounds())
                 .filter(|bounds| bounds.width > 0.5)
             {
-                renderer.with_layer(viewport, |renderer| {
+                let draw = |renderer: &mut iced::Renderer| {
                     slot.content.as_widget().draw(
                         tree,
                         renderer,
@@ -588,8 +658,13 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
                         layout.child(0),
                         clipped_cursor(cursor, viewport),
                         &viewport,
-                    )
-                });
+                    );
+                };
+                if encloses(viewport, layout.child(0).bounds()) {
+                    draw(renderer);
+                } else {
+                    renderer.with_layer(viewport, draw);
+                }
             }
         }
     }
@@ -755,7 +830,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StableMeasure<'_,
     ) {
         use renderer::Renderer;
         if let Some(clip) = viewport.intersection(&layout.bounds()) {
-            renderer.with_layer(clip, |renderer| {
+            let draw = |renderer: &mut iced::Renderer| {
                 self.content.as_widget().draw(
                     &tree.children[0],
                     renderer,
@@ -765,7 +840,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for StableMeasure<'_,
                     clipped_cursor(cursor, clip),
                     &clip,
                 );
-            });
+            };
+            if encloses(clip, layout.child(0).bounds()) {
+                draw(renderer);
+            } else {
+                renderer.with_layer(clip, draw);
+            }
         }
     }
     fn operate(
@@ -1252,7 +1332,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                 if clip.height <= 0.0 {
                     return;
                 }
-                renderer.with_layer(clip, |renderer| {
+                let draw = |renderer: &mut iced::Renderer| {
                     self.content.as_widget().draw(
                         &tree.children[0],
                         renderer,
@@ -1261,8 +1341,13 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                         layout.child(0),
                         cursor,
                         &clip,
-                    )
-                });
+                    );
+                };
+                if encloses(clip, layout.child(0).bounds()) {
+                    draw(renderer);
+                } else {
+                    renderer.with_layer(clip, draw);
+                }
             }
         } else {
             self.content.as_widget().draw(
@@ -1367,7 +1452,6 @@ impl LocalPositions {
             generation,
             animate: true,
             origin: Some(self.origin.clone()),
-            both_axes: true,
             morph_width: true,
             allocation_height: None,
             target_shift: Vector::ZERO,
@@ -1463,7 +1547,6 @@ pub(crate) fn reflow<'a, Message: 'a>(
         generation,
         animate,
         origin: None,
-        both_axes: false,
         morph_width: false,
         allocation_height: None,
         target_shift: Vector::ZERO,
@@ -1483,7 +1566,6 @@ pub(crate) fn reflow_to<'a, Message: 'a>(
         generation,
         animate: true,
         origin: None,
-        both_axes: true,
         morph_width: false,
         allocation_height: None,
         target_shift: shift,
@@ -1527,7 +1609,6 @@ pub(crate) fn reflow_card_height_to<'a, Message: 'a>(
         generation,
         animate,
         origin: None,
-        both_axes: true,
         morph_width: true,
         allocation_height,
         target_shift,
@@ -1541,7 +1622,6 @@ struct Reflow<'a, Message> {
     generation: u64,
     animate: bool,
     origin: Option<Rc<Cell<Point>>>,
-    both_axes: bool,
     morph_width: bool,
     allocation_height: Option<f32>,
     target_shift: Vector,
@@ -1730,16 +1810,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                 let grew = layout.bounds().width > place.width + 0.5;
                 let animate = self.animate
                     && enabled()
-                    && (!grew || self.both_axes)
+                    && (!grew || self.morph_width)
                     && place.generation != self.generation;
                 if animate {
-                    // Material motion: list elements travel vertically from
-                    // their start to their end. A group expanding downward
-                    // pushes siblings down, so the meaningful axis is always
-                    // Y: snapping Y would teleport cards in the wrong
-                    // direction. Animate Y whenever it changes; animate X
-                    // only for pure horizontal shifts (same-row reorder, tab
-                    // strips) where there is no vertical story to tell.
+                    // Move both coordinates on the same eased timeline. A
+                    // diagonal reflow otherwise teleports the horizontal
+                    // coordinate before beginning its vertical travel.
                     let current_x = place.x.value(*now);
                     let current_y = place.y.value(*now);
                     let dx = (target.x - current_x).abs();
@@ -1753,7 +1829,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                             .split_once('\0')
                             .is_some_and(|(_, field)| matches!(field, "title" | "words"));
                     let animate_y = dy >= 1.0 && !heading;
-                    let animate_x = dx >= 1.0 && !heading && (dy < 1.0 || self.both_axes);
+                    let animate_x = dx >= 1.0 && !heading;
                     // A heading clears the compact row before it reaches its
                     // full width, so its growing edge does not cover a card
                     // that preceded it in that row.
@@ -1764,15 +1840,6 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
                     };
                     place.x.set(target.x, *now, animate_x);
                     place.y.set(target.y, *now, animate_y);
-                    if self.target_shift.y < -1.0 && self.target_shift.x.abs() > 1.0 {
-                        // A card returning from below a closing group clears
-                        // the wide heading horizontally before rising. Its
-                        // vertical target stays near the allocated row until
-                        // the child rows are gone, so it remains paintable.
-                        place.x.duration = LAYOUT / 2;
-                        place.y.duration = LAYOUT - Duration::from_millis(50);
-                        place.y.started = *now + Duration::from_millis(50);
-                    }
                 } else if self.target_shift != Vector::ZERO && self.animate && enabled() {
                     // The closing rows change their allocated heights every
                     // frame. Their settled target can drift a few pixels as
@@ -1872,31 +1939,47 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Reflow<'_, Messag
             Vector::ZERO
         };
         let correction = desired - (layout.child(0).position() - layout.position());
-        let visible_height =
-            (self.morph_width && self.origin.is_none() && self.allocation_height.is_none())
-                .then(|| {
-                    self.positions
-                        .0
-                        .lock()
-                        .expect("motion positions")
-                        .get(&self.id)
-                        .filter(|place| enabled() && place.height_motion.active(now()))
-                        .map(|place| place.height_motion.value(now()))
-                })
-                .flatten();
-        let clip = visible_height
-            .and_then(|height| {
-                viewport.intersection(&Rectangle {
-                    x: layout.child(0).bounds().x + correction.x,
-                    y: layout.child(0).bounds().y + correction.y,
-                    width: layout.child(0).bounds().width,
-                    height,
-                })
+        // A group heading can become wider while its height contracts (or
+        // vice versa). Its final-layout children must never paint outside the
+        // surface that is actually moving through this frame. Without this
+        // clip, synopsis and metadata draw over the departing child rows.
+        let moving_bounds = self
+            .morph_width
+            .then(|| {
+                let positions = self.positions.0.lock().expect("motion positions");
+                positions
+                    .get(&self.id)
+                    .filter(|place| {
+                        enabled()
+                            && (self.allocation_height.is_some()
+                                || place.width_motion.active(now())
+                                || place.height_motion.active(now()))
+                    })
+                    .map(|place| {
+                        let child = layout.child(0).bounds();
+                        Rectangle {
+                            x: child.x + correction.x,
+                            y: child.y + correction.y,
+                            width: if self.allocation_height.is_some() {
+                                child.width
+                            } else {
+                                place.width_motion.value(now())
+                            },
+                            height: if self.allocation_height.is_some() {
+                                child.height
+                            } else {
+                                place.height_motion.value(now())
+                            },
+                        }
+                    })
             })
+            .flatten();
+        let clip = moving_bounds
+            .and_then(|bounds| viewport.intersection(&bounds))
             .unwrap_or(*viewport);
         // Retain the source height when packing moves a header into a new row
         // and therefore mounts a fresh child widget tree.
-        if correction == Vector::ZERO && visible_height.is_none() {
+        if correction == Vector::ZERO && moving_bounds.is_none() {
             self.content.as_widget().draw(
                 &tree.children[0],
                 renderer,
@@ -2622,6 +2705,156 @@ mod tests {
     }
 
     #[test]
+    fn focus_pane_edges_follow_one_eased_path_in_both_directions() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let make = |companion| {
+            row_focus(vec![
+                slot(pane(), Length::Fill, true),
+                slot(pane(), Length::Fill, companion),
+            ])
+        };
+        let mut element: Element<'_, ()> = make(true);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = make(false);
+        tree.diff(&element);
+        for millis in [0, 48, 96, 160, 240, 320] {
+            let at = start + Duration::from_millis(millis);
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            frame(&mut element, &mut tree, &renderer, &node, at);
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let expected = 400.0 + 400.0 * standard_easing(millis as f32 / 320.0);
+            assert!((node.children()[0].size().width - expected).abs() < 0.1);
+            assert!((node.children()[1].size().width - (800.0 - expected)).abs() < 0.1);
+        }
+        FRAME_TIME.set(Some(start + FOCUS_LAYOUT));
+        element = make(true);
+        tree.diff(&element);
+        for millis in [0, 48, 96, 160, 240, 320] {
+            let at = start + FOCUS_LAYOUT + Duration::from_millis(millis);
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            frame(&mut element, &mut tree, &renderer, &node, at);
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let expected = 800.0 - 400.0 * standard_easing(millis as f32 / 320.0);
+            assert!((node.children()[0].size().width - expected).abs() < 0.1);
+            assert!((node.children()[1].size().width - (800.0 - expected)).abs() < 0.1);
+        }
+    }
+
+    #[test]
+    fn focus_side_panels_slide_from_their_screen_edges() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let make = |sides| {
+            row_focus(vec![
+                slot(pane(), Length::Fixed(200.0), sides),
+                slot(pane(), Length::Fill, true),
+                slot(pane(), Length::Fixed(100.0), sides),
+            ])
+        };
+        let mut element: Element<'_, ()> = make(true);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = make(false);
+        tree.diff(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &node,
+            start + FOCUS_LAYOUT / 2,
+        );
+        let middle = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let left = &middle.children()[0];
+        let right = &middle.children()[2];
+        assert!(left.children()[0].bounds().x < left.bounds().x);
+        assert_eq!(left.children()[0].bounds().x + 200.0, left.bounds().width);
+        assert_eq!(right.children()[0].bounds().x, 0.0);
+        assert!(right.bounds().x > 700.0 && right.bounds().x < 800.0);
+    }
+
+    #[test]
+    fn primary_editor_exits_left_when_companion_takes_focus() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let make = |primary| {
+            row_editor(vec![
+                slot(pane(), Length::Fill, primary),
+                slot(pane(), Length::Fill, true),
+            ])
+        };
+        let mut element: Element<'_, ()> = make(true);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = make(false);
+        tree.diff(&element);
+        let node = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        frame(
+            &mut element,
+            &mut tree,
+            &renderer,
+            &node,
+            start + FOCUS_LAYOUT / 2,
+        );
+        let middle = element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        let outgoing = &middle.children()[0];
+        assert!(outgoing.bounds().width > 0.0 && outgoing.bounds().width < 400.0);
+        assert_eq!(
+            outgoing.children()[0].bounds().x + 400.0,
+            outgoing.bounds().width
+        );
+        assert_eq!(middle.children()[1].children()[0].bounds().x, 0.0);
+    }
+
+    #[test]
     fn page_change_snaps_sidebars_while_same_page_toggles_animate() {
         set_reduced(false);
         let renderer = renderer();
@@ -3261,7 +3494,7 @@ mod tests {
         frame(&mut element, &mut tree, &renderer, &compact, start);
         assert_eq!(
             tree.state.downcast_ref::<ReflowState>().offset,
-            Vector::new(0.0, 120.0)
+            Vector::new(-220.0, 120.0)
         );
         frame(
             &mut element,
@@ -3271,6 +3504,7 @@ mod tests {
             start + LAYOUT / 2,
         );
         let middle = tree.state.downcast_ref::<ReflowState>().offset;
+        assert!(middle.x > -220.0 && middle.x < 0.0);
         assert!(middle.y > 0.0 && middle.y < 120.0);
         frame(&mut element, &mut tree, &renderer, &compact, start + LAYOUT);
         assert_eq!(
@@ -3280,7 +3514,7 @@ mod tests {
     }
 
     #[test]
-    fn reflow_slides_vertically_and_snaps_horizontally_on_diagonal_moves() {
+    fn reflow_moves_both_coordinates_on_a_diagonal_path() {
         set_reduced(false);
         let renderer = renderer();
         let positions = Positions::default();
@@ -3295,9 +3529,7 @@ mod tests {
         frame(&mut element, &mut tree, &renderer, &node, start);
         element = reflow(positions, "card", 2, true, card());
         tree.diff(&element);
-        // A group collapse shifts siblings mostly vertically with a small
-        // column shift: the card should slide vertically and snap
-        // horizontally instead of flying diagonally.
+        // A column shift belongs to the same travel as the vertical move.
         let node = element
             .as_widget_mut()
             .layout(&mut tree, &renderer, &limits)
@@ -3305,7 +3537,7 @@ mod tests {
         frame(&mut element, &mut tree, &renderer, &node, start + LAYOUT);
         let offset = tree.state.downcast_ref::<ReflowState>().offset;
         assert_ne!(offset, Vector::ZERO);
-        assert_eq!(offset.x, 0.0);
+        assert!(offset.x < 0.0);
         assert!(offset.y < 0.0);
     }
 

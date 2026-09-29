@@ -1277,11 +1277,10 @@ impl<'a> CardsState<'a> {
             .map_or(0.0, |row| row.tail_reserve)
     }
 
-    /// During a close, retained child rows still own layout space. Give the
-    /// surviving cards and creation slot their settled positions immediately
-    /// so they travel with the heading instead of starting a second reflow
-    /// when those zero-height rows unmount.
-    pub(crate) fn closing_offsets(
+    /// Cards joining the compact group's row travel diagonally into their
+    /// final cell. Rows that stay below the group follow the shrinking row
+    /// allocation alone; shifting those rows vertically makes them overshoot.
+    pub(crate) fn closing_packing_offsets(
         &self,
         columns: usize,
         width: f32,
@@ -1348,7 +1347,7 @@ impl<'a> CardsState<'a> {
             .filter_map(|(id, start)| {
                 let end = to.get(&id)?;
                 let delta = iced::Vector::new(end.x() - start.x(), end.y() - start.y());
-                (delta.x.abs() > 0.5 || delta.y.abs() > 0.5).then_some((id, delta))
+                (delta.x.abs() > 0.5).then_some((id, delta))
             })
             .collect()
     }
@@ -12095,17 +12094,6 @@ mod tests {
     }
 
     #[test]
-    fn closing_group_targets_following_cards_before_children_unmount() {
-        let _clock = crate::motion::FixedTime::new(std::time::Instant::now());
-        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
-        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
-        let offsets = workspace.cards().closing_offsets(3, 800.0);
-        assert!(offsets["chapter-three"].y < 0.0);
-        assert!(offsets["add:manuscript"].y < 0.0);
-        assert!(!offsets.contains_key("chapter-one"));
-    }
-
-    #[test]
     fn collapsed_groups_hide_extra_details_and_children() {
         let _settled = crate::motion::SettledMotion::new();
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
@@ -12123,6 +12111,19 @@ mod tests {
                 .filter(|item| item.node_id == "chapter-one")
                 .all(|item| !item.visible)
         );
+    }
+
+    #[test]
+    fn closing_group_only_prepositions_cards_joining_its_compact_row() {
+        let _clock = crate::motion::FixedTime::new(std::time::Instant::now());
+        let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
+        workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
+        let offsets = workspace.cards().closing_packing_offsets(3, 800.0);
+        assert!(offsets["chapter-three"].x > 0.0);
+        assert!(offsets["chapter-three"].y < 0.0);
+        assert_eq!(offsets["add:manuscript"], offsets["chapter-three"]);
+        assert!(!offsets.contains_key("chapter-one"));
+        assert!(!offsets.contains_key("part-one"));
     }
 
     #[test]
