@@ -155,6 +155,10 @@ impl Drop for ProjectLockLease {
             let _ = file.set_len(0);
             let _ = file.sync_all();
         }
+        // A concurrent capability check can retain the file handle after this
+        // lease ends. Release the OS lock at the lease boundary instead of
+        // waiting for that reader's final Arc to close the handle.
+        let _ = file.unlock();
     }
 }
 
@@ -1974,4 +1978,45 @@ fn scan_document_index(
         documents.insert(DocumentId::new(id), relative);
     }
     Ok(documents)
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_the_lease_unlocks_a_handle_retained_by_a_capability_check() {
+        let path = std::env::temp_dir().join(format!(
+            "parchmint-retained-lock-{}-{}",
+            std::process::id(),
+            next_unique_id()
+        ));
+        let files = NativeProjectFileSystem::new();
+        let (root, lease) = files
+            .create_root(UntrustedProjectPath::new(&path))
+            .expect("create locked root");
+        let retained_handle = root.lock_file.upgrade().expect("retain reader handle");
+        assert!(matches!(
+            files.acquire(UntrustedProjectPath::new(&path)),
+            Err(FsError::Locked { .. })
+        ));
+
+        drop(lease);
+        assert!(matches!(
+            root.checked_path(),
+            Err(FsError::NotLockOwner { .. })
+        ));
+        let (reopened, new_lease) = files
+            .acquire(UntrustedProjectPath::new(&path))
+            .expect("lease teardown must unlock even while a reader retains the handle");
+        assert!(reopened.checked_path().is_ok());
+        assert!(matches!(
+            root.checked_path(),
+            Err(FsError::NotLockOwner { .. })
+        ));
+
+        drop(new_lease);
+        drop(retained_handle);
+        fs::remove_dir_all(path).expect("remove test root");
+    }
 }

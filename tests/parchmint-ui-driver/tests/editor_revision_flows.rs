@@ -52,7 +52,7 @@ fn save_and_close_wait_for_recovery_before_projecting_again() {
 }
 
 #[test]
-fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
+fn scrolling_defers_layout_writes_until_save_and_close() {
     let run = IsolatedRun::new("deferred-scroll-layout").unwrap();
     let project = run.root().join("scroll.parchmint");
     let harness = create_project(&run, &project, "Scroll layout");
@@ -79,6 +79,9 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
         )
         .unwrap();
     harness.elapse_notifications().unwrap();
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
     let document = harness
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();
@@ -123,6 +126,14 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
         "wheel input must not wait for a layout write"
     );
     harness.elapse_notifications().unwrap();
+    assert_eq!(
+        std::fs::read(&workspace_path).unwrap(),
+        before,
+        "idle time must leave layout persistence to Save or close"
+    );
+    harness
+        .press_command_key(HarnessWindow::Project, 's')
+        .unwrap();
     let settled: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&workspace_path).unwrap()).unwrap();
     let previous: serde_json::Value = serde_json::from_slice(&before).unwrap();
@@ -136,7 +147,7 @@ fn scrolling_defers_layout_writes_and_close_preserves_the_latest_position() {
         serde_json::from_slice(&std::fs::read(&workspace_path).unwrap()).unwrap();
     assert_ne!(
         closed["views"], settled["views"],
-        "close must flush the final unexpired scroll position"
+        "close must flush the final unsaved scroll position"
     );
     let reopened =
         DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project)).unwrap();
