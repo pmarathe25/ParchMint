@@ -4069,7 +4069,7 @@ impl NativeDesktop {
     }
 
     fn view_content(&self, id: window::Id) -> Element<'_, Message> {
-        let base = match self.windows.get(&id) {
+        let base: Element<'_, Message> = match self.windows.get(&id) {
             Some(NativeWindow::Launcher) => self.launcher_view(),
             Some(NativeWindow::Project(state)) => state.workspace.as_deref().map_or_else(
                 || {
