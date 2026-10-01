@@ -1986,11 +1986,13 @@ mod lock_tests {
 
     #[test]
     fn dropping_the_lease_unlocks_a_handle_retained_by_a_capability_check() {
-        let path = std::env::temp_dir().join(format!(
-            "parchmint-retained-lock-{}-{}",
-            std::process::id(),
-            next_unique_id()
-        ));
+        let path = fs::canonicalize(std::env::temp_dir())
+            .expect("resolve temporary directory")
+            .join(format!(
+                "parchmint-retained-lock-{}-{}",
+                std::process::id(),
+                next_unique_id()
+            ));
         let files = NativeProjectFileSystem::new();
         let (root, lease) = files
             .create_root(UntrustedProjectPath::new(&path))
