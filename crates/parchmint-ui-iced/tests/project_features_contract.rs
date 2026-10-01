@@ -107,7 +107,7 @@ fn inspector_follows_the_most_recent_explorer_or_editor_focus() {
 }
 
 #[test]
-fn cards_disclosure_hides_descendants_without_narrowing_the_projection() {
+fn cards_disclosure_collapses_groups_without_narrowing_the_projection() {
     let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Cards);
     assert!(
         workspace
@@ -127,12 +127,20 @@ fn cards_disclosure_hides_descendants_without_narrowing_the_projection() {
     );
     workspace.update(ProjectMessage::ToggleCardsExpanded("part-one".into()));
     let cards = workspace.cards();
-    assert!(cards.items().iter().any(|item| item.node_id == "part-one"));
     assert!(
         cards
             .items()
             .iter()
-            .any(|item| item.node_id == "chapter-one" && !item.visible)
+            .any(|item| item.node_id == "part-one" && !item.expanded)
+    );
+    // Descendants remain in the complete projection even after disclosure.
+    // Their mounted visibility follows the exit animation; the workspace's
+    // settled-motion tests cover hiding them once that transition completes.
+    assert!(
+        cards
+            .items()
+            .iter()
+            .any(|item| item.node_id == "chapter-one")
     );
 }
 
