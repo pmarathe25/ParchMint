@@ -18,11 +18,26 @@ git tag -a v0.1.1 -m "ParchMint 0.1.1"
 git push origin main v0.1.1
 ```
 
+Alternatively, push a release branch from the merged, current `main` commit.
+For version 0.1.3:
+
+```console
+git push origin main:release/v0.1.3
+```
+
+[Start release](../.github/workflows/start-release.yml) validates the branch against
+Cargo.toml and the current remote main commit. It creates the annotated tag,
+refuses conflicting or lightweight existing tags, and dispatches CI on that tag.
+This uses the repository's `GITHUB_TOKEN` with `contents: write` and `actions: write`.
+The explicit dispatch starts CI because tag pushes made with that token do not
+automatically trigger another workflow.
+
 [CI](../.github/workflows/ci.yml) publishes after workspace checks and all three
 packages pass. It checks the tag against Cargo.toml, verifies checksums, and
 creates a release with installers, SHA-256 files, generated notes, and an
-installation link. Branch, pull-request, and manual builds retain Actions
-artifacts. Existing releases are not overwritten. On a rerun, CI accepts an
+installation link. Branch and pull-request builds retain Actions artifacts.
+Manual CI runs on branches also retain artifacts; manual runs on version tags
+perform the same checks and publication as tag pushes. Existing releases are not overwritten. On a rerun, CI accepts an
 existing release only when it targets the same commit and contains every
 expected installer and SHA-256 file; an incomplete or inconsistent release
 fails validation.
