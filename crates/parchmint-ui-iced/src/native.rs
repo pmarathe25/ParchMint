@@ -4069,7 +4069,7 @@ impl NativeDesktop {
     }
 
     fn view_content(&self, id: window::Id) -> Element<'_, Message> {
-        let base = match self.windows.get(&id) {
+        let base: Element<'_, Message> = match self.windows.get(&id) {
             Some(NativeWindow::Launcher) => self.launcher_view(),
             Some(NativeWindow::Project(state)) => state.workspace.as_deref().map_or_else(
                 || {
@@ -4112,6 +4112,17 @@ impl NativeDesktop {
             None => container(text("Opening ParchMint…"))
                 .center(Length::Fill)
                 .into(),
+        };
+        let base = if self.project_chooser == Some(id) {
+            base.map(|message| match message {
+                Message::ProjectSurface {
+                    message: ProjectSurfaceMessage::ShowProjectChooser,
+                    ..
+                } => Message::CloseProjectChooser,
+                message => message,
+            })
+        } else {
+            base
         };
         let base = crate::focus::input_scope(
             base,
@@ -4194,7 +4205,7 @@ impl NativeDesktop {
             });
             return stack![
                 base,
-                crate::hierarchy_drag::pass_through_press(Message::CloseProjectChooser),
+                crate::hierarchy_drag::pass_through_release(Message::CloseProjectChooser),
                 container(opaque(crate::motion::enter("projects-menu", menu)))
                     .width(Length::Fill)
                     .height(Length::Fill)
@@ -14370,6 +14381,51 @@ mod tests {
                 }
             )),
             "{messages:?}"
+        );
+        for message in messages {
+            let _ = desktop.update(message);
+        }
+        assert!(desktop.project_chooser.is_none());
+    }
+
+    #[test]
+    fn clicking_the_project_title_while_its_menu_is_open_closes_it() {
+        let project = legacy_project(PathBuf::from("/tmp/project-menu-toggle.parchmint"), 255);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        install_fixture_workspace(&mut desktop, window);
+        desktop.project_chooser = Some(window);
+        let mut simulator = Simulator::<Message>::with_size(
+            Settings::default(),
+            Size::new(1280.0, 720.0),
+            desktop.view(window),
+        );
+        simulator
+            .click(crate::HarnessTarget::ProjectMenu.id())
+            .expect("the title remains clickable while its menu is open");
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, Message::CloseProjectChooser))
+        );
+        assert!(
+            !messages.iter().any(|message| matches!(
+                message,
+                Message::ProjectSurface {
+                    message: ProjectSurfaceMessage::ShowProjectChooser,
+                    ..
+                }
+            )),
+            "the same title click must not reopen the chooser"
         );
         for message in messages {
             let _ = desktop.update(message);

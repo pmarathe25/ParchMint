@@ -1,0 +1,68 @@
+name: Start release
+
+on:
+  push:
+    branches:
+      - "release/v*"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: start-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Validate release branch and version
+        id: version
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))["workspace"]["package"]["version"]
+          if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
+              raise SystemExit("A release requires a numeric major.minor.patch version")
+          tag = f"v{version}"
+          if os.environ["GITHUB_REF_NAME"] != f"release/{tag}":
+              raise SystemExit(f"Release branch must be release/{tag} to match Cargo.toml")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"tag={tag}\n")
+          PY
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "::error::Release branch must point to the current merged main commit"
+            exit 1
+          fi
+      - name: Create or verify the annotated release tag
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            if [ "$(git rev-parse "$RELEASE_TAG^{commit}")" != "$GITHUB_SHA" ] || \
+              [ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != "tag" ]; then
+              echo "::error::Existing release tag must be annotated and point to this commit"
+              exit 1
+            fi
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "ParchMint ${RELEASE_TAG#v}"
+            git push origin "$RELEASE_TAG"
+          fi
+      - name: Run release checks and publication on the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: gh workflow run ci.yml --ref "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"

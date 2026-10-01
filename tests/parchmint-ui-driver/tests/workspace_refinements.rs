@@ -282,6 +282,11 @@ fn overview_groups_collapse_and_managers_are_contextual() {
     harness.click_text(WINDOW, "Add field").unwrap();
     capture(&harness, "metadata-manager-light");
     harness.click_text(WINDOW, "Save").unwrap();
+    // Drag previews froze the motion clock, so finish the dialog's exit before
+    // trying to navigate through the controls underneath it.
+    harness
+        .advance_motion(WINDOW, std::time::Duration::from_millis(260))
+        .unwrap();
     harness
         .click_target(WINDOW, HarnessTarget::Ribbon(RibbonDestination::Settings))
         .unwrap();
