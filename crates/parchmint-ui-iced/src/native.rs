@@ -4205,7 +4205,7 @@ impl NativeDesktop {
             });
             return stack![
                 base,
-                crate::hierarchy_drag::pass_through_press(Message::CloseProjectChooser),
+                crate::hierarchy_drag::pass_through_release(Message::CloseProjectChooser),
                 container(opaque(crate::motion::enter("projects-menu", menu)))
                     .width(Length::Fill)
                     .height(Length::Fill)

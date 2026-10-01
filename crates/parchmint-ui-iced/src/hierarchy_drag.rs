@@ -102,19 +102,20 @@ where
     .into()
 }
 
-/// A full-window dismiss layer that lets the same press reach controls below
-/// it in a Stack. A menu above this layer captures presses inside the menu.
-pub(crate) fn pass_through_press<'a, Message: Clone + 'a>(
-    on_press: Message,
+/// A full-window dismiss layer that lets the same click reach controls below
+/// it in a Stack. Dismiss on release so buttons below resolve their action while
+/// the menu is still open. A menu above this layer captures clicks inside it.
+pub(crate) fn pass_through_release<'a, Message: Clone + 'a>(
+    on_release: Message,
 ) -> Element<'a, Message> {
-    Element::new(PassThroughPress { on_press })
+    Element::new(PassThroughRelease { on_release })
 }
 
-struct PassThroughPress<Message> {
-    on_press: Message,
+struct PassThroughRelease<Message> {
+    on_release: Message,
 }
 
-impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for PassThroughPress<Message> {
+impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for PassThroughRelease<Message> {
     fn size(&self) -> Size<Length> {
         Size::new(Length::Fill, Length::Fill)
     }
@@ -141,12 +142,12 @@ impl<Message: Clone> Widget<Message, iced::Theme, iced::Renderer> for PassThroug
     ) {
         if matches!(
             event,
-            Event::Mouse(mouse::Event::ButtonPressed(
+            Event::Mouse(mouse::Event::ButtonReleased(
                 mouse::Button::Left | mouse::Button::Right
             ))
         ) && cursor.is_over(layout.bounds())
         {
-            shell.publish(self.on_press.clone());
+            shell.publish(self.on_release.clone());
         }
     }
 

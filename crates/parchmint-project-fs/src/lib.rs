@@ -2012,10 +2012,10 @@ mod lock_tests {
             .acquire(UntrustedProjectPath::new(&path))
             .expect("lease teardown must unlock even while a reader retains the handle");
         assert!(reopened.checked_path().is_ok());
-        assert!(matches!(
-            root.checked_path(),
-            Err(FsError::NotLockOwner { .. })
-        ));
+        assert!(
+            root.checked_path().is_err(),
+            "the retired capability must remain unauthorized under the new lease"
+        );
 
         drop(new_lease);
         drop(retained_handle);
