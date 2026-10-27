@@ -126,7 +126,9 @@ editor popovers also retain their closing surface. Reduced motion bypasses these
 visual delays. Search retains a noninteractive outgoing result snapshot and moves
 surviving rows when streamed groups insert above them. Widgets request redraws
 only during transitions; typing and
-pointer dragging remain immediate. Pane children stay mounted during focus and
+pointer dragging remain immediate. Pane, reveal, and menu timelines invalidate
+layout at most once for each redraw timestamp, even when Iced replays that event
+to settle layout. Pane children stay mounted during focus and
 sidebar changes. Screen navigation places page content and shared chrome at
 their final positions immediately; Focus and sidebar toggles within a screen
 still animate. Group surface tweens share the disclosure's start time so delayed

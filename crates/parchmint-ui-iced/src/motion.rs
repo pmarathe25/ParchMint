@@ -599,10 +599,12 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for MotionRow<'_, Mes
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
             let was_active = state.reveals.iter().any(|reveal| reveal.active(state.now))
                 || state.shares.iter().any(|share| share.active(state.now));
-            state.now = *now;
-            if was_active {
+            // Iced can replay the same redraw while resolving invalidated
+            // layouts. The timeline has not advanced on those replays.
+            if was_active && state.now != *now {
                 shell.invalidate_layout();
             }
+            state.now = *now;
             if self.animated
                 && enabled()
                 && (state.reveals.iter().any(|reveal| reveal.active(*now))
@@ -1165,6 +1167,7 @@ struct EntranceState {
     key: String,
     progress: Tween,
     now: Instant,
+    last_redraw: Option<Instant>,
     completed: Option<Instant>,
 }
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Message> {
@@ -1191,6 +1194,7 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
             key: self.key.clone(),
             progress,
             now,
+            last_redraw: None,
             completed: None,
         })
     }
@@ -1321,10 +1325,11 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Entrance<'_, Mess
                 .disclosure
                 .as_ref()
                 .map_or(&state.progress, |value| &value.0);
-            if progress.active(state.now) {
+            if progress.active(state.now) && state.last_redraw != Some(*now) {
                 shell.invalidate_layout();
             }
             state.now = *now;
+            state.last_redraw = Some(*now);
             if enabled() && progress.active(*now) {
                 shell.request_redraw();
             } else if self.disclosure.is_some() && state.completed != Some(progress.started) {
@@ -2231,7 +2236,7 @@ impl<Message> overlay::Overlay<Message, iced::Theme, iced::Renderer> for MenuEnt
         shell: &mut Shell<'_, Message>,
     ) {
         if let Event::Window(iced::window::Event::RedrawRequested(now)) = event {
-            if self.motion.progress.active(self.motion.now) {
+            if self.motion.progress.active(self.motion.now) && self.motion.now != *now {
                 shell.invalidate_layout();
             }
             self.motion.now = *now;
@@ -2748,6 +2753,90 @@ mod tests {
             &Rectangle::with_size(Size::new(800.0, 600.0)),
         );
         shell.redraw_request()
+    }
+
+    #[test]
+    fn pane_motion_invalidates_layout_once_per_redraw_timestamp() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let pane = || {
+            iced::widget::Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill)
+        };
+        let mut element: Element<'_, ()> = row(vec![
+            slot(pane(), Length::Fill, true),
+            slot(pane(), Length::Fill, true),
+        ]);
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits);
+        element = row(vec![
+            slot(pane(), Length::Fill, true),
+            slot(pane(), Length::Fill, false),
+        ]);
+        tree.diff(&element);
+        let at = start + Duration::from_millis(16);
+        for expected in [true, false, false] {
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(at)),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::with_size(Size::new(800.0, 600.0)),
+            );
+            assert_eq!(shell.is_layout_invalid(), expected);
+            assert_eq!(
+                shell.redraw_request(),
+                iced::window::RedrawRequest::NextFrame
+            );
+        }
+    }
+
+    #[test]
+    fn entrance_invalidates_layout_once_per_redraw_timestamp() {
+        set_reduced(false);
+        let start = Instant::now();
+        let _clock = FixedTime::new(start);
+        let renderer = renderer();
+        let mut element: Element<'_, ()> = enter("test", iced::widget::Space::new().height(40));
+        let mut tree = Tree::new(&element);
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 600.0));
+        let at = start + Duration::from_millis(16);
+        for expected in [true, false, false] {
+            let node = element
+                .as_widget_mut()
+                .layout(&mut tree, &renderer, &limits);
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                &mut tree,
+                &Event::Window(iced::window::Event::RedrawRequested(at)),
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut shell,
+                &Rectangle::with_size(Size::new(800.0, 600.0)),
+            );
+            assert_eq!(shell.is_layout_invalid(), expected);
+            assert_eq!(
+                shell.redraw_request(),
+                iced::window::RedrawRequest::NextFrame
+            );
+        }
     }
 
     #[test]

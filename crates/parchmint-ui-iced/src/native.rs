@@ -104,6 +104,19 @@ const INSPECTOR_COMMIT_DELAY: Duration = Duration::from_millis(700);
 /// current work as soon as History opens.
 const HISTORY_PAGE_SIZE: usize = 20;
 
+fn focus_window_decorations(id: window::Id, maximized: bool) -> Task<Message> {
+    let decorations = window::toggle_decorations(id);
+    if cfg!(target_os = "linux") && maximized {
+        // Mutter needs a fresh maximize configure after changing client
+        // decorations. On other platforms this visibly restores the window.
+        decorations
+            .chain(window::maximize(id, false))
+            .chain(window::maximize(id, true))
+    } else {
+        decorations
+    }
+}
+
 fn restore_search_scroll(workspace: &ProjectWorkspace) -> Task<Message> {
     if workspace.sidebar_surface() != crate::SidebarSurface::GlobalSearch {
         return Task::none();
@@ -3934,17 +3947,7 @@ impl NativeDesktop {
                     return Task::none();
                 }
                 state.focus_titlebar_hidden = hide;
-                let decorations = window::toggle_decorations(id);
-                if maximized {
-                    // Wayland client decorations keep the old inner size until the
-                    // compositor issues a new maximize configure. Reasserting true
-                    // alone is a no-op on Mutter; queue both requests together.
-                    decorations
-                        .chain(window::maximize(id, false))
-                        .chain(window::maximize(id, true))
-                } else {
-                    decorations
-                }
+                focus_window_decorations(id, maximized)
             }
             Message::ExitWithoutSaving(id) => {
                 let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
@@ -13470,6 +13473,33 @@ mod tests {
     use super::*;
 
     static APPEARANCE_STREAM_DROPS: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn focus_decorations_do_not_restore_maximized_windows_outside_linux() {
+        use iced_test::runtime::{Action, window::Action as WindowAction};
+
+        for maximized in [false, true] {
+            let id = window::Id::unique();
+            let mut stream =
+                iced_test::runtime::task::into_stream(focus_window_decorations(id, maximized))
+                    .expect("decoration task");
+            assert!(matches!(
+                block_on(stream.next()),
+                Some(Action::Window(WindowAction::ToggleDecorations(actual))) if actual == id
+            ));
+            if cfg!(target_os = "linux") && maximized {
+                assert!(matches!(
+                    block_on(stream.next()),
+                    Some(Action::Window(WindowAction::Maximize(actual, false))) if actual == id
+                ));
+                assert!(matches!(
+                    block_on(stream.next()),
+                    Some(Action::Window(WindowAction::Maximize(actual, true))) if actual == id
+                ));
+            }
+            assert!(block_on(stream.next()).is_none());
+        }
+    }
 
     #[test]
     fn cancelling_export_picker_preserves_the_native_destination() {

@@ -606,6 +606,9 @@ mod platform {
 mod platform {
     use super::*;
 
+    const READ_CLIPBOARD_TEXT: &str = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -Raw))";
+    const READ_CLIPBOARD_HTML: &str = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -TextFormatType Html -Raw))";
+
     pub(super) fn choose_path(request: &PathDialog) -> Result<Option<PathBuf>, PlatformError> {
         let script = match request.kind {
             PathDialogKind::OpenFile => {
@@ -641,7 +644,7 @@ mod platform {
                 .arg("-NoProfile")
                 .arg("-NonInteractive")
                 .arg("-Command")
-                .arg("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Get-Clipboard -Raw"),
+                .arg(READ_CLIPBOARD_TEXT),
         );
         let html = formats.accepts_html().then(|| {
             command_output_raw(
@@ -650,7 +653,7 @@ mod platform {
                     .arg("-NoProfile")
                     .arg("-NonInteractive")
                     .arg("-Command")
-                    .arg("[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); Get-Clipboard -TextFormatType Html -Raw"),
+                    .arg(READ_CLIPBOARD_HTML),
             )
         });
         clipboard_content(plain, html)
@@ -702,6 +705,38 @@ mod platform {
             Ok(SystemAppearance::Dark)
         } else {
             Ok(SystemAppearance::Light)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn clipboard_commands_preserve_exact_output_including_trailing_newlines() {
+            for expected in ["copied text", "two lines\r\n", ""] {
+                for command in [READ_CLIPBOARD_TEXT, READ_CLIPBOARD_HTML] {
+                    // Replace only the OS clipboard source, retaining the production
+                    // PowerShell output path without modifying the system clipboard.
+                    let script = format!(
+                        "function Get-Clipboard {{ param([switch]$Raw, $TextFormatType) [Console]::In.ReadToEnd() }}; {command}"
+                    );
+                    let mut process = Command::new("powershell.exe");
+                    process.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+                    process.stdin(Stdio::piped()).stdout(Stdio::piped());
+                    let mut child = process.spawn().expect("start PowerShell");
+                    use std::io::Write;
+                    child
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(expected.as_bytes())
+                        .unwrap();
+                    let output = child.wait_with_output().expect("read PowerShell output");
+                    assert!(output.status.success());
+                    assert_eq!(output.stdout, expected.as_bytes());
+                }
+            }
         }
     }
 }
